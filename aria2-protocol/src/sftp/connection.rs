@@ -14,15 +14,51 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+use md5::Md5;
 use russh::client;
 use russh::keys;
+use russh::keys::ssh_key::HashAlg;
+use sha1::Digest as Sha1Digest;
+use sha1::Sha1;
 
 // Re-export packet constants for test access and internal use
 #[cfg(test)]
 use crate::sftp::packet::{SSH_FXP_INIT, SSH_FXP_VERSION};
+
+fn matches_fingerprint(key: &russh::keys::ssh_key::PublicKey, expected: &str) -> bool {
+    let Some((algorithm, digest)) = expected.split_once('=') else {
+        return key.fingerprint(HashAlg::Sha256).to_string() == expected;
+    };
+    let Ok(bytes) = key.to_bytes() else {
+        return false;
+    };
+
+    let algorithm = algorithm.to_ascii_lowercase();
+    let digest = digest.trim();
+    match algorithm.as_str() {
+        "md5" => hex::encode(Md5::digest(&bytes)).eq_ignore_ascii_case(&digest.replace(':', "")),
+        "sha-1" | "sha1" => {
+            hex::encode(Sha1::digest(&bytes)).eq_ignore_ascii_case(&digest.replace(':', ""))
+        }
+        "sha-256" | "sha256" => {
+            let actual = key.fingerprint(HashAlg::Sha256).to_string();
+            actual.eq_ignore_ascii_case(digest)
+                || actual
+                    .strip_prefix("SHA256:")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(digest))
+        }
+        "sha-512" | "sha512" => {
+            let actual = key.fingerprint(HashAlg::Sha512).to_string();
+            actual.eq_ignore_ascii_case(digest)
+                || actual
+                    .strip_prefix("SHA512:")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(digest))
+        }
+        _ => false,
+    }
+}
 
 /// Host key verification modes for SSH connections
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -67,6 +103,8 @@ pub struct SshOptions {
     pub read_timeout: Duration,
     /// Host key verification mode
     pub host_key_mode: HostKeyCheckingMode,
+    /// Expected fingerprint in `hashType=digest` form.
+    pub host_key_fingerprint: Option<String>,
     /// Compression setting (not all servers support this)
     pub compression: bool,
     /// Keep-alive interval (None to disable)
@@ -87,6 +125,7 @@ impl Default for SshOptions {
             connect_timeout: Duration::from_secs(15),
             read_timeout: Duration::from_secs(30),
             host_key_mode: HostKeyCheckingMode::default(),
+            host_key_fingerprint: None,
             compression: false,
             keepalive_interval: Some(Duration::from_secs(60)),
             preferred_ciphers: Vec::new(),
@@ -126,6 +165,12 @@ impl SshOptions {
     /// Set a passphrase for an encrypted private key
     pub fn with_passphrase(mut self, passphrase: &str) -> Self {
         self.private_key_passphrase = Some(passphrase.to_string());
+        self
+    }
+
+    /// Set the expected host-key fingerprint.
+    pub fn with_host_key_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.host_key_fingerprint = Some(fingerprint.into());
         self
     }
 
@@ -189,35 +234,17 @@ impl SshOptions {
 // Russh Client Handler
 // =============================================================================
 
-/// Shared state between the russh handler and the connection/session layers.
-#[derive(Clone)]
-struct HandlerState {
-    /// Connection options for authentication
-    #[allow(dead_code)] // Stored for re-authentication and connection reuse
-    options: Arc<SshOptions>,
-    /// Host key checking mode
-    host_key_mode: HostKeyCheckingMode,
-    /// Sender for routing channel data to the SFTP session
-    channel_data_tx: Arc<tokio::sync::Mutex<Option<mpsc::Sender<Vec<u8>>>>>,
-}
-
 /// russh client handler that manages SSH protocol events.
 ///
-/// This handler processes server key verification, authentication challenges,
-/// and routes incoming channel data to the appropriate consumer via mpsc.
+/// The SFTP session reads its own `russh::Channel`, so this handler only owns
+/// connection-level verification behavior.
 struct SshClientHandler {
-    state: HandlerState,
+    options: Arc<SshOptions>,
 }
 
 impl SshClientHandler {
     fn new(options: Arc<SshOptions>) -> Self {
-        Self {
-            state: HandlerState {
-                options: options.clone(),
-                host_key_mode: options.host_key_mode.clone(),
-                channel_data_tx: Arc::new(tokio::sync::Mutex::new(None)),
-            },
-        }
+        Self { options }
     }
 }
 
@@ -230,9 +257,19 @@ impl client::Handler for SshClientHandler {
         &mut self,
         _server_public_key: &russh::keys::ssh_key::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        let mode = self.state.host_key_mode.clone();
+        let mode = self.options.host_key_mode.clone();
+        let expected = self.options.host_key_fingerprint.clone();
+        let server_key = _server_public_key.clone();
         async move {
             debug!("[SFTP] Checking server key (mode={})", mode);
+            if let Some(expected) = expected {
+                if !matches_fingerprint(&server_key, &expected) {
+                    return Err(SshError::Handshake {
+                        message: format!("SSH host-key fingerprint mismatch: expected {expected}"),
+                    });
+                }
+                return Ok(true);
+            }
 
             match mode {
                 HostKeyCheckingMode::Strict => {
@@ -252,26 +289,6 @@ impl client::Handler for SshClientHandler {
             }
         }
     }
-
-    #[allow(refining_impl_trait)]
-    fn data(
-        &mut self,
-        _channel: russh::ChannelId,
-        data: &[u8],
-        _session: &mut client::Session,
-    ) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-        let tx = self.state.channel_data_tx.clone();
-        let data = data.to_vec();
-        async move {
-            // Route incoming channel data to the registered receiver (SFTP session)
-            let guard = tx.lock().await;
-            if let Some(ref sender) = *guard {
-                // Ignore send errors - receiver may have been dropped during disconnect
-                let _ = sender.send(data).await;
-            }
-            Ok(())
-        }
-    }
 }
 
 // =============================================================================
@@ -289,8 +306,6 @@ pub struct SshConnection {
     options: Arc<SshOptions>,
     /// When this connection was established (for age tracking)
     connected_at: std::time::Instant,
-    /// Internal handler state clone for accessing channel_data_tx
-    handler_state: HandlerState,
 }
 
 impl std::fmt::Debug for SshConnection {
@@ -356,20 +371,12 @@ impl SshConnection {
         // Step 3: Authenticate
         Self::authenticate(&mut handle, &options_arc).await?;
 
-        // Step 4: Set up handler state for channel data routing
-        let handler_state = HandlerState {
-            options: Arc::clone(&options_arc),
-            host_key_mode: options_arc.host_key_mode.clone(),
-            channel_data_tx: Arc::new(tokio::sync::Mutex::new(None)),
-        };
-
         info!("[SFTP] SSH authenticated successfully: {}", target);
 
         Ok(Self {
             handle,
             options: options_arc,
             connected_at: std::time::Instant::now(),
-            handler_state,
         })
     }
 
@@ -390,14 +397,14 @@ impl SshConnection {
                 "[SFTP] Attempting password authentication for user '{}'",
                 username
             );
-            return handle
+            let result = handle
                 .authenticate_password(username, password)
                 .await
-                .map(|_| ())
                 .map_err(|e| SshError::AuthFailed {
                     method: "password".to_string(),
                     message: e.to_string(),
-                });
+                })?;
+            return Self::require_successful_authentication(result, "password");
         }
 
         // Method 2: Private key authentication
@@ -420,19 +427,38 @@ impl SshConnection {
             // Wrap PrivateKey into PrivateKeyWithHashAlg required by russh 0.59
             let key_with_alg = keys::PrivateKeyWithHashAlg::new(std::sync::Arc::new(key), None);
 
-            return handle
+            let result = handle
                 .authenticate_publickey(username, key_with_alg)
                 .await
-                .map(|_| ())
                 .map_err(|e| SshError::AuthFailed {
                     method: "publickey".to_string(),
                     message: format!("Public key auth failed (key={}): {}", key_path.display(), e),
-                });
+                })?;
+            return Self::require_successful_authentication(result, "publickey");
         }
 
         // No credentials available
         Err(SshError::NoCredentials {
             message: "No authentication credentials provided".to_string(),
+        })
+    }
+
+    /// Translate russh's protocol-level result into the command-level contract.
+    ///
+    /// A rejected credential is represented by `Ok(AuthResult::Failure { .. })`
+    /// by russh, not an I/O error. Treating that value as success would allow a
+    /// client to proceed after the server has declined authentication.
+    fn require_successful_authentication(
+        result: client::AuthResult,
+        method: &str,
+    ) -> Result<(), SshError> {
+        if result.success() {
+            return Ok(());
+        }
+
+        Err(SshError::AuthFailed {
+            method: method.to_string(),
+            message: "server rejected credentials".to_string(),
         })
     }
 
@@ -442,21 +468,12 @@ impl SshConnection {
     /// The returned channel is ready for SFTP packet exchange.
     ///
     /// # Returns
-    /// A tuple of (channel, data_receiver) where data_receiver collects
-    /// incoming channel data for the SFTP session to consume.
+    /// The channel owns both the send and receive halves, so callers can use
+    /// its `ChannelStream` without a handler-level forwarding adapter.
     pub async fn open_sftp_channel(
         &mut self,
-    ) -> Result<(russh::Channel<russh::client::Msg>, mpsc::Receiver<Vec<u8>>), SshError> {
+    ) -> Result<russh::Channel<russh::client::Msg>, SshError> {
         debug!("[SFTP] Opening SFTP subsystem channel");
-
-        // Create channel for routing data to the session
-        let (data_tx, data_rx) = mpsc::channel(256);
-
-        // Register the data sender in our handler state so incoming data gets routed
-        {
-            let mut tx_guard = self.handler_state.channel_data_tx.lock().await;
-            *tx_guard = Some(data_tx);
-        }
 
         // Open a session channel
         let channel =
@@ -476,7 +493,7 @@ impl SshConnection {
             })?;
 
         debug!("[SFTP] SFTP subsystem channel opened successfully");
-        Ok((channel, data_rx))
+        Ok(channel)
     }
 
     /// Get the connection options
@@ -656,12 +673,14 @@ impl SshConnectionPool {
 
     /// Remove and close a specific connection from the pool
     pub async fn remove(&mut self, target: &str) -> Option<SshConnection> {
-        self.connections.remove(target).map(|arc| {
-            // We need to extract the inner value; in practice this requires careful handling
-            // For now, just mark it for removal
-            drop(arc);
-            unreachable!("Pool removal requires ownership transfer")
-        })
+        let connection = self.connections.remove(target)?;
+
+        // A caller may still hold a clone returned by `get_or_create`. In that
+        // case the pool can evict its own reference, but it cannot safely take
+        // ownership of the connection out of the mutex yet. Returning `None`
+        // reports that distinction without panicking or leaking a live entry.
+        let connection = Arc::try_unwrap(connection).ok()?;
+        Some(connection.into_inner())
     }
 
     /// Close all connections in the pool
@@ -824,10 +843,56 @@ mod tests {
     }
 
     #[test]
+    fn rejected_russh_authentication_is_not_treated_as_success() {
+        let error = SshConnection::require_successful_authentication(
+            client::AuthResult::Failure {
+                remaining_methods: russh::MethodSet::empty(),
+                partial_success: false,
+            },
+            "password",
+        )
+        .expect_err("a rejected SSH password must fail authentication");
+
+        assert!(matches!(
+            error,
+            SshError::AuthFailed { method, .. } if method == "password"
+        ));
+    }
+
+    #[test]
     fn test_connection_pool_creation() {
         let pool = SshConnectionPool::new(3, Duration::from_secs(300));
         assert!(pool.is_empty());
         assert_eq!(pool.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_connection_pool_remove_unknown_is_noop() {
+        let mut pool = SshConnectionPool::new(1, Duration::from_secs(60));
+        assert!(pool.remove("missing@example.com:22").await.is_none());
+        assert!(pool.is_empty());
+    }
+
+    #[test]
+    fn test_host_key_fingerprint_formats() {
+        let key = keys::parse_public_key_base64(
+            "AAAAC3NzaC1lZDI1NTE5AAAAIJdD7y3aLq454yWBdwLWbieU1ebz9/cu7/QEXn9OIeZJ",
+        )
+        .expect("fixture key must parse");
+        let key_bytes = key.to_bytes().expect("fixture key must encode");
+
+        let md5_digest = format!("md5={}", hex::encode(Md5::digest(&key_bytes)));
+        let sha1_digest = format!("sha-1={}", hex::encode(Sha1::digest(&key_bytes)));
+        let sha256_digest = key.fingerprint(HashAlg::Sha256).to_string();
+
+        assert!(matches_fingerprint(&key, &md5_digest));
+        assert!(matches_fingerprint(&key, &sha1_digest));
+        assert!(matches_fingerprint(
+            &key,
+            &format!("sha-256={sha256_digest}")
+        ));
+        assert!(!matches_fingerprint(&key, "sha-1=00"));
+        assert!(!matches_fingerprint(&key, "unknown=00"));
     }
 
     #[test]

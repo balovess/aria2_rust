@@ -3,18 +3,24 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::config::parse_integer_segments;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub struct MagnetDownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     magnet_uri: String,
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
+    /// Carried through to the internally-created `BtDownloadCommand`.
+    global_limiter: Option<RateLimiter>,
 }
 
 impl MagnetDownloadCommand {
@@ -24,10 +30,46 @@ impl MagnetDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
-        let _ml =
-            aria2_protocol::bittorrent::magnet::MagnetLink::parse(magnet_uri).map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Invalid magnet link: {}", e)))
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            vec![magnet_uri.to_string()],
+            options.clone(),
+        )));
+        Self::new_with_group(group, output_dir)
+    }
+
+    /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
+    ///
+    /// When set, the internally-created `BtDownloadCommand` is given this
+    /// limiter so the resolved torrent's piece writes share the global ceiling.
+    pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
+        self.global_limiter = Some(limiter);
+    }
+
+    /// Create a magnet download command that reuses an externally-managed
+    /// `RequestGroup` (e.g. from the engine's promotion flow).
+    ///
+    /// The first URI in the group is treated as the magnet link. Output
+    /// directory falls back to the group's `DownloadOptions` when not
+    /// explicitly overridden. The group's existing GID and progress counters
+    /// are reused.
+    pub fn new_with_group(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        output_dir: Option<&str>,
+    ) -> Result<Self> {
+        let (magnet_uri, options) = {
+            let g = group.recover();
+            let uri = g.uris().first().cloned().ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "RequestGroup has no URIs for magnet download".into(),
+                ))
             })?;
+            let opts = g.options_arc();
+            (uri, opts)
+        };
+
+        let _ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&magnet_uri)
+            .map_err(|e| Aria2Error::MagnetParse(format!("Invalid magnet link: {}", e)))?;
 
         let dir = output_dir
             .map(|d| d.to_string())
@@ -41,28 +83,26 @@ impl MagnetDownloadCommand {
             .to_string();
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let urls = vec![magnet_uri.to_string()];
-        let group = RequestGroup::new(gid, urls, options.clone());
-
         info!(
-            "MagnetDownloadCommand created: {} -> {} (hash={})",
+            "MagnetDownloadCommand created (shared group): {} -> {} (hash={})",
             filename,
             path.display(),
             _ml.info_hash_hex()
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
-            magnet_uri: magnet_uri.to_string(),
+            group,
+            magnet_uri,
             output_path: path,
             started: false,
             completed_bytes: 0,
             dht_engine: None,
+            global_limiter: None,
         })
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 
     /// BEP 0027 (Private Torrent) enforcement after metadata exchange.
@@ -113,13 +153,12 @@ impl MagnetDownloadCommand {
 impl Command for MagnetDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
-        let ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&self.magnet_uri).map_err(
-            |e| Aria2Error::Fatal(FatalError::Config(format!("Magnet parse error: {}", e))),
-        )?;
+        let ml = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&self.magnet_uri)
+            .map_err(|e| Aria2Error::MagnetParse(format!("Magnet parse error: {}", e)))?;
 
         info!(
             "Magnet download: hash={}, name={:?}",
@@ -135,12 +174,32 @@ impl Command for MagnetDownloadCommand {
             })?;
         }
 
-        let enable_dht = { self.group.read().await.options().enable_dht };
-        let dht_port = { self.group.read().await.options().dht_listen_port };
+        let enable_dht = { self.group.recover().options().enable_dht };
+        let dht_port = { self.group.recover().options().dht_listen_port.clone() };
 
         if enable_dht && self.dht_engine.is_none() {
+            let dht_ports = dht_port
+                .as_deref()
+                .map(|value| {
+                    parse_integer_segments(value, 1024, u16::MAX as i64).map(|ranges| {
+                        ranges
+                            .into_iter()
+                            .flat_map(|range| range.map(|port| port as u16))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .transpose()
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "invalid dht-listen-port: {error}"
+                    )))
+                })?;
             let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
-                port: dht_port.unwrap_or(0),
+                port: dht_ports
+                    .as_ref()
+                    .and_then(|ports| ports.first().copied())
+                    .unwrap_or(0),
+                port_range: dht_ports,
                 ..Default::default()
             };
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
@@ -156,13 +215,20 @@ impl Command for MagnetDownloadCommand {
         }
 
         let discovered_peers = if let Some(ref engine) = self.dht_engine {
-            let result = engine.find_peers(&ml.info_hash).await;
-            info!(
-                "Magnet: DHT discovered {} peers (contacted {} nodes)",
-                result.peers.len(),
-                result.nodes_contacted
-            );
-            result.peers
+            match engine.find_peers(&ml.info_hash).await {
+                Ok(result) => {
+                    info!(
+                        "Magnet: DHT discovered {} peers (contacted {} nodes)",
+                        result.peers.len(),
+                        result.nodes_contacted
+                    );
+                    result.peers
+                }
+                Err(e) => {
+                    warn!("Magnet: DHT find_peers failed: {}", e);
+                    vec![]
+                }
+            }
         } else {
             warn!("Magnet: DHT disabled, no peers available");
             vec![]
@@ -204,11 +270,14 @@ impl Command for MagnetDownloadCommand {
 
         use crate::engine::bt_download_command::BtDownloadCommand;
         let mut bt_cmd = BtDownloadCommand::new(
-            self.group.read().await.gid(),
+            self.group.recover().gid(),
             &torrent_bytes,
-            &DownloadOptions::default(),
+            self.group.recover().options(),
             self.output_path.parent().and_then(|p| p.to_str()),
         )?;
+        if let Some(gl) = self.global_limiter.clone() {
+            bt_cmd.set_global_limiter(gl);
+        }
 
         bt_cmd.execute().await?;
 
@@ -216,7 +285,7 @@ impl Command for MagnetDownloadCommand {
             engine.shutdown();
         }
 
-        self.completed_bytes = self.group.read().await.total_length();
+        self.completed_bytes = self.group.recover().total_length();
 
         info!("Magnet download complete: {}", self.output_path.display());
         Ok(())
@@ -230,6 +299,17 @@ impl Command for MagnetDownloadCommand {
         }
     }
 
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
+    }
+
+    fn request_group(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
+        Some(std::sync::Arc::clone(&self.group))
+    }
+
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(900))
     }
@@ -238,7 +318,7 @@ impl Command for MagnetDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::bt_download_command_tests::tests::{
+    use crate::engine::bt_download_command_tests::{
         build_private_test_torrent, build_test_torrent,
     };
 
@@ -256,11 +336,15 @@ mod tests {
         .expect("Failed to create test MagnetDownloadCommand")
     }
 
-    /// Start a real DhtEngine on an ephemeral port (port 0) for testing.
+    /// Start a real DhtEngine on an ephemeral port for testing.
+    ///
+    /// Uses `DhtEngineConfig::local()`: an OS-assigned port (avoids conflicts)
+    /// and no public bootstrap, so the test performs no outbound network I/O
+    /// and cannot stall on DNS or unreachable entry points.
     async fn start_test_dht_engine()
     -> std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
         aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
-            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::default(),
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
         )
         .await
         .expect("Failed to start DhtEngine for test")

@@ -42,7 +42,9 @@ pub mod cli;
 use cli::CliArgs;
 mod config;
 mod engine;
-mod rpc;
+// Public so integration tests can exercise the core → RPC notification bridge
+// (`rpc::CoreEventBridge`) without spinning up a real RPC server.
+pub mod rpc;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -81,29 +83,38 @@ impl App {
     /// 7. Runs the engine event loop
     /// 8. **Saves session on shutdown (if configured)**
     ///
-    /// `--help` / `--version` are handled by clap before `run` is called.
+    /// `--help[=TAG|KEYWORD]` / `--version` are handled before `run` is called.
     ///
     /// Returns exit code: `0` = success, `1` = error.
     pub async fn run(&mut self, cli: CliArgs) -> i32 {
         // Apply --no-color flag + TTY detection: disable colored output when
         // the user requests it OR when stdout is not a terminal (e.g. piped).
-        if cli.no_color || !std::io::stdout().is_terminal() {
+        if cli.no_color.unwrap_or(false) || !std::io::stdout().is_terminal() {
             colored::control::set_override(false);
         }
 
         // verbose is handled via log-level config option
 
-        // Use --conf-path from CLI if provided, else fall back to default
-        let conf_path = cli
-            .general
-            .conf_path
-            .as_ref()
-            .and_then(|p| p.to_str())
-            .map(|s| s.to_string());
+        // Handle --no-conf and --conf-path (matching original aria2 option_processing.cc):
+        // - --no-conf: skip config file loading entirely
+        // - --conf-path: use explicit path (error if not found)
+        // - neither: use default ~/.aria2/aria2.conf
+        let no_conf = cli.general.no_conf.unwrap_or(false);
+        let conf_path = if no_conf {
+            eprintln!("[*] --no-conf set, skipping config file loading");
+            None
+        } else {
+            cli.general
+                .conf_path
+                .as_ref()
+                .and_then(|p| p.to_str())
+                .map(|s| s.to_string())
+        };
 
-        self.load_env().await;
-
-        if let Err(e) = self.load_config_file(conf_path.as_deref()).await {
+        if let Err(e) = self
+            .load_startup_config(no_conf, conf_path.as_deref())
+            .await
+        {
             tracing::error!("Failed to load config file: {}", e);
         }
 
@@ -127,6 +138,40 @@ impl App {
                     );
                     return 0;
                 }
+            }
+
+            // ===================================================================
+            // CRITICAL ORDERING CONSTRAINT — daemonize must run BEFORE the tokio
+            // runtime's I/O driver (reactor) is initialized and before the engine
+            // binds any sockets. See `Daemonizer::daemonize` docs in daemon.rs.
+            //
+            // Current guarantees at this point:
+            //  * main.rs `#[tokio::main]` created the runtime object, but the
+            //    reactor is created LAZILY on the first socket/timer registration.
+            //    Up to here only synchronous `std::fs` reads and in-memory
+            //    RwLock/Mutex ops have run — no fd has been registered with the
+            //    runtime, so `close_file_descriptors_unix` closing fds 3..max_fd
+            //    will NOT destroy a live reactor fd (epoll/eventfd/socket).
+            //  * `initialize_engine()` (called later in this fn) binds RPC server
+            //    sockets and spawns engine tasks. daemonize MUST stay before it.
+            //
+            // Do NOT move this block after `initialize_engine()`, into a tokio
+            // task, or after the RPC server binds — the daemon child would then
+            // inherit-and-close the reactor's epoll/eventfd and crash on first I/O.
+            // ===================================================================
+            // Assertion-style guard: if the engine already exists we are too late.
+            // Its sockets/files are registered with the runtime, so fd-closing in
+            // the daemon child would corrupt the reactor. Fails loudly in debug
+            // builds, warns in release.
+            if self.engine.lock().await.is_some() {
+                warn!(
+                    "daemonize() called after engine initialization — \
+                     inherited-fd closing in daemon mode may corrupt the tokio runtime"
+                );
+                debug_assert!(
+                    false,
+                    "daemonize() must be called before initialize_engine()"
+                );
             }
 
             // Perform daemonization
@@ -159,11 +204,19 @@ impl App {
                 .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+            let log_max_size = self
+                .get_opt_i64("log-max-size")
+                .await
+                .filter(|&v| v > 0)
+                .map(|v| v as u64);
+            let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
             init_logging(
                 &log_level,
                 &console_log_level,
                 log_path.as_deref(),
                 log_backup_count,
+                log_max_size,
+                log_max_files,
             );
 
             info!("Daemon started successfully");
@@ -181,15 +234,33 @@ impl App {
                 .unwrap_or_else(|| "notice".to_string());
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+            let log_max_size = self
+                .get_opt_i64("log-max-size")
+                .await
+                .filter(|&v| v > 0)
+                .map(|v| v as u64);
+            let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
             init_logging(
                 &log_level,
                 &console_log_level,
                 log_path.as_deref(),
                 log_backup_count,
+                log_max_size,
+                log_max_files,
             );
         }
 
         self.print_banner();
+
+        // Apply engine-level options from config (CLI/file/env) BEFORE tasks
+        // are added. max-concurrent-downloads drives the engine's slot limit;
+        // the RequestGroupMan default is 5 (matching aria2).
+        if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await
+            && max > 0
+        {
+            self.request_man.read().await.set_max_concurrent(max as u32);
+            info!("Max concurrent downloads set to {} (from config)", max);
+        }
 
         // Initialize engine (must be before session restore)
         self.initialize_engine().await;
@@ -207,9 +278,14 @@ impl App {
             }
         }
 
-        // Check if there are any inputs (restored tasks or CLI URIs)
-        let man = self.request_man.read().await;
-        let has_restored_tasks = man.count().await > 0;
+        // Check if there are any inputs (restored tasks or CLI URIs). Keep the
+        // manager guard scoped to this synchronous snapshot: `run` continues
+        // through RPC startup and the engine lifetime, so retaining it here
+        // would starve the first RPC write lock indefinitely.
+        let has_restored_tasks = {
+            let man = self.request_man.read().await;
+            man.count() > 0
+        };
 
         // In daemon mode, we need RPC enabled to control the daemon
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
@@ -252,12 +328,12 @@ impl App {
         // Step 6: Start RPC server (if enabled)
         let rpc_handle = if rpc_enabled {
             // Extract shared state from the engine before run() consumes it
-            let (group_man, cmd_tx) = {
+            let (group_man, engine_cmd_tx) = {
                 let engine_lock = self.engine.lock().await;
                 let engine_ref = engine_lock.as_ref().expect("engine should be initialized");
-                (self.request_man.clone(), engine_ref.command_sender())
+                (self.request_man.clone(), engine_ref.engine_command_sender())
             };
-            match self.start_rpc_server(group_man, cmd_tx).await {
+            match self.start_rpc_server(group_man, engine_cmd_tx).await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
                     warn!("RPC server failed to start: {}", e);
@@ -268,8 +344,9 @@ impl App {
             None
         };
 
-        // Step 7: Run engine
-        let run_result = self.run_engine(rpc_enabled).await;
+        // Step 7: Run engine (always show console progress when stdout is interactive)
+        let show_progress = std::io::stdout().is_terminal();
+        let run_result = self.run_engine(rpc_enabled, show_progress).await;
 
         // Step 8: Shutdown RPC server
         if let Some(handle) = rpc_handle {

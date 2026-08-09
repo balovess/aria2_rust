@@ -1,7 +1,7 @@
-//! 流式过滤器框架的单元测试
+//! Unit tests for the stream filter framework
 //!
-//! 测试覆盖 GZip、Chunked、BZip2 解码器，过滤器组合，
-//! AutoFilterSelector 自动选择器，以及 HttpResponse 集成测试。
+//! Tests cover GZip, Chunked, BZip2 decoders, filter composition,
+//! AutoFilterSelector, and HttpResponse integration tests.
 
 use super::stream_filter::*;
 use crate::error::Aria2Error;
@@ -9,9 +9,9 @@ use flate2::Compression;
 use flate2::write::GzEncoder;
 use std::io::Write;
 
-// ==================== 辅助函数 ====================
+// ==================== Helper functions ====================
 
-/// 创建 GZip 压缩数据（用于测试）
+/// Create GZip compressed data (for testing)
 fn create_gzip_data(data: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(data).unwrap();
@@ -29,44 +29,42 @@ fn bzip2_test_data() -> Vec<u8> {
     .unwrap()
 }
 
-// ==================== GZipDecoder 测试 ====================
+// ==================== GZipDecoder tests ====================
 
 #[test]
 fn test_gzip_decompress_small_file() {
-    // 准备测试数据 (<1KB)
+    // Prepare test data (<1KB)
     let original = b"Hello, World! This is a small test file for gzip decompression.";
     let compressed = create_gzip_data(original);
 
-    // 执行解压
+    // Decompress
     let mut decoder = GZipDecoder::new();
     let result = decoder
         .filter(&compressed)
         .expect("GZip decompression failed");
 
-    // 验证结果
+    // Verify results
     assert_eq!(result, original, "Decompressed data should match original");
     assert_eq!(decoder.name(), "gzip");
 }
 
 #[test]
 fn test_gzip_invalid_header_error() {
-    // 非 GZip 数据（缺少 magic number）
+    // Non-GZip data (missing magic number)
+    // With the new auto-detection decoder, data that doesn't start with
+    // gzip (0x1f 0x8b) or zlib (0x78) magic bytes is treated as raw
+    // deflate. Since "This is not gzip data" is not valid deflate either,
+    // decompression fails with an Io error (not a Parse error about the
+    // magic number, which was the old batch-only behavior).
     let invalid_data = b"This is not gzip data";
 
     let mut decoder = GZipDecoder::new();
     let result = decoder.filter(invalid_data);
 
-    // 应该返回错误
-    assert!(result.is_err(), "Should fail with invalid GZip data");
-    match result.unwrap_err() {
-        Aria2Error::Parse(msg) => {
-            assert!(
-                msg.contains("Invalid GZip magic number"),
-                "Error message should mention invalid magic number"
-            );
-        }
-        other => panic!("Expected Parse error, got: {:?}", other),
-    }
+    // Should return error (either Parse for format detection or Io for
+    // decompression failure — the exact error type depends on which
+    // decoder path is taken)
+    assert!(result.is_err(), "Should fail with invalid compressed data");
 }
 
 #[test]
@@ -76,13 +74,13 @@ fn test_gzip_needs_more_input() {
 
     let mut decoder = GZipDecoder::new();
 
-    // 解压前应该需要输入
+    // Should need input before decompression
     assert!(
         decoder.needs_more_input(),
         "New decoder should need input before processing"
     );
 
-    // 解压后不应该再需要输入
+    // Should not need more input after decompression
     let _ = decoder
         .filter(&compressed)
         .expect("Decompression should succeed");
@@ -92,11 +90,11 @@ fn test_gzip_needs_more_input() {
     );
 }
 
-// ==================== ChunkedDecoder 测试 ====================
+// ==================== ChunkedDecoder tests ====================
 
 #[test]
 fn test_chunked_decode_normal() {
-    // 标准 chunked 格式: 5\r\nhello\r\n0\r\n\r\n
+    // Standard chunked format: 5\r\nhello\r\n0\r\n\r\n
     let chunked_data = b"5\r\nhello\r\n0\r\n\r\n";
 
     let mut decoder = ChunkedDecoder::new();
@@ -105,7 +103,7 @@ fn test_chunked_decode_normal() {
     assert_eq!(result, b"hello", "Should decode 'hello'");
     assert_eq!(decoder.name(), "chunked");
 
-    // 应该完成
+    // Should be complete
     assert!(
         !decoder.needs_more_input(),
         "Should be complete after final chunk"
@@ -114,7 +112,7 @@ fn test_chunked_decode_normal() {
 
 #[test]
 fn test_chunked_decode_with_extensions() {
-    // 含扩展的 chunked 格式: 5;name=value\r\nhello\r\n0\r\n\r\n
+    // Chunked format with extensions: 5;name=value\r\nhello\r\n0\r\n\r\n
     let chunked_data = b"5;name=value\r\nhello\r\n0\r\n\r\n";
 
     let mut decoder = ChunkedDecoder::new();
@@ -130,51 +128,51 @@ fn test_chunked_decode_with_extensions() {
 
 #[test]
 fn test_chunked_early_eof() {
-    // 不完整的 chunk (size=10 但只有5字节数据)
+    // Incomplete chunk (size=10 but only 5 bytes of data)
     let incomplete_chunked = b"A\r\nHello"; // size=10, but only 5 bytes of data
 
     let mut decoder = ChunkedDecoder::new();
     let result = decoder.filter(incomplete_chunked);
 
-    // 应该成功返回已有数据（部分解码）
+    // Should successfully return available data (partial decode)
     match result {
         Ok(data) => {
             assert_eq!(data, b"Hello", "Should return partial data");
-            // 状态应该是 ReadingData 或等待更多输入
+            // State should be ReadingData or waiting for more input
             assert!(
                 decoder.needs_more_input(),
                 "Incomplete chunk should need more input"
             );
         }
         Err(e) => {
-            // 也可能返回错误，取决于实现
+            // May also return error depending on implementation
             println!("Got error for early EOF: {:?}", e);
         }
     }
 
-    // flush 应该返回错误或警告
+    // flush should return error or warning
     let flush_result = decoder.flush();
     match flush_result {
-        Err(Aria2Error::Parse(_)) => {} // 预期的错误
-        Ok(_) => {}                     // 或者返回已有数据
+        Err(Aria2Error::Parse(_)) => {} // Expected error
+        Ok(_) => {}                     // Or return available data
         other => panic!("Unexpected flush result: {:?}", other),
     }
 }
 
 #[test]
 fn test_chunked_multiple_chunks() {
-    // 多个 chunk: 5\r\nhello\r\n6\r\n world\r\n7\r\n!!!\r\n0\r\n\r\n
-    let chunked_data = b"5\r\nhello\r\n6\r\n world\r\n7\r\n!!!\r\n0\r\n\r\n";
+    // Multiple chunks: 5\r\nhello\r\n6\r\n world\r\n3\r\n!!!\r\n0\r\n\r\n
+    let chunked_data = b"5\r\nhello\r\n6\r\n world\r\n3\r\n!!!\r\n0\r\n\r\n";
 
     let mut decoder = ChunkedDecoder::new();
     let result = decoder
         .filter(chunked_data)
         .expect("Multi-chunk decode failed");
 
-    // 验证输出包含所有 chunk 的数据（前面部分应该完全匹配）
-    assert!(
-        result.starts_with(b"hello world!!!"),
-        "Output should start with concatenated chunk data: got {:?}",
+    // Verify output contains data from all chunks
+    assert_eq!(
+        result, b"hello world!!!",
+        "Output should be concatenated chunk data: got {:?}",
         result
     );
 }
@@ -183,11 +181,11 @@ fn test_chunked_multiple_chunks() {
 
 #[test]
 fn test_filter_chain_gzip_then_chunked() {
-    // 先 GZip 压缩，再用 chunked 编码
+    // First GZip compress, then chunked encode
     let original = b"Compressed and chunked data";
     let compressed = create_gzip_data(original);
 
-    // 手动创建 chunked 格式的压缩数据
+    // Manually create chunked format of compressed data
     let size_hex = format!("{:x}", compressed.len());
     let _chunked_compressed = format!(
         "{}\r\n{}\r\n0\r\n\r\n",
@@ -196,7 +194,7 @@ fn test_filter_chain_gzip_then_chunked() {
     )
     .into_bytes();
 
-    // 单独测试每个过滤器
+    // Test each filter individually
     let mut gzip_decoder = GZipDecoder::new();
     let decompressed = gzip_decoder.filter(&compressed).expect("GZip failed");
     assert_eq!(decompressed, original);
@@ -231,11 +229,11 @@ fn test_process_filters_with_decoders() {
     assert_eq!(filters.len(), 0, "Length should be 0 after clear");
 }
 
-// ==================== AutoFilterSelector 测试 ====================
+// ==================== AutoFilterSelector tests ====================
 
 #[test]
 fn test_auto_select_gzip_content_encoding() {
-    // Content-Encoding: gzip → 应选择 GZipDecoder
+    // Content-Encoding: gzip → should select GZipDecoder
     let filters = AutoFilterSelector::select_filters(Some("gzip"), None);
 
     assert_eq!(filters.len(), 1, "Should select 1 filter for gzip");
@@ -243,7 +241,7 @@ fn test_auto_select_gzip_content_encoding() {
 
 #[test]
 fn test_auto_select_chunked_transfer_encoding() {
-    // Transfer-Encoding: chunked → 应选择 ChunkedDecoder
+    // Transfer-Encoding: chunked → should select ChunkedDecoder
     let filters = AutoFilterSelector::select_filters(None, Some("chunked"));
 
     assert_eq!(filters.len(), 1, "Should select 1 filter for chunked");
@@ -251,7 +249,7 @@ fn test_auto_select_chunked_transfer_encoding() {
 
 #[test]
 fn test_auto_select_x_gzip_encoding() {
-    // x-gzip 是 gzip 的别名
+    // x-gzip is an alias for gzip
     let filters = AutoFilterSelector::select_filters(Some("x-gzip"), None);
 
     assert_eq!(filters.len(), 1, "x-gzip should be treated as gzip");
@@ -270,7 +268,7 @@ fn test_auto_select_bzip2_encoding() {
 
 #[test]
 fn test_auto_select_identity_encoding() {
-    // identity 表示无编码
+    // identity means no encoding
     let filters = AutoFilterSelector::select_filters(Some("identity"), None);
 
     assert_eq!(
@@ -282,24 +280,24 @@ fn test_auto_select_identity_encoding() {
 
 #[test]
 fn test_auto_select_no_encoding() {
-    // 无编码信息
+    // No encoding info
     let filters = AutoFilterSelector::select_filters(None, None);
 
     assert_eq!(filters.len(), 0, "No encoding should result in empty list");
 }
 
-// ==================== HttpResponse 集成测试 ====================
+// ==================== HttpResponse integration tests ====================
 
 #[test]
 fn test_http_response_decoded_body_integration() {
     use super::request_response::HttpResponse;
     use std::collections::HashMap;
 
-    // 准备原始数据和 GZip 压缩数据
+    // Prepare original data and GZip compressed data
     let original = b"HTTP response body content";
     let compressed = create_gzip_data(original);
 
-    // 构建 HTTP 响应
+    // Build HTTP response
     let mut headers: HashMap<String, Vec<String>> = HashMap::new();
     headers.insert("Content-Encoding".to_string(), vec!["gzip".to_string()]);
     headers.insert("Content-Type".to_string(), vec!["text/plain".to_string()]);
@@ -312,7 +310,7 @@ fn test_http_response_decoded_body_integration() {
         body: Some(compressed),
     };
 
-    // 使用 decoded_body 获取解压后的内容
+    // Use decoded_body to get decompressed content
     let decoded = response.decoded_body().expect("decoded_body failed");
 
     assert_eq!(
@@ -326,7 +324,7 @@ fn test_http_response_decoded_body_no_body() {
     use super::request_response::HttpResponse;
     use std::collections::HashMap;
 
-    // 无 body 的响应
+    // Response without body
     let response = HttpResponse {
         status_code: 204,
         reason_phrase: "No Content".to_string(),
@@ -345,15 +343,15 @@ fn test_http_response_decoded_body_no_body() {
     );
 }
 
-// ==================== 混合编码处理测试 ====================
+// ==================== Mixed encoding handling tests ====================
 
 #[test]
 fn test_mixed_encoding_handling() {
-    // 当同时存在 Transfer-Encoding 和 Content-Encoding 时，
-    // 根据 RFC 7230，Transfer-Encoding 优先
+    // When both Transfer-Encoding and Content-Encoding exist,
+    // per RFC 7230, Transfer-Encoding takes priority
 
-    // 场景1: Transfer-Encoding=chunked + Content-Encoding=gzip
-    // 应该只使用 chunked 解码器
+    // Scenario 1: Transfer-Encoding=chunked + Content-Encoding=gzip
+    // Should only use chunked decoder
     let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
 
     assert_eq!(
@@ -365,17 +363,17 @@ fn test_mixed_encoding_handling() {
 
 #[test]
 fn test_multiple_content_encodings() {
-    // 多个 Content-Encoding 值（逗号分隔）
+    // Multiple Content-Encoding values (comma-separated)
     let filters = AutoFilterSelector::select_filters(Some("gzip, deflate"), None);
 
-    // 目前只支持 gzip，deflate 会输出 warning 但不添加过滤器
+    // Currently only gzip is supported, deflate will output warning but not add a filter
     assert!(
         !filters.is_empty(),
         "Should at least handle supported encodings"
     );
 }
 
-// ==================== BZip2Decoder 测试 ====================
+// ==================== BZip2Decoder tests ====================
 
 #[test]
 fn test_bzip2_decompress_basic() {
@@ -396,7 +394,7 @@ fn test_bzip2_decompress_basic() {
 
 #[test]
 fn test_bzip2_invalid_data_error() {
-    // 无效的 BZip2 数据
+    // Invalid BZip2 data
     let invalid_data = b"This is not valid bzip2 data";
 
     let mut decoder = BZip2Decoder::new();
@@ -405,11 +403,11 @@ fn test_bzip2_invalid_data_error() {
     assert!(result.is_err(), "Invalid BZip2 data should cause error");
 }
 
-// ==================== 边界情况测试 ====================
+// ==================== Edge case tests ====================
 
 #[test]
 fn test_gzip_empty_data() {
-    // 压缩空字符串
+    // Compress empty string
     let original = b"";
     let compressed = create_gzip_data(original);
 
@@ -423,7 +421,7 @@ fn test_gzip_empty_data() {
 
 #[test]
 fn test_chunked_single_byte_chunks() {
-    // 每个 chunk 只有1字节
+    // Each chunk is only 1 byte
     let chunked_data = b"1\r\nH\r\n1\r\ne\r\n1\r\nl\r\n1\r\nl\r\n1\r\no\r\n0\r\n\r\n";
 
     let mut decoder = ChunkedDecoder::new();
@@ -439,7 +437,7 @@ fn test_chunked_single_byte_chunks() {
 
 #[test]
 fn test_chunked_large_size() {
-    // 大尺寸 chunk (100字节)
+    // Large chunk (100 bytes)
     let data = vec![b'X'; 100];
     let size_hex = format!("{:x}", 100);
     let chunked = format!(
@@ -454,4 +452,51 @@ fn test_chunked_large_size() {
 
     assert_eq!(result.len(), 100, "Should decode all 100 bytes");
     assert!(result.iter().all(|&b| b == b'X'), "All bytes should be X");
+}
+
+#[test]
+fn test_chunked_strict_crlf_after_data() {
+    // Strict CRLF enforcement after chunk data — matches C++ ChunkedDecodeFilter.
+    // After chunk data, the decoder expects exactly \r\n.
+    // Bare \r\n is the valid sequence.
+    let chunked_data = b"4\r\ntest\r\n0\r\n\r\n";
+
+    let mut decoder = ChunkedDecoder::new();
+    let result = decoder
+        .filter(chunked_data)
+        .expect("Valid CRLF after data should succeed");
+
+    assert_eq!(result, b"test", "Should decode 'test' with strict CRLF");
+}
+
+#[test]
+fn test_chunked_bare_lf_after_data_tolerated() {
+    // Bare LF after chunk data is tolerated for robustness (some broken servers).
+    // C++ is strict and would reject this, but we tolerate it for real-world compat.
+    let chunked_data = b"4\r\ntest\n0\r\n\r\n";
+
+    let mut decoder = ChunkedDecoder::new();
+    let result = decoder
+        .filter(chunked_data)
+        .expect("Bare LF after data should be tolerated");
+
+    assert_eq!(
+        result, b"test",
+        "Should decode 'test' even with bare LF after data"
+    );
+}
+
+#[test]
+fn test_chunked_invalid_byte_after_data() {
+    // Non-CRLF byte after chunk data should be rejected.
+    // After reading chunk data, the decoder expects CRLF; a letter is invalid.
+    let chunked_data = b"4\r\ntestX0\r\n\r\n";
+
+    let mut decoder = ChunkedDecoder::new();
+    let result = decoder.filter(chunked_data);
+
+    assert!(
+        result.is_err(),
+        "Non-CRLF byte after chunk data should be rejected"
+    );
 }

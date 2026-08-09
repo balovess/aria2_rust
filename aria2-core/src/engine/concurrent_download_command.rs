@@ -13,9 +13,10 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::file_allocation;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub struct ConcurrentDownloadCommand {
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
     client: reqwest::Client,
     output_path: std::path::PathBuf,
     started: bool,
@@ -36,14 +37,20 @@ impl ConcurrentDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes)
+        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
             .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
-            })?;
+            Aria2Error::Fatal(FatalError::Config(format!("Metalink parse failed: {}", e)))
+        })?;
 
-        let file = doc
-            .single_file()
-            .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("No file in Metalink".into())))?;
+        if doc.files.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Metalink contains no files".into(),
+            )));
+        }
+
+        // Use the first file. For multi-file Metalinks, the caller
+        // should use create_multi_file_sequential() on MetalinkDownloadCommand.
+        let file = &doc.files[0];
 
         if file.urls.is_empty() {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -65,20 +72,23 @@ impl ConcurrentDownloadCommand {
         let group = RequestGroup::new(gid, urls.clone(), options.clone());
         let max_conn = options.max_connection_per_server.unwrap_or(2);
 
-        let client = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .timeout(Duration::from_secs(300))
-            .user_agent("aria2-rust/0.1.0")
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!(
-                    "HTTP client build failed: {}",
-                    e
-                )))
-            })?;
+        let client = {
+            crate::http::client_pool::ensure_rustls_provider();
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(300))
+                .user_agent(crate::constants::USER_AGENT)
+                .redirect(reqwest::redirect::Policy::limited(5))
+                .build()
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "HTTP client build failed: {}",
+                        e
+                    )))
+                })?
+        };
 
-        let alloc = "prealloc".to_string();
+        let alloc = crate::constants::DEFAULT_FILE_ALLOCATION.to_string();
         let secure = options.secure_falloc;
         let cache_mb: Option<usize> = None;
 
@@ -90,7 +100,7 @@ impl ConcurrentDownloadCommand {
         );
 
         Ok(Self {
-            group: Arc::new(tokio::sync::RwLock::new(group)),
+            group: Arc::new(std::sync::RwLock::new(group)),
             client,
             output_path: path,
             started: false,
@@ -103,8 +113,8 @@ impl ConcurrentDownloadCommand {
         })
     }
 
-    pub async fn group(&self) -> tokio::sync::RwLockReadGuard<'_, RequestGroup> {
-        self.group.read().await
+    pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
+        self.group.recover()
     }
 }
 
@@ -112,18 +122,18 @@ impl ConcurrentDownloadCommand {
 impl Command for ConcurrentDownloadCommand {
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
-            self.group.write().await.start().await?;
+            self.group.recover_mut().start()?;
             self.started = true;
         }
 
-        let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data)
-            .map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
-            })?;
+        let doc =
+            aria2_protocol::metalink::parser::MetalinkDocument::parse(&self.metalink_data, None)
+                .map_err(|e| {
+                    Aria2Error::Fatal(FatalError::Config(format!("Metalink parse error: {}", e)))
+                })?;
 
-        let file = doc
-            .single_file()
-            .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("No available file".into())))?;
+        // Use the first file for single-file mode
+        let file = &doc.files[0];
 
         let sorted_urls = file.get_sorted_urls();
         if sorted_urls.len() < 2 {
@@ -190,6 +200,9 @@ impl Command for ConcurrentDownloadCommand {
 
         let num_pieces = manager.num_segments().max(1);
         let ctrl_path = control_file::ControlFile::control_path_for(&self.output_path);
+        self.group
+            .recover()
+            .set_control_file_path(ctrl_path.clone());
         let mut ctrl_file =
             control_file::ControlFile::open_or_create(&ctrl_path, total_len, num_pieces).await?;
         ctrl_file.save().await.ok();
@@ -198,7 +211,7 @@ impl Command for ConcurrentDownloadCommand {
             CachedDiskWriter::new(&self.output_path, expected_size, self.disk_cache_size_mb);
 
         let rate_limit = {
-            let g = self.group.read().await;
+            let g = self.group.recover();
             g.options().max_download_limit
         };
         let limiter = rate_limit.filter(|&r| r > 0).map(|r| {
@@ -207,8 +220,8 @@ impl Command for ConcurrentDownloadCommand {
         });
         // Register clone with RequestGroup for runtime rate updates
         if let Some(ref limiter) = limiter {
-            let g = self.group.read().await;
-            g.set_rate_limiter(limiter.clone()).await;
+            let g = self.group.recover();
+            g.set_rate_limiter(limiter.clone());
         }
 
         Self::download_concurrent_to_disk(
@@ -253,10 +266,12 @@ impl Command for ConcurrentDownloadCommand {
         self.completed_bytes = total_len;
 
         {
-            let mut g = self.group.write().await;
-            g.update_progress(self.completed_bytes).await;
-            g.update_speed(self.completed_bytes, 0).await;
-            g.complete().await?;
+            let g = self.group.recover();
+            g.update_progress(self.completed_bytes);
+            g.update_speed(self.completed_bytes, 0);
+            drop(g);
+            let mut g = self.group.recover_mut();
+            g.complete()?;
         }
 
         info!(
@@ -275,6 +290,17 @@ impl Command for ConcurrentDownloadCommand {
         } else {
             CommandStatus::Pending
         }
+    }
+
+    fn gid(&self) -> GroupId {
+        self.group.recover().gid()
+    }
+
+    fn request_group(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>>
+    {
+        Some(std::sync::Arc::clone(&self.group))
     }
 
     fn timeout(&self) -> Option<Duration> {
@@ -348,7 +374,13 @@ impl ConcurrentDownloadCommand {
                             .write_at(offset, &data)
                             .await
                             .map_err(|e| format!("Disk write error seg{}: {}", seg_idx, e))?;
-                        manager.complete_segment(seg_idx, data);
+                        if !manager.complete_segment(seg_idx, data.len()) {
+                            return Err(format!(
+                                "Invalid completed segment {} length {}",
+                                seg_idx,
+                                data.len()
+                            ));
+                        }
                         ctrl_file.mark_piece_done(seg_idx as usize);
                         ctrl_file.save().await.ok();
                     }
@@ -404,8 +436,12 @@ impl ConcurrentDownloadCommand {
             }
         }
 
-        if data.is_empty() && length > 0 {
-            return Err("Empty segment data".to_string());
+        if data.len() as u64 != length {
+            return Err(format!(
+                "Incomplete segment response: expected {} bytes, received {}",
+                length,
+                data.len()
+            ));
         }
 
         // Freeze to immutable Bytes (zero-cost)
@@ -419,7 +455,10 @@ impl ConcurrentDownloadCommand {
         use aria2_protocol::metalink::parser::HashAlgorithm;
         match hash.algo {
             HashAlgorithm::Md5 => {
-                let digest = md5::compute(data);
+                use md5::Digest;
+                let mut hasher = md5::Md5::new();
+                hasher.update(data);
+                let digest = hasher.finalize();
                 Ok(format!("{:x}", digest) == hash.value)
             }
             HashAlgorithm::Sha1 => {
@@ -480,7 +519,21 @@ impl ConcurrentDownloadCommand {
                             }
                         }
 
-                        manager.complete_segment(0, bytes::Bytes::new());
+                        if offset != manager.total_size() {
+                            return Err(format!(
+                                "Incomplete single-segment response: expected {} bytes, received {}",
+                                manager.total_size(),
+                                offset
+                            ));
+                        }
+                        if !manager.complete_segment(
+                            0,
+                            usize::try_from(offset).map_err(|_| {
+                                "Downloaded segment size exceeds platform limits".to_string()
+                            })?,
+                        ) {
+                            return Err("Invalid completed single segment".to_string());
+                        }
                         return Ok(());
                     }
                 }

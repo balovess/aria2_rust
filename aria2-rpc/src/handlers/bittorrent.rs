@@ -3,24 +3,49 @@
 //! Handlers for BT-specific operations, bulk operations, L3 query methods,
 //! and system/multicall support.
 
-use crate::engine::RpcEngine;
+use crate::engine::{RpcEngine, rpc_method_requires_auth};
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use crate::types::{
-    DownloadStatus, FileInfo, ServerInfo, ServerInfoIndex, SessionInfo, UriEntry, VersionInfo,
-};
+use crate::rpc_helpers::split_auth_token;
+use crate::types::{DownloadStatus, PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
+use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 impl RpcEngine {
+    async fn lifecycle_gids(&self) -> Vec<String> {
+        let Some(group_man) = &self.group_man else {
+            return Vec::new();
+        };
+        let man = group_man.read().await;
+        man.all_groups()
+            .into_iter()
+            .map(|(_, group)| group.recover().gid().to_hex_string())
+            .collect()
+    }
+
     /// Handle `aria2.removeDownloadResult` - Remove a specific stopped download result.
     pub async fn handle_remove_download_result(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let _gid: String = req.get_param(0)?;
-        Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
-            "OK",
-        ))
+        let gid: String = req.get_param(0)?;
+        let group_man = self.group_man.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.removeDownloadResult is not supported by the core state model".into(),
+            )
+        })?;
+        let man = group_man.read().await;
+        if man.remove_stopped_result(&gid).is_some() {
+            Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                "OK",
+            ))
+        } else {
+            Err(JsonRpcError::RpcExecution(format!(
+                "GID {} not found in download results",
+                gid
+            )))
+        }
     }
 
     /// Handle `aria2.getPeers` - Get peer list for a BitTorrent download.
@@ -29,71 +54,145 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let tasks = self.tasks.read().await;
-        match tasks.get(&gid) {
-            Some(state) => Ok(JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                serde_json::to_value(&state.peers).map_err(|e| {
-                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                })?,
-            )),
-            None => Err(JsonRpcError::MethodNotFound(format!(
-                "GID {} not found",
-                gid
-            ))),
-        }
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let man = group_man.read().await;
+        let group = man
+            .group_by_hex(&gid)
+            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
+        let peers = group
+            .recover()
+            .bt_peer_snapshots()
+            .into_iter()
+            .map(|peer| PeerInfo {
+                peer_id: peer
+                    .peer_id
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+                ip: peer.addr.ip().to_string(),
+                port: peer.addr.port(),
+                bitfield: None,
+                am_choking: peer.am_choking,
+                peer_choking: peer.peer_choking,
+                download_speed: peer.download_speed.max(0.0) as u64,
+                upload_speed: peer.upload_speed.max(0.0) as u64,
+                seeder: peer.seeder.map(|value| value.to_string()),
+            })
+            .collect::<Vec<_>>();
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::to_value(peers).map_err(|error| {
+                JsonRpcError::InternalError(format!("Serialization failed: {error}"))
+            })?,
+        ))
     }
 
     /// Handle `aria2.pauseAll` - Pause all active downloads.
-    pub async fn handle_pause_all(&self) -> JsonRpcResponse {
-        let mut tasks = self.tasks.write().await;
-        let mut count = 0usize;
-        for state in tasks.values_mut() {
-            if state.status.status == DownloadStatus::Active {
-                state.status.status = DownloadStatus::Paused;
-                let _ = self.event_publisher.publish(
-                    EventType::DownloadPause,
-                    DownloadEvent::download_pause(&state.status.gid),
-                );
-                count += 1;
-            }
+    pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let gids = self.lifecycle_gids().await;
+        if let Some(group_man) = &self.group_man {
+            group_man.write().await.pause_all();
         }
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            format!("OK. {} tasks paused.", count),
-        )
+        let result = self
+            .engine_cmd_tx
+            .as_ref()
+            .ok_or_else(|| {
+                JsonRpcError::RpcExecution(
+                    "aria2.pauseAll is not supported by the core state model".into(),
+                )
+            })
+            .and_then(|tx| {
+                tx.send(EngineCommand::PauseAll).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+                })
+            });
+        match result {
+            Ok(()) => {
+                for gid in gids {
+                    let _ = self
+                        .event_publisher
+                        .publish(EventType::DownloadPause, DownloadEvent::download_pause(gid));
+                }
+                JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                )
+            }
+            Err(e) => e.into_response(req.id.clone()),
+        }
     }
 
     /// Handle `aria2.forcePauseAll` - Force pause all active downloads.
-    pub async fn handle_force_pause_all(&self) -> JsonRpcResponse {
-        let mut tasks_map = self.tasks.write().await;
-
-        for task_state in tasks_map.values_mut() {
-            if task_state.status.status == DownloadStatus::Active {
-                task_state.status.status = DownloadStatus::Paused;
-                if let Some(cancel_token) = &task_state.cancel_token {
-                    cancel_token.cancel();
-                }
-            }
+    pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let gids = self.lifecycle_gids().await;
+        if let Some(group_man) = &self.group_man {
+            group_man.write().await.force_pause_all();
         }
-
-        JsonRpcResponse::success(serde_json::Value::Null, serde_json::json!("OK"))
+        let result = self
+            .engine_cmd_tx
+            .as_ref()
+            .ok_or_else(|| {
+                JsonRpcError::RpcExecution(
+                    "aria2.forcePauseAll is not supported by the core state model".into(),
+                )
+            })
+            .and_then(|tx| {
+                tx.send(EngineCommand::ForcePauseAll).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+                })
+            });
+        match result {
+            Ok(()) => {
+                for gid in gids {
+                    let _ = self
+                        .event_publisher
+                        .publish(EventType::DownloadPause, DownloadEvent::download_pause(gid));
+                }
+                JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                )
+            }
+            Err(e) => e.into_response(req.id.clone()),
+        }
     }
 
     /// Handle `aria2.unpauseAll` - Resume all paused downloads.
-    pub async fn handle_unpause_all(&self) -> JsonRpcResponse {
-        let mut tasks = self.tasks.write().await;
-        let mut count = 0usize;
-        for state in tasks.values_mut() {
-            if state.status.status == DownloadStatus::Paused {
-                state.status.status = DownloadStatus::Active;
-                count += 1;
-            }
+    pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        let gids = self.lifecycle_gids().await;
+        if let Some(group_man) = &self.group_man {
+            group_man.write().await.unpause_all();
         }
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            format!("OK. {} tasks resumed.", count),
-        )
+        let result = self
+            .engine_cmd_tx
+            .as_ref()
+            .ok_or_else(|| {
+                JsonRpcError::RpcExecution(
+                    "aria2.unpauseAll is not supported by the core state model".into(),
+                )
+            })
+            .and_then(|tx| {
+                tx.send(EngineCommand::UnpauseAll).map_err(|e| {
+                    JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+                })
+            });
+        match result {
+            Ok(()) => {
+                for gid in gids {
+                    let _ = self
+                        .event_publisher
+                        .publish(EventType::DownloadStart, DownloadEvent::download_start(gid));
+                }
+                JsonRpcResponse::success(
+                    req.id.clone().unwrap_or_default(),
+                    serde_json::json!("OK"),
+                )
+            }
+            Err(e) => e.into_response(req.id.clone()),
+        }
     }
 
     /// Handle `aria2.getUris` - Get URI list for a download with status.
@@ -102,33 +201,29 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let tasks = self.tasks.read().await;
-        match tasks.get(&gid) {
-            Some(state) => {
-                let uris: Vec<UriEntry> = state
-                    .uris
-                    .iter()
-                    .enumerate()
-                    .map(|(i, u)| {
-                        if i == 0 {
-                            UriEntry::new(u.as_str()).used()
-                        } else {
-                            UriEntry::new(u.as_str()).waiting()
-                        }
-                    })
-                    .collect();
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(uris).map_err(|e| {
-                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                    })?,
-                ))
-            }
-            None => Err(JsonRpcError::MethodNotFound(format!(
-                "GID {} not found",
-                gid
-            ))),
-        }
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let man = group_man.read().await;
+        let group = man
+            .group_by_hex(&gid)
+            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
+        let guard = group.recover();
+        let entries = guard
+            .get_download_context()
+            .and_then(|context| {
+                context
+                    .get_file_entries()
+                    .first()
+                    .map(RpcEngine::build_uri_entries)
+            })
+            .unwrap_or_else(|| guard.uris().iter().cloned().map(UriEntry::new).collect());
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::to_value(entries)
+                .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {e}")))?,
+        ))
     }
 
     /// Handle `aria2.getFiles` - Get file list for a download.
@@ -137,52 +232,28 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let tasks = self.tasks.read().await;
-        match tasks.get(&gid) {
-            Some(state) => {
-                let files = match &state.status.files {
-                    Some(files_vec) if !files_vec.is_empty() => files_vec
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| FileInfo {
-                            index: i,
-                            path: f.path.clone(),
-                            length: if f.length == 0 {
-                                state.total_length
-                            } else {
-                                f.length
-                            },
-                            completed_length: if f.completed_length == 0 {
-                                state.completed_length
-                            } else {
-                                f.completed_length
-                            },
-                            selected: f.selected,
-                            uris: f.uris.clone(),
-                        })
-                        .collect(),
-                    _ => {
-                        vec![
-                            FileInfo::new(
-                                state.uris.first().map(|s| s.as_str()).unwrap_or(""),
-                                state.total_length,
-                            )
-                            .with_completed(state.completed_length),
-                        ]
-                    }
-                };
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(files).map_err(|e| {
-                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                    })?,
-                ))
-            }
-            None => Err(JsonRpcError::MethodNotFound(format!(
-                "GID {} not found",
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let man = group_man.read().await;
+        let files = if let Some(group) = man.group_by_hex(&gid) {
+            let guard = group.recover();
+            let completed = guard.get_completed_length();
+            RpcEngine::build_file_infos(&guard, completed)
+        } else if let Some(result) = man.find_stopped_result(&gid) {
+            RpcEngine::build_file_infos_from_result(&result)
+        } else {
+            return Err(JsonRpcError::RpcExecution(format!(
+                "No file data is available for GID#{}",
                 gid
-            ))),
-        }
+            )));
+        };
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::to_value(files)
+                .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {e}")))?,
+        ))
     }
 
     /// Handle `aria2.getServers` - Get active server connection information.
@@ -191,29 +262,51 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let tasks = self.tasks.read().await;
-        match tasks.get(&gid) {
-            Some(state) => {
-                let servers: Vec<ServerInfo> = state
-                    .uris
-                    .iter()
-                    .map(|u| ServerInfo::new(u.as_str()).with_download_speed(state.download_speed))
-                    .collect();
-
-                let result = vec![ServerInfoIndex { index: 0, servers }];
-
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(result).map_err(|e| {
-                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                    })?,
-                ))
-            }
-            None => Err(JsonRpcError::MethodNotFound(format!(
-                "GID {} not found",
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let man = group_man.read().await;
+        let group = man.group_by_hex(&gid).ok_or_else(|| {
+            JsonRpcError::RpcExecution(format!("No active download for GID#{}", gid))
+        })?;
+        let guard = group.recover();
+        if !matches!(guard.status(), DownloadStatus::Active) {
+            return Err(JsonRpcError::RpcExecution(format!(
+                "No active download for GID#{}",
                 gid
-            ))),
+            )));
         }
+        let files = guard
+            .get_download_context()
+            .map(|context| {
+                context
+                    .get_file_entries()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, file)| ServerInfoIndex {
+                        index: index + 1,
+                        servers: file
+                            .in_flight_requests()
+                            .iter()
+                            .filter_map(|request| {
+                                let stats = request.peer_stat()?;
+                                Some(
+                                    ServerInfo::new(request.uri())
+                                        .with_current_uri(request.current_uri())
+                                        .with_download_speed(stats.download_speed),
+                                )
+                            })
+                            .collect(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::to_value(files)
+                .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {e}")))?,
+        ))
     }
 
     /// Handle `aria2.getVersion` - Get version information with enabled features.
@@ -230,48 +323,58 @@ impl RpcEngine {
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        match req.get_param::<String>(0) {
-            Ok(gid) => {
-                let mut stopped = self.stopped_tasks.write().await;
-                let original_len = stopped.len();
-                stopped.retain(|s| s.gid != gid);
-
-                if stopped.len() < original_len {
-                    Ok(JsonRpcResponse::success(
-                        req.id.clone().unwrap_or_default(),
-                        "OK",
-                    ))
-                } else {
-                    Err(JsonRpcError::MethodNotFound(format!(
-                        "GID {} not found in download results",
-                        gid
-                    )))
-                }
-            }
-            Err(_) => {
-                let mut stopped = self.stopped_tasks.write().await;
-                stopped.clear();
-                Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    "OK",
-                ))
-            }
-        }
+        let group_man = self.group_man.as_ref().ok_or_else(|| {
+            JsonRpcError::RpcExecution(
+                "aria2.purgeDownloadResult is not supported by the core state model".into(),
+            )
+        })?;
+        // The original method has no parameters and purges all retained
+        // results. It intentionally ignores the request object entirely.
+        group_man.read().await.purge_stopped_results();
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            "OK",
+        ))
     }
 
     /// Handle `aria2.getSessionInfo` - Get session identifier and start time.
+    ///
+    /// Returns the same `sessionId` for every call within a session, matching
+    /// C++ aria2 which generates `sessionId_` once at engine construction.
     pub fn handle_session_info(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let session_info = SessionInfo::new();
         JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
-            session_info.to_json_value(),
+            self.session_info.to_json_value(),
         )
     }
 
     /// Handle `system.multicall` - Execute multiple RPC calls in one HTTP request.
+    ///
+    /// Every sub-call is routed through [`RpcEngine::dispatch_single`] — the
+    /// exact same method table `handle_request` uses — so the batched API
+    /// surface always matches the single-call API surface. AriaNg and
+    /// webui-aria2 batch their whole refresh loop (`tellActive` +
+    /// `tellWaiting` + `tellStopped` + `getGlobalStat`) into one multicall,
+    /// so any method missing here shows up as missing data in the UI.
+    ///
+    /// # Authorization
+    ///
+    /// Follows C++ aria2 (`SystemMulticallRpcMethod::execute` →
+    /// `RpcMethod::execute` → `RpcMethod::authorize`): the multicall envelope
+    /// itself is not authorized, but **each sub-call is**. A sub-call carries
+    /// its own `"token:xxx"` first parameter, which is validated and then
+    /// stripped so the handler's positional arguments do not shift.
+    /// `envelope_token` is the secret found on the multicall request itself, if any.
+    ///
+    /// # Error handling
+    ///
+    /// A failing sub-call never aborts the batch: its error is reported in
+    /// place and the loop continues, mirroring C++ which appends
+    /// `createErrorResponse(...)` and moves on to the next entry.
     pub async fn handle_multicall(
         &self,
         req: &JsonRpcRequest,
+        envelope_token: Option<&str>,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let calls: Vec<serde_json::Value> = req.get_param(0)?;
 
@@ -284,85 +387,66 @@ impl RpcEngine {
 
         let mut results = Vec::with_capacity(calls.len());
 
-        for (index, call_obj) in calls.iter().enumerate() {
-            let method_name = call_obj
-                .get("methodName")
-                .or_else(|| call_obj.get("method_name"))
-                .or_else(|| call_obj.get("method"))
-                .ok_or_else(|| {
-                    JsonRpcError::InvalidParams(format!(
-                        "Call #{} missing 'methodName' field",
-                        index
-                    ))
-                })?
-                .as_str()
-                .ok_or_else(|| {
-                    JsonRpcError::InvalidParams(format!(
-                        "Call #{} 'methodName' must be a string",
-                        index
-                    ))
-                })?;
+        for call_obj in &calls {
+            let Some(call_obj) = call_obj.as_object() else {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "system.multicall expected struct."
+                }));
+                continue;
+            };
+            let Some(method_name) = call_obj.get("methodName") else {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "Missing methodName."
+                }));
+                continue;
+            };
+            let Some(method_name) = method_name.as_str() else {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "methodName must be a string."
+                }));
+                continue;
+            };
+            if method_name == "system.multicall" {
+                results.push(serde_json::json!({
+                    "code": 1,
+                    "message": "Recursive system.multicall forbidden."
+                }));
+                continue;
+            }
 
             let call_params = call_obj
                 .get("params")
-                .or_else(|| call_obj.get("parameters"))
                 .cloned()
                 .unwrap_or(serde_json::json!([]));
 
-            let sub_request = JsonRpcRequest::new(method_name, call_params);
+            // Authorize the sub-call the same way C++ RpcMethod::authorize()
+            // does for every method invocation: pop a leading "token:xxx"
+            // parameter and validate it. Without this the token would leak
+            // into the handler as a positional argument and shift every
+            // subsequent parameter by one.
+            let (sub_token, stripped_params) = split_auth_token(&call_params);
+            let effective_token = sub_token.as_deref().or(envelope_token);
 
-            let id = sub_request.id.clone().unwrap_or_default();
-            let sub_response = match sub_request.method.as_str() {
-                "aria2.addUri" => self
-                    .handle_add_uri(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.tellActive" => self.handle_tell_active(&sub_request).await?,
-                "aria2.getGlobalStat" => self.handle_global_stat().await,
-                "aria2.getUris" => self
-                    .handle_get_uris(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getFiles" => self
-                    .handle_get_files(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getServers" => self
-                    .handle_get_servers(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.getVersion" => self.handle_version(&sub_request),
-                "aria2.getSessionInfo" => self.handle_session_info(&sub_request),
-                "aria2.purgeDownloadResult" => self
-                    .handle_purge_download_result(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.saveSession" => self
-                    .handle_save_session(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.changePosition" => self
-                    .handle_change_position(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "aria2.forceRemove" => self
-                    .handle_force_remove(&sub_request)
-                    .await
-                    .unwrap_or_else(|e| e.into_response(Some(id))),
-                "system.multicall" => JsonRpcResponse::error(
-                    Some(id),
-                    -32600,
-                    "Nested system.multicall is not supported".to_string(),
-                ),
-                _ => JsonRpcResponse::error(
-                    Some(id),
-                    -32601,
-                    format!("Method not found: {}", sub_request.method),
-                ),
+            let sub_request =
+                JsonRpcRequest::new(method_name, stripped_params.unwrap_or(call_params));
+
+            let sub_response = if rpc_method_requires_auth(method_name) {
+                match self.auth_middleware.validate(effective_token) {
+                    Ok(()) => self.dispatch_single(&sub_request).await,
+                    Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
+                }
+            } else {
+                self.dispatch_single(&sub_request).await
             };
 
+            // Per C++ aria2 system.multicall spec: each successful result is
+            // wrapped in an extra array layer so the output is [[result]], not
+            // [result]. Errors remain as flat structs {code, message}.
             match sub_response.result {
-                Some(result_value) => results.push(result_value),
+                Some(result_value) => results.push(serde_json::json!([result_value])),
                 None => {
                     if let Some(err) = sub_response.error {
                         results.push(serde_json::json!({

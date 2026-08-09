@@ -1,10 +1,357 @@
 //! Tests for the App module
 
+use super::cli::CliArgs;
 use super::*;
 use aria2_core::config::OptionValue;
 use aria2_core::request::request_group::DownloadOptions;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn read_http_response(port: u16, request: &str) -> String {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut stream = loop {
+        match tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
+            Ok(stream) => break stream,
+            Err(_error) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("RPC server did not accept a connection: {error}"),
+        }
+    };
+
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write HTTP request");
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("read HTTP response timed out")
+    .expect("read HTTP response");
+    String::from_utf8(response).expect("RPC response should be UTF-8")
+}
+
+#[tokio::test]
+async fn test_cli_metalink_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--follow-metalink=mem",
+        "--metalink-version=4.0",
+        "--metalink-language=en",
+        "--metalink-os=linux",
+        "--metalink-location=us,jp",
+        "--metalink-preferred-protocol=https",
+        "--select-file=2",
+        "https://example.test/metadata",
+    ])
+    .expect("Metalink CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(
+        options.follow_metalink,
+        Some(aria2_core::request::request_group::FollowMode::Memory)
+    );
+    assert_eq!(options.metalink_version.as_deref(), Some("4.0"));
+    assert_eq!(options.metalink_language.as_deref(), Some("en"));
+    assert_eq!(options.metalink_os.as_deref(), Some("linux"));
+    assert_eq!(options.metalink_location.as_deref(), Some("us,jp"));
+    assert_eq!(
+        options.metalink_preferred_protocol.as_deref(),
+        Some("https")
+    );
+    assert_eq!(options.select_file.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_invalid_split() {
+    let cli = CliArgs::try_parse_from(["aria2", "--split=0"])
+        .expect("clap should parse the integer before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the registry must reject split=0");
+
+    assert!(error.contains("--split"), "unexpected error: {error}");
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_invalid_file_allocation() {
+    let cli = CliArgs::try_parse_from(["aria2", "--file-allocation=invalid"])
+        .expect("clap should parse the string before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the registry must reject an unknown allocation mode");
+
+    assert!(
+        error.contains("--file-allocation"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn application_rpc_does_not_enable_cors_by_default() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let port = probe
+        .local_addr()
+        .expect("test listener should expose an address")
+        .port();
+    drop(probe);
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option("enable-rpc", OptionValue::Bool(true))
+            .await
+            .expect("enable-rpc should be valid");
+        config
+            .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
+            .await
+            .expect("rpc-listen-port should be valid");
+    }
+
+    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = app
+        .start_rpc_server(app.request_man.clone(), cmd_tx)
+        .await
+        .expect("RPC server should start");
+
+    let response = read_http_response(
+        port,
+        &format!(
+            "OPTIONS /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: https://browser.example\r\nAccess-Control-Request-Method: POST\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .await;
+    server.abort();
+
+    assert!(
+        !response
+            .lines()
+            .any(|line| line.eq_ignore_ascii_case("access-control-allow-origin: *")),
+        "aria2_original only emits CORS headers after explicit opt-in, response was:\n{response}"
+    );
+}
+
+#[tokio::test]
+async fn test_original_cli_options_reach_config_registry() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--async-dns=false",
+        "--event-poll=select",
+        "--certificate=client.pem",
+        "--private-key=client.key",
+        "--min-tls-version=TLSv1.2",
+        "--ssh-host-key-md=sha-1=deadbeef",
+        "--metalink-enable-unique-protocol=false",
+        "--pause-metadata",
+        "--show-console-readout=false",
+        "--dscp=46",
+        "--socket-recv-buffer-size=1M",
+        "--max-resume-failure-tries=3",
+        "--optimize-concurrent-downloads",
+    ])
+    .expect("new original CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("new original CLI options should use registry validation");
+
+    assert_eq!(app.get_opt_bool("async-dns").await, Some(false));
+    assert_eq!(
+        app.get_opt_str("event-poll").await.as_deref(),
+        Some("select")
+    );
+    assert_eq!(
+        app.get_opt_str("certificate").await.as_deref(),
+        Some("client.pem")
+    );
+    assert_eq!(
+        app.get_opt_str("ssh-host-key-md").await.as_deref(),
+        Some("sha-1=deadbeef")
+    );
+    assert_eq!(
+        app.get_opt_bool("metalink-enable-unique-protocol").await,
+        Some(false)
+    );
+    assert_eq!(app.get_opt_bool("pause-metadata").await, Some(true));
+    assert_eq!(app.get_opt_i64("dscp").await, Some(46));
+    assert_eq!(
+        app.get_opt_i64("socket-recv-buffer-size").await,
+        Some(1024 * 1024)
+    );
+    assert_eq!(app.get_opt_i64("max-resume-failure-tries").await, Some(3));
+    assert_eq!(
+        app.get_opt_bool("optimize-concurrent-downloads").await,
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn test_torrent_and_metalink_file_options_enter_input_detection() {
+    let temp_dir = TempDir::new().expect("temporary input directory");
+    let torrent_path = temp_dir.path().join("input.torrent");
+    let metalink_path = temp_dir.path().join("input.meta4");
+    tokio::fs::write(&torrent_path, b"d8:announce0:e")
+        .await
+        .expect("write torrent fixture");
+    tokio::fs::write(
+        &metalink_path,
+        br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"></metalink>"#,
+    )
+    .await
+    .expect("write metalink fixture");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--torrent-file",
+        torrent_path.to_str().expect("torrent path is UTF-8"),
+        "--metalink-file",
+        metalink_path.to_str().expect("metalink path is UTF-8"),
+    ])
+    .expect("metadata file options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("metadata file options should be detected");
+
+    assert_eq!(app.detected_inputs.len(), 2);
+    assert_eq!(
+        app.detected_inputs[0].input_type,
+        aria2_core::validation::protocol_detector::InputType::TorrentFile
+    );
+    assert_eq!(
+        app.detected_inputs[1].input_type,
+        aria2_core::validation::protocol_detector::InputType::MetalinkFile
+    );
+}
+
+#[tokio::test]
+async fn test_no_conf_skips_explicit_config_file() {
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, "split=8\n")
+        .await
+        .expect("write config file");
+
+    let mut app = App::new();
+    app.load_startup_config(true, config_path.to_str())
+        .await
+        .expect("--no-conf should not attempt to read the file");
+
+    assert_eq!(app.get_opt_i64("split").await, Some(5));
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_standard_session_restores_metalink_graph() {
+    use aria2_core::session::session_entry::SessionEntry;
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let metadata_path = temp_dir.path().join("metadata.torrent");
+    let mut options = HashMap::new();
+    options.insert(
+        "dir".to_string(),
+        temp_dir.path().to_string_lossy().into_owned(),
+    );
+    options.insert(
+        "aria2-rust-payload-gid".to_string(),
+        "0000000000000020".to_string(),
+    );
+    options.insert(
+        "aria2-rust-metadata-uri".to_string(),
+        "https://example.test/metadata.torrent".to_string(),
+    );
+    options.insert(
+        "aria2-rust-metadata-path".to_string(),
+        metadata_path.to_string_lossy().into_owned(),
+    );
+    options.insert("aria2-rust-metadata-memory".to_string(), "true".to_string());
+    options.insert(
+        "aria2-rust-output-name".to_string(),
+        "payload.bin".to_string(),
+    );
+    let entry = SessionEntry::new(
+        0x10,
+        vec!["https://example.test/metadata.torrent".to_string()],
+    )
+    .with_options(options);
+    tokio::fs::write(&session_file, entry.serialize())
+        .await
+        .expect("write session");
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+
+    assert_eq!(app.restore_session().await.expect("restore session"), 2);
+    let groups = app.request_man.read().await.list_groups();
+    let metadata = groups
+        .iter()
+        .find(|group| {
+            group.recover().gid() == aria2_core::request::request_group::GroupId::new(0x10)
+        })
+        .expect("metadata group should be restored");
+    assert_eq!(
+        metadata.recover().belongs_to_gid(),
+        Some(aria2_core::request::request_group::GroupId::new(0x20))
+    );
+    let payload = groups
+        .iter()
+        .find(|group| {
+            group.recover().gid() == aria2_core::request::request_group::GroupId::new(0x20)
+        })
+        .expect("payload group should be restored");
+    assert_eq!(
+        payload.recover().output_name().as_deref(),
+        Some("payload.bin")
+    );
+    assert!(!payload.recover().is_dependency_resolved());
+    let payload_options = payload
+        .recover()
+        .effective_option_snapshot()
+        .expect("restored payload should retain a request option snapshot");
+    let expected_dir = temp_dir.path().to_string_lossy().into_owned();
+    assert_eq!(
+        payload_options
+            .get("dir")
+            .and_then(serde_json::Value::as_str),
+        Some(expected_dir.as_str())
+    );
+    assert!(
+        !payload_options.contains_key("aria2-rust-metadata-uri"),
+        "session metadata must not be observable through task options"
+    );
+}
 
 /// Test 1: Load entries from session file
 ///
@@ -87,8 +434,20 @@ ftp://server.com/bigfile.bin
 
     // Verify RequestGroupMan has corresponding groups
     let man = app.request_man.read().await;
-    let group_count = man.count().await;
+    let group_count = man.count();
     assert_eq!(group_count, 3, "RequestGroupMan should have 3 groups");
+    assert!(
+        man.find_group(aria2_core::request::request_group::GroupId::new(1))
+            .is_some()
+    );
+    assert!(
+        man.find_group(aria2_core::request::request_group::GroupId::new(2))
+            .is_some()
+    );
+    assert!(
+        man.find_group(aria2_core::request::request_group::GroupId::new(3))
+            .is_some()
+    );
 }
 
 /// Test 2: Skip completed entries
@@ -173,7 +532,7 @@ http://example.com/paused4.iso
     assert_eq!(count, 2, "Should only restore 2 non-completed entries");
 
     let man = app.request_man.read().await;
-    let group_count = man.count().await;
+    let group_count = man.count();
     assert_eq!(group_count, 2, "RequestGroupMan should have 2 groups");
 }
 
@@ -213,11 +572,9 @@ async fn test_save_session_on_shutdown() {
             vec!["http://example.com/file1.zip".to_string()],
             opts.clone(),
         )
-        .await
         .expect("Failed to add group 1");
 
         man.add_group(vec!["http://mirror.com/file2.iso".to_string()], opts)
-            .await
             .expect("Failed to add group 2");
     }
 
@@ -389,11 +746,11 @@ async fn test_bt_bitfield_preserved_on_restore() {
 
     // Verify bitfield is preserved in RequestGroup
     let man = app.request_man.read().await;
-    let groups = man.list_groups().await;
+    let groups = man.list_groups();
     assert_eq!(groups.len(), 1, "Should have 1 group");
 
-    let group = groups[0].read().await;
-    let bitfield = group.bt_bitfield.read().await;
+    let group = groups[0].read().unwrap();
+    let bitfield = group.bt_bitfield.read().unwrap();
     assert!(bitfield.is_some(), "BT bitfield should be preserved");
     assert_eq!(
         bitfield.as_ref().unwrap(),
@@ -440,6 +797,9 @@ async fn test_skip_entries_with_zero_progress() {
     let session_file = temp_dir.path().join("zero_progress_session.txt");
 
     // Create session file where all entries have no progress
+    // Per C++ aria2 behavior, 0/0 entries are still restored (they may
+    // be newly added downloads that haven't started yet). Only "removed"
+    // entries are skipped.
     // Note: Property lines must have leading space prefix (aria2 session format)
     let session_content = r#"http://example.com/new1.zip
  GID=1
@@ -483,13 +843,16 @@ http://example.com/new2.iso
 
     let result = app.restore_session().await;
     assert!(result.is_ok(), "Should return Ok");
+    // C++ aria2 restores ALL non-finished entries, including 0/0 progress
+    // entries (they may be newly added downloads). Only "removed" entries
+    // are skipped.
     assert_eq!(
         result.unwrap(),
-        0,
-        "Entries with no progress should all be skipped"
+        2,
+        "C++ aria2 restores all non-finished entries including 0/0 progress"
     );
 
     let man = app.request_man.read().await;
-    let group_count = man.count().await;
-    assert_eq!(group_count, 0, "Should not add any groups");
+    let group_count = man.count();
+    assert_eq!(group_count, 2, "Should restore both 0/0 progress groups");
 }

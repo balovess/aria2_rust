@@ -7,10 +7,34 @@
 use once_cell::sync::Lazy;
 use reqwest::Client;
 use std::sync::Arc;
+use std::sync::Once;
 use std::time::Duration;
 
+/// Ensure the rustls ring crypto provider is installed.
+///
+/// Required when reqwest is built with `rustls-no-provider` (no aws-lc-rs).
+/// Must be called before any `reqwest::Client` is constructed.
+///
+/// Note: `install_default()` returns Err if a provider is already installed
+/// (e.g., by another module's initializer). That is fine — we only need to
+/// ensure a provider is present, not that we installed it.
+pub fn ensure_rustls_provider() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Global HTTP client instance for connection reuse.
+///
+/// Redirects are disabled (`Policy::none`) because we handle them
+/// manually in the download flow, matching C++ aria2 behavior:
+/// - Update the RequestGroup URI list with redirect targets
+/// - Feed redirect results back to the URI selector
+/// - Track redirect count per-request
+/// - Apply method change rules (301/302/303 → GET; 307/308 → preserve)
 static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
+    ensure_rustls_provider();
     let client = Client::builder()
         .connect_timeout(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
@@ -19,9 +43,7 @@ static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
             crate::constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
         ))
         .user_agent(crate::constants::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(
-            crate::constants::HTTP_DEFAULT_MAX_REDIRECTS,
-        ))
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(crate::constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
         .pool_idle_timeout(Some(Duration::from_secs(
             crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
@@ -29,6 +51,7 @@ static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
         .tcp_keepalive(Some(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )))
+        .tcp_nodelay(true)
         .build()
         .expect("Failed to create global HTTP client");
 
@@ -48,18 +71,19 @@ pub fn get_global_client() -> Arc<Client> {
 /// Create a custom HTTP client with specific configuration.
 ///
 /// Use this when you need client settings different from the global defaults.
+/// Redirects are disabled — they are handled manually in the download flow
+/// matching C++ aria2 behavior.
 pub fn create_custom_client(
     connect_timeout: Duration,
     timeout: Duration,
     pool_max_idle_per_host: usize,
 ) -> Arc<Client> {
+    ensure_rustls_provider();
     let client = Client::builder()
         .connect_timeout(connect_timeout)
         .timeout(timeout)
         .user_agent(crate::constants::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(
-            crate::constants::HTTP_DEFAULT_MAX_REDIRECTS,
-        ))
+        .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(pool_max_idle_per_host)
         .pool_idle_timeout(Some(Duration::from_secs(
             crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
@@ -67,6 +91,7 @@ pub fn create_custom_client(
         .tcp_keepalive(Some(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )))
+        .tcp_nodelay(true)
         .build()
         .expect("Failed to create custom HTTP client");
 

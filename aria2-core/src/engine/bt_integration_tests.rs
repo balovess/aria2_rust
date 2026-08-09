@@ -1,9 +1,9 @@
-//! BtDownloadCommand 与 P1/P2 模块集成测试
+//! Integration tests for BtDownloadCommand with P1/P2 modules
 //!
-//! 测试 BtDownloadCommand 与以下模块的集成：
-//! - BtProgressManager (进度持久化)
-//! - LpdManager (LPD 局域网 peer 发现)
-//! - HookManager + PostDownloadHook (下载后处理钩子)
+//! Tests integration of BtDownloadCommand with the following modules:
+//! - BtProgressManager (progress persistence)
+//! - LpdManager (LPD LAN peer discovery)
+//! - HookManager + PostDownloadHook (post-download hooks)
 
 #[cfg(test)]
 #[allow(unused_imports, dead_code)]
@@ -13,24 +13,24 @@ mod tests {
     use std::time::Duration;
     use tracing::info;
 
-    use crate::engine::bt_post_download_handler::{
-        DownloadStats as HookDownloadStats, DownloadStatus, HookContext, HookManager,
-        PostDownloadHook,
-    };
     use crate::engine::bt_progress_info_file::{
-        BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats,
+        BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, InFlightPiece,
+    };
+    use crate::engine::hook_manager::{
+        DownloadStats as HookDownloadStats, DownloadStatus, HookConfig, HookContext, HookManager,
+        PostDownloadHook,
     };
     use crate::engine::lpd_manager::{LpdManager, LpdPeer};
     use crate::request::request_group::{DownloadOptions, GroupId};
 
-    /// 创建测试用的最小 torrent 数据（1KB 假数据）
+    /// Create minimal torrent data for testing (1KB dummy data)
     fn create_test_torrent_data() -> Vec<u8> {
-        // 返回空数据，实际测试中不需要真实 torrent
-        // 仅用于验证字段存在性和 API 调用
+        // Return empty data; real torrent not needed in actual tests
+        // Only used to verify field existence and API calls
         vec![]
     }
 
-    /// 创建默认的下载选项
+    /// Create default download options
     fn create_test_options() -> DownloadOptions {
         DownloadOptions {
             dir: Some(std::env::temp_dir().to_string_lossy().to_string()),
@@ -40,20 +40,20 @@ mod tests {
 
     #[test]
     fn test_command_with_progress_manager_field() {
-        // 验证新字段存在且为 Option 类型
+        // Verify new field exists and is Option type
         let temp_dir = std::env::temp_dir().join("bt_integration_test");
         let _ = std::fs::create_dir_all(&temp_dir);
 
         let manager = BtProgressManager::new(&temp_dir).expect("Failed to create progress manager");
 
-        // 验证字段可以通过 setter 设置
+        // Verify field can be set via setter
         assert!(!manager.get_progress_file_path(&[0u8; 20]).exists());
     }
 
     #[test]
     fn test_command_default_has_no_progress() {
-        // 由于 new() 需要 valid torrent，我们通过结构体字面量验证字段默认值
-        // 这里验证 Option 类型的默认行为
+        // Since new() requires a valid torrent, we verify field defaults via struct literals
+        // Verify Option type default behavior here
         let option_field: Option<i32> = None;
         assert!(
             option_field.is_none(),
@@ -94,23 +94,26 @@ mod tests {
             piece_length: 256 * 1024,
             total_size: 512 * 1024,
             num_pieces: 2,
+            upload_length: 512,
+            in_flight_pieces: vec![],
+            is_torrent: true,
             save_time: std::time::SystemTime::now(),
             version: 1,
         };
 
-        // 验证 BtProgress 结构有效性
+        // Verify BtProgress struct validity
         assert_eq!(progress.info_hash, info_hash);
         assert_eq!(progress.num_pieces, 2);
         assert_eq!(progress.piece_length, 256 * 1024);
-        // bitfield [0xFF, 0xFF] = 16 set bits, 但只有 2 pieces
-        // completion_ratio 计算 set_bits / num_pieces = 16 / 2 = 8.0 (超过 1.0)
-        // 这是正常行为，因为 bitfield 可能包含多于 num_pieces 的位
+        // bitfield [0xFF, 0xFF] = 16 set bits, but only 2 pieces
+        // completion_ratio = set_bits / num_pieces = 16 / 2 = 8.0 (exceeds 1.0)
+        // This is normal behavior, as bitfield may contain more bits than num_pieces
         assert!(
             progress.completion_ratio() >= 1.0,
             "Should be at least complete"
         );
 
-        // 验证 hex hash 格式正确（40 个十六进制字符）
+        // Verify hex hash format is correct (40 hex characters)
         let hex = progress.to_hex_hash();
         assert_eq!(hex.len(), 40, "Hex hash should be 40 characters");
         assert!(
@@ -118,14 +121,19 @@ mod tests {
             "Hex should start with expected pattern"
         );
 
-        // 验证可以保存和加载
+        // Verify save and load works
         manager.save_progress(&info_hash, &progress).unwrap();
         let loaded = manager.load_progress(&info_hash).unwrap();
         assert_eq!(loaded.info_hash, info_hash);
         assert_eq!(loaded.num_pieces, 2);
-        assert_eq!(loaded.stats.downloaded_bytes, 1024);
+        // Binary format persists upload_length (matching C++)
+        assert_eq!(loaded.upload_length, 512);
+        // C++ restores uploadLength into the runtime stats via
+        // btRuntime_->setUploadLengthAtStartup(uploadLength).
+        // Our deserialize_binary mirrors this by setting uploaded_bytes from upload_length.
+        assert_eq!(loaded.stats.uploaded_bytes, 512);
 
-        // 清理
+        // Cleanup
         let _ = manager.remove_progress(&info_hash);
     }
 
@@ -169,7 +177,7 @@ mod tests {
             error: None,
         };
 
-        // 验证所有字段正确填充
+        // Verify all fields are correctly populated
         assert_eq!(ctx.gid.value(), 42);
         assert_eq!(ctx.file_path, file_path);
         assert_eq!(ctx.status, DownloadStatus::Complete);
@@ -190,10 +198,10 @@ mod tests {
 
         let info_hash = [0xCDu8; 20];
 
-        // 构造初始进度
+        // Construct initial progress
         let original = BtProgress {
             info_hash,
-            bitfield: vec![0xF0], // 4 pieces 中完成 4 个（高4位）
+            bitfield: vec![0xF0], // 4 pieces completed out of 4 (high 4 bits)
             peers: vec![],
             stats: ProgressDownloadStats {
                 downloaded_bytes: 1024 * 1024,
@@ -205,32 +213,33 @@ mod tests {
             piece_length: 256 * 1024,
             total_size: 1024 * 1024,
             num_pieces: 4,
+            upload_length: 512 * 1024,
+            in_flight_pieces: vec![],
+            is_torrent: true,
             save_time: std::time::SystemTime::now(),
             version: 1,
         };
 
-        // 执行保存
+        // Execute save
         manager
             .save_progress(&info_hash, &original)
             .expect("Save should succeed");
 
-        // 执行加载
+        // Execute load
         let loaded = manager
             .load_progress(&info_hash)
             .expect("Load should succeed");
 
-        // 验证数据一致性
+        // Verify data consistency
         assert_eq!(loaded.info_hash, original.info_hash);
         assert_eq!(loaded.num_pieces, original.num_pieces);
         assert_eq!(loaded.piece_length, original.piece_length);
         assert_eq!(loaded.total_size, original.total_size);
         assert_eq!(loaded.version, original.version);
-        assert_eq!(
-            loaded.stats.downloaded_bytes,
-            original.stats.downloaded_bytes
-        );
-        assert_eq!(loaded.stats.uploaded_bytes, original.stats.uploaded_bytes);
-        assert_eq!(loaded.stats.elapsed_seconds, original.stats.elapsed_seconds);
+        // Binary format persists upload_length (matching C++)
+        assert_eq!(loaded.upload_length, original.upload_length);
+        // C++ restores uploadLength into runtime stats. Our deserialize mirrors this.
+        assert_eq!(loaded.stats.uploaded_bytes, original.upload_length);
 
         info!(
             hash = %loaded.to_hex_hash(),
@@ -238,7 +247,7 @@ mod tests {
             "Progress round-trip successful"
         );
 
-        // 清理
+        // Cleanup
         let _ = manager.remove_progress(&info_hash);
     }
 
@@ -248,7 +257,7 @@ mod tests {
         let info_hash = "efefefefefefefefefefefefefefefefefefefef";
 
         // Register torrent
-        lpd.register_torrent(info_hash).await.unwrap();
+        lpd.register_torrent(info_hash, false).await.unwrap();
 
         // Verify registered
         let active = lpd.active_hashes.read().await;
@@ -284,7 +293,7 @@ mod tests {
 
         static HOOK_CALLED: AtomicBool = AtomicBool::new(false);
 
-        // 创建自定义测试钩子
+        // Create custom test hook
         struct TestHook;
 
         #[async_trait::async_trait]
@@ -307,8 +316,7 @@ mod tests {
             }
         }
 
-        let mut manager =
-            HookManager::new(crate::engine::bt_post_download_handler::HookConfig::default());
+        let mut manager = HookManager::new(HookConfig::default());
         manager.add_hook(Box::new(TestHook));
 
         let ctx = HookContext {
@@ -322,11 +330,11 @@ mod tests {
             error: None,
         };
 
-        // 触发 fire_complete
+        // Trigger fire_complete
         let result = manager.fire_complete(&ctx).await;
         assert!(result.is_ok(), "fire_complete should succeed");
 
-        // 验证钩子被调用
+        // Verify hook was called
         assert!(
             HOOK_CALLED.load(Ordering::SeqCst),
             "TestHook.on_complete should have been called"
@@ -391,8 +399,8 @@ mod tests {
             }
         }
 
-        // 注意：这个测试需要在异步运行时中执行，这里仅做结构验证
-        // 完整的执行顺序测试在 async context 中进行
+        // Note: This test needs to run in an async runtime; here we only verify structure
+        // Full execution order testing is done in async context
         let _ = (FirstHook, SecondHook);
         assert!(CALL_ORDER.load(Ordering::SeqCst) == 0);
     }

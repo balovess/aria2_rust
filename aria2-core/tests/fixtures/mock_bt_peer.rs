@@ -12,6 +12,28 @@ impl MockBtPeerServer {
         Self::start_with_metadata(info_hash, piece_data, None).await
     }
 
+    pub async fn start_failing() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("Failed to bind failing mock peer port");
+        let actual_addr = listener.local_addr().unwrap();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = listener.accept() => {
+                        if result.is_err() { break; }
+                    }
+                    _ = &mut shutdown_rx => break,
+                }
+            }
+        });
+        Self {
+            addr: actual_addr,
+            shutdown: Some(shutdown_tx),
+        }
+    }
+
     pub async fn start_with_metadata(
         info_hash: [u8; 20],
         piece_data: Vec<Vec<u8>>,
@@ -20,7 +42,7 @@ impl MockBtPeerServer {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = tokio::net::TcpListener::bind(addr)
             .await
-            .expect("绑定Mock Peer端口失败");
+            .expect("Failed to bind mock peer port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
 

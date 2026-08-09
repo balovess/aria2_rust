@@ -95,12 +95,10 @@ fn test_concurrent_segment_manager_complete_all() {
     let mut manager =
         ConcurrentSegmentManager::new(200, vec!["http://example.com/med".to_string()], Some(100));
     manager.allocate_segments();
-    manager.complete_segment(0, bytes::Bytes::from(vec![0u8; 100]));
-    manager.complete_segment(1, bytes::Bytes::from(vec![0u8; 100]));
+    manager.complete_segment(0, 100);
+    manager.complete_segment(1, 100);
     assert!(manager.is_complete());
     assert_eq!(manager.completed_bytes(), 200);
-    let assembled = manager.assemble().unwrap();
-    assert_eq!(assembled.len(), 200);
 }
 
 #[test]
@@ -119,7 +117,7 @@ async fn test_http_segment_downloader_zero_length() {
     let client = reqwest::Client::new();
     let dl = HttpSegmentDownloader::new(&client);
     let result = dl
-        .download_range("http://example.com", 0, 0, None, &[])
+        .download_range("http://example.com", 0, 0, None, &[], None, 0)
         .await;
     assert!(result.is_ok());
     assert!(result.unwrap().is_empty());

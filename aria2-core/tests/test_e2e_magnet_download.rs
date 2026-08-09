@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 mod fixtures;
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;

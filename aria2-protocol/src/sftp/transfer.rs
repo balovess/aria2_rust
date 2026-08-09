@@ -303,7 +303,7 @@ impl<'a> SftpTransfer<'a> {
         );
 
         // Step 3: Open remote file for reading
-        let remote_file = match self.ops.open(remote_path, OpenFlags::readonly(), 0).await {
+        let mut remote_file = match self.ops.open(remote_path, OpenFlags::readonly(), 0).await {
             Ok(f) => f,
             Err(e) => {
                 return Err(format!(
@@ -362,7 +362,6 @@ impl<'a> SftpTransfer<'a> {
         }
 
         // Step 5: Main transfer loop
-        let _buf = vec![0u8; options.buffer_size];
         let mut transferred = start_offset;
         let start_time = std::time::Instant::now();
         let mut last_report = start_offset;
@@ -494,7 +493,7 @@ impl<'a> SftpTransfer<'a> {
         let total_size = metadata.len();
 
         // Open remote file for writing
-        let remote_file = match self
+        let mut remote_file = match self
             .ops
             .open(remote_path, OpenFlags::write_create(), 0o644)
             .await

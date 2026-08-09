@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 const CONTROL_MAGIC: &[u8; 4] = b"A2CF";
 const CONTROL_VERSION: u16 = 1;
 const FLAG_HAS_CHECKSUM: u8 = 0x01;
+const CONTROL_HEADER_LEN: usize = 39;
 
 #[derive(Debug, Clone)]
 pub struct ControlFile {
@@ -44,9 +45,12 @@ impl ControlFile {
         num_pieces: usize,
     ) -> Result<Self> {
         if ctrl_path.exists() {
-            Self::load(ctrl_path)
-                .await?
-                .ok_or_else(|| Aria2Error::Io(format!("无法加载控制文件: {}", ctrl_path.display())))
+            Self::load(ctrl_path).await?.ok_or_else(|| {
+                Aria2Error::FileIo(format!(
+                    "Failed to load control file: {}",
+                    ctrl_path.display()
+                ))
+            })
         } else {
             let bitfield_len = num_pieces.div_ceil(8);
             Ok(Self {
@@ -69,30 +73,41 @@ impl ControlFile {
 
         let data = tokio::fs::read(path)
             .await
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+            .map_err(|e| Aria2Error::FileIo(format!("{}: {e}", path.display())))?;
 
-        if data.len() < 8 {
-            return Ok(None);
+        if data.len() < CONTROL_HEADER_LEN {
+            return Err(Aria2Error::FileIo(format!(
+                "Truncated control file header: {} bytes (expected at least {})",
+                data.len(),
+                CONTROL_HEADER_LEN
+            )));
         }
 
         if &data[0..4] != CONTROL_MAGIC {
-            return Err(Aria2Error::Io("无效的控制文件magic".to_string()));
+            return Err(Aria2Error::FileIo("Invalid control file magic".to_string()));
         }
 
         let version = u16_from_le(&data[4..6]);
         if version > CONTROL_VERSION {
-            return Err(Aria2Error::Io(format!("不支持的版本: {}", version)));
+            return Err(Aria2Error::FileIo(format!(
+                "Unsupported version: {}",
+                version
+            )));
         }
 
         let flags = data[6];
         let total_length = u64_from_le(&data[7..15]);
         let completed_length = u64_from_le(&data[15..23]);
         let upload_length = u64_from_le(&data[23..31]);
-        let _bitfield_length = u64_from_le(&data[31..39]);
+        let bitfield_length = usize::try_from(u64_from_le(&data[31..39])).map_err(|_| {
+            Aria2Error::FileIo("Control file bitfield length exceeds platform limits".to_string())
+        })?;
 
-        let mut offset = 39usize;
+        let mut offset = CONTROL_HEADER_LEN;
         let checksum_algo = if flags & FLAG_HAS_CHECKSUM != 0 {
-            let algo = data[offset];
+            let algo = *data.get(offset).ok_or_else(|| {
+                Aria2Error::FileIo("Truncated control file checksum algorithm".to_string())
+            })?;
             offset += 1;
             algo
         } else {
@@ -105,21 +120,45 @@ impl ControlFile {
                 2 => 20,
                 3 => 32,
                 4 => 8,
-                _ => 0,
+                _ => {
+                    return Err(Aria2Error::FileIo(format!(
+                        "Unsupported control file checksum algorithm: {}",
+                        checksum_algo
+                    )));
+                }
             };
-            if len > 0 && offset + len <= data.len() {
-                let val = data[offset..offset + len].to_vec();
-                offset += len;
-                val
-            } else {
-                Vec::new()
+            let end = offset.checked_add(len).ok_or_else(|| {
+                Aria2Error::FileIo("Control file checksum length overflow".to_string())
+            })?;
+            if end > data.len() {
+                return Err(Aria2Error::FileIo(
+                    "Truncated control file checksum".to_string(),
+                ));
             }
+            let val = data[offset..end].to_vec();
+            offset = end;
+            val
         } else {
             Vec::new()
         };
 
-        let bitfield = data[offset..].to_vec();
+        let bitfield_end = offset.checked_add(bitfield_length).ok_or_else(|| {
+            Aria2Error::FileIo("Control file bitfield length overflow".to_string())
+        })?;
+        if bitfield_end != data.len() {
+            return Err(Aria2Error::FileIo(format!(
+                "Control file bitfield length mismatch: declared {}, available {}",
+                bitfield_length,
+                data.len().saturating_sub(offset)
+            )));
+        }
+        let bitfield = data[offset..bitfield_end].to_vec();
         let num_pieces = bitfield.len() * 8;
+        if completed_length > total_length {
+            return Err(Aria2Error::FileIo(
+                "Control file completed length exceeds total length".to_string(),
+            ));
+        }
 
         Ok(Some(Self {
             path: path.to_path_buf(),
@@ -316,6 +355,39 @@ mod tests {
 
         let result = ControlFile::load(&path).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_control_file_load_truncated_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("truncated.aria2");
+        for length in [0usize, 7, 8, 38] {
+            let mut data = vec![0u8; length];
+            if length >= 4 {
+                data[..4].copy_from_slice(CONTROL_MAGIC);
+            }
+            tokio::fs::write(&path, &data).await.unwrap();
+            assert!(ControlFile::load(&path).await.is_err(), "length={length}");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_control_file_rejects_invalid_checksum_and_bitfield_lengths() {
+        let dir = tempfile::tempdir().expect("failed to create temporary directory");
+        let path = dir.path().join("malformed.aria2");
+        let mut data = vec![0u8; CONTROL_HEADER_LEN];
+        data[..4].copy_from_slice(CONTROL_MAGIC);
+        data[6] = FLAG_HAS_CHECKSUM;
+        data[31..39].copy_from_slice(&0u64.to_le_bytes());
+        data.push(2);
+        tokio::fs::write(&path, &data).await.unwrap();
+        assert!(ControlFile::load(&path).await.is_err());
+
+        let mut data = vec![0u8; CONTROL_HEADER_LEN];
+        data[..4].copy_from_slice(CONTROL_MAGIC);
+        data[31..39].copy_from_slice(&1u64.to_le_bytes());
+        tokio::fs::write(&path, &data).await.unwrap();
+        assert!(ControlFile::load(&path).await.is_err());
     }
 
     #[tokio::test]

@@ -1,36 +1,54 @@
 //! Local Peer Discovery (LPD) Manager - Phase 15 H8
 //!
 //! Implements BitTorrent Local Peer Discovery using UDP multicast on
-//! the standard LPD multicast group 239.192.152.143:6771.
+//! the standard LPD multicast group 239.192.152.143:6771 per BEP 14.
 //!
 //! # Architecture
 //!
 //! ```text
-//! lpd_manager.rs (this file)
-//!   ├── LpdManager - High-level coordinator for LPD operations
-//!   ├── LpdAnnouncer - Low-level UDP multicast sender/receiver
-//!   ├── LpdPeer - Discovered peer information
-//!   └── parse_lpd_announcement() - Parse text-format LPD messages
+//! lpd_manager.rs (this anchor file)
+//!   ├── LpdPeer       - Discovered peer information
+//!   ├── LpdManager    - High-level coordinator for LPD operations
+//!   ├── constants     - MAX_PEERS_PER_HASH
+//!   └── re-exports    - Public API from submodules
 //!
-//! LPD Protocol:
+//! lpd_manager/ (submodules)
+//!   ├── announce.rs   - LpdAnnouncer (UDP multicast sender/receiver)
+//!   ├── discovery.rs  - BEP14 message parsing + private address detection
+//!   └── tests.rs      - Comprehensive test suite
+//!
+//! LPD Protocol (BEP 14):
 //!   Multicast Group: 239.192.152.143:6771
-//!   Message Format:
-//!     Hash: <info_hash_hex>\n
-//!     Port: <listen_port>\n
-//!     Token: <random_8hex>\n
+//!   Message Format (HTTP-like):
+//!     BT-SEARCH * HTTP/1.1\r\n
+//!     Host: 239.192.152.143:6771\r\n
+//!     Port: <listen_port>\r\n
+//!     Infohash: <40-char-hex-info-hash>\r\n
+//!     \r\n\r\n
 //!
 //!   Announce Interval: Every 5 minutes while active
 //! ```
 
+mod announce;
+mod discovery;
+#[cfg(test)]
+mod tests;
+
+// Re-export public API for backward compatibility
+pub use announce::LpdAnnouncer;
+pub use discovery::{is_private_address, parse_lpd_announcement};
+
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::constants;
+use crate::engine::lpd_receive_loop::LpdReceiveLoop;
 
 // Re-export LPD constants for backward compatibility with test imports
 pub use constants::{
@@ -60,8 +78,9 @@ pub struct LpdPeer {
     pub addr: IpAddr,
     /// When this peer was last announced
     pub last_seen: Instant,
-    /// Random token from the announcement (for anti-spoofing)
-    pub token: Option<u32>,
+    /// Whether this peer is on the local network (private IP range).
+    /// C++: `peer->setLocalPeer(util::inPrivateAddress(remoteEndpoint.addr))`
+    pub is_local: bool,
 }
 
 impl LpdPeer {
@@ -72,15 +91,8 @@ impl LpdPeer {
             port,
             addr,
             last_seen: Instant::now(),
-            token: None,
+            is_local: is_private_address(&addr),
         }
-    }
-
-    /// Create with token
-    pub fn with_token(info_hash: impl Into<String>, port: u16, addr: IpAddr, token: u32) -> Self {
-        let mut p = Self::new(info_hash, port, addr);
-        p.token = Some(token);
-        p
     }
 
     /// Get the peer's address as SocketAddr
@@ -111,279 +123,6 @@ impl std::hash::Hash for LpdPeer {
 }
 
 // =========================================================================
-// LpdAnnouncer - UDP Multicast Sender/Receiver
-// =========================================================================
-
-/// Handles low-level UDP multicast I/O for LPD announcements.
-///
-/// Binds to a local UDP socket, joins the LPD multicast group, and provides
-/// methods for sending announcements and receiving peer discoveries.
-///
-/// # Thread Safety
-///
-/// `LpdAnnouncer` uses `UdpSocket` which is `Send + Sync`. However, concurrent
-/// send/recv calls may need external synchronization for correctness.
-pub struct LpdAnnouncer {
-    /// Bound UDP socket for multicast I/O
-    socket: UdpSocket,
-    /// The multicast address we send to / receive from
-    multicast_addr: SocketAddr,
-    /// Whether announcing is enabled
-    enabled: bool,
-    /// Current announce interval
-    announce_interval: Duration,
-}
-
-impl LpdAnnouncer {
-    /// Create a new LpdAnnouncer bound to an ephemeral local port
-    ///
-    /// Joins the LPD multicast group (239.192.152.143:6771) and enables
-    /// broadcast mode on the socket.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - Cannot bind to any local UDP port
-    /// - Cannot enable broadcast mode
-    /// - Cannot join multicast group
-    pub fn new() -> Result<Self, String> {
-        Self::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
-    }
-
-    /// Create with custom announce interval
-    pub fn with_config(announce_interval_secs: u64) -> Result<Self, String> {
-        // Bind to ephemeral port on all interfaces
-        let socket = UdpSocket::bind("0.0.0.0:0")
-            .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
-
-        // Enable broadcast
-        socket
-            .set_broadcast(true)
-            .map_err(|e| format!("Failed to enable broadcast: {}", e))?;
-
-        // Set reuse address so multiple instances can coexist (Unix only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            let fd = socket.as_raw_fd();
-            unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEADDR,
-                    &1i32 as *const i32 as *const libc::c_void,
-                    std::mem::size_of::<i32>() as libc::socklen_t,
-                );
-            }
-        }
-
-        // Parse multicast address
-        let multicast_addr: SocketAddr = format!(
-            "{}:{}",
-            constants::LPD_MULTICAST_ADDRESS,
-            constants::LPD_PORT
-        )
-        .parse()
-        .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
-
-        // Join multicast group
-        let multicast_ip: Ipv4Addr = constants::LPD_MULTICAST_ADDRESS
-            .parse()
-            .map_err(|e| format!("Invalid LPD multicast IP: {}", e))?;
-
-        socket
-            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
-            .map_err(|e| format!("Failed to join LPD multicast group: {}", e))?;
-
-        debug!(
-            local = ?socket.local_addr().ok(),
-            multicast = %multicast_addr,
-            "LpdAnnouncer created successfully"
-        );
-
-        Ok(Self {
-            socket,
-            multicast_addr,
-            enabled: true,
-            announce_interval: Duration::from_secs(announce_interval_secs),
-        })
-    }
-
-    /// Disable announcing (for testing or when BT is disabled)
-    pub fn disable(&mut self) {
-        self.enabled = false;
-    }
-
-    /// Enable announcing
-    pub fn enable(&mut self) {
-        self.enabled = true;
-    }
-
-    /// Check if announcer is enabled
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// Get the local bind address
-    pub fn local_addr(&self) -> Result<SocketAddr, String> {
-        self.socket
-            .local_addr()
-            .map_err(|e| format!("Failed to get local address: {}", e))
-    }
-
-    /// Send an LPD announcement for a torrent
-    ///
-    /// Formats and sends a text-based LPD message containing:
-    /// - Hash: <info_hash> (40-char hex)
-    /// - Port: <listen_port>
-    /// - Token: <random 8-hex>
-    ///
-    /// # Arguments
-    ///
-    /// * `info_hash` - 40-character hex string of the torrent's info hash
-    /// * `port` - Our listening port for incoming connections
-    ///
-    /// # Errors
-    ///
-    /// Returns error if UDP send fails.
-    pub fn announce(&self, info_hash: &str, port: u16) -> Result<(), String> {
-        if !self.enabled {
-            return Ok(()); // Silently succeed when disabled
-        }
-
-        // Validate info hash format (should be 40 hex chars)
-        if info_hash.len() != 40 || !info_hash.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!(
-                "Invalid info_hash format: expected 40 hex chars, got {} chars",
-                info_hash.len()
-            ));
-        }
-
-        // Generate random anti-spoofing token
-        let token: u32 = rand::random::<u32>();
-
-        // Format LPD announcement per BEP-14 spec
-        let msg = format!(
-            "Hash: {}\nPort: {}\nToken: {:08x}\n",
-            info_hash, port, token
-        );
-
-        debug!(
-            info_hash = %&info_hash[..8],
-            port,
-            token = format!("{:08x}", token),
-            "Sending LPD announcement"
-        );
-
-        self.socket
-            .send_to(msg.as_bytes(), self.multicast_addr)
-            .map_err(|e| format!("LPD announce send failed: {}", e))?;
-
-        Ok(())
-    }
-
-    /// Receive LPD announcements within a timeout window
-    ///
-    /// Blocks for up to `timeout` duration, collecting all valid LPD
-    /// announcements received. Deduplicates by (info_hash, source_ip).
-    ///
-    /// # Arguments
-    ///
-    /// * `timeout` - Maximum time to wait for announcements
-    ///
-    /// # Returns
-    ///
-    /// Vector of discovered peers. May be empty if no announcements received.
-    pub fn receive_announcements(&self, timeout: Duration) -> Vec<LpdPeer> {
-        let mut buf = [0u8; constants::LPD_RECEIVE_BUFFER_SIZE];
-        let mut peers = Vec::new();
-        let mut seen: HashSet<(String, IpAddr)> = HashSet::new();
-
-        self.socket
-            .set_read_timeout(Some(timeout))
-            .expect("set_read_timeout should not fail");
-
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-
-            match self.socket.recv_from(&mut buf) {
-                Ok((len, src_addr)) => {
-                    if len == 0 {
-                        continue;
-                    }
-
-                    if let Some(peer) = parse_lpd_announcement(&buf[..len], src_addr.ip()) {
-                        // Deduplicate by (info_hash, ip)
-                        let key = (peer.info_hash.clone(), peer.addr);
-                        if seen.insert(key) {
-                            debug!(
-                                info_hash = %peer.info_hash[..8.min(peer.info_hash.len())],
-                                addr = %src_addr.ip(),
-                                "Received valid LPD announcement"
-                            );
-                            peers.push(peer);
-                        } else {
-                            debug!(
-                                addr = %src_addr.ip(),
-                                "Duplicate LPD announcement suppressed"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    let kind = e.kind();
-                    if kind == std::io::ErrorKind::TimedOut
-                        || kind == std::io::ErrorKind::WouldBlock
-                    {
-                        break;
-                    }
-                    // Other errors: log but continue trying
-                    warn!(error = %e, "LPD receive error, continuing");
-                    // Small sleep to avoid busy-looping on persistent errors
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-
-        debug!(count = peers.len(), "LPD receive completed");
-        peers
-    }
-
-    /// Perform a single announce+receive cycle (announce then collect responses)
-    ///
-    /// Sends our announcement, waits briefly, then collects any responses
-    /// from other peers who also announced in that window.
-    pub fn announce_and_discover(
-        &self,
-        info_hash: &str,
-        port: u16,
-        discover_timeout: Duration,
-    ) -> Result<Vec<LpdPeer>, String> {
-        // Announce ourselves
-        self.announce(info_hash, port)?;
-
-        // Wait a bit for others to respond
-        std::thread::sleep(Duration::from_millis(500));
-
-        // Collect announcements
-        let peers = self.receive_announcements(discover_timeout);
-
-        // Filter out our own announcement (by matching our info_hash + port)
-        let peers: Vec<LpdPeer> = peers
-            .into_iter()
-            .filter(|p| !(p.info_hash == info_hash && p.port == port))
-            .collect();
-
-        Ok(peers)
-    }
-}
-
-// =========================================================================
 // LpdManager - High-level coordinator
 // =========================================================================
 
@@ -391,6 +130,11 @@ impl LpdAnnouncer {
 ///
 /// Maintains a registry of known peers discovered via LPD, handles periodic
 /// announcements for active downloads, and coordinates with the download engine.
+///
+/// The receive loop (`LpdReceiveLoop`) runs as a background tokio task
+/// that continuously reads LPD multicast announcements and updates the
+/// peer registry. This mirrors the C++ `LpdReceiveCommand` which
+/// re-adds itself to the event loop after each receive.
 pub struct LpdManager {
     /// The underlying UDP announcer
     announcer: Arc<LpdAnnouncer>,
@@ -400,6 +144,8 @@ pub struct LpdManager {
     pub active_hashes: Arc<RwLock<HashSet<String>>>,
     /// Handle to the background announce task
     _announce_task: Option<tokio::task::JoinHandle<()>>,
+    /// Background receive loop for continuous LPD announcement processing
+    receive_loop: LpdReceiveLoop,
 }
 
 impl Default for LpdManager {
@@ -412,7 +158,8 @@ impl LpdManager {
     /// Create a new LpdManager
     ///
     /// Initializes the UDP socket, joins multicast group, and sets up
-    /// internal state tracking.
+    /// internal state tracking. The receive loop is not started
+    /// automatically; call `start_receive_loop()` to begin receiving.
     pub fn new() -> Self {
         let announcer = LpdAnnouncer::new().unwrap_or_else(|_| {
             // If we can't create real socket, create a dummy one for testing
@@ -427,25 +174,56 @@ impl LpdManager {
             peers: Arc::new(RwLock::new(HashMap::new())),
             active_hashes: Arc::new(RwLock::new(HashSet::new())),
             _announce_task: None,
+            receive_loop: LpdReceiveLoop::new(),
         }
     }
 
     /// Create LpdManager with custom configuration
     pub fn with_interval(announce_interval_secs: u64) -> Result<Self, String> {
-        let announcer = LpdAnnouncer::with_config(announce_interval_secs)?;
+        Self::with_interval_and_interface(announce_interval_secs, None)
+    }
+
+    /// Create an LPD manager with an optional local IPv4 multicast interface.
+    pub fn with_interval_and_interface(
+        announce_interval_secs: u64,
+        interface: Option<std::net::Ipv4Addr>,
+    ) -> Result<Self, String> {
+        if announce_interval_secs == 0 {
+            return Err("LPD announce interval must be greater than zero".to_string());
+        }
+
+        let announcer = LpdAnnouncer::with_interface(announce_interval_secs, interface)?;
 
         Ok(Self {
             announcer: Arc::new(announcer),
             peers: Arc::new(RwLock::new(HashMap::new())),
             active_hashes: Arc::new(RwLock::new(HashSet::new())),
             _announce_task: None,
+            receive_loop: LpdReceiveLoop::new(),
         })
     }
 
     /// Register a torrent for LPD announcements
     ///
     /// Adds the info_hash to the active set so it gets periodically announced.
-    pub async fn register_torrent(&self, info_hash: &str) -> Result<(), String> {
+    ///
+    /// Per BEP 0027, private torrents MUST NOT be announced via LPD.
+    /// If `private_torrent` is true, this method returns an error without
+    /// registering the hash. C++ `BtRegistry::add()` checks
+    /// `torrentAttribute->private_torrent` before enabling LPD.
+    pub async fn register_torrent(
+        &self,
+        info_hash: &str,
+        private_torrent: bool,
+    ) -> Result<(), String> {
+        if private_torrent {
+            debug!(
+                info_hash = %&info_hash[..8],
+                "Skipping LPD registration for private torrent (BEP 0027)"
+            );
+            return Err("Private torrents must not be announced via LPD (BEP 0027)".to_string());
+        }
+
         let mut active = self.active_hashes.write().await;
         active.insert(info_hash.to_string());
 
@@ -507,14 +285,15 @@ impl LpdManager {
 
         let announcer = Arc::clone(&self.announcer);
         let active_hashes = Arc::clone(&self.active_hashes);
+        let interval = self.announcer.announce_interval();
 
         info!(
-            interval_secs = self.announcer.announce_interval.as_secs(),
+            interval_secs = interval.as_secs(),
             port, "Starting LPD background announce task"
         );
 
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(announcer.announce_interval);
+            let mut ticker = tokio::time::interval(interval);
 
             loop {
                 ticker.tick().await;
@@ -555,6 +334,58 @@ impl LpdManager {
         }
     }
 
+    /// Start the background LPD receive loop.
+    ///
+    /// Spawns a tokio task that continuously receives LPD multicast
+    /// announcements on the standard LPD port (6771), parses them,
+    /// and updates the peer registry. This is the Rust equivalent of
+    /// the C++ `LpdReceiveCommand` which runs in the event loop.
+    ///
+    /// The receive loop:
+    /// - Binds to 0.0.0.0:6771 and joins multicast group 239.192.152.143
+    /// - Continuously receives and processes LPD announcements
+    /// - Only processes announcements for info hashes in `active_hashes`
+    /// - Updates the peer registry automatically
+    /// - Can be stopped via `stop_receive_loop()` or cancellation token
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the UDP socket cannot be bound (e.g., port
+    /// already in use, multicast unavailable in this environment).
+    pub async fn start_receive_loop(&mut self) -> Result<(), String> {
+        if !self.announcer.is_enabled() {
+            debug!("LPD is disabled, not starting receive loop");
+            return Ok(());
+        }
+
+        self.receive_loop
+            .start(Arc::clone(&self.peers), Arc::clone(&self.active_hashes))
+            .await
+    }
+
+    /// Stop the background LPD receive loop gracefully.
+    ///
+    /// Signals the receive task to stop via `CancellationToken` and
+    /// waits for it to finish. After stopping, `start_receive_loop()`
+    /// can be called again to restart.
+    pub async fn stop_receive_loop(&mut self) {
+        self.receive_loop.stop().await;
+    }
+
+    /// Check if the LPD receive loop is currently running.
+    pub fn is_receive_loop_running(&self) -> bool {
+        self.receive_loop.is_running()
+    }
+
+    /// Get a clone of the receive loop's cancellation token.
+    ///
+    /// This allows external code (e.g., the download engine shutdown
+    /// sequence) to cancel the receive loop without holding a mutable
+    /// reference to `LpdManager`.
+    pub fn receive_loop_cancellation_token(&self) -> CancellationToken {
+        self.receive_loop.cancellation_token()
+    }
+
     /// Update peer registry with newly discovered peers
     pub async fn update_peers(&self, info_hash: &str, new_peers: Vec<LpdPeer>) {
         let mut peers_map = self.peers.write().await;
@@ -593,71 +424,5 @@ impl LpdManager {
     /// Check if LPD is available and working
     pub fn is_available(&self) -> bool {
         self.announcer.is_enabled()
-    }
-}
-
-// =========================================================================
-// LPD Announcement Parser
-// =========================================================================
-
-/// Parse a raw LPD announcement message into structured data
-///
-/// LPD messages are plain text with key-value pairs:
-///
-/// ```text
-/// Hash: <40-char-hex-info-hash>\n
-/// Port: <1-65535>\n
-/// Token: <8-char-hex-token>\n
-/// ```
-///
-/// # Arguments
-///
-/// * `data` - Raw bytes received from UDP socket
-/// * `sender_ip` - IP address of the sender (from recv_from)
-///
-/// # Returns
-///
-/// `Some(LpdPeer)` if parsing succeeds, `None` if malformed
-pub fn parse_lpd_announcement(data: &[u8], sender_ip: IpAddr) -> Option<LpdPeer> {
-    let text = std::str::from_utf8(data).ok()?;
-    let mut info_hash = String::new();
-    let mut port = 0u16;
-    let mut token: Option<u32> = None;
-
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("Hash:") {
-            let val = rest.trim();
-            // Validate: must be exactly 40 hex characters
-            if val.len() == 40 && val.chars().all(|c| c.is_ascii_hexdigit()) {
-                info_hash = val.to_lowercase(); // Normalize to lowercase
-            } else {
-                return None; // Invalid info_hash format
-            }
-        } else if let Some(rest) = line.strip_prefix("Port:") {
-            port = rest.trim().parse().ok()?;
-            if port == 0 {
-                return None; // Port 0 is invalid
-            }
-        } else if let Some(rest) = line.strip_prefix("Token:") {
-            let token_str = rest.trim();
-            token = u32::from_str_radix(token_str, 16).ok();
-        }
-    }
-
-    // All three fields are required for a valid announcement
-    if !info_hash.is_empty() && port > 0 && token.is_some() {
-        let mut peer = LpdPeer::new(info_hash, port, sender_ip);
-        peer.token = token;
-        Some(peer)
-    } else {
-        debug!(
-            text_len = data.len(),
-            has_hash = !info_hash.is_empty(),
-            has_port = port > 0,
-            has_token = token.is_some(),
-            "Incomplete/malformed LPD announcement ignored"
-        );
-        None
     }
 }

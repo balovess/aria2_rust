@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import socket
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -12,17 +14,38 @@ import pytest_asyncio
 
 
 def find_aria2_rust_binary() -> Optional[str]:
-    for name in ["aria2c-rust", "aria2_rust", "aria2c"]:
+    project_root = Path(__file__).resolve().parents[4]
+    candidates: list[Path] = []
+    configured = os.environ.get("ARIA2_RUST_BIN")
+    if configured:
+        candidates.append(Path(configured))
+
+    for name in ("aria2c-rust", "aria2_rust", "aria2c"):
         path = shutil.which(name)
         if path is not None:
-            return path
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-    for root, dirs, files in os.walk(project_root):
-        for f in files:
-            if f in ("aria2c-rust", "aria2_rust", "aria2c") or f.endswith(".exe"):
-                base = os.path.splitext(f)[0]
-                if base in ("aria2c-rust", "aria2_rust", "aria2c"):
-                    return os.path.join(root, f)
+            candidates.append(Path(path))
+
+    for target_dir in ("target/debug", "target-check/debug"):
+        for name in ("aria2c", "aria2c.exe", "aria2c-rust", "aria2c-rust.exe"):
+            candidates.append(project_root / target_dir / name)
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        candidate = candidate.resolve()
+        if candidate in seen or not candidate.is_file():
+            continue
+        seen.add(candidate)
+        try:
+            subprocess.run(
+                [str(candidate), "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        return str(candidate)
     return None
 
 
@@ -92,10 +115,16 @@ class Aria2Server:
         self._dir = tempfile.mkdtemp(prefix="aria2_e2e_")
 
     async def start(self):
+        if self.port == 0:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", 0))
+                self.port = int(probe.getsockname()[1])
+
         cmd = [
             self.binary,
             "--enable-rpc",
-            f"--rpc-listen-port=0",
+            "--rpc-listen-all=false",
+            f"--rpc-listen-port={self.port}",
             "--dir", self._dir,
         ]
         if self.token:
@@ -103,9 +132,26 @@ class Aria2Server:
         self._process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        await asyncio.sleep(1)
-        if self._process.poll() is not None:
-            raise RuntimeError(f"aria2-rust failed to start: {self._process.stderr.read().decode()}")
+        deadline = asyncio.get_running_loop().time() + 10
+        last_error: Optional[BaseException] = None
+        while asyncio.get_running_loop().time() < deadline:
+            if self._process.poll() is not None:
+                _, stderr = self._process.communicate(timeout=1)
+                detail = stderr.decode(errors="replace") if stderr else ""
+                raise RuntimeError(f"aria2-rust failed to start: {detail}")
+            try:
+                reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
+                writer.close()
+                await writer.wait_closed()
+                return
+            except OSError as error:
+                last_error = error
+                await asyncio.sleep(0.05)
+
+        await self.stop()
+        raise RuntimeError(
+            f"aria2-rust RPC server did not start on port {self.port}: {last_error}"
+        )
 
     async def stop(self):
         if self._process and self._process.poll() is None:

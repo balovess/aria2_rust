@@ -115,23 +115,23 @@ impl DhtMessage {
             .dict_get(b"t")
             .and_then(|v| v.as_bytes())
             .map(|b| b.to_vec())
-            .ok_or("缺少t字段")?;
+            .ok_or("Missing 't' field")?;
 
         let y_bytes = root
             .dict_get(b"y")
             .and_then(|v| v.as_bytes())
-            .ok_or("缺少y字段")?;
+            .ok_or("Missing 'y' field")?;
 
         let y = match y_bytes.first() {
             Some(b'q') => DhtMessageType::Query,
             Some(b'r') => DhtMessageType::Response,
             Some(b'e') => DhtMessageType::Error,
-            _ => return Err(format!("无效的y值: {:?}", y_bytes)),
+            _ => return Err(format!("Invalid 'y' value: {:?}", y_bytes)),
         };
 
         match y {
             DhtMessageType::Query => {
-                let q_str = root.dict_get_str("q").ok_or("缺少q字段")?;
+                let q_str = root.dict_get_str("q").ok_or("Missing 'q' field")?;
                 let args = root.dict_get(b"a").cloned();
                 Ok(Self {
                     t,
@@ -157,9 +157,9 @@ impl DhtMessage {
                 let err_val = root
                     .dict_get(b"e")
                     .and_then(|v| v.as_list())
-                    .ok_or("缺少e字段")?;
+                    .ok_or("Missing 'e' field")?;
                 if err_val.len() < 2 {
-                    return Err("error格式错误".to_string());
+                    return Err("Invalid error format".to_string());
                 }
                 let code = err_val[0].as_int().unwrap_or(201);
                 let msg = err_val[1].as_str().unwrap_or("unknown error");

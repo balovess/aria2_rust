@@ -82,7 +82,7 @@ impl<'a> RetryExecutor<'a> {
                 Err(error) => {
                     if !self.policy.should_retry(attempt, &error) {
                         warn!(
-                            "重试失败 (尝试 {}/{}, 不再重试): {}",
+                            "Retry failed (attempt {}/{}, no more retries): {}",
                             attempt + 1,
                             self.policy.max_tries(),
                             error
@@ -90,10 +90,10 @@ impl<'a> RetryExecutor<'a> {
                         self.stats.record_retry(&error);
                         return Err(error);
                     }
-                    attempt += 1;
                     let wait = self.policy.wait_duration(attempt);
+                    attempt = attempt.saturating_add(1);
                     warn!(
-                        "第 {} 次重试, 等待 {:?} 后执行 (原因: {})",
+                        "Retry #{}, waiting {:?} before next attempt (reason: {})",
                         attempt, wait, error
                     );
                     self.stats.record_retry(&error);

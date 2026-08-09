@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::selector::server_stat::{ServerStat, ServerStatSnapshot};
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Container for serialized server statistics file.
 ///
@@ -36,8 +37,23 @@ pub struct ServerStatFile {
     pub servers: Vec<ServerStatSnapshot>,
 }
 
+/// Composite key for server statistics: (hostname, protocol).
+///
+/// In C++ aria2, `ServerStatMan::find()` takes `(hostname, protocol)` as a
+/// composite key. This Rust version uses the same approach for compatibility.
+/// When protocol is empty, the entry is treated as protocol-agnostic.
+type StatKey = (String, String);
+
+/// Process-level shared `ServerStatMan` singleton.
+///
+/// Initialized lazily on first access via [`ServerStatMan::shared`].
+/// All production download paths should use `ServerStatMan::shared()`
+/// instead of `ServerStatMan::new()` so that server speed statistics
+/// are shared across downloads.
+static SHARED_STAT_MAN: OnceLock<Arc<ServerStatMan>> = OnceLock::new();
+
 pub struct ServerStatMan {
-    stats: RwLock<HashMap<String, Arc<ServerStat>>>,
+    stats: RwLock<HashMap<StatKey, Arc<ServerStat>>>,
 }
 
 impl ServerStatMan {
@@ -47,20 +63,70 @@ impl ServerStatMan {
         }
     }
 
+    /// Process-level shared instance for cross-download server stats.
+    ///
+    /// Like `FileAllocationMan::shared()` — all downloads should use this
+    /// instance so that `AdaptiveUriSelector` sees speed statistics from
+    /// every download, not just the current one. Without a shared instance
+    /// each `DownloadCommand` creates its own `ServerStatMan`, causing
+    /// adaptive mirror selection to degrade because server speeds are
+    /// isolated per-download.
+    pub fn shared() -> &'static Arc<ServerStatMan> {
+        SHARED_STAT_MAN.get_or_init(|| Arc::new(ServerStatMan::new()))
+    }
+
+    /// Gets or creates a ServerStat for the given hostname (protocol-agnostic).
+    ///
+    /// This is the backward-compatible method. For protocol-aware lookups,
+    /// use [`ServerStatMan::get_or_create_with_protocol`].
     pub fn get_or_create(&self, host: &str) -> Arc<ServerStat> {
-        let mut map = self.stats.write().unwrap();
-        if let Some(stat) = map.get(host) {
+        self.get_or_create_with_protocol(host, "")
+    }
+
+    /// Gets or creates a ServerStat for the given hostname and protocol.
+    ///
+    /// This matches the C++ `ServerStatMan::find(host, protocol)` semantics.
+    /// Each `(host, protocol)` pair has its own separate ServerStat entry,
+    /// so "example.com:http" and "example.com:ftp" are distinct entries.
+    pub fn get_or_create_with_protocol(&self, host: &str, protocol: &str) -> Arc<ServerStat> {
+        let key = (host.to_string(), protocol.to_string());
+        let mut map = self.stats.recover_mut();
+        if let Some(stat) = map.get(&key) {
             Arc::clone(stat)
         } else {
-            let stat = Arc::new(ServerStat::new(host));
-            map.insert(host.to_string(), Arc::clone(&stat));
+            let stat = Arc::new(ServerStat::new_with_protocol(host, protocol));
+            map.insert(key, Arc::clone(&stat));
             stat
         }
     }
 
+    /// Finds a ServerStat by hostname only (protocol-agnostic).
+    ///
+    /// Returns the entry with an empty protocol if it exists.
+    /// For protocol-aware lookups, use [`ServerStatMan::find_stat_by_protocol`].
     pub fn find_stat(&self, host: &str) -> Option<Arc<ServerStat>> {
-        let map = self.stats.read().unwrap();
-        map.get(host).cloned()
+        self.find_stat_by_protocol(host, "")
+    }
+
+    /// Finds a ServerStat by hostname and protocol.
+    ///
+    /// This matches the C++ `ServerStatMan::find(hostname, protocol)` semantics.
+    /// Returns `None` if no entry exists for the given `(host, protocol)` pair.
+    pub fn find_stat_by_protocol(&self, host: &str, protocol: &str) -> Option<Arc<ServerStat>> {
+        let key = (host.to_string(), protocol.to_string());
+        let map = self.stats.recover();
+        map.get(&key).cloned()
+    }
+
+    /// Finds any ServerStat for the given hostname, regardless of protocol.
+    ///
+    /// This is useful when you need a stat entry for a host but don't care
+    /// about the protocol. Returns the first match found.
+    pub fn find_stat_by_host(&self, host: &str) -> Option<Arc<ServerStat>> {
+        let map = self.stats.recover();
+        map.iter()
+            .find(|((h, _), _)| h == host)
+            .map(|(_, v)| Arc::clone(v))
     }
 
     pub fn update(&self, host: &str, dl_speed: u64, is_multi: bool) {
@@ -68,38 +134,85 @@ impl ServerStatMan {
         stat.update_speed(dl_speed, is_multi);
     }
 
+    /// Updates server stat for a specific (host, protocol) pair.
+    pub fn update_with_protocol(&self, host: &str, protocol: &str, dl_speed: u64, is_multi: bool) {
+        let stat = self.get_or_create_with_protocol(host, protocol);
+        stat.update_speed(dl_speed, is_multi);
+    }
+
     pub fn get_all_stats(&self) -> Vec<Arc<ServerStat>> {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
         map.values().cloned().collect()
     }
 
     pub fn remove(&self, host: &str) {
-        let mut map = self.stats.write().unwrap();
-        map.remove(host);
+        let mut map = self.stats.recover_mut();
+        // Remove all entries for this host (all protocols)
+        map.retain(|(h, _), _| h != host);
+    }
+
+    /// Remove a specific (host, protocol) entry.
+    pub fn remove_by_protocol(&self, host: &str, protocol: &str) {
+        let key = (host.to_string(), protocol.to_string());
+        let mut map = self.stats.recover_mut();
+        map.remove(&key);
     }
 
     pub fn count(&self) -> usize {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
         map.len()
     }
 
-    pub fn hosts(&self) -> Vec<String> {
-        let map = self.stats.read().unwrap();
-        map.keys().cloned().collect()
+    /// Remove statistics that have not been updated within `max_age`.
+    /// This mirrors aria2_original `removeStaleServerStat` and prevents
+    /// long-running RPC processes from retaining obsolete mirror entries.
+    pub fn remove_stale(&self, max_age: std::time::Duration) -> usize {
+        let now = std::time::SystemTime::now();
+        let mut map = self.stats.recover_mut();
+        let before = map.len();
+        map.retain(|_, stat| {
+            let updated = stat.get_last_updated();
+            if updated == 0 {
+                return false;
+            }
+            let timestamp =
+                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(updated));
+            timestamp
+                .and_then(|time| now.duration_since(time).ok())
+                .is_none_or(|age| age <= max_age)
+        });
+        before.saturating_sub(map.len())
     }
 
-    /// Mark a host as failed, updating error tracking fields.
+    pub fn hosts(&self) -> Vec<String> {
+        let map = self.stats.recover();
+        let mut hosts: Vec<String> = map.keys().map(|(h, _)| h.clone()).collect();
+        hosts.sort();
+        hosts.dedup();
+        hosts
+    }
+
+    /// Mark a host as failed (protocol-agnostic), updating error tracking fields.
+    ///
+    /// Looks up the entry with empty protocol. For protocol-aware failure marking,
+    /// use [`ServerStatMan::mark_failure_with_protocol`].
+    pub fn mark_failure(&self, host: &str, error_code: u16) {
+        self.mark_failure_with_protocol(host, "", error_code);
+    }
+
+    /// Mark a (host, protocol) entry as failed, updating error tracking fields.
     ///
     /// Clones the existing ServerStat, applies failure info via set_failure_info,
     /// and replaces the entry in the map so all future Arc holders see the update.
-    pub fn mark_failure(&self, host: &str, error_code: u16) {
-        let mut map = self.stats.write().unwrap();
-        if let Some(stat_arc) = map.get(host) {
+    pub fn mark_failure_with_protocol(&self, host: &str, protocol: &str, error_code: u16) {
+        let key = (host.to_string(), protocol.to_string());
+        let mut map = self.stats.recover_mut();
+        if let Some(stat_arc) = map.get(&key) {
             // Dereference Arc to get inner ServerStat, then clone the inner value
             let inner: &ServerStat = stat_arc;
             let mut updated = inner.clone();
             updated.set_failure_info(error_code);
-            map.insert(host.to_string(), Arc::new(updated));
+            map.insert(key, Arc::new(updated));
         }
     }
 
@@ -132,7 +245,7 @@ impl ServerStatMan {
     /// println!("Saved {} servers", saved);
     /// ```
     pub fn save_to_file(&self, path: &Path) -> Result<usize, String> {
-        let map = self.stats.read().unwrap();
+        let map = self.stats.recover();
 
         let servers: Vec<ServerStatSnapshot> =
             map.values().map(|stat| stat.to_snapshot()).collect();
@@ -197,11 +310,12 @@ impl ServerStatMan {
             .map_err(|e| format!("Invalid server stat file format: {}", e))?;
 
         let count = file_content.servers.len();
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
 
         for snapshot in file_content.servers {
             let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
-            map.insert(snapshot.host, stat);
+            let key = (snapshot.host.clone(), snapshot.protocol.clone());
+            map.insert(key, stat);
         }
 
         Ok(count)
@@ -223,7 +337,7 @@ impl ServerStatMan {
     pub async fn save_to_file_async(&self, path: &Path) -> Result<usize, String> {
         let path = path.to_path_buf();
         let snapshots: Vec<ServerStatSnapshot> = {
-            let map = self.stats.read().unwrap();
+            let map = self.stats.recover();
             map.values().map(|stat| stat.to_snapshot()).collect()
         };
 
@@ -272,10 +386,11 @@ impl ServerStatMan {
             .map_err(|e| format!("Invalid server stat file format: {}", e))?;
 
         let count = file_content.servers.len();
-        let mut map = self.stats.write().unwrap();
+        let mut map = self.stats.recover_mut();
         for snapshot in file_content.servers {
             let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
-            map.insert(snapshot.host, stat);
+            let key = (snapshot.host.clone(), snapshot.protocol.clone());
+            map.insert(key, stat);
         }
 
         Ok(count)
@@ -372,6 +487,23 @@ mod tests {
     // ======================================================================
     // Tests for mark_failure
     // ======================================================================
+
+    #[test]
+    fn test_remove_stale_removes_never_updated_and_old_entries() {
+        let man = ServerStatMan::new();
+        man.get_or_create_with_protocol("never.example", "http");
+        let recent = man.get_or_create_with_protocol("recent.example", "http");
+        recent.update_speed(1000, false);
+        assert_eq!(
+            man.remove_stale(std::time::Duration::from_secs(24 * 60 * 60)),
+            1
+        );
+        assert!(man.find_stat_by_protocol("never.example", "http").is_none());
+        assert!(
+            man.find_stat_by_protocol("recent.example", "http")
+                .is_some()
+        );
+    }
 
     #[test]
     fn test_mark_failure_updates_stats() {

@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use aria2_core::engine::bt_upload_session::{
     BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider,
@@ -7,6 +9,7 @@ use aria2_core::engine::bt_upload_session::{
 fn test_bt_upload_session_creation() {
     let config = BtSeedingConfig {
         max_upload_bytes_per_sec: Some(50000),
+        global_limiter: None,
         max_peers_to_unchoke: 4,
         optimistic_unchoke_interval_secs: 30,
     };
@@ -83,6 +86,7 @@ fn test_upload_speed_tracking_concept() {
 fn test_seeding_config_limits() {
     let cfg = BtSeedingConfig {
         max_upload_bytes_per_sec: Some(1024 * 1024),
+        global_limiter: None,
         max_peers_to_unchoke: 2,
         optimistic_unchoke_interval_secs: 60,
     };

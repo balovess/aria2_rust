@@ -2,10 +2,16 @@
 //!
 //! Provides parsing of WWW-Authenticate Digest challenges and building
 //! of Authorization header values for HTTP Digest authentication.
+//!
+//! Note: The actual hash computation (MD5/SHA-256/SHA-512-256) delegates to
+//! `crate::auth::digest_auth::DigestAuthProvider`, which provides correct
+//! RFC 7616-compliant hash implementations. This module focuses on the
+//! challenge parsing and response formatting aspects.
 
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::auth::digest_auth::{DigestAlgorithm, DigestAuthProvider};
 use crate::error::Aria2Error;
 
 /// Parsed WWW-Authenticate header for Digest auth challenge
@@ -199,37 +205,36 @@ impl DigestAuthResponse {
         challenge: &DigestAuthChallenge,
         nc: u32,
     ) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        // Determine the hash algorithm from the challenge
+        let algorithm = match challenge.algorithm.to_uppercase().as_str() {
+            "SHA-256" | "SHA-256-SESS" => DigestAlgorithm::Sha256,
+            "SHA-512-256" | "SHA-512-256-SESS" => DigestAlgorithm::Sha512_256,
+            _ => DigestAlgorithm::Md5, // Default: MD5, MD5-SESS
+        };
 
-        /// Simple hash function producing hex string (used as MD5 substitute)
-        fn hash_hex(input: &str) -> String {
-            let mut hasher = DefaultHasher::new();
-            input.hash(&mut hasher);
-            format!("{:016x}", hasher.finish())
-        }
+        // Create a DigestAuthProvider to leverage its correct hash implementations
+        let provider =
+            DigestAuthProvider::new(username.to_string(), password.to_string(), Some(algorithm));
 
-        // Compute HA1 = hash(username:realm:password)
-        let ha1 = hash_hex(&format!("{}:{}:{}", username, challenge.realm, password));
+        // Compute HA1 = H(username:realm:password)
+        let ha1 = provider.compute_ha1(&challenge.realm);
 
-        // Compute HA2 = hash(method:uri)
-        let ha2 = hash_hex(&format!("{}:{}", method, uri));
+        // Compute HA2 = H(method:uri)
+        let ha2 = provider.compute_ha2(method, uri, challenge.qop.as_deref(), None);
 
-        // Generate random cnonce (client nonce)
-        let cnonce = format!("{:016x}", rand_u64());
+        // Generate random cnonce (client nonce) using crypto-quality randomness
+        let cnonce = format!("{:016x}", rand::random::<u64>());
         let nc_str = format!("{:08x}", nc);
 
-        // Compute final response based on whether qop is present
-        let response = if let Some(qop) = &challenge.qop {
-            // With QoP: HA1:nonce:nc:cnonce:qop:HA2
-            hash_hex(&format!(
-                "{}:{}:{}:{}:{}:{}",
-                ha1, challenge.nonce, nc_str, cnonce, qop, ha2
-            ))
-        } else {
-            // Without QoP: HA1:nonce:HA2
-            hash_hex(&format!("{}:{}:{}", ha1, challenge.nonce, ha2))
-        };
+        // Compute final response = KD(HA1, nonce:nc:cnonce:qop:HA2) or KD(HA1, nonce:HA2)
+        let response = provider.compute_response(
+            &ha1,
+            &challenge.nonce,
+            &nc_str,
+            &cnonce,
+            challenge.qop.as_deref(),
+            &ha2,
+        );
 
         DigestAuthResponse {
             username: username.to_string(),
@@ -244,15 +249,6 @@ impl DigestAuthResponse {
             opaque: challenge.opaque.clone(),
         }
     }
-}
-
-/// Generate a pseudo-random u64 value for use as cnonce
-fn rand_u64() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let dur = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    dur.as_nanos() as u64 ^ (dur.as_secs()).wrapping_mul(0x5851F42D4C957F2D)
 }
 
 #[cfg(test)]
@@ -441,5 +437,65 @@ mod tests {
         // Each request should have different cnonce and response
         assert_ne!(resp1.cnonce, resp2.cnonce);
         assert_ne!(resp1.response, resp2.response);
+    }
+
+    /// Verify RFC 2617 known test vector.
+    ///
+    /// Reference values computed from:
+    ///   HA1 = MD5("Mufasa:testrealm@host.com:Circle Of Life") = "939e7578ed9e3c518a452acee763bce9"
+    ///   HA2 = MD5("GET:/dir/index.html") = "39aff3a2bab6126f332b942af96d3366"
+    ///   response = MD5(HA1 ":" nonce ":" nc ":" cnonce ":" qop ":" HA2)
+    ///            = MD5("939e7578ed9e3c518a452acee763bce9:dcd98b7102dd2f0e8b11d0f600bfb0c093:00000001:0a4f113b:auth:39aff3a2bab6126f332b942af96d3366")
+    ///            = "6629fae49393a05397450978507c4ef1"
+    #[test]
+    fn test_rfc2617_known_vector_md5() {
+        // Verify HA1 computation
+        let provider = DigestAuthProvider::new(
+            "Mufasa".to_string(),
+            "Circle Of Life".to_string(),
+            Some(DigestAlgorithm::Md5),
+        );
+        let ha1 = provider.compute_ha1("testrealm@host.com");
+        assert_eq!(
+            ha1, "939e7578ed9e3c518a452acee763bce9",
+            "HA1 should match RFC 2617 test vector"
+        );
+
+        // Verify HA2 computation
+        let ha2 = provider.compute_ha2("GET", "/dir/index.html", None, None);
+        assert_eq!(
+            ha2, "39aff3a2bab6126f332b942af96d3366",
+            "HA2 should match RFC 2617 test vector"
+        );
+
+        // Verify response computation with known cnonce
+        let response = provider.compute_response(
+            &ha1,
+            "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+            "00000001",
+            "0a4f113b",
+            Some("auth"),
+            &ha2,
+        );
+        assert_eq!(
+            response, "6629fae49393a05397450978507c4ef1",
+            "Response should match RFC 2617 test vector"
+        );
+    }
+
+    /// Verify SHA-256 variant produces correct length hash (64 hex chars).
+    #[test]
+    fn test_sha256_digest_produces_64_char_hex() {
+        let provider = DigestAuthProvider::new(
+            "user".to_string(),
+            "pass".to_string(),
+            Some(DigestAlgorithm::Sha256),
+        );
+
+        let ha1 = provider.compute_ha1("testrealm");
+        assert_eq!(ha1.len(), 64, "SHA-256 should produce 64 hex chars");
+
+        let ha2 = provider.compute_ha2("GET", "/test", None, None);
+        assert_eq!(ha2.len(), 64, "SHA-256 should produce 64 hex chars");
     }
 }

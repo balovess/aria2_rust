@@ -1,9 +1,16 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::mock_ftp_server::{MockFtpServer, medium_pattern, small_content};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 async fn start_server() -> MockFtpServer {
     MockFtpServer::start().await
@@ -11,6 +18,46 @@ async fn start_server() -> MockFtpServer {
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
+}
+
+#[test]
+fn test_ftp_uri_parsing_bracketed_ipv6() {
+    let command = FtpDownloadCommand::new(
+        GroupId::new(100),
+        "ftp://user:pass@[::1]:2121/path/file.bin",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(command.timeout().is_some());
+}
+
+#[tokio::test]
+async fn test_ftps_does_not_downgrade_to_plain_ftp() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftps://127.0.0.1:{}/files/small.bin", addr.port());
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(101),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("FTPS command should construct");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), cmd.execute()).await;
+    assert!(
+        result.is_ok(),
+        "an ftps:// request must reject a plaintext FTP server promptly"
+    );
+    assert!(
+        result.unwrap().is_err(),
+        "an ftps:// request must not downgrade to plaintext FTP"
+    );
 }
 
 #[tokio::test]
@@ -41,6 +88,132 @@ async fn test_e2e_ftp_download_small_file() {
 
     let data = std::fs::read(&output_path).expect("读取下载文件失败");
     assert_eq!(data, small_content(), "内容不匹配");
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_max_tries_counts_total_control_attempts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicU32::new(0));
+    let accepted_by_server = Arc::clone(&accepted);
+    let server_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_by_server.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let mut reader = tokio::io::BufReader::new(stream);
+                let writer = reader.get_mut();
+                let _ = writer.write_all(b"220 retry test FTP server\r\n").await;
+                let _ = writer.flush().await;
+
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let verb = line.split_whitespace().next().unwrap_or("");
+                    let response = match verb {
+                        "USER" => b"331 Password required\r\n".as_slice(),
+                        "PASS" => b"230 Login successful\r\n".as_slice(),
+                        "TYPE" => b"421 Service temporarily unavailable\r\n".as_slice(),
+                        _ => b"200 OK\r\n".as_slice(),
+                    };
+                    let writer = reader.get_mut();
+                    if writer.write_all(response).await.is_err() {
+                        return;
+                    }
+                    if writer.flush().await.is_err() || verb == "TYPE" {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+
+    let dir = tmp_dir();
+    let options = DownloadOptions {
+        max_retries: 2,
+        retry_wait: 0,
+        ..DownloadOptions::default()
+    };
+    let url = format!("ftp://{}/retry.bin", addr);
+    let mut command =
+        FtpDownloadCommand::new(GroupId::new(104), &url, &options, dir.path().to_str(), None)
+            .expect("FTP command should construct");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("retry test should not hang");
+    assert!(result.is_err(), "persistent FTP 421 should fail");
+    assert_eq!(
+        accepted.load(Ordering::Relaxed),
+        2,
+        "max-tries=2 means two total FTP control attempts"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_pasv_uses_control_peer_when_host_is_misadvertised() {
+    let server = MockFtpServer::start_with_pasv_advertised_host([127, 0, 0, 2]).await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(102),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("FTP command should construct");
+
+    cmd.execute()
+        .await
+        .expect("PASV data connection should use the control peer");
+    assert_eq!(
+        std::fs::read(dir.path().join("small.bin")).unwrap(),
+        small_content()
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_memory_download_keeps_source_out_of_filesystem() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        ..DownloadOptions::default()
+    };
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(9),
+        &url,
+        &options,
+        dir.path().to_str(),
+        Some("source.torrent"),
+    )
+    .expect("memory FTP command should construct");
+
+    cmd.execute()
+        .await
+        .expect("memory FTP download should succeed");
+
+    assert!(!dir.path().join("source.torrent").exists());
+    let group = cmd
+        .request_group()
+        .expect("FTP command should expose its request group");
+    let group = group.recover();
+    assert!(group.is_in_memory_download());
+    assert_eq!(group.in_memory_data(), Some(small_content().to_vec()));
+    assert_eq!(group.total_length(), small_content().len() as u64);
+    assert!(group.status().is_completed());
 }
 
 #[tokio::test]
@@ -160,7 +333,7 @@ async fn test_e2e_ftp_request_group_progress_tracking() {
     )
     .expect("创建FtpDownloadCommand失败");
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!(
         (progress_before - 0.0).abs() < f64::EPSILON,
         "下载前进度应为0"
@@ -168,14 +341,14 @@ async fn test_e2e_ftp_request_group_progress_tracking() {
 
     cmd.execute().await.expect("FTP下载失败");
 
-    let progress_after = cmd.group().await.progress().await;
+    let progress_after = cmd.group().progress();
     assert!(
         (progress_after - 100.0).abs() < 1.0,
         "下载后进度应接近100%, got: {}",
         progress_after
     );
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 }
 

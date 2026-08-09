@@ -1,0 +1,877 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
+
+use crate::engine::bt_download_command::{
+    BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES, PEER_CONNECTION_DELAY_MS,
+};
+use crate::engine::bt_message_handler::BtMessageHandler;
+use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_peer_interaction::BtPeerInteraction;
+use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
+use crate::engine::bt_piece_selector::BtPieceSelector;
+use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
+use crate::error::{Aria2Error, FatalError, Result};
+use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::request::request_group::BtPeerSnapshot;
+use crate::util::rwlock_ext::RwLockRecover;
+
+use super::super::types::{EndgameState, PeerKey};
+
+fn sync_peer_snapshots(
+    group: &crate::request::request_group::RequestGroup,
+    active_connections: &[BtPeerConn],
+) {
+    let snapshots = active_connections
+        .iter()
+        .filter_map(|conn| {
+            Some(BtPeerSnapshot {
+                peer_id: conn.peer_id.unwrap_or(conn.stats.peer_id),
+                addr: format!("{}:{}", conn.ip_addr, conn.port).parse().ok()?,
+                uploaded_bytes: conn.stats.uploaded_bytes,
+                downloaded_bytes: conn.stats.downloaded_bytes,
+                upload_speed: conn.stats.upload_speed,
+                download_speed: conn.stats.download_speed,
+                avg_upload_speed: conn.stats.avg_upload_speed,
+                avg_download_speed: conn.stats.avg_download_speed,
+                am_choking: conn.stats.am_choking,
+                peer_choking: conn.stats.peer_choking,
+                seeder: Some(conn.seeder),
+                connection_duration_secs: conn.stats.connection_duration_secs(),
+                last_data_age_secs: conn
+                    .stats
+                    .last_data_time
+                    .map_or(conn.stats.age().as_secs(), |time| time.elapsed().as_secs()),
+                is_snubbed: conn.stats.is_snubbed,
+                is_banned: conn.stats.is_banned,
+            })
+        })
+        .collect();
+    group.set_bt_peer_snapshots(snapshots);
+}
+
+struct NewPeerConnectionsContext<'a> {
+    peer_last_data_time: &'a mut HashMap<PeerKey, Instant>,
+    pex_enabled_peers: &'a mut HashSet<PeerKey>,
+    allowed_fast_sent_peers: &'a mut HashMap<PeerKey, HashSet<u32>>,
+    suggest_sent_counts: &'a mut HashMap<PeerKey, usize>,
+    peer_tracker: &'a mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+    choking_algo: &'a mut Option<crate::engine::choking_algorithm::ChokingAlgorithm>,
+}
+
+impl BtDownloadCommand {
+    // Parameters are individually meaningful; grouping into a struct would
+    // reduce clarity for this inner download loop.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn remove_failed_peers(
+        active_connections: &mut Vec<BtPeerConn>,
+        failed_peers: &[std::net::SocketAddr],
+        choking_algo: Option<&mut crate::engine::choking_algorithm::ChokingAlgorithm>,
+        pex_enabled_peers: &mut std::collections::HashSet<PeerKey>,
+        peer_last_data_time: &mut HashMap<PeerKey, Instant>,
+        allowed_fast_sent_peers: &mut HashMap<PeerKey, std::collections::HashSet<u32>>,
+        suggest_sent_counts: &mut HashMap<PeerKey, usize>,
+        endgame_state: &mut EndgameState,
+        peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        peer_storage: &std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
+    ) {
+        if failed_peers.is_empty() {
+            return;
+        }
+        let failed: HashSet<_> = failed_peers.iter().copied().collect();
+        let removed_indices: Vec<_> = active_connections
+            .iter()
+            .enumerate()
+            .filter_map(|(index, conn)| {
+                let address = format!("{}:{}", conn.ip_addr, conn.port).parse().ok()?;
+                failed.contains(&address).then_some(index)
+            })
+            .collect();
+        if removed_indices.is_empty() {
+            return;
+        }
+        for &index in removed_indices.iter().rev() {
+            if let Some(conn) = active_connections.get(index) {
+                peer_tracker.remove_peer(&BtPeerInteraction::peer_tracker_key(conn));
+            }
+        }
+        for &index in removed_indices.iter().rev() {
+            active_connections[index].release_session_resource();
+        }
+        if let Some(algo) = choking_algo {
+            algo.remove_peers(removed_indices.as_slice());
+        }
+        let removed_keys: Vec<_> = removed_indices
+            .iter()
+            .filter_map(|&index| active_connections.get(index))
+            .filter_map(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port))
+            .collect();
+        endgame_state.remove_peers(&removed_keys);
+        let mut removed = Vec::new();
+        active_connections.retain(|conn| {
+            let address =
+                match format!("{}:{}", conn.ip_addr, conn.port).parse::<std::net::SocketAddr>() {
+                    Ok(address) => address,
+                    Err(_) => return true,
+                };
+            if failed.contains(&address) {
+                removed.push(address);
+                false
+            } else {
+                true
+            }
+        });
+        if removed.is_empty() {
+            return;
+        }
+        {
+            let mut storage = peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for address in &removed {
+                storage.return_peer_by_endpoint(&address.ip().to_string(), address.port());
+            }
+        }
+        for peer_key in &removed_keys {
+            pex_enabled_peers.remove(peer_key);
+            peer_last_data_time.remove(peer_key);
+            allowed_fast_sent_peers.remove(peer_key);
+            suggest_sent_counts.remove(peer_key);
+        }
+    }
+
+    fn append_new_connections(
+        active_connections: &mut Vec<BtPeerConn>,
+        mut new_connections: Vec<BtPeerConn>,
+        max_peers: usize,
+        is_private: bool,
+        context: &mut NewPeerConnectionsContext<'_>,
+        peer_storage: &std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
+        caretaker_id: u64,
+    ) -> usize {
+        new_connections.retain(|conn| {
+            let Some(endpoint) = conn.remote_endpoint() else {
+                tracing::debug!("[BT] Dropping new peer without a remote endpoint");
+                return false;
+            };
+            if endpoint.ip().is_unspecified() || endpoint.port() == 0 {
+                tracing::debug!(peer = %endpoint, "[BT] Dropping new peer with invalid endpoint");
+                return false;
+            }
+            true
+        });
+        let checkout_limit = if max_peers == 0 {
+            usize::MAX
+        } else {
+            max_peers.saturating_sub(active_connections.len())
+        };
+        let mut seen_endpoints = HashSet::with_capacity(new_connections.len());
+        new_connections.retain(|conn| {
+            let Some(endpoint) = conn.remote_endpoint() else {
+                return false;
+            };
+            seen_endpoints.insert((endpoint.ip(), endpoint.port()))
+        });
+
+        let mut checked_out_endpoints = Vec::with_capacity(new_connections.len());
+        {
+            let mut storage = peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            new_connections.retain(|conn| {
+                let Some(endpoint) = conn.remote_endpoint() else {
+                    return false;
+                };
+                let entry = crate::engine::bt_peer_storage::PeerEntry::new(
+                    endpoint.ip().to_string(),
+                    endpoint.port(),
+                );
+                if checked_out_endpoints.len() >= checkout_limit
+                    || storage.add_and_checkout_peer(entry, caretaker_id).is_none()
+                {
+                    return false;
+                }
+                checked_out_endpoints.push((endpoint.ip().to_string(), endpoint.port()));
+                true
+            });
+        }
+
+        let previous_len = active_connections.len();
+        active_connections.extend(new_connections);
+        let connected = active_connections.len() - previous_len;
+        {
+            let mut storage = peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (ip, port) in &checked_out_endpoints {
+                storage.set_peer_active(ip, *port, true);
+            }
+        }
+        if connected == 0 {
+            return 0;
+        }
+
+        tracing::debug!(connected, "[BT] Added new peer connections");
+
+        for conn in &active_connections[previous_len..] {
+            let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
+                continue;
+            };
+            context.peer_last_data_time.insert(peer_key, Instant::now());
+            context.allowed_fast_sent_peers.entry(peer_key).or_default();
+            context.suggest_sent_counts.entry(peer_key).or_insert(0);
+            if !is_private {
+                context.pex_enabled_peers.insert(peer_key);
+            }
+            let bitfield = conn
+                .session_resource
+                .as_ref()
+                .map_or(&[][..], |resource| resource.bitfield());
+            context
+                .peer_tracker
+                .update_peer_bitfield(&BtPeerInteraction::peer_tracker_key(conn), bitfield);
+        }
+
+        if let Some(algo) = context.choking_algo.as_mut() {
+            for conn in &active_connections[previous_len..] {
+                algo.add_peer(conn.stats.clone());
+            }
+        }
+        connected
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn download_pieces_loop(
+        &mut self,
+        active_connections: &mut Vec<BtPeerConn>,
+        meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        piece_length: u32,
+        total_size: u64,
+        num_pieces: u32,
+        web_seed_manager: Option<&crate::engine::bt_web_seed::WebSeedManager>,
+        pex_enabled_peers: &mut HashSet<PeerKey>,
+        last_pex_send: &mut Instant,
+        pex_send_interval_secs: u64,
+        verified_piece_indices: &[usize],
+    ) -> Result<()> {
+        // Single-file torrents are written with a positioned + cached writer:
+        // BT downloads pieces out of order (RarestFirst etc.), so writes must
+        // target the piece offset — the old sequential `write()` appended
+        // pieces in arrival order and silently corrupted the file whenever
+        // pieces did not arrive in index order. The write-back cache also
+        // coalesces adjacent pieces before flushing (C++ WrDiskCache usage).
+        // Multi-file torrents go through the coalesced per-file writer below.
+        let cache_mb: Option<usize> = Some(16);
+        let raw_writer: Box<dyn SeekableDiskWriter> = if self.multi_file_layout.is_none() {
+            Box::new(CachedDiskWriter::new(
+                &self.output_path,
+                Some(total_size),
+                cache_mb,
+            ))
+        } else {
+            Box::new(
+                crate::filesystem::positioned_disk_writer::PositionedDiskWriter::new(
+                    &self.output_path,
+                    Some(total_size),
+                ),
+            )
+        };
+        let rate_limit = {
+            let g = self.group.recover();
+            g.options().max_download_limit
+        };
+        // Global (process-wide) limiter: when present and enabled, the writer
+        // acquires tokens after the per-download limiter so all concurrent
+        // downloads share a single bandwidth ceiling.
+        let global_limited = self
+            .global_limiter
+            .as_ref()
+            .is_some_and(|g| g.is_download_limited());
+        let mut writer: Box<dyn SeekableDiskWriter> = if rate_limit.is_some() || global_limited {
+            let per_limiter = rate_limit
+                .filter(|&r| r > 0)
+                .map(|rate| RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)));
+            let limiter = per_limiter.unwrap_or_else(RateLimiter::unlimited);
+            let mut tw = ThrottledWriter::new(raw_writer, limiter);
+            if let Some(ref gl) = self.global_limiter {
+                tw = tw.with_global_limiter(gl.clone());
+            }
+            Box::new(tw)
+        } else {
+            raw_writer
+        };
+        let start_time = Instant::now();
+        let mut last_speed_update = Instant::now();
+        let mut last_completed = 0u64;
+
+        // P1 integration: progress save time tracking
+        let mut last_progress_save = Instant::now();
+
+        let piece_selector = BtPieceSelector::new(num_pieces);
+
+        let mut piece_manager = aria2_protocol::bittorrent::piece::manager::PieceManager::new(
+            num_pieces,
+            piece_length,
+            total_size,
+            meta.info.pieces.clone(),
+        );
+
+        let mut piece_picker =
+            aria2_protocol::bittorrent::piece::picker::PiecePicker::new(num_pieces);
+        piece_picker.set_strategy(
+            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::Sequential,
+        );
+
+        // G2: Set piece priority mode from config option (--bt-prioritize-piece)
+        let prioritize_piece_mode = {
+            let g = self.group.recover();
+            g.options().bt_prioritize_piece.clone()
+        };
+        match prioritize_piece_mode.as_str() {
+            "head" => {
+                piece_picker.set_priority_mode(
+                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialHead,
+                );
+                info!("[BT] Piece priority mode: SequentialHead (from start)");
+            }
+            "tail" => {
+                piece_picker.set_priority_mode(
+                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialTail,
+                );
+                info!("[BT] Piece priority mode: SequentialTail (from end)");
+            }
+            _ => {
+                piece_picker.set_priority_mode(
+                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::RarestFirst,
+                );
+                info!("[BT] Piece priority mode: RarestFirst (default)");
+            }
+        }
+
+        let mut peer_tracker =
+            aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker::new(num_pieces);
+        BtPeerInteraction::initialize_peer_tracking(
+            active_connections,
+            num_pieces,
+            &mut peer_tracker,
+        );
+
+        for &index in verified_piece_indices {
+            if index < num_pieces as usize {
+                piece_picker.mark_completed(index as u32);
+                piece_manager.mark_piece_complete(index as u32);
+            }
+        }
+        piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
+
+        tracing::info!(
+            "[BT] Piece selection strategy: {:?}, {} pieces total, {} peers tracked",
+            piece_picker.priority_mode(),
+            num_pieces,
+            peer_tracker.peer_count()
+        );
+
+        // Phase 14 - B1: Initialize endgame state for this download session
+        let mut endgame_state = EndgameState::new();
+
+        // G1: Snub detection state - track last data received time per peer index
+        let mut peer_last_data_time: HashMap<PeerKey, Instant> = HashMap::new();
+        let mut last_snub_check = Instant::now();
+
+        // Initialize last-data-time tracking for all active peers
+        for conn in active_connections.iter() {
+            if let Some(key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
+                peer_last_data_time.insert(key, Instant::now());
+            }
+        }
+
+        loop {
+            self.drain_incoming_peers(active_connections, piece_length, total_size);
+            self.bt_runtime.set_connections(active_connections.len());
+
+            let halt_requested = {
+                let group = self.group.recover();
+                group.is_force_halt_requested() || group.is_halt_requested()
+            };
+            if halt_requested {
+                writer.flush().await.map_err(|error| {
+                    Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
+                })?;
+                writer.close().await.map_err(|error| {
+                    Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                })?;
+                return Err(Aria2Error::DownloadFailed(
+                    "BitTorrent download halted".into(),
+                ));
+            }
+            if BtPieceSelector::is_complete(&piece_picker) {
+                if endgame_state.is_endgame_active() {
+                    endgame_state.exit_endgame();
+                }
+                break;
+            }
+
+            // Phase 14 - B1: Check if we should enter endgame mode
+            let endgame_candidates = piece_picker.endgame_candidates();
+            if !endgame_candidates.is_empty() && !endgame_state.is_endgame_active() {
+                endgame_state.enter_endgame();
+                info!(
+                    "[BT] Endgame mode activated: {}/{} pieces remaining",
+                    endgame_candidates.len(),
+                    num_pieces
+                );
+            } else if endgame_candidates.is_empty() && endgame_state.is_endgame_active() {
+                endgame_state.exit_endgame();
+            }
+
+            // G1: Periodic snub detection via extracted helper
+            self.check_and_mark_snubbed_peers(
+                &mut last_snub_check,
+                &peer_last_data_time,
+                active_connections,
+            );
+            {
+                let group = self.group.recover();
+                sync_peer_snapshots(&group, active_connections);
+            }
+
+            // PEX Integration: Periodic PEX message sending (BEP 11)
+            super::pex::send_periodic_pex(
+                self,
+                active_connections,
+                pex_enabled_peers,
+                last_pex_send,
+                pex_send_interval_secs,
+            )
+            .await;
+
+            // PEX Integration: Drain inbound PEX peers from all connections.
+            // Peers are accumulated during block reads (in
+            // BtMessageHandler::wait_for_piece_block) and stashed on
+            // BtPeerConn::pending_pex_peers. Here we drain them and add
+            // to our known-peers list.
+            let mut all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
+                Vec::new();
+            for conn in active_connections.iter_mut() {
+                let peers = conn.drain_pex_peers();
+                if !peers.is_empty() {
+                    for peer in &peers {
+                        self.add_pex_peer(peer.clone());
+                    }
+                    all_new_pex_peers.extend(peers);
+                }
+            }
+            if !all_new_pex_peers.is_empty() {
+                info!(
+                    "[PEX] Drained {} inbound peers from connections, attempting to connect",
+                    all_new_pex_peers.len()
+                );
+                // Attempt to connect to PEX-discovered peers
+                let new_connections = self
+                    .connect_to_discovered_peers(
+                        &all_new_pex_peers,
+                        &meta.info_hash.bytes,
+                        num_pieces,
+                        active_connections,
+                        piece_length,
+                        total_size,
+                    )
+                    .await;
+                let mut context = NewPeerConnectionsContext {
+                    peer_last_data_time: &mut peer_last_data_time,
+                    pex_enabled_peers,
+                    allowed_fast_sent_peers: &mut self.allowed_fast_sent_peers,
+                    suggest_sent_counts: &mut self.suggest_sent_counts,
+                    peer_tracker: &mut peer_tracker,
+                    choking_algo: &mut self.choking_algo,
+                };
+                let connected = Self::append_new_connections(
+                    active_connections,
+                    new_connections,
+                    self.group.recover().options().bt_max_peers,
+                    self.is_private,
+                    &mut context,
+                    &self.peer_storage,
+                    self.group.recover().gid().value(),
+                );
+                if connected > 0 {
+                    info!("[PEX] Successfully connected to {} new peers", connected);
+                    let group = self.group.recover();
+                    sync_peer_snapshots(&group, active_connections);
+                }
+            }
+
+            // Keep tracker numwant aligned with the live peer command count,
+            // then re-announce when the tracker interval permits it.
+            self.update_tracker_peer_state(active_connections.len());
+            if self.should_discover_more_peers(active_connections.len()) {
+                let new_peers = self
+                    .periodic_tracker_announce(
+                        &meta.info_hash.bytes,
+                        self.completed_bytes,
+                        total_size.saturating_sub(self.completed_bytes),
+                        self.total_uploaded,
+                    )
+                    .await;
+                if !new_peers.is_empty() {
+                    info!(
+                        "[BT] Periodic tracker announce found {} new peers",
+                        new_peers.len()
+                    );
+                    // Connect to newly discovered peers
+                    let new_connections = self
+                        .connect_to_discovered_peers(
+                            &new_peers,
+                            &meta.info_hash.bytes,
+                            num_pieces,
+                            active_connections,
+                            piece_length,
+                            total_size,
+                        )
+                        .await;
+                    let mut context = NewPeerConnectionsContext {
+                        peer_last_data_time: &mut peer_last_data_time,
+                        pex_enabled_peers,
+                        allowed_fast_sent_peers: &mut self.allowed_fast_sent_peers,
+                        suggest_sent_counts: &mut self.suggest_sent_counts,
+                        peer_tracker: &mut peer_tracker,
+                        choking_algo: &mut self.choking_algo,
+                    };
+                    let connected = Self::append_new_connections(
+                        active_connections,
+                        new_connections,
+                        self.group.recover().options().bt_max_peers,
+                        self.is_private,
+                        &mut context,
+                        &self.peer_storage,
+                        self.group.recover().gid().value(),
+                    );
+                    if connected > 0 {
+                        info!("[BT] Connected to {} new peers", connected);
+                        let group = self.group.recover();
+                        sync_peer_snapshots(&group, active_connections);
+                    }
+                }
+            }
+
+            let remaining = piece_picker.remaining_count();
+            let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
+
+            let next_piece_idx = match selection.piece_index {
+                Some(idx) => idx,
+                None => {
+                    tracing::debug!("[BT] No piece available, waiting...");
+                    tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
+                    continue;
+                }
+            };
+
+            tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
+
+            let actual_piece_len =
+                piece_selector.calculate_piece_length(next_piece_idx, piece_length, total_size);
+
+            let num_blocks = BtPieceSelector::calculate_num_blocks(actual_piece_len, BLOCK_SIZE);
+            tracing::debug!(
+                "[BT] Piece {} has {} blocks (size: {} bytes)",
+                next_piece_idx,
+                num_blocks,
+                actual_piece_len
+            );
+            let mut piece_ok = false;
+
+            // Phase 14 - B1: Use endgame-aware download when in endgame mode
+            let download_result = if endgame_state.is_endgame_active() {
+                info!(
+                    "[BT] Endgame: downloading piece {} with duplicate requests ({} peers available)",
+                    next_piece_idx,
+                    active_connections.len()
+                );
+                BtMessageHandler::download_piece_blocks_endgame_with_sources(
+                    active_connections,
+                    next_piece_idx as u32,
+                    actual_piece_len,
+                    num_blocks,
+                    &mut endgame_state,
+                    self.dht_engine.clone(),
+                )
+                .await
+            } else {
+                BtMessageHandler::download_piece_blocks_with_sources(
+                    active_connections,
+                    next_piece_idx as u32,
+                    actual_piece_len,
+                    num_blocks,
+                    self.dht_engine.clone(),
+                )
+                .await
+            };
+
+            match download_result {
+                Ok(piece_result) => {
+                    let piece_data = piece_result.data;
+                    let piece_data_len = piece_data.len();
+
+                    // Consume peer indices before failed connections are removed and the Vec compacts.
+                    for peer_download in &piece_result.peer_bytes {
+                        let Some(conn) = active_connections.get(peer_download.peer_index) else {
+                            tracing::debug!(
+                                peer_index = peer_download.peer_index,
+                                peer = %peer_download.peer,
+                                "Discarding peer byte accounting for stale connection index"
+                            );
+                            continue;
+                        };
+                        let Some(address) = format!("{}:{}", conn.ip_addr, conn.port)
+                            .parse::<std::net::SocketAddr>()
+                            .ok()
+                        else {
+                            continue;
+                        };
+                        if address != peer_download.peer {
+                            tracing::debug!(
+                                peer_index = peer_download.peer_index,
+                                expected = %peer_download.peer,
+                                actual = %address,
+                                "Discarding peer byte accounting for mismatched connection"
+                            );
+                            continue;
+                        }
+                        let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
+                            continue;
+                        };
+                        active_connections[peer_download.peer_index]
+                            .stats
+                            .on_data_received(peer_download.bytes);
+                        self.on_data_received_from_peer(
+                            peer_download.peer_index,
+                            peer_download.bytes,
+                        );
+                        peer_last_data_time.insert(peer_key, Instant::now());
+                    }
+
+                    Self::remove_failed_peers(
+                        active_connections,
+                        &piece_result.failed_peers,
+                        self.choking_algo.as_mut(),
+                        pex_enabled_peers,
+                        &mut peer_last_data_time,
+                        &mut self.allowed_fast_sent_peers,
+                        &mut self.suggest_sent_counts,
+                        &mut endgame_state,
+                        &mut peer_tracker,
+                        &self.peer_storage,
+                    );
+                    self.update_tracker_peer_state(active_connections.len());
+                    {
+                        let group = self.group.recover();
+                        sync_peer_snapshots(&group, active_connections);
+                    }
+
+                    tracing::info!(
+                        "[BT] All blocks received for piece {}, verifying...",
+                        next_piece_idx
+                    );
+                    if piece_manager.verify_piece_hash(next_piece_idx as u32, &piece_data) {
+                        tracing::info!("[BT] Piece {} verified OK", next_piece_idx);
+                        piece_manager.mark_piece_complete(next_piece_idx as u32);
+                        piece_picker.mark_completed(next_piece_idx as u32);
+
+                        let piece_bytes = bytes::Bytes::from(piece_data);
+                        if let Some(ref layout) = self.multi_file_layout {
+                            write_piece_to_multi_files_coalesced(
+                                layout,
+                                next_piece_idx as u32,
+                                &piece_bytes,
+                                layout.piece_length(),
+                            )
+                            .await?;
+                        } else {
+                            writer
+                                .write_bytes_at(
+                                    next_piece_idx as u64 * piece_length as u64,
+                                    piece_bytes,
+                                )
+                                .await?;
+                        }
+
+                        self.completed_bytes += piece_data_len as u64;
+
+                        // Sync bitfield to RequestGroup for session persistence
+                        {
+                            let bitfield = piece_picker.export_bitfield();
+                            let g = self.group.recover();
+                            g.set_bt_bitfield(Some(bitfield));
+                        }
+
+                        BtPeerInteraction::broadcast_have(
+                            active_connections,
+                            next_piece_idx as u32,
+                        )
+                        .await;
+                        piece_ok = true;
+
+                        // P1 integration: periodically save download progress
+                        self.maybe_save_progress(
+                            meta,
+                            piece_length,
+                            total_size,
+                            num_pieces,
+                            start_time,
+                            &mut last_progress_save,
+                            next_piece_idx,
+                        );
+                    } else {
+                        tracing::warn!(
+                            "[BT] SHA1 mismatch on piece {}, retrying...",
+                            next_piece_idx
+                        );
+                        tracing::warn!(
+                            "[BT] Piece {} hash verification FAILED - potential bad peer detected",
+                            next_piece_idx
+                        );
+                        let mut peer_bytes = piece_result.peer_bytes.iter();
+                        let unique_peer = peer_bytes
+                            .next()
+                            .filter(|first| peer_bytes.all(|peer| peer.peer == first.peer));
+                        if let Some(peer_download) = unique_peer {
+                            let peer_ip = peer_download.peer.ip().to_string();
+                            self.reject_peer_temporarily(&peer_ip);
+                            tracing::warn!(
+                                peer = %peer_download.peer,
+                                piece = next_piece_idx,
+                                "Rejected peer after a piece hash mismatch"
+                            );
+                        } else {
+                            tracing::debug!(
+                                piece = next_piece_idx,
+                                "Piece used multiple or unknown peers; no peer was rejected"
+                            );
+                        }
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "[BT] Incomplete piece {}, needed {} blocks",
+                        next_piece_idx,
+                        num_blocks
+                    );
+                }
+            }
+
+            if !piece_ok {
+                // Try Web Seeds as fallback (BEP 19)
+                piece_ok = super::web_seed::try_web_seed_fallback(
+                    self,
+                    web_seed_manager,
+                    next_piece_idx,
+                    &mut piece_manager,
+                    &mut piece_picker,
+                    &mut writer,
+                    piece_length,
+                )
+                .await?;
+
+                if !piece_ok {
+                    tracing::error!(
+                        "[BT] Piece {} failed after {} retries (peers and web seeds)",
+                        next_piece_idx,
+                        MAX_RETRIES
+                    );
+                    return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                        "Piece {} download failed after {} retries",
+                        next_piece_idx, MAX_RETRIES
+                    ))));
+                }
+            }
+
+            {
+                self.progress.set_completed_length(self.completed_bytes);
+
+                let elapsed = last_speed_update.elapsed();
+                if elapsed.as_millis() >= 500 {
+                    let delta = self.completed_bytes - last_completed;
+                    let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
+                    self.progress.set_download_speed(speed);
+                    self.progress.set_upload_speed(0);
+                    last_speed_update = Instant::now();
+                    last_completed = self.completed_bytes;
+                }
+            }
+        }
+
+        tracing::info!("[BT] Finalizing writer...");
+        writer
+            .flush()
+            .await
+            .map_err(|error| Aria2Error::FileIo(format!("Failed to flush BT output: {error}")))?;
+        writer
+            .close()
+            .await
+            .map_err(|error| Aria2Error::FileIo(format!("Failed to close BT output: {error}")))?;
+        tracing::info!("[BT] Writer flushed and closed OK");
+        info!(
+            "BT download done: {} ({} bytes)",
+            self.output_path.display(),
+            self.completed_bytes
+        );
+
+        Ok(())
+    }
+
+    /// Periodically save download progress to .aria2 file (P1 integration).
+    /// Called after a piece is successfully verified and written.
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_save_progress(
+        &self,
+        meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        piece_length: u32,
+        total_size: u64,
+        num_pieces: u32,
+        start_time: Instant,
+        last_progress_save: &mut Instant,
+        next_piece_idx: usize,
+    ) {
+        if let Some(ref mgr) = self.progress_manager
+            && last_progress_save.elapsed() >= self.progress_save_interval
+        {
+            let progress = BtProgress {
+                info_hash: meta.info_hash.bytes,
+                bitfield: vec![],
+                peers: vec![],
+                stats: ProgressDownloadStats {
+                    downloaded_bytes: self.completed_bytes,
+                    uploaded_bytes: self.total_uploaded,
+                    upload_speed: 0.0,
+                    download_speed: 0.0,
+                    elapsed_seconds: start_time.elapsed().as_secs(),
+                },
+                piece_length,
+                total_size,
+                num_pieces,
+                upload_length: self.total_uploaded,
+                in_flight_pieces: vec![],
+                is_torrent: true,
+                save_time: std::time::SystemTime::now(),
+                version: 1,
+            };
+
+            if let Err(e) = mgr.save_progress(&meta.info_hash.bytes, &progress) {
+                warn!(error = %e, "Failed to save BT progress");
+            } else {
+                debug!(
+                    pieces_completed = next_piece_idx + 1,
+                    total_pieces = num_pieces,
+                    "BT progress saved successfully"
+                );
+            }
+            *last_progress_save = Instant::now();
+        }
+    }
+}

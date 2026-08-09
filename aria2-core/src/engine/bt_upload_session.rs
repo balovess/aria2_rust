@@ -5,16 +5,20 @@ use crate::rate_limiter::RateLimiter;
 use crate::rate_limiter::RateLimiterConfig;
 
 use aria2_protocol::bittorrent::message::types::BtMessage;
+use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 
 pub trait PieceDataProvider: Send + Sync {
     fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>>;
     fn has_piece(&self, piece_index: u32) -> bool;
     fn num_pieces(&self) -> u32;
+    fn piece_length(&self) -> u32;
 }
 
 pub struct BtSeedingConfig {
     pub max_upload_bytes_per_sec: Option<u64>,
+    /// Process-wide limiter shared by all download/seeding commands.
+    pub global_limiter: Option<RateLimiter>,
     pub max_peers_to_unchoke: usize,
     pub optimistic_unchoke_interval_secs: u64,
 }
@@ -23,6 +27,7 @@ impl Default for BtSeedingConfig {
     fn default() -> Self {
         Self {
             max_upload_bytes_per_sec: None,
+            global_limiter: None,
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         }
@@ -35,6 +40,8 @@ pub struct BtUploadSession {
     peer_interested: bool,
     uploaded_bytes: u64,
     upload_limiter: Option<RateLimiter>,
+    global_upload_limiter: Option<RateLimiter>,
+    message_validator: Option<BtMessageValidator>,
     pub(crate) is_dead: bool,
 }
 
@@ -51,8 +58,14 @@ impl BtUploadSession {
             peer_interested: false,
             uploaded_bytes: 0,
             upload_limiter,
+            global_upload_limiter: config.global_limiter.clone(),
+            message_validator: None,
             is_dead: false,
         }
+    }
+
+    pub fn configure_message_validator(&mut self, num_pieces: u32, piece_length: u32) {
+        self.message_validator = Some(BtMessageValidator::new(num_pieces, piece_length));
     }
 
     pub async fn handle_incoming_messages(
@@ -67,98 +80,119 @@ impl BtUploadSession {
 
         loop {
             match self.conn.read_message().await {
-                Ok(Some(msg)) => match msg {
-                    BtMessage::Request { request } => {
-                        if !self.am_choke_state && self.peer_interested {
-                            debug!(
-                                "Upload request: piece={}, offset={}, len={}",
-                                request.index, request.begin, request.length
-                            );
+                Ok(Some(msg)) => {
+                    if let Some(validator) = &self.message_validator
+                        && let Err(error) = validator.validate(&msg)
+                    {
+                        warn!("Invalid BitTorrent upload message: {}", error);
+                        self.is_dead = true;
+                        break;
+                    }
+                    match msg {
+                        BtMessage::Request { request } => {
+                            if !self.am_choke_state && self.peer_interested {
+                                debug!(
+                                    "Upload request: piece={}, offset={}, len={}",
+                                    request.index, request.begin, request.length
+                                );
 
-                            let data = provider.get_piece_data(
-                                request.index,
-                                request.begin,
-                                request.length,
-                            );
-                            if let Some(piece_data) = data {
-                                let data_len = piece_data.len() as u64;
-                                if let Some(ref lim) = self.upload_limiter {
-                                    lim.acquire_upload(data_len).await;
-                                }
-                                self.conn.send_message(&BtMessage::Piece {
+                                let data = provider.get_piece_data(
+                                    request.index,
+                                    request.begin,
+                                    request.length,
+                                );
+                                if let Some(piece_data) = data {
+                                    let data_len = piece_data.len() as u64;
+                                    if let Some(ref lim) = self.upload_limiter {
+                                        lim.acquire_upload(data_len).await;
+                                    }
+                                    if let Some(ref lim) = self.global_upload_limiter
+                                        && lim.is_upload_limited()
+                                    {
+                                        lim.acquire_upload(data_len).await;
+                                    }
+                                    self.conn.send_message(&BtMessage::Piece {
                                         index: request.index,
                                         begin: request.begin,
                                         data: piece_data,
                                     }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
                                         crate::error::RecoverableError::TemporaryNetworkFailure { message: e }
                                     ))?;
-                                self.uploaded_bytes += data_len;
+                                    self.uploaded_bytes += data_len;
+                                } else {
+                                    warn!(
+                                        "No data for piece {} at offset {}",
+                                        request.index, request.begin
+                                    );
+                                }
                             } else {
-                                warn!(
-                                    "No data for piece {} at offset {}",
-                                    request.index, request.begin
+                                debug!(
+                                    "Ignoring request: choked={} interested={}",
+                                    self.am_choke_state, self.peer_interested
                                 );
                             }
-                        } else {
+                        }
+                        BtMessage::Interested => {
+                            self.peer_interested = true;
+                            if !self.am_choke_state {
+                                self.conn.send_unchoke().await.ok();
+                            }
+                        }
+                        BtMessage::NotInterested => {
+                            self.peer_interested = false;
+                        }
+                        BtMessage::Choke => {
+                            debug!("Peer choked us");
+                        }
+                        BtMessage::Unchoke => {
+                            debug!("Peer unchoked us");
+                        }
+                        BtMessage::Have { piece_index } => {
+                            debug!("Peer has piece {}", piece_index);
+                        }
+                        BtMessage::Cancel { request } => {
                             debug!(
-                                "Ignoring request: choked={} interested={}",
-                                self.am_choke_state, self.peer_interested
+                                "Peer cancelled request for piece {} offset {}",
+                                request.index, request.begin
+                            );
+                        }
+                        BtMessage::Piece { .. } => {
+                            debug!("Unexpected Piece from peer during seeding");
+                        }
+                        BtMessage::Bitfield { .. } => {}
+                        BtMessage::KeepAlive => {}
+                        BtMessage::Port { port: _ } => {}
+                        BtMessage::AllowedFast { index } => {
+                            debug!("Received AllowedFast for piece {}", index);
+                        }
+                        BtMessage::Reject {
+                            index,
+                            offset,
+                            length,
+                        } => {
+                            debug!(
+                                "Received Reject for piece {} offset {} len {}",
+                                index, offset, length
+                            );
+                        }
+                        BtMessage::Suggest { index } => {
+                            debug!("Received Suggest for piece {}", index);
+                        }
+                        BtMessage::HaveAll => {
+                            debug!("Received HaveAll");
+                        }
+                        BtMessage::HaveNone => {
+                            debug!("Received HaveNone");
+                        }
+                        BtMessage::Extended { ext_id, payload } => {
+                            debug!(
+                                "Received Extended message: ext_id={}, payload_len={}",
+                                ext_id,
+                                payload.len()
                             );
                         }
                     }
-                    BtMessage::Interested => {
-                        self.peer_interested = true;
-                        if !self.am_choke_state {
-                            self.conn.send_unchoke().await.ok();
-                        }
-                    }
-                    BtMessage::NotInterested => {
-                        self.peer_interested = false;
-                    }
-                    BtMessage::Choke => {
-                        debug!("Peer choked us");
-                    }
-                    BtMessage::Unchoke => {
-                        debug!("Peer unchoked us");
-                    }
-                    BtMessage::Have { piece_index } => {
-                        debug!("Peer has piece {}", piece_index);
-                    }
-                    BtMessage::Cancel { request } => {
-                        debug!(
-                            "Peer cancelled request for piece {} offset {}",
-                            request.index, request.begin
-                        );
-                    }
-                    BtMessage::Piece { .. } => {
-                        debug!("Unexpected Piece from peer during seeding");
-                    }
-                    BtMessage::Bitfield { .. } => {}
-                    BtMessage::KeepAlive => {}
-                    BtMessage::Port { port: _ } => {}
-                    BtMessage::AllowedFast { index } => {
-                        debug!("Received AllowedFast for piece {}", index);
-                    }
-                    BtMessage::Reject {
-                        index,
-                        offset,
-                        length,
-                    } => {
-                        debug!(
-                            "Received Reject for piece {} offset {} len {}",
-                            index, offset, length
-                        );
-                    }
-                    BtMessage::Suggest { index } => {
-                        debug!("Received Suggest for piece {}", index);
-                    }
-                    BtMessage::HaveAll => {
-                        debug!("Received HaveAll");
-                    }
-                    BtMessage::HaveNone => {
-                        debug!("Received HaveNone");
-                    }
-                },
+                }
                 Ok(None) => {
                     debug!("EOF from peer, marking session as dead");
                     self.is_dead = true;
@@ -209,6 +243,12 @@ impl BtUploadSession {
 
     pub fn is_dead(&self) -> bool {
         self.is_dead
+    }
+
+    pub fn endpoint(&self) -> Option<(String, u16)> {
+        self.conn
+            .remote_addr()
+            .map(|addr| (addr.ip().to_string(), addr.port()))
     }
 
     pub fn uploaded_bytes(&self) -> u64 {
@@ -282,6 +322,10 @@ impl PieceDataProvider for InMemoryPieceProvider {
 
     fn num_pieces(&self) -> u32 {
         self.pieces.len() as u32
+    }
+
+    fn piece_length(&self) -> u32 {
+        16 * 1024
     }
 }
 

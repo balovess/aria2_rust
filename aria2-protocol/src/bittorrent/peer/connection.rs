@@ -21,13 +21,32 @@ impl PeerAddr {
         }
     }
 
+    /// Compact peer format sizes for IPv4 and IPv6.
+    pub const COMPACT_SIZE_V4: usize = 6;
+    pub const COMPACT_SIZE_V6: usize = 18;
+
+    /// Decode from IPv4 compact format (4-byte IP + 2-byte port = 6 bytes).
     pub fn from_compact(data: &[u8]) -> Option<Self> {
-        if data.len() < 6 {
+        if data.len() < Self::COMPACT_SIZE_V4 {
             return None;
         }
         let ip = format!("{}.{}.{}.{}", data[0], data[1], data[2], data[3]);
         let port = u16::from_be_bytes([data[4], data[5]]);
         Some(Self { ip, port })
+    }
+
+    /// Decode from IPv6 compact format (16-byte IP + 2-byte port = 18 bytes).
+    pub fn from_compact_v6(data: &[u8]) -> Option<Self> {
+        if data.len() < Self::COMPACT_SIZE_V6 {
+            return None;
+        }
+        let ip_bytes: [u8; 16] = data[..16].try_into().ok()?;
+        let ipv6 = std::net::Ipv6Addr::from(ip_bytes);
+        let port = u16::from_be_bytes([data[16], data[17]]);
+        Some(Self {
+            ip: ipv6.to_string(),
+            port,
+        })
     }
 
     pub fn to_socket_addr(&self) -> std::net::SocketAddr {
@@ -36,6 +55,7 @@ impl PeerAddr {
             .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap())
     }
 
+    /// Encode to IPv4 compact format (4-byte IP + 2-byte port = 6 bytes).
     pub fn to_compact(&self) -> [u8; 6] {
         let mut buf = [0u8; 6];
         if let Ok(addr) = self.ip.parse::<std::net::Ipv4Addr>() {
@@ -44,10 +64,20 @@ impl PeerAddr {
         }
         buf
     }
+
+    /// Encode to IPv6 compact format (16-byte IP + 2-byte port = 18 bytes).
+    pub fn to_compact_v6(&self) -> Option<[u8; 18]> {
+        let addr = self.ip.parse::<std::net::Ipv6Addr>().ok()?;
+        let mut buf = [0u8; 18];
+        buf[..16].copy_from_slice(&addr.octets());
+        buf[16..18].copy_from_slice(&self.port.to_be_bytes());
+        Some(buf)
+    }
 }
 
 pub struct PeerConnection {
     stream: TcpStream,
+    remote_addr: Option<std::net::SocketAddr>,
     pub state: PeerState,
     pub remote_peer_id: Option<[u8; 20]>,
     pub remote_bitfield: Vec<u8>,
@@ -63,8 +93,8 @@ impl PeerConnection {
             tokio::net::TcpStream::connect(&socket_addr),
         )
         .await
-        .map_err(|_| format!("连接peer超时: {}", socket_addr))?
-        .map_err(|e| format!("连接peer失败: {}", e))?;
+        .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+        .map_err(|e| format!("Peer connection failed: {}", e))?;
 
         Self::from_stream(stream, info_hash).await
     }
@@ -80,8 +110,36 @@ impl PeerConnection {
         stream
             .write_all(&handshake_bytes)
             .await
-            .map_err(|e| format!("发送握手失败: {}", e))?;
+            .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
+        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash).await?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
+    /// Complete the server side of a BitTorrent handshake.
+    ///
+    /// Incoming peers send their handshake first.  The listener must validate
+    /// the torrent identity before admitting the endpoint to PeerStorage, then
+    /// reply with our handshake and keep the stream for the upload/download
+    /// session.
+    pub async fn from_incoming_stream(
+        mut stream: tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash).await?;
+        let handshake = Handshake::new(info_hash, local_peer_id);
+        stream
+            .write_all(&handshake.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to send handshake response: {}", e))?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
+    async fn read_remote_handshake(
+        stream: &mut tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+    ) -> Result<Handshake, String> {
         let mut response = [0u8; 68];
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -90,20 +148,29 @@ impl PeerConnection {
         .await
         {
             Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(format!("读取握手响应失败: {}", e)),
-            Err(_) => return Err("读取握手响应超时".to_string()),
+            Ok(Err(e)) => return Err(format!("Failed to read handshake response: {}", e)),
+            Err(_) => return Err("Handshake response timeout".to_string()),
         }
 
         let remote_hs = Handshake::parse(&response)?;
-
         if remote_hs.info_hash != *info_hash {
-            return Err("info_hash不匹配".to_string());
+            return Err("info_hash mismatch".to_string());
         }
+        Ok(remote_hs)
+    }
 
-        info!("Peer握手成功: peer_id={}", remote_hs.peer_id_str());
-
+    fn finish_handshake(
+        stream: tokio::net::TcpStream,
+        remote_hs: Handshake,
+    ) -> Result<Self, String> {
+        info!(
+            "Peer handshake successful: peer_id={}",
+            remote_hs.peer_id_str()
+        );
+        let remote_addr = stream.peer_addr().ok();
         Ok(Self {
             stream,
+            remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(remote_hs.peer_id),
             remote_bitfield: vec![],
@@ -111,8 +178,10 @@ impl PeerConnection {
     }
 
     pub fn from_stream_with_peer(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {
+        let remote_addr = stream.peer_addr().ok();
         Self {
             stream,
+            remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(peer_id),
             remote_bitfield: vec![],
@@ -126,13 +195,13 @@ impl PeerConnection {
         self.stream
             .write_all(&data)
             .await
-            .map_err(|e| format!("发送消息失败: {}", e))?;
+            .map_err(|e| format!("Failed to send message: {}", e))?;
         self.stream
             .flush()
             .await
-            .map_err(|e| format!("刷新缓冲区失败: {}", e))?;
+            .map_err(|e| format!("Failed to flush buffer: {}", e))?;
 
-        debug!("发送消息: {:?}", message.message_id());
+        debug!("Sent message: {:?}", message.message_id());
         Ok(())
     }
 
@@ -143,7 +212,7 @@ impl PeerConnection {
         match self.stream.read_exact(&mut len_buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(format!("读取消息长度失败: {}", e)),
+            Err(e) => return Err(format!("Failed to read message length: {}", e)),
         }
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
@@ -155,7 +224,7 @@ impl PeerConnection {
         self.stream
             .read_exact(&mut payload_buf)
             .await
-            .map_err(|e| format!("读取消息体失败: {}", e))?;
+            .map_err(|e| format!("Failed to read message body: {}", e))?;
 
         let mut full_msg = vec![0u8; 4 + msg_len];
         full_msg[0..4].copy_from_slice(&len_buf);
@@ -212,6 +281,10 @@ impl PeerConnection {
         self.remote_peer_id.is_some()
     }
 
+    pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
+        self.remote_addr
+    }
+
     pub async fn stream_write(&mut self, data: &[u8]) -> Result<(), String> {
         self.stream
             .write_all(data)
@@ -259,5 +332,55 @@ mod tests {
     #[test]
     fn test_peer_addr_too_short() {
         assert!(PeerAddr::from_compact(&[1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn test_peer_addr_from_compact_v6() {
+        // ::1 (loopback) + port 6881
+        let mut data = [0u8; 18];
+        data[15] = 1; // ::1 in 16 bytes
+        data[16..18].copy_from_slice(&6881u16.to_be_bytes());
+        let addr = PeerAddr::from_compact_v6(&data).unwrap();
+        assert_eq!(addr.ip, "::1");
+        assert_eq!(addr.port, 6881);
+    }
+
+    #[test]
+    fn test_peer_addr_compact_v6_roundtrip() {
+        let addr = PeerAddr::new("2001:db8::1", 6881);
+        let compact = addr.to_compact_v6().unwrap();
+        let parsed = PeerAddr::from_compact_v6(&compact).unwrap();
+        assert_eq!(parsed.ip, addr.ip);
+        assert_eq!(parsed.port, addr.port);
+    }
+
+    #[test]
+    fn test_peer_addr_compact_v6_too_short() {
+        assert!(PeerAddr::from_compact_v6(&[0u8; 17]).is_none());
+    }
+
+    #[test]
+    fn test_peer_addr_to_compact_v6_non_ipv6() {
+        let addr = PeerAddr::new("192.168.1.1", 6881);
+        assert!(addr.to_compact_v6().is_none());
+    }
+
+    #[test]
+    fn test_peer_addr_from_compact_v6_full_addr() {
+        // 2001:0db8:85a3:0000:0000:8a2e:0370:7334 + port 1234
+        let mut data = [0u8; 18];
+        data[0..2].copy_from_slice(&[0x20, 0x01]);
+        data[2..4].copy_from_slice(&[0x0d, 0xb8]);
+        data[4..6].copy_from_slice(&[0x85, 0xa3]);
+        data[6..8].copy_from_slice(&[0x00, 0x00]);
+        data[8..10].copy_from_slice(&[0x00, 0x00]);
+        data[10..12].copy_from_slice(&[0x8a, 0x2e]);
+        data[12..14].copy_from_slice(&[0x03, 0x70]);
+        data[14..16].copy_from_slice(&[0x73, 0x34]);
+        data[16..18].copy_from_slice(&1234u16.to_be_bytes());
+
+        let addr = PeerAddr::from_compact_v6(&data).unwrap();
+        assert_eq!(addr.ip, "2001:db8:85a3::8a2e:370:7334");
+        assert_eq!(addr.port, 1234);
     }
 }

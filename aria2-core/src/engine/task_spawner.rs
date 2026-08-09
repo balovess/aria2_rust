@@ -1,0 +1,287 @@
+//! Task spawner: creates tokio tasks from promoted download groups.
+//!
+//! When the engine promotes a group from reserved to active, it needs to
+//! create the appropriate `Command` implementation (DownloadCommand,
+//! BtDownloadCommand, etc.) and spawn it as a tokio task. This module
+//! handles that dispatch, wiring up the completion channel so the engine
+//! can track when tasks finish.
+
+use std::sync::Arc;
+use tracing::{debug, warn};
+
+use super::command::Command;
+use super::engine_command::TaskResult;
+use crate::dns::dns_cache::DnsCache;
+use crate::error::Aria2Error;
+use crate::ftp::FtpConnectionPool;
+use crate::rate_limiter::RateLimiter;
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
+use tokio_util::sync::CancellationToken;
+
+/// Spawns a download command as a tokio task and wires up the completion
+/// channel. Returns the `JoinHandle` for task management.
+///
+/// The command is created based on the group's URIs and options:
+/// - BitTorrent magnet URIs → BtDownloadCommand
+/// - FTP URIs (`ftp://`, `ftps://`) → FtpDownloadCommand
+/// - HTTP/HTTPS → DownloadCommand
+///
+/// Before spawning, increments `RequestGroup::num_commands`
+/// (mirrors C++ AbstractCommand constructor).
+///
+/// After the task completes, sends `(GID, generation, TaskResult)` via the completion
+/// channel so the engine can decrement `num_commands` and check for demotion.
+pub fn spawn_download_task(
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    _ftp_pool: Arc<FtpConnectionPool>,
+    _dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+    global_limiter: Option<RateLimiter>,
+    generation: u64,
+    completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
+) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)> {
+    let gid = group.recover().gid();
+    let uris = group.recover().uris().to_vec();
+    let options = group.recover().options_arc();
+
+    // Increment command counter BEFORE spawning.
+    group.recover().inc_commands();
+
+    // Determine the first URI to decide which command type to create.
+    let first_uri = match uris.first() {
+        Some(u) => u.clone(),
+        None => {
+            warn!(gid = gid.value(), "No URIs in group, cannot spawn task");
+            group.recover().dec_commands();
+            return None;
+        }
+    };
+
+    let shutdown = CancellationToken::new();
+    let task_shutdown = shutdown.clone();
+    let dns_cache = _dns_cache;
+    let completion_tx = completion_tx.clone();
+
+    // Command construction may perform DNS resolution and build protocol
+    // clients. Keep that work in the tracked task so the single-threaded
+    // engine loop can continue processing pause/remove commands while a
+    // resolver or a slow protocol constructor is waiting.
+    let handle = tokio::spawn(async move {
+        let result = tokio::select! {
+            command_result = create_command_for_group(
+                Arc::clone(&group),
+                first_uri,
+                options,
+                global_limiter,
+                dns_cache,
+            ) => {
+                match command_result {
+                    Ok(mut cmd) => tokio::select! {
+                        result = cmd.execute() => result,
+                        _ = task_shutdown.cancelled() => {
+                            cmd.shutdown().await;
+                            Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+                        }
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+            _ = task_shutdown.cancelled() => {
+                Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+            }
+        };
+        let task_result = match result {
+            Ok(()) => {
+                debug!(gid = gid.value(), "Download task completed successfully");
+                TaskResult::Success
+            }
+            Err(Aria2Error::Recoverable(recoverable)) => {
+                warn!(
+                    gid = gid.value(),
+                    "Download task failed with recoverable error"
+                );
+                TaskResult::Failed(Aria2Error::Recoverable(recoverable))
+            }
+            Err(e) => {
+                warn!(gid = gid.value(), error = %e, "Download task failed");
+                TaskResult::Failed(e)
+            }
+        };
+
+        // Send completion notification. If the channel is closed, the engine
+        // has already shut down; just log and move on.
+        if completion_tx.send((gid, generation, task_result)).is_err() {
+            debug!(
+                gid = gid.value(),
+                "Completion channel closed, engine likely shut down"
+            );
+        }
+    });
+
+    Some((handle, shutdown))
+}
+
+fn direct_origin(uri: &str) -> Option<(String, u16)> {
+    let parsed = url::Url::parse(uri).ok()?;
+    let scheme = parsed.scheme();
+    if !matches!(scheme, "http" | "https" | "ftp" | "ftps") {
+        return None;
+    }
+    Some((
+        parsed.host_str()?.to_string(),
+        parsed.port_or_known_default()?,
+    ))
+}
+
+/// Build the protocol command inside the tracked task.
+///
+/// Metalink commands need their source metadata before URI dispatch, while
+/// the other protocols share the regular scheme factory. Keeping both paths
+/// here ensures command construction remains cancellable and never blocks the
+/// engine loop on DNS or client setup.
+async fn create_command_for_group(
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    first_uri: String,
+    options: Arc<DownloadOptions>,
+    global_limiter: Option<RateLimiter>,
+    dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+) -> crate::error::Result<Box<dyn Command>> {
+    #[cfg(feature = "metalink")]
+    if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
+        let base_uri = group.recover().metalink_base_uri();
+        let mut command = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source(
+            Arc::clone(&group),
+            &metalink_data,
+            file_index,
+            &options,
+            base_uri.as_deref(),
+        )?;
+        if let Some(limiter) = global_limiter {
+            command.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(command));
+    }
+
+    create_command_for_uri(&first_uri, group, &options, global_limiter, &dns_cache).await
+}
+
+/// Create the appropriate `Command` implementation for a URI.
+///
+/// Uses `new_with_group` constructors so the externally-managed `RequestGroup`
+/// is preserved rather than creating a new one internally. This is critical
+/// for the engine loop's `num_commands` tracking and promotion/demotion flow.
+async fn create_command_for_uri(
+    uri: &str,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    options: &DownloadOptions,
+    global_limiter: Option<RateLimiter>,
+    dns_cache: &Arc<tokio::sync::Mutex<DnsCache>>,
+) -> crate::error::Result<Box<dyn Command>> {
+    let uri_lower = uri.to_lowercase();
+
+    // SFTP downloads use the engine-owned group, matching other v2 protocols.
+    #[cfg(feature = "sftp")]
+    if uri_lower.starts_with("sftp://") {
+        let mut cmd = crate::engine::sftp_download_command::SftpDownloadCommand::new_with_group(
+            Arc::clone(&group),
+            uri,
+            options,
+            options.dir.as_deref(),
+            options.out.as_deref(),
+        )?;
+        if let Some(limiter) = global_limiter {
+            cmd.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(cmd));
+    }
+
+    // BitTorrent torrent payloads. The group must already have a resolved
+    // DownloadContext, which is installed by BtDependency before promotion.
+    #[cfg(feature = "bittorrent")]
+    if uri_lower.starts_with("bt://") {
+        let output_dir = options.dir.as_deref();
+        let torrent_bytes = group
+            .recover()
+            .bt_metadata_data()
+            .or_else(|| {
+                group
+                    .recover()
+                    .metadata_info()
+                    .and_then(|info| info.metadata_path().map(std::path::PathBuf::from))
+                    .and_then(|path| std::fs::read(path).ok())
+            })
+            .ok_or_else(|| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(
+                    "Resolved BitTorrent payload has no metadata source".to_string(),
+                ))
+            })?;
+        let mut cmd = crate::engine::bt_download_command::BtDownloadCommand::new_with_group(
+            group,
+            &torrent_bytes,
+            options,
+            output_dir,
+        )?;
+        if let Some(limiter) = global_limiter {
+            cmd.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(cmd));
+    }
+
+    // BitTorrent magnet links.
+    #[cfg(feature = "bittorrent")]
+    if uri_lower.starts_with("magnet:") {
+        let output_dir = options.dir.as_deref();
+        let mut cmd =
+            crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
+                group, output_dir,
+            )?;
+        if let Some(limiter) = global_limiter.clone() {
+            cmd.set_global_limiter(limiter);
+        }
+        return Ok(Box::new(cmd));
+    }
+
+    // FTP/FTPS downloads.
+    if uri_lower.starts_with("ftp://") || uri_lower.starts_with("ftps://") {
+        let output_dir = options.dir.as_deref();
+        let output_name = options.out.as_deref();
+        let mut cmd = crate::engine::ftp_download_command::FtpDownloadCommand::new_with_group(
+            group,
+            output_dir,
+            output_name,
+        )?;
+        if let Some(limiter) = global_limiter.clone() {
+            cmd.set_global_limiter(limiter);
+        }
+        cmd.set_dns_cache(Arc::clone(dns_cache));
+        if let Some((hostname, port)) = direct_origin(uri)
+            && let Ok(addresses) = dns_cache.lock().await.resolve(&hostname, port).await
+        {
+            cmd.set_resolved_addresses(addresses);
+        }
+        return Ok(Box::new(cmd));
+    }
+
+    // Default: HTTP/HTTPS download command.
+    let output_dir = options.dir.as_deref();
+    let group_output_name = group.recover().output_name();
+    let output_name = group_output_name.as_deref().or(options.out.as_deref());
+    let resolved_addresses = if let Some((hostname, port)) = direct_origin(uri) {
+        dns_cache.lock().await.resolve(&hostname, port).await.ok()
+    } else {
+        None
+    };
+    let mut cmd =
+        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_addresses(
+            group,
+            uri,
+            options,
+            output_dir,
+            output_name,
+            resolved_addresses,
+        )?;
+    if let Some(limiter) = global_limiter {
+        cmd.set_global_limiter(limiter);
+    }
+    Ok(Box::new(cmd))
+}

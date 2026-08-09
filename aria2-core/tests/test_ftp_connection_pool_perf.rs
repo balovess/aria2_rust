@@ -8,13 +8,11 @@ use std::time::{Duration, Instant};
 
 use aria2_core::ftp::connection_pool::{FtpConnectionPool, PoolConfig};
 
-/// Simulated connection establishment time (based on real-world measurements)
-/// FTP connection establishment typically takes 5-15 seconds including:
-/// - TCP handshake: ~1-2 seconds
-/// - Welcome message: ~1-2 seconds
-/// - Authentication: ~2-5 seconds
-/// - Mode negotiation: ~1-2 seconds
-const CONNECTION_ESTABLISH_TIME_MS: u64 = 10_000; // 10 seconds
+/// Synthetic connection establishment time used by this model test.
+///
+/// The test validates the pool's relative cost model, not a real network
+/// round-trip. Keep the delay short so the full test suite remains bounded.
+const CONNECTION_ESTABLISH_TIME_MS: u64 = 50; // 50ms
 
 /// Simulated connection reuse time (negligible)
 const CONNECTION_REUSE_TIME_MS: u64 = 1; // 1ms
@@ -80,13 +78,10 @@ fn test_connection_pool_performance_improvement() {
     println!("Time without pool: {:?}", time_without_pool);
     println!("Time with pool: {:?}", time_with_pool);
     println!("Performance improvement: {:.1}%", improvement);
-    println!("Expected improvement: 40-60%");
+    println!("Expected improvement: at least 80%");
 
-    // Verify that we achieve at least 40% improvement
-    // With 10 operations:
-    // - Without pool: 10 * 10s = 100s
-    // - With pool: 10s + 9 * 1ms ≈ 10s
-    // - Improvement: (100 - 10) / 100 = 90%
+    // Verify that the short synthetic model still predicts a substantial
+    // benefit without making the suite wait for real network latencies.
     assert!(
         improvement >= 40.0,
         "Expected at least 40% improvement, got {:.1}%",
@@ -319,7 +314,7 @@ fn test_break_even_analysis() {
 
     // Break-even: when savings > overhead
     // n * savings_per_reuse > n * pool_overhead_per_op
-    // Since savings_per_reuse (9999ms) >> pool_overhead_per_op (1ms)
+    // Since savings_per_reuse (49ms) exceeds pool_overhead_per_op (1ms)
     // Break-even is essentially immediate (after 1 reuse)
 
     let ops_to_break_even = 1; // After first reuse
@@ -335,7 +330,7 @@ fn test_break_even_analysis() {
 
     // Verify that savings are significant
     assert!(
-        savings_per_reuse > 5000,
-        "Savings per reuse should be > 5 seconds"
+        savings_per_reuse > pool_overhead_per_op,
+        "Savings per reuse should exceed pool overhead"
     );
 }

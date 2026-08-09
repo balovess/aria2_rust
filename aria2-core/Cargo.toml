@@ -1,17 +1,20 @@
 [package]
 name = "aria2-core"
-version = "0.2.3"
+version = "0.2.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-performance download engine core: multi-protocol segmented downloads, rate limiting, config management, session persistence, and BitTorrent seeding"
+description = "aria2-rust core download engine: multi-protocol segmented downloads, rate limiting, configuration, session persistence, and BitTorrent seeding"
 documentation = "https://docs.rs/aria2-core"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
 keywords = ["download", "bittorrent", "concurrent-download", "rate-limiting", "resume"]
 categories = ["network-programming", "web-programming::http-client"]
-include = ["src/**/*", "../README.md", "../LICENSE"]
+include = ["src/**/*", "../bindings/c/**/*", "../README.md", "../LICENSE"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [features]
 # All io_uring code is Linux-only behind this feature flag.
@@ -19,14 +22,13 @@ include = ["src/**/*", "../README.md", "../LICENSE"]
 # `tokio-uring` only builds on Linux. This is expected and documented.
 default = []
 io_uring = ["dep:tokio-uring"]
+bittorrent = ["aria2-protocol/bittorrent", "dep:rc4"]
+metalink = ["aria2-protocol/metalink"]
+sftp = ["aria2-protocol/sftp"]
 
 [dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
-# Optional io_uring backend (Linux only). When the `io_uring` feature is
-# enabled, `tokio-uring` provides async positioned I/O via the io_uring
-# syscall interface. Not available on Windows/macOS.
-tokio-uring = { version = "0.4", optional = true }
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -41,13 +43,16 @@ async-trait.workspace = true
 colored = "2.0"
 atty = "0.2"
 crossterm = "0.27"
-md5 = "0.7"
+md-5 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
 adler32 = "1.2"
 digest = "0.10"
-aria2-protocol = { workspace = true, features = ["bittorrent", "metalink", "sftp"] }
-reqwest = { version = "0.13.4", features = ["stream", "rustls", "gzip", "http2"], default-features = false }
+aria2-protocol = { workspace = true }
+# Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
+# The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
+# automatically use ring as the crypto provider.
+reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
@@ -55,24 +60,46 @@ reqwest = { version = "0.13.4", features = ["stream", "rustls", "gzip", "http2"]
 # feature is enabled (we don't use it). Upgrading to 0.26 would conflict with russh's
 # pinned `rand_core = 0.10.0-rc-3` via aria2-protocol's SFTP support.
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"], default-features = false }
-rand = "0.8"
+rand.workspace = true
 regex = "1"
 url = "2.5"
-base64 = "0.21"
+base64.workspace = true
 flate2 = "1.0"
 bzip2-rs = "0.1"
 zeroize = "1.8"
-hex = "0.4"
+hex.workspace = true
 ring = "0.17"
-rc4 = "0.2"
+# rustls with ring provider; required for installing the crypto provider when
+# reqwest uses `rustls-no-provider` (avoids aws-lc-rs ABI conflict on Windows).
+rustls = { workspace = true, features = ["ring"] }
+# tokio-rustls: async TLS stream wrapper for FTPS (AUTH TLS) data/control channels.
+# Uses ring crypto (same as rustls above) with TLS 1.2 + 1.3 support.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# PEM certificate parser for loading custom CA files (--ca-certificate option).
+rustls-pemfile = { workspace = true }
+# Bundled Mozilla root certificates for FTPS TLS verification when no custom
+# CA file is specified. webpki-roots 0.26 is compatible with rustls 0.23.
+webpki-roots = "0.26"
+rc4 = { version = "0.2", optional = true }
 once_cell = "1.19"
 dashmap = "5.5"
+# Firefox/Chromium cookie import reads `cookies.sqlite` / `Cookies` directly
+# (C++ `Sqlite3CookieParser`). `bundled` statically compiles SQLite into the
+# binary, so there is no system libsqlite3 requirement on any platform and no
+# version skew between what we test against and what a user happens to have
+# installed. `default-features = false` drops extras we never touch — the
+# parser only ever opens a database read-only and runs a single SELECT.
+rusqlite = { version = "0.40.1", default-features = false, features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# tokio-uring is available only on Linux and is enabled through the `io_uring` feature.
+tokio-uring = { version = "0.4", optional = true }
+
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [dev-dependencies]
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
@@ -82,11 +109,15 @@ hyper = { version = "1", features = ["http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 http = "1"
-tempfile = "3.8"
+tempfile.workspace = true
 tokio-test = "0.4"
 criterion.workspace = true
-base64 = "0.21"
-aria2-rpc = { path = "../aria2-rpc" }
+base64.workspace = true
+aria2-rpc.workspace = true
+aria2-protocol.workspace = true
+# Local SFTP E2E fixture. Reuses the production lockfile version and stays
+# test-only so it does not expand the engine's runtime dependency surface.
+russh = { version = "0.59", default-features = false, features = ["ring", "rsa"] }
 # sysinfo is used by the memory-footprint regression test (Phase F6) to sample
 # the process RSS while writing a file via PositionedDiskWriter. Pinned to 0.30
 # where `Process::memory()` returns bytes (in newer versions the API was split
@@ -100,6 +131,7 @@ harness = false
 [[bench]]
 name = "engine_bench"
 harness = false
+required-features = ["bittorrent"]
 
 [[bench]]
 name = "filesystem_bench"
@@ -108,10 +140,12 @@ harness = false
 [[bench]]
 name = "p2_bench"
 harness = false
+required-features = ["bittorrent"]
 
 [[bench]]
 name = "serialization_bench"
 harness = false
+required-features = ["bittorrent"]
 
 # Linux-only io_uring benchmark. Compiles only when both the `io_uring`
 # feature is enabled and the target OS is Linux. The source file itself is

@@ -1,158 +1,53 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use tokio_util::sync::CancellationToken;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
+use super::rpc_helpers::split_auth_token;
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
-use super::types::{GlobalOptions, PeerInfo, StatusInfo, TaskOptions};
+use super::types::{GlobalOptions, SessionInfo};
 use super::websocket::EventPublisher;
-use aria2_core::TorrentFileEntry;
 use aria2_core::config::OptionRegistry;
-use aria2_core::engine::command::Command;
 use aria2_core::request::request_group_man::RequestGroupMan;
 
-/// Core RPC engine that manages download tasks and handles aria2 protocol requests.
-///
-/// This is the main orchestrator that:
-/// - Maintains task state (active downloads, stopped tasks)
-/// - Routes incoming RPC requests to appropriate handlers
-/// - Provides progress tracking and status queries
-/// - Publishes events via WebSocket for real-time notifications
-///
-/// Handler implementations are in the [`handlers`](crate::handlers) module.
+pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
+    !matches!(method, "system.listMethods" | "system.listNotifications")
+}
+
+/// Core RPC engine. Download state lives exclusively in `RequestGroupMan` and
+/// lifecycle changes are submitted to the core engine command channel.
 pub struct RpcEngine {
-    /// Active download tasks keyed by GID
-    pub(crate) tasks: Arc<RwLock<HashMap<String, TaskState>>>,
-    /// Global configuration options
     pub(crate) global_opts: GlobalOptions,
-    /// Per-task configuration options
-    pub(crate) task_opts: TaskOptions,
-    /// Completed/stopped task results
-    pub(crate) stopped_tasks: Arc<RwLock<Vec<StatusInfo>>>,
-    /// Event publisher for WebSocket notifications
-    pub(crate) event_publisher: Arc<EventPublisher>,
-    /// Authentication middleware for token-based RPC auth
+    pub event_publisher: Arc<EventPublisher>,
     pub(crate) auth_middleware: RpcAuthMiddleware,
-    /// Shared download group manager (for live progress queries and task tracking).
-    /// When set, RPC handlers read progress directly from RequestGroupMan
-    /// instead of the placeholder `tasks` map.
     pub(crate) group_man: Option<Arc<RwLock<RequestGroupMan>>>,
-    /// Channel sender to submit download commands to the DownloadEngine loop.
-    /// When set, `aria2.addUri` starts real downloads by sending a
-    /// `DownloadCommand` through this channel.
-    pub(crate) cmd_tx: Option<mpsc::UnboundedSender<Box<dyn Command>>>,
-}
-
-/// Internal state for an active download task.
-///
-/// Contains both static metadata (GID, URIs, options) and dynamic
-/// progress fields (speeds, lengths, connections) that are updated
-/// by the download engine during execution.
-pub(crate) struct TaskState {
-    /// Current status information with metadata
-    pub(crate) status: StatusInfo,
-    /// Configuration options specific to this task
-    #[allow(dead_code)] // Stored for future RPC tellActive/tellStopped option reporting
-    pub(crate) options: HashMap<String, serde_json::Value>,
-    /// URI list for this download
-    #[allow(dead_code)] // Stored for future RPC getUris option reporting
-    pub(crate) uris: Vec<String>,
-    /// Torrent file entries (for BitTorrent downloads)
-    pub(crate) torrent_files: Option<Vec<TorrentFileEntry>>,
-    // === Dynamic progress fields (updated by download engine) ===
-    pub(crate) total_length: u64,
-    pub(crate) completed_length: u64,
-    pub(crate) upload_length: u64,
-    pub(crate) download_speed: u64,
-    pub(crate) upload_speed: u64,
-    pub(crate) connections: u16,
-    /// Peer list for BitTorrent downloads
-    pub(crate) peers: Vec<PeerInfo>,
-    /// Cancellation token for forceful interruption of active downloads
-    pub(crate) cancel_token: Option<CancellationToken>,
-}
-
-impl TaskState {
-    pub(crate) fn new(
-        status: StatusInfo,
-        options: HashMap<String, serde_json::Value>,
-        uris: Vec<String>,
-    ) -> Self {
-        Self {
-            status,
-            options,
-            uris,
-            torrent_files: None,
-            total_length: 0,
-            completed_length: 0,
-            upload_length: 0,
-            download_speed: 0,
-            upload_speed: 0,
-            connections: 0,
-            peers: vec![],
-            cancel_token: Some(CancellationToken::new()),
-        }
-    }
-
-    /// Update the StatusInfo snapshot from current internal state.
-    ///
-    /// Called before returning status to ensure all progress fields
-    /// are reflected in the response.
-    pub(crate) fn update_status_info(&mut self) {
-        let mut status = StatusInfo::new(&self.status.gid)
-            .with_status(self.status.status.clone())
-            .with_total_length(self.total_length)
-            .with_completed_length(self.completed_length)
-            .with_upload_length(self.upload_length)
-            .with_download_speed(self.download_speed)
-            .with_upload_speed(self.upload_speed)
-            .with_connections(self.connections)
-            .with_dir(self.status.dir.clone().unwrap_or_default())
-            .with_files(self.status.files.clone().unwrap_or_default());
-        if let Some(ref tf) = self.torrent_files {
-            status = status.with_torrent_files(tf.clone());
-        }
-        self.status = status;
-    }
-
-    /// Update progress fields (typically called by download engine).
-    pub fn update_progress(
-        &mut self,
-        total: u64,
-        completed: u64,
-        uploaded: u64,
-        dl_speed: u64,
-        ul_speed: u64,
-        connections: u16,
-    ) {
-        self.total_length = total;
-        self.completed_length = completed;
-        self.upload_length = uploaded;
-        self.download_speed = dl_speed;
-        self.upload_speed = ul_speed;
-        self.connections = connections;
-    }
+    pub(crate) engine_cmd_tx:
+        Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
+    pub(crate) session_info: SessionInfo,
+    pub(crate) save_session_path: Option<std::path::PathBuf>,
 }
 
 impl RpcEngine {
-    /// Create a new RpcEngine instance with default global options seeded
-    /// from the `OptionRegistry`.
-    ///
-    /// The `global_opts` map is pre-populated with all registered option
-    /// defaults (e.g. `file-allocation=falloc`, `secure-falloc=false`,
-    /// `mmap-threshold=268435456`) so that `aria2.getGlobalOption` returns
-    /// meaningful values immediately, without requiring the client to first
-    /// call `aria2.changeGlobalOption`.
+    /// Create a new RpcEngine test fixture with private core dependencies.
+    /// Production callers should wire shared dependencies with the builder methods.
     pub fn new() -> Self {
+        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
+        std::mem::forget(engine_cmd_rx);
+        Self::wired(Arc::new(RwLock::new(RequestGroupMan::new())), engine_cmd_tx)
+    }
+
+    pub fn wired(
+        group_man: Arc<RwLock<RequestGroupMan>>,
+        engine_cmd_tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
+    ) -> Self {
+        // Initialize global options from the registry.
         let registry = OptionRegistry::new();
         let mut defaults = HashMap::new();
         for (name, def) in registry.all() {
-            // Skip deprecated and hidden options so RPC clients don't see
-            // internal/legacy options via aria2.getGlobalOption.
-            if def.deprecated || def.hidden {
-                continue;
-            }
+            // `GetGlobalOptionRpcMethod` reports every defined original
+            // OptionHandler value, including hidden and deprecated options.
+            // RPC visibility is projected later from registry metadata so
+            // secrets and Rust-only extensions remain private.
             let json_val: serde_json::Value = serde_json::Value::from(def.default_value());
             // Skip None/Null defaults to keep the map compact
             if !json_val.is_null() {
@@ -161,14 +56,13 @@ impl RpcEngine {
         }
 
         Self {
-            tasks: Arc::new(RwLock::new(HashMap::new())),
             global_opts: Arc::new(RwLock::new(defaults)),
-            task_opts: Arc::new(RwLock::new(HashMap::new())),
-            stopped_tasks: Arc::new(RwLock::new(Vec::new())),
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
-            group_man: None,
-            cmd_tx: None,
+            group_man: Some(group_man),
+            engine_cmd_tx: Some(engine_cmd_tx),
+            session_info: SessionInfo::new(),
+            save_session_path: None,
         }
     }
 
@@ -200,10 +94,24 @@ impl RpcEngine {
         self
     }
 
-    /// Chainable builder method to set the command channel sender.
-    /// When set, `aria2.addUri` sends real `DownloadCommand`s to the engine.
-    pub fn with_cmd_tx(mut self, tx: mpsc::UnboundedSender<Box<dyn Command>>) -> Self {
-        self.cmd_tx = Some(tx);
+    /// Chainable builder method to set the EngineCommand channel sender.
+    /// When set, RPC handlers send structured lifecycle commands (AddDownload,
+    /// RemoveDownload, Pause, etc.) to the engine loop.
+    pub fn with_engine_cmd_tx(
+        mut self,
+        tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
+    ) -> Self {
+        self.engine_cmd_tx = Some(tx);
+        self
+    }
+
+    /// Chainable builder method to set the configured `--save-session` path.
+    ///
+    /// `aria2.saveSession` always uses this configured path; request parameters
+    /// are ignored, mirroring C++ `SaveSessionRpcMethod` which reads the
+    /// engine's `PREF_SAVE_SESSION` option.
+    pub fn with_save_session_path(mut self, path: std::path::PathBuf) -> Self {
+        self.save_session_path = Some(path);
         self
     }
 
@@ -239,196 +147,220 @@ impl RpcEngine {
 
     /// Get current number of active tasks.
     pub async fn task_count(&self) -> usize {
-        self.tasks.read().await.len()
-    }
-
-    /// Update progress for a specific task (called by download engine).
-    ///
-    /// Returns `true` if the task was found and updated, `false` otherwise.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_task_progress(
-        &self,
-        gid: &str,
-        total: u64,
-        completed: u64,
-        uploaded: u64,
-        dl_speed: u64,
-        ul_speed: u64,
-        connections: u16,
-    ) -> bool {
-        let mut tasks = self.tasks.write().await;
-        if let Some(state) = tasks.get_mut(gid) {
-            state.update_progress(total, completed, uploaded, dl_speed, ul_speed, connections);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Set torrent file entries for a BitTorrent download task.
-    pub async fn set_task_torrent_files(&self, gid: &str, files: Vec<TorrentFileEntry>) -> bool {
-        let mut tasks = self.tasks.write().await;
-        if let Some(state) = tasks.get_mut(gid) {
-            state.torrent_files = Some(files);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Set peer list for a BitTorrent download task.
-    pub async fn set_task_peers(&self, gid: &str, peers: Vec<PeerInfo>) -> bool {
-        let mut tasks = self.tasks.write().await;
-        if let Some(state) = tasks.get_mut(gid) {
-            state.peers = peers;
-            true
-        } else {
-            false
+        match self.group_man.as_ref() {
+            Some(man) => man.read().await.count(),
+            None => 0,
         }
     }
 
     /// Main request dispatcher - routes RPC methods to their handlers.
     ///
     /// This is the central entry point for all JSON-RPC requests.
-    /// It matches on the method name and delegates to the appropriate
-    /// handler implementation in [rpc_handlers].
     ///
-    /// Before dispatching, validates the request token against the
-    /// configured `rpc-secret` (if any) via [`RpcAuthMiddleware`].
+    /// Pipeline:
+    /// 1. Split the `"token:xxx"` secret off `params[0]` and validate it
+    ///    against the configured `rpc-secret` (if any) via [`RpcAuthMiddleware`].
+    /// 2. Route `system.multicall` to [`RpcEngine::handle_multicall`] and every
+    ///    other method to [`RpcEngine::dispatch_single`].
+    /// 3. Post-process the result into aria2's wire format.
+    ///
+    /// `system.multicall` is deliberately exempt from step 1's *mandatory*
+    /// check: C++ aria2's `SystemMulticallRpcMethod::execute()` overrides the
+    /// base `RpcMethod::execute()` and therefore never calls `authorize()` on
+    /// the multicall envelope — each sub-call authorizes itself instead.
+    /// AriaNg / webui-aria2 depend on this, since they put the secret into
+    /// every sub-call's `params[0]` and never into the envelope. An envelope
+    /// token that *is* present is still validated here and additionally used
+    /// as the fallback secret for sub-calls that omit their own.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+        let is_multicall = req.method == "system.multicall";
 
-        // Authenticate: extract token from params and validate
-        let token = req.params.get("token").and_then(|v| v.as_str());
-        if let Err(auth_err) = self.auth_middleware.validate(token) {
+        // Authenticate: extract token from params and validate.
+        // Supports both array-style ("token:xxx" as first param element)
+        // and object-style ({"token": "xxx"}) params for backward compatibility.
+        let (token, stripped_params) = split_auth_token(&req.params);
+        if rpc_method_requires_auth(&req.method)
+            && (!is_multicall || token.is_some())
+            && let Err(auth_err) = self.auth_middleware.validate(token.as_deref())
+        {
             return auth_err.into_response(req.id.clone());
         }
 
-        match req.method.as_str() {
+        // Dispatch against the token-stripped params so method handlers never
+        // see the secret — matching C++ aria2's authorize() behaviour which
+        // pops the token from the params array before dispatching.
+        let stripped_req;
+        let dispatch_req = match stripped_params {
+            Some(params) => {
+                stripped_req = JsonRpcRequest {
+                    version: req.version.clone(),
+                    method: req.method.clone(),
+                    params,
+                    id: req.id.clone(),
+                };
+                &stripped_req
+            }
+            None => req,
+        };
+
+        if is_multicall {
+            self.handle_multicall(dispatch_req, token.as_deref())
+                .await
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone()))
+        } else {
+            self.dispatch_single(dispatch_req).await
+        }
+    }
+
+    /// Dispatch one already-authenticated, token-stripped JSON-RPC request.
+    ///
+    /// This is *the* method table: every registered `aria2.*` method plus
+    /// `system.listMethods` / `system.listNotifications` is routed from here.
+    /// Both [`RpcEngine::handle_request`] (single calls) and
+    /// [`RpcEngine::handle_multicall`] (batched sub-calls) go through it, so
+    /// the batched API surface can never drift from the single-call one.
+    ///
+    /// `system.multicall` is intentionally *not* dispatched here — aria2
+    /// forbids nesting a multicall inside a multicall (C++
+    /// `SystemMulticallRpcMethod::execute` rejects it with "Recursive
+    /// system.multicall forbidden."). Excluding it also keeps this method
+    /// non-recursive, so no `Box::pin` indirection is required.
+    ///
+    /// The returned response is **not** converted to aria2 wire format; the
+    /// caller applies that once to the outermost response.
+    pub(crate) async fn dispatch_single(&self, dispatch_req: &JsonRpcRequest) -> JsonRpcResponse {
+        let id = dispatch_req.id.clone().unwrap_or(serde_json::Value::Null);
+
+        match dispatch_req.method.as_str() {
             "aria2.addUri" => self
-                .handle_add_uri(req)
+                .handle_add_uri(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            #[cfg(feature = "bittorrent")]
             "aria2.addTorrent" => self
-                .handle_add_torrent(req)
+                .handle_add_torrent(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            #[cfg(feature = "metalink")]
             "aria2.addMetalink" => self
-                .handle_add_metalink(req)
+                .handle_add_metalink(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.remove" => self
-                .handle_remove(req)
+                .handle_remove(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.pause" => self
-                .handle_pause(req)
+                .handle_pause(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.forcePause" => self
-                .handle_force_pause(req)
+                .handle_force_pause(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.unpause" | "aria2.forceUnpause" => self
-                .handle_unpause(req)
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.unpause" => self
+                .handle_unpause(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellStatus" => self
-                .handle_tell_status(req)
+                .handle_tell_status(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellActive" => self
-                .handle_tell_active(req)
+                .handle_tell_active(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellWaiting" => self
-                .handle_tell_waiting(req)
+                .handle_tell_waiting(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.tellStopped" => self
-                .handle_tell_stopped(req)
+                .handle_tell_stopped(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalStat" => self.handle_global_stat().await,
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.getGlobalStat" => self.handle_global_stat(dispatch_req).await,
             "aria2.getUris" => self
-                .handle_get_uris(req)
+                .handle_get_uris(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getFiles" => self
-                .handle_get_files(req)
+                .handle_get_files(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getServers" => self
-                .handle_get_servers(req)
+                .handle_get_servers(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.purgeDownloadResult" => self
-                .handle_purge_download_result(req)
+                .handle_purge_download_result(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.removeDownloadResult" => self
-                .handle_remove_download_result(req)
+                .handle_remove_download_result(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getGlobalOption" => self.handle_get_global_option().await,
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.getGlobalOption" => self.handle_get_global_option(dispatch_req).await,
             "aria2.changeGlobalOption" => self
-                .handle_change_global_option(req)
+                .handle_change_global_option(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.getOption" => self
-                .handle_get_option(req)
+                .handle_get_option(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.changeOption" => self
-                .handle_change_option(req)
+                .handle_change_option(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            #[cfg(feature = "bittorrent")]
             "aria2.getPeers" => self
-                .handle_get_peers(req)
+                .handle_get_peers(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.pauseAll" => self.handle_pause_all().await,
-            "aria2.forcePauseAll" => self.handle_force_pause_all().await,
-            "aria2.unpauseAll" => self.handle_unpause_all().await,
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.pauseAll" => self.handle_pause_all(dispatch_req).await,
+            "aria2.forcePauseAll" => self.handle_force_pause_all(dispatch_req).await,
+            "aria2.unpauseAll" => self.handle_unpause_all(dispatch_req).await,
             "aria2.changeUri" => self
-                .handle_change_uri(req)
+                .handle_change_uri(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.saveSession" => self
-                .handle_save_session(req)
+                .handle_save_session(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.changePosition" => self
-                .handle_change_position(req)
+                .handle_change_position(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.forceRemove" => self
-                .handle_force_remove(req)
+                .handle_force_remove(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.shutdown" => self
-                .handle_shutdown(req)
+                .handle_shutdown(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "aria2.forceShutdown" => self
-                .handle_force_shutdown(req)
+                .handle_force_shutdown(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            "aria2.getVersion" => self.handle_version(req),
-            "aria2.getSessionInfo" => self.handle_session_info(req),
-            "system.multicall" => self
-                .handle_multicall(req)
-                .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            "aria2.getVersion" => self.handle_version(dispatch_req),
+            "aria2.getSessionInfo" => self.handle_session_info(dispatch_req),
             "system.listMethods" => self
-                .handle_list_methods(req)
+                .handle_list_methods(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
             "system.listNotifications" => self
-                .handle_list_notifications(req)
+                .handle_list_notifications(dispatch_req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone())),
-            _ => JsonRpcResponse::error(id, -32601, format!("Method not found: {}", req.method)),
+                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone())),
+            // Guard against recursion: a multicall may not contain a multicall.
+            // Mirrors C++ SystemMulticallRpcMethod::execute()'s
+            // "Recursive system.multicall forbidden." branch.
+            "system.multicall" => {
+                JsonRpcResponse::error(id, 1, "Recursive system.multicall forbidden.".to_string())
+            }
+            _ => JsonRpcResponse::error(id, 1, format!("No such method: {}", dispatch_req.method)),
         }
     }
 }
@@ -459,7 +391,9 @@ mod tests {
         let req = JsonRpcRequest::new("aria2.nonExistent", serde_json::json!([])).with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_error());
-        assert_eq!(resp.error.unwrap().code, -32601);
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, 1);
+        assert!(err.message.contains("No such method"));
     }
 
     #[tokio::test]
@@ -468,6 +402,10 @@ mod tests {
         let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_success());
+        assert_eq!(
+            resp.result.expect("getVersion result"),
+            crate::types::VersionInfo::from_env().to_json_value()
+        );
     }
 
     #[tokio::test]
@@ -483,7 +421,7 @@ mod tests {
         let engine = RpcEngine::new();
         let req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!(["http://example.com/file.iso"]),
+            serde_json::json!([["http://example.com/file.iso"]]),
         )
         .with_id(1);
         let resp = engine.handle_request(&req).await;
@@ -505,7 +443,7 @@ mod tests {
     async fn test_handle_pause_and_unpause() {
         let engine = RpcEngine::new();
         let add_req =
-            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
         let add_resp = engine.handle_request(&add_req).await;
         let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -522,7 +460,7 @@ mod tests {
     async fn test_handle_tell_status() {
         let engine = RpcEngine::new();
         let add_req =
-            JsonRpcRequest::new("aria2.addUri", serde_json::json!(["http://x.com/f"])).with_id(1);
+            JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/f"]])).with_id(1);
         let add_resp = engine.handle_request(&add_req).await;
         let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
@@ -573,6 +511,66 @@ mod tests {
         assert!(set_resp.is_success());
     }
 
+    #[tokio::test]
+    async fn test_change_global_option_max_concurrent_emits_command() {
+        use aria2_core::engine::engine_command::EngineCommand;
+
+        let engine = RpcEngine::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let engine = engine.with_engine_cmd_tx(tx);
+
+        let set_req = JsonRpcRequest::new(
+            "aria2.changeGlobalOption",
+            serde_json::json!([{"max-concurrent-downloads": "3"}]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&set_req).await;
+        assert!(resp.is_success());
+
+        // The engine must receive SetMaxConcurrent so the slot limit is
+        // applied live (previously the value was only stored for display).
+        match rx.try_recv() {
+            Ok(EngineCommand::SetMaxConcurrent { max }) => assert_eq!(max, 3),
+            other => panic!("expected SetMaxConcurrent command, got {:?}", other.is_ok()),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_change_global_option_rate_limit_emits_command() {
+        use aria2_core::engine::engine_command::EngineCommand;
+
+        let engine = RpcEngine::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let engine = engine.with_engine_cmd_tx(tx);
+
+        let set_req = JsonRpcRequest::new(
+            "aria2.changeGlobalOption",
+            serde_json::json!([
+                {
+                    "max-overall-download-limit": "2M",
+                    "max-overall-upload-limit": "0"
+                }
+            ]),
+        )
+        .with_id(1);
+        let resp = engine.handle_request(&set_req).await;
+        assert!(resp.is_success());
+
+        match rx.try_recv() {
+            Ok(EngineCommand::SetGlobalRateLimit {
+                download_limit,
+                upload_limit,
+            }) => {
+                assert_eq!(download_limit, Some(2 * 1024 * 1024));
+                assert_eq!(upload_limit, None);
+            }
+            other => panic!(
+                "expected SetGlobalRateLimit command, got {:?}",
+                other.is_ok()
+            ),
+        }
+    }
+
     // =========================================================================
     // Auth Integration Tests (G4 Part B)
     // =========================================================================
@@ -617,7 +615,7 @@ mod tests {
         assert!(resp.is_error(), "Wrong token should be rejected");
         assert_eq!(
             resp.error.unwrap().code,
-            -32001,
+            1,
             "Should return Unauthorized error code"
         );
     }
@@ -633,7 +631,7 @@ mod tests {
             resp.is_error(),
             "Missing token should be rejected when auth is enabled"
         );
-        assert_eq!(resp.error.unwrap().code, -32001);
+        assert_eq!(resp.error.unwrap().code, 1);
     }
 
     #[tokio::test]
@@ -649,5 +647,34 @@ mod tests {
         .with_id(1);
         let resp = engine.handle_request(&req).await;
         assert!(resp.is_success(), "Token from AuthConfig should work");
+    }
+
+    #[tokio::test]
+    async fn test_public_discovery_methods_skip_rpc_auth() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("secret"));
+
+        for method in ["system.listMethods", "system.listNotifications"] {
+            let req = JsonRpcRequest::new(method, serde_json::json!([])).with_id(1);
+            let resp = engine.handle_request(&req).await;
+            assert!(resp.is_success(), "{method} should not require a token");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multicall_public_discovery_methods_skip_rpc_auth() {
+        let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("secret"));
+        let req = JsonRpcRequest::new(
+            "system.multicall",
+            serde_json::json!([[
+                {"methodName": "system.listMethods", "params": []},
+                {"methodName": "system.listNotifications", "params": []}
+            ]]),
+        )
+        .with_id(1);
+
+        let resp = engine.handle_request(&req).await;
+        let results = resp.result.expect("multicall should succeed");
+        assert!(!results[0][0].as_array().unwrap().is_empty());
+        assert!(!results[1][0].as_array().unwrap().is_empty());
     }
 }

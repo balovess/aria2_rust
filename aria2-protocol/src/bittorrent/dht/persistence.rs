@@ -115,7 +115,7 @@ impl DhtPersistence {
 
     pub fn deserialize(data: &[u8]) -> Result<DhtPersistedData, String> {
         if data.len() < 56 {
-            return Err("dht.dat 数据太短".into());
+            return Err("dht.dat data too short".into());
         }
 
         let header_v3: [u8; 8] = [
@@ -144,14 +144,17 @@ impl DhtPersistence {
         } else if data[..8] == header_v2[..] {
             2
         } else {
-            return Err(format!("dht.dat 无效的 magic/version: {:02x?}", &data[..8]));
+            return Err(format!(
+                "dht.dat invalid magic/version: {:02x?}",
+                &data[..8]
+            ));
         };
 
         let mut offset = 8;
 
         let saved_at_secs = if version >= 3 {
             if offset + 8 > data.len() {
-                return Err("dht.dat 时间戳截断".into());
+                return Err("dht.dat timestamp truncated".into());
             }
             let ts = u64::from_be_bytes([
                 data[offset],
@@ -167,7 +170,7 @@ impl DhtPersistence {
             ts
         } else {
             if offset + 8 > data.len() {
-                return Err("dht.dat 时间戳截断 (v2)".into());
+                return Err("dht.dat timestamp truncated (v2)".into());
             }
             let ts32 = u32::from_be_bytes([
                 data[offset],
@@ -180,17 +183,17 @@ impl DhtPersistence {
         };
 
         if offset + 32 > data.len() {
-            return Err("dht.dat localnode 截断".into());
+            return Err("dht.dat localnode truncated".into());
         }
         offset += 8;
         let self_id: [u8; 20] = data[offset..offset + 20]
             .try_into()
-            .map_err(|_| "dht.dat self_id 长度错误")?;
+            .map_err(|_| "dht.dat self_id length error")?;
         offset += 20;
         offset += 4;
 
         if offset + 8 > data.len() {
-            return Err("dht.dat 节点计数截断".into());
+            return Err("dht.dat node count truncated".into());
         }
         let num_nodes = u32::from_be_bytes([
             data[offset],
@@ -203,7 +206,7 @@ impl DhtPersistence {
         let expected_end = offset + num_nodes * NODE_ENTRY_SIZE;
         if expected_end > data.len() {
             return Err(format!(
-                "dht.dat 节点数据截断: 需要 {} 字节，实际 {}",
+                "dht.dat node data truncated: need {} bytes, got {}",
                 expected_end,
                 data.len()
             ));
@@ -247,7 +250,7 @@ impl DhtPersistence {
             }
             let id: [u8; 20] = data[offset..offset + 20]
                 .try_into()
-                .map_err(|_| "dht.dat 节点 ID 长度错误")?;
+                .map_err(|_| "dht.dat node ID length error")?;
             offset += 20;
             offset += 4;
 
@@ -262,17 +265,7 @@ impl DhtPersistence {
     }
 
     pub fn collect_good_nodes(rt: &RoutingTable) -> Vec<DhtNode> {
-        let mut result = Vec::new();
-        for bucket_idx in 0..160 {
-            if let Some(bucket) = rt.get_bucket(bucket_idx) {
-                for node in bucket.get_nodes() {
-                    if node.is_good() {
-                        result.push(node.clone());
-                    }
-                }
-            }
-        }
-        result
+        rt.collect_good_nodes()
     }
 
     pub async fn save_to_file(
@@ -285,11 +278,11 @@ impl DhtPersistence {
         let tmp_path = path.with_extension("dat.tmp");
         tokio::fs::write(&tmp_path, &data)
             .await
-            .map_err(|e| format!("写入临时文件失败 {}: {}", tmp_path.display(), e))?;
+            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
 
         tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
             format!(
-                "重命名失败 {} -> {}: {}",
+                "Failed to rename {} -> {}: {}",
                 tmp_path.display(),
                 path.display(),
                 e
@@ -308,11 +301,11 @@ impl DhtPersistence {
 
         let tmp_path = path.with_extension("dat.tmp");
         std::fs::write(&tmp_path, &data)
-            .map_err(|e| format!("写入临时文件失败 {}: {}", tmp_path.display(), e))?;
+            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
 
         std::fs::rename(&tmp_path, path).map_err(|e| {
             format!(
-                "重命名失败 {} -> {}: {}",
+                "Failed to rename {} -> {}: {}",
                 tmp_path.display(),
                 path.display(),
                 e
@@ -325,13 +318,13 @@ impl DhtPersistence {
     pub async fn load_from_file(path: &Path) -> Result<DhtPersistedData, String> {
         let data = tokio::fs::read(path)
             .await
-            .map_err(|e| format!("读取 dht.dat 失败 {}: {}", path.display(), e))?;
+            .map_err(|e| format!("Failed to read dht.dat {}: {}", path.display(), e))?;
         Self::deserialize(&data)
     }
 
     pub fn load_from_file_sync(path: &Path) -> Result<DhtPersistedData, String> {
         let data = std::fs::read(path)
-            .map_err(|e| format!("读取 dht.dat 失败 {}: {}", path.display(), e))?;
+            .map_err(|e| format!("Failed to read dht.dat {}: {}", path.display(), e))?;
         Self::deserialize(&data)
     }
 }

@@ -37,10 +37,10 @@ impl CookieHelper {
         let url_parsed = reqwest::Url::parse(uri).ok();
         if let Some(ref url) = url_parsed {
             let domain = url.host_str().unwrap_or("");
-            let path = url.path();
+            let default_path = Cookie::default_path(url.path());
             for sc_val in response.headers().get_all("set-cookie").iter() {
                 if let Ok(sc_str) = sc_val.to_str()
-                    && let Some(c) = Cookie::from_set_cookie_header(sc_str, domain, path)
+                    && let Some(c) = Cookie::from_set_cookie_header(sc_str, domain, &default_path)
                 {
                     self.cookie_storage.add(c);
                     tracing::debug!("Received Set-Cookie: {}", sc_str);

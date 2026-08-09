@@ -67,7 +67,6 @@ async fn test_stress_50_concurrent_downloads() {
             // Add download group (async)
             let gid = manager_clone
                 .add_group(vec![url], Default::default())
-                .await
                 .expect("Failed to add group");
 
             // Simulate download progress tracking
@@ -145,14 +144,13 @@ async fn test_stress_download_lifecycle_churn() {
                 // Create group (async)
                 let gid = manager_clone
                     .add_group(vec![url], Default::default())
-                    .await
                     .expect("Failed to add group");
 
                 // Small delay
                 tokio::time::sleep(Duration::from_micros(50)).await;
 
                 // Remove group (async)
-                manager_clone.remove_group(gid).await.ok();
+                manager_clone.remove_group(gid).ok();
 
                 idx
             }));
@@ -534,11 +532,10 @@ async fn test_stress_memory_stability_sustained() {
                         // Add group (async)
                         let gid = m
                             .add_group(vec![url], Default::default())
-                            .await
                             .expect("Failed to add group");
                         tokio::time::sleep(Duration::from_millis(50)).await;
-                        // Remove group (async)
-                        m.remove_group(gid).await.ok();
+                        // Remove group (sync now)
+                        m.remove_group(gid).ok();
                     }));
                 }
 
@@ -602,7 +599,7 @@ async fn test_stress_request_group_man_concurrent() {
         let m = manager.clone();
         add_handles.push(tokio::spawn(async move {
             let uri = format!("http://example.com/file{}.bin", i);
-            m.add_group(vec![uri], Default::default()).await
+            m.add_group(vec![uri], Default::default())
         }));
     }
 
@@ -620,14 +617,14 @@ async fn test_stress_request_group_man_concurrent() {
         .collect();
 
     // Verify count
-    let count = manager.count().await;
+    let count = manager.count();
     assert_eq!(count, 200, "Manager should have 200 groups");
 
     // 200 concurrent remove operations
     let mut remove_handles = Vec::new();
     for gid in gids {
         let m = manager.clone();
-        remove_handles.push(tokio::spawn(async move { m.remove_group(gid).await }));
+        remove_handles.push(tokio::spawn(async move { m.remove_group(gid) }));
     }
 
     let remove_results: Vec<_> = futures::future::join_all(remove_handles).await;
@@ -640,7 +637,7 @@ async fn test_stress_request_group_man_concurrent() {
     );
 
     // Verify empty
-    let final_count = manager.count().await;
+    let final_count = manager.count();
     assert_eq!(final_count, 0, "Manager should be empty after removes");
 
     println!("RequestGroupMan stress test: 200 adds, 200 removes completed");

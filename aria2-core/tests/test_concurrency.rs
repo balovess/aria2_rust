@@ -1,6 +1,7 @@
 use aria2_core::config::ConfigManager;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group_man::RequestGroupMan;
+#[cfg(feature = "bittorrent")]
 use aria2_core::segment::bitfield::Bitfield;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,6 +56,7 @@ fn test_download_engine_quick_shutdown() {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 #[test]
 fn test_bitfield_concurrent_set_unset() {
     use std::sync::{Arc, Barrier, Mutex};

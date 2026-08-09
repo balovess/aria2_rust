@@ -1,10 +1,12 @@
 # aria2-rust-client
 
-Python SDK for aria2-rust JSON-RPC & WebSocket interface. Production-grade client with complete type annotations, automatic reconnection, and comprehensive test coverage.
+Python SDK for the aria2-rust JSON-RPC and WebSocket interface. The client
+surface has complete type annotations and current binding coverage; full
+original-client compatibility remains tracked in the repository matrix.
 
 ## Features
 
-- ✅ **Complete RPC Coverage** - 34 aria2 RPC methods (94% coverage)
+- ✅ **RPC Client Surface** - Task, status, option, session, and event methods
 - ✅ **Dual Transport** - HTTP JSON-RPC and WebSocket support
 - ✅ **Type Safe** - Full type annotations with mypy/pyright support
 - ✅ **Error Handling** - Structured exception hierarchy

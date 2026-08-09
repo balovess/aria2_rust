@@ -17,7 +17,7 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
     let trimmed = uri.trim();
     if trimmed.is_empty() {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "URI不能为空".into(),
+            "URI must not be empty".into(),
         )));
     }
 
@@ -34,7 +34,7 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
         Some(pair) => pair,
         None => {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                "URI缺少协议前缀".into(),
+                "URI missing scheme prefix".into(),
             )));
         }
     };
@@ -43,18 +43,18 @@ pub fn validate(uri: &str) -> Result<ValidatedUri> {
     for dangerous in DANGEROUS_SCHEMES {
         if lower_scheme == *dangerous {
             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                format!("不安全的协议: {}", scheme),
+                format!("Insecure scheme: {}", scheme),
             )));
         }
     }
     if !SUPPORTED_SCHEMES.contains(&lower_scheme.as_str()) && lower_scheme != "magnet" {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            format!("不支持的协议: {}", scheme),
+            format!("Unsupported scheme: {}", scheme),
         )));
     }
     if rest.is_empty() {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "URI缺少路径".into(),
+            "URI missing path component".into(),
         )));
     }
 

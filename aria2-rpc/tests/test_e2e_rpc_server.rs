@@ -131,7 +131,7 @@ async fn test_jsonrpc_get_version() {
 }
 
 #[tokio::test]
-async fn test_root_endpoint() {
+async fn test_root_endpoint_matches_original_not_found_contract() {
     let (server, port) = start_test_server().await;
 
     // Spawn server in background
@@ -150,10 +150,7 @@ async fn test_root_endpoint() {
         .await
         .expect("Failed to send request");
 
-    assert!(response.status().is_success());
-
-    let body: serde_json::Value = response.json().await.expect("Failed to parse response");
-    assert_eq!(body.get("name").unwrap().as_str().unwrap(), "aria2-rust");
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
 
     // Cleanup
     server_handle.abort();

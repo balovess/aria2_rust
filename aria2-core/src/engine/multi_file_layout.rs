@@ -210,6 +210,32 @@ impl MultiFileLayout {
             .map(|f| f.absolute_path.as_path())
     }
 
+    /// Override the output path for one torrent file.
+    ///
+    /// Metalink torrent groups may map a torrent-relative `originalName` to a
+    /// different user-visible path. The byte offsets remain those from the
+    /// torrent; only the destination path changes.
+    pub fn set_file_absolute_path(
+        &mut self,
+        file_index: usize,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        let file = self
+            .files
+            .get_mut(file_index)
+            .ok_or_else(|| format!("invalid file index {file_index}"))?;
+        file.absolute_path = path.clone();
+        let relative = path.strip_prefix(&self.base_dir).unwrap_or(&path);
+        file.path = relative
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        Ok(())
+    }
+
     pub fn file_completed_bytes(&self, file_idx: usize, bitfield: &[u8]) -> u64 {
         let file = match self.files.get(file_idx) {
             Some(f) => f,

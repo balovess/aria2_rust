@@ -55,12 +55,10 @@ impl DiskAdaptor for DirectDiskAdaptor {
             open_opts.write(true).create(true).read(true);
         }
 
-        self.file = Some(
-            open_opts
-                .open(path)
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?,
-        );
+        self.file =
+            Some(open_opts.open(path).await.map_err(|e| {
+                crate::error::Aria2Error::FileOpen(format!("{}: {e}", path.display()))
+            })?);
 
         Ok(())
     }
@@ -100,7 +98,7 @@ impl DiskAdaptor for DirectDiskAdaptor {
             }
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
-                "文件未打开".to_string(),
+                "File not open".to_string(),
             ))
         }
     }
@@ -138,7 +136,7 @@ impl DiskAdaptor for DirectDiskAdaptor {
             Ok(metadata.len())
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
-                "文件未打开".to_string(),
+                "File not open".to_string(),
             ))
         }
     }

@@ -19,6 +19,29 @@
 //! This matches the [`SeekableDiskWriter`] trait's `&mut self` requirement.
 //! The mmap itself is safe for concurrent reads, but the trait mandates
 //! `&mut self` for consistency across implementations.
+//!
+//! # SIGBUS risk & multi-process constraint
+//!
+//! **Only one process may hold a writable mapping of the file at a time.**
+//! Multi-process resume of the same output file is NOT supported while a
+//! mapping is active, and neither is any external `truncate`/`set_len` on a
+//! file another process has mapped writable. Both of these scenarios can
+//! raise **SIGBUS** (a process-level abort that Rust cannot catch):
+//!
+//! - **External truncation**: if the file is truncated below a page the
+//!   process later writes or reads, the faulting access raises SIGBUS. This
+//!   can be triggered by a second aria2 instance resuming/truncating the same
+//!   output file.
+//! - **Disk full during write-back**: if the filesystem runs out of space
+//!   while the kernel writes back a dirty page, the access that dirtied the
+//!   page raises SIGBUS. The kernel cannot defer the error to `flush()`.
+//!
+//! The download engine therefore performs a disk-space pre-check
+//! ([`crate::filesystem::disk_space::check_disk_space`]) and pre-allocation
+//! (`fallocate`) *before* creating the mmap — the main `file_allocation = mmap`
+//! path is covered. Direct users of this writer that bypass the allocation
+//! layer are responsible for (1) reserving enough free space and (2) ensuring
+//! no other process writes/truncates the same file.
 
 use std::path::{Path, PathBuf};
 
@@ -97,7 +120,8 @@ impl MmapDiskWriter {
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
             debug!("Created parent directories for {:?}", self.path);
         }
         Ok(())
@@ -115,12 +139,27 @@ impl MmapDiskWriter {
             .write(true)
             .read(true)
             .truncate(false) // Explicit: preserve existing data for resume scenarios.
-            .open(&self.path)?;
+            .open(&self.path)
+            .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", self.path.display())))?;
 
         // Pre-allocate if total_size is provided and file is new (size 0).
         if let Some(size) = self.total_size {
             let current_size = file.metadata()?.len();
             if current_size == 0 && size > 0 {
+                // Defensive disk-space pre-check before set_len. The download
+                // engine's allocation layer (preallocate_file_with_progress /
+                // FileAllocationMan) already runs check_disk_space for the
+                // main mmap path; this guards direct users who bypass it.
+                // Non-fatal by design: log and continue, since set_len still
+                // fails cleanly if the filesystem rejects the allocation,
+                // whereas running out of space during dirty-page write-back
+                // would raise SIGBUS (see module docs).
+                if let Err(e) = crate::filesystem::disk_space::check_disk_space(&self.path, size) {
+                    warn!(
+                        "Insufficient disk space for mmap pre-allocation of {} bytes at {:?}: {}",
+                        size, self.path, e
+                    );
+                }
                 file.set_len(size)?;
                 debug!("Pre-allocated file to {} bytes: {:?}", size, self.path);
             }
@@ -143,9 +182,21 @@ impl MmapDiskWriter {
         }
 
         // Try to create the memory mapping.
-        // Safety: The file was opened with read+write access. The file is not
-        // modified externally while the mapping is active (we hold the only
-        // file handle in this writer). The file size is non-zero.
+        // SAFETY: The file was opened with read+write access above and is
+        // non-empty (checked above). The mapping is valid for the file's
+        // current size and is unmapped when the Inner::Mmap variant is
+        // dropped.
+        //
+        // Caller-side invariants required for soundness (see module docs):
+        //  * NO OTHER PROCESS may concurrently hold a writable mapping of, or
+        //    truncate (`set_len`/`ftruncate`), this file while the mapping is
+        //    active. Multi-process resume of the same output file is NOT
+        //    supported — external truncation makes accesses past the new EOF
+        //    raise SIGBUS (process abort, not catchable in Rust).
+        //  * The caller must ensure the backing filesystem has enough free
+        //    space for the mapped size. The download engine's allocation
+        //    layer runs `check_disk_space` before mapping; direct users must
+        //    do the same (see `open_sync` for a defensive warning).
         match unsafe { MmapMut::map_mut(&file) } {
             Ok(mmap) => {
                 debug!(
@@ -195,7 +246,8 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = offset as usize;
+                let start = usize::try_from(offset)
+                    .map_err(|_| Aria2Error::Io("write offset exceeds usize range".into()))?;
                 let end = start
                     .checked_add(data.len())
                     .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
@@ -224,7 +276,8 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = offset as usize;
+                let start = usize::try_from(offset)
+                    .map_err(|_| Aria2Error::Io("write offset exceeds usize range".into()))?;
                 let end = start
                     .checked_add(data.len())
                     .ok_or_else(|| Aria2Error::Io("write offset + length overflow".into()))?;
@@ -248,7 +301,8 @@ impl SeekableDiskWriter for MmapDiskWriter {
         self.open().await?;
         match self.inner.as_mut() {
             Some(Inner::Mmap { mmap, .. }) => {
-                let start = offset as usize;
+                let start = usize::try_from(offset)
+                    .map_err(|_| Aria2Error::Io("read offset exceeds usize range".into()))?;
                 if start >= mmap.len() {
                     return Ok(0); // EOF
                 }

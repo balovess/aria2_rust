@@ -84,7 +84,6 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          strip aria2c${{ matrix.ext }} || true
           tar czf ../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.ext }}
           cd -
       - name: Prepare artifacts (Windows)

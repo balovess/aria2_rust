@@ -31,6 +31,7 @@
 
 pub mod ftp;
 pub mod http;
+pub mod identity;
 
 #[cfg(feature = "bittorrent")]
 pub mod bittorrent;

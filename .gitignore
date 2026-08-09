@@ -1,5 +1,6 @@
 target/
 aria2_original/
+aria2-next/
 .trae/
 bindings/nodejs/node_modules/
 bindings/python/aria2_rust_client/__pycache__/
@@ -9,3 +10,12 @@ bindings/python/tests/integration/__pycache__/
 bindings/python/tests/__pycache__/
 *.txt
 *.md
+*.7z
+*.bak
+*.bin
+!docs/
+AGENTS.md
+docs/compatibility-status.md
+docs/MIGRATION.md
+.codex-python-deps/
+!docs/compatibility-status.md

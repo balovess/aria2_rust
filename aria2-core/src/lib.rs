@@ -70,7 +70,7 @@
 //!         ..Default::default()
 //!     };
 //!
-//!     match man.add_group(vec!["http://example.com/file.zip".into()], opts).await {
+//!     match man.add_group(vec!["http://example.com/file.zip".into()], opts) {
 //!         Ok(gid) => println!("Started: #{}", gid.value()),
 //!         Err(e) => eprintln!("Error: {}", e),
 //!     }
@@ -78,17 +78,22 @@
 //! ```
 
 pub mod auth;
+pub mod c_api;
 pub mod checksum;
 pub mod colorized_stream;
 pub mod config;
 pub mod constants;
+#[cfg(feature = "bittorrent")]
+pub use aria2_protocol::bittorrent::dht;
 pub mod dns;
+pub mod download;
 pub mod engine;
 pub mod error;
 pub mod filesystem;
 pub mod ftp;
 pub mod http;
 pub mod log;
+pub mod network;
 pub mod option;
 pub mod rate_limiter;
 pub mod request;
@@ -102,8 +107,12 @@ pub mod validation;
 
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
+#[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
-pub use request::request_group::{DownloadStatus, RUNTIME_CHANGEABLE_OPTIONS};
+pub use request::request_group::{
+    ChangeableKind, DownloadStatus, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+    RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable,
+};
 
 #[cfg(test)]
 mod integration_tests_j2_j5;
@@ -111,12 +120,24 @@ mod integration_tests_j2_j5;
 /// Initialize the logging subsystem with optional file output.
 ///
 /// Sets up `tracing-subscriber` with console output (colorized) and optionally
-/// writes to a log file. The log level controls verbosity (DEBUG/INFO/WARN/ERROR).
+/// writes to a log file. When `log_max_size` is `Some`, size-based rotation is
+/// used (keeping `log_max_files` rotated copies); otherwise daily time-based
+/// rotation is used (controlled by `log_backup_count`).
+#[allow(clippy::too_many_arguments)]
 pub fn init_logging(
     log_level: &str,
     console_log_level: &str,
     log_file: Option<&str>,
     log_backup_count: usize,
+    log_max_size: Option<u64>,
+    log_max_files: Option<usize>,
 ) {
-    log::init_logging(log_level, console_log_level, log_file, log_backup_count);
+    log::init_logging(
+        log_level,
+        console_log_level,
+        log_file,
+        log_backup_count,
+        log_max_size,
+        log_max_files,
+    );
 }

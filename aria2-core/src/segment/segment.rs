@@ -76,7 +76,7 @@ impl Segment {
     pub fn write_data(&mut self, offset: u64, length: u64) -> Result<()> {
         if offset < self.start || offset + length > self.end {
             return Err(Aria2Error::DownloadFailed(format!(
-                "数据偏移超出分段范围: {}-{}",
+                "data offset out of segment range: {}-{}",
                 offset, self.end
             )));
         }

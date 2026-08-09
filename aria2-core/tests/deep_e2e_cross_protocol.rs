@@ -9,14 +9,20 @@ mod fixtures;
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::filesystem::disk_writer::{ByteArrayDiskWriter, DefaultDiskWriter, DiskWriter};
 use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::session::session_entry::SessionEntry;
-use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
+use e2e_helpers::mock_http_server::MockHttpServer;
+#[cfg(feature = "metalink")]
+use e2e_helpers::mock_http_server::full_body;
 use fixtures::mock_ftp_server::{MockFtpServer, small_content};
+#[cfg(feature = "metalink")]
 use fixtures::test_metalink_builder::{build_metalink_v3, compute_sha256};
+#[cfg(feature = "metalink")]
+use http::{Response, StatusCode};
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,6 +30,7 @@ use std::time::{Duration, Instant};
 // ==================== Helper Functions ====================
 
 /// Start a MockHttpServer instance for HTTP-based tests
+#[allow(dead_code)]
 async fn start_http_server() -> MockHttpServer {
     MockHttpServer::start()
         .await
@@ -42,6 +49,7 @@ fn tmp_dir() -> tempfile::TempDir {
 
 // ==================== Test 1: Metalink SHA256 Verification Success ====================
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn metalink_sha256_verify_ok() {
     // Build Metalink v3 document with correct SHA256 hash of known data
@@ -98,6 +106,7 @@ async fn metalink_sha256_verify_ok() {
 
 // ==================== Test 2: Metalink SHA256 Mismatch Error ====================
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn metalink_sha256_mismatch_error() {
     // Build Metalink with SHA256 hash BUT server serves DIFFERENT data
@@ -151,6 +160,7 @@ async fn metalink_sha256_mismatch_error() {
 
 // ==================== Test 3: Metalink Mirror Failover ====================
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn metalink_mirror_failover() {
     // Metalink with 2 URLs: primary returns 503, mirror returns 200
@@ -543,6 +553,7 @@ fn session_save_and_restore_tasks() {
 
 // ==================== Test 8: Concurrent Same Filename Collision ====================
 
+#[cfg(feature = "metalink")]
 #[tokio::test]
 async fn concurrent_same_filename_collision() {
     // 2 downloads targeting same output directory with same inferred filename

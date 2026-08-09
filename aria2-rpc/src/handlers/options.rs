@@ -4,80 +4,227 @@
 
 use std::collections::HashMap;
 
-use aria2_core::RUNTIME_CHANGEABLE_OPTIONS;
+use aria2_core::config::{OptionRegistry, is_global_option_changeable, project_initial_options};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use crate::rpc_helpers::normalize_rpc_options;
 
-/// Valid option keys accepted by `aria2.changeOption`.
-const VALID_OPTION_KEYS: &[&str] = &[
-    "split",
-    "max-connection-per-server",
-    "max-download-limit",
-    "max-upload-limit",
-    "dir",
-    "out",
-    "seed-time",
-    "seed-ratio",
-    // File allocation
-    "file-allocation",
-    "mmap-threshold",
-    "secure-falloc",
-    // Checksum & cookies
-    "checksum",
-    "cookie-file",
-    "cookies",
-    // BitTorrent
-    "bt-force-encrypt",
-    "bt-require-crypto",
-    "enable-dht",
-    "dht-listen-port",
-    "dht-entry-point",
-    "enable-public-trackers",
-    "bt-piece-selection-strategy",
-    "bt-endgame-threshold",
-    "bt-max-upload-slots",
-    "bt-optimistic-unchoke-interval",
-    "bt-snubbed-timeout",
-    "bt-prioritize-piece",
-    "enable-utp",
-    "utp-listen-port",
-    // Retry
-    "max-retries",
-    "retry-wait",
-    // DHT
-    "dht-file-path",
-    // Proxy
-    "http-proxy",
-    "all-proxy",
-    "https-proxy",
-    "ftp-proxy",
-    "no-proxy",
-    // HTTP headers
-    "header",
-    "user-agent",
-    "referer",
-];
+/// Options that can be changed at runtime via `aria2.changeGlobalOption`.
+///
+/// Extracted from the C++ aria2 `OptionHandlerFactory.cc` — all options
+/// with `setChangeGlobalOption(true)`. Keep in sync with the original.
+fn parse_non_negative_u64(value: &serde_json::Value, option: &str) -> Result<u64, JsonRpcError> {
+    if let Some(value) = value.as_u64() {
+        return Ok(value);
+    }
+    if let Some(value) = value.as_i64() {
+        return u64::try_from(value).map_err(|_| {
+            JsonRpcError::InvalidParams(format!("Option '{}' must be non-negative", option))
+        });
+    }
+    if let Some(value) = value.as_str() {
+        return value.trim().parse::<u64>().map_err(|_| {
+            JsonRpcError::InvalidParams(format!("Option '{}' must be an integer", option))
+        });
+    }
+    Err(JsonRpcError::InvalidParams(format!(
+        "Option '{}' must be an integer",
+        option
+    )))
+}
+
+fn parse_rate_limit(value: &serde_json::Value, option: &str) -> Result<Option<u64>, JsonRpcError> {
+    let raw = if let Some(value) = value.as_str() {
+        value.trim().to_string()
+    } else {
+        parse_non_negative_u64(value, option)?.to_string()
+    };
+    let (number, multiplier) = match raw.chars().last() {
+        Some('k' | 'K') => (&raw[..raw.len() - 1], 1024u64),
+        Some('m' | 'M') => (&raw[..raw.len() - 1], 1024u64 * 1024),
+        Some('g' | 'G') => (&raw[..raw.len() - 1], 1024u64 * 1024 * 1024),
+        Some('t' | 'T') => (&raw[..raw.len() - 1], 1024u64 * 1024 * 1024 * 1024),
+        _ => (raw.as_str(), 1),
+    };
+    let number = number.parse::<f64>().map_err(|_| {
+        JsonRpcError::InvalidParams(format!("Option '{}' must be a byte rate", option))
+    })?;
+    if !number.is_finite() || number < 0.0 {
+        return Err(JsonRpcError::InvalidParams(format!(
+            "Option '{}' must be a non-negative byte rate",
+            option
+        )));
+    }
+    let bytes = number * multiplier as f64;
+    if bytes > u64::MAX as f64 {
+        return Err(JsonRpcError::InvalidParams(format!(
+            "Option '{}' is too large",
+            option
+        )));
+    }
+    let bytes = bytes as u64;
+    Ok((bytes > 0).then_some(bytes))
+}
+
+fn parse_rate_limit_for_option_change(
+    value: &serde_json::Value,
+    option: &str,
+) -> Result<Option<u64>, JsonRpcError> {
+    parse_rate_limit(value, option).map_err(|error| match error {
+        JsonRpcError::InvalidParams(message) => JsonRpcError::RpcExecution(message),
+        other => other,
+    })
+}
+
+fn parse_non_negative_u64_for_option_change(
+    value: &serde_json::Value,
+    option: &str,
+) -> Result<u64, JsonRpcError> {
+    parse_non_negative_u64(value, option).map_err(|error| match error {
+        JsonRpcError::InvalidParams(message) => JsonRpcError::RpcExecution(message),
+        other => other,
+    })
+}
+
+fn validate_registered_option(
+    registry: &OptionRegistry,
+    key: &str,
+    value: &serde_json::Value,
+) -> Result<(), JsonRpcError> {
+    if registry.get(key).is_none() {
+        return Ok(());
+    }
+    registry
+        .parse_rpc_value(key, value)
+        .map(|_| ())
+        .map_err(|error| JsonRpcError::RpcExecution(format!("Option '{}': {}", key, error)))
+}
+
+fn serialize_request_options(
+    options: &HashMap<String, serde_json::Value>,
+) -> Result<serde_json::Value, JsonRpcError> {
+    let projected = project_initial_options(
+        options
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone())),
+    );
+    serde_json::to_value(normalize_rpc_options(&projected))
+        .map_err(|error| JsonRpcError::InternalError(format!("Serialization failed: {error}")))
+}
 
 impl RpcEngine {
     /// Handle `aria2.getGlobalOption` - Get global configuration options.
-    pub async fn handle_get_global_option(&self) -> JsonRpcResponse {
+    ///
+    /// C++ aria2 returns every defined option with an `OptionHandler`, except
+    /// `rpc-secret`. The core registry owns that visibility policy so hidden
+    /// original options remain observable while Rust-only extensions do not
+    /// change the original wire response.
+    pub async fn handle_get_global_option(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let opts = self.global_opts.read().await;
-        JsonRpcResponse::success(
-            serde_json::Value::Null,
-            serde_json::to_value(&*opts).unwrap_or(serde_json::json!({})),
-        )
+        let registry = OptionRegistry::new();
+        let projected = registry.project_defined_global_options_for_rpc(&opts);
+        let value = serde_json::to_value(normalize_rpc_options(&projected))
+            .unwrap_or(serde_json::json!({}));
+        JsonRpcResponse::success(req.id.clone().unwrap_or_default(), value)
     }
 
     /// Handle `aria2.changeGlobalOption` - Modify global configuration options.
+    ///
+    /// Per original C++ aria2, only options with `setChangeGlobalOption(true)`
+    /// in the OptionHandler may be modified via this method. Unknown and
+    /// non-changeable option keys are ignored, matching C++ aria2.
     pub async fn handle_change_global_option(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let new_opts: HashMap<String, serde_json::Value> = req.get_param(0)?;
+        // C++ aria2 silently ignores unknown and non-changeable options.
+        let new_opts: HashMap<String, serde_json::Value> = new_opts
+            .into_iter()
+            .filter(|(key, _)| is_global_option_changeable(key))
+            .collect();
+
+        // Parse before mutating shared state. C++ propagates option handler
+        // parse failures as execution errors, and a failed request must not
+        // leave an invalid value visible through getGlobalOption.
+        let registry = OptionRegistry::new();
+        for (key, value) in &new_opts {
+            match key.as_str() {
+                "max-overall-download-limit" | "max-overall-upload-limit" => {
+                    parse_rate_limit_for_option_change(value, key)?;
+                }
+                // aria2 treats zero as the unlimited value in the runtime
+                // engine even though the static registry uses a positive
+                // command-line lower bound for this option.
+                "max-concurrent-downloads" => {
+                    let value = parse_non_negative_u64_for_option_change(value, key)?;
+                    u32::try_from(value).map_err(|_| {
+                        JsonRpcError::RpcExecution(format!("Option '{}' is too large", key))
+                    })?;
+                }
+                _ => validate_registered_option(&registry, key, value)?,
+            }
+        }
+
+        let current_download_limit = self
+            .global_opts
+            .read()
+            .await
+            .get("max-overall-download-limit")
+            .map(|value| parse_rate_limit_for_option_change(value, "max-overall-download-limit"))
+            .transpose()?;
+        let current_upload_limit = self
+            .global_opts
+            .read()
+            .await
+            .get("max-overall-upload-limit")
+            .map(|value| parse_rate_limit_for_option_change(value, "max-overall-upload-limit"))
+            .transpose()?;
+
         let mut opts = self.global_opts.write().await;
-        for (k, v) in new_opts {
-            opts.insert(k, v);
+        for (k, v) in &new_opts {
+            opts.insert(k.clone(), v.clone());
+        }
+        drop(opts);
+        // Apply engine-level options live.
+        // max-concurrent-downloads drives the engine's slot limit; the
+        // engine loop reduces excess active downloads immediately.
+        if let Some(value) = new_opts.get("max-concurrent-downloads")
+            && let Some(tx) = &self.engine_cmd_tx
+        {
+            let max = parse_non_negative_u64_for_option_change(value, "max-concurrent-downloads")?;
+            use aria2_core::engine::engine_command::EngineCommand;
+            let max = u32::try_from(max).map_err(|_| {
+                JsonRpcError::RpcExecution(
+                    "Option 'max-concurrent-downloads' is too large".to_string(),
+                )
+            })?;
+            let _ = tx.send(EngineCommand::SetMaxConcurrent { max });
+        }
+        if new_opts.contains_key("max-overall-download-limit")
+            || new_opts.contains_key("max-overall-upload-limit")
+        {
+            let download_limit = match new_opts.get("max-overall-download-limit") {
+                Some(value) => {
+                    parse_rate_limit_for_option_change(value, "max-overall-download-limit")?
+                }
+                None => current_download_limit.flatten(),
+            };
+            let upload_limit = match new_opts.get("max-overall-upload-limit") {
+                Some(value) => {
+                    parse_rate_limit_for_option_change(value, "max-overall-upload-limit")?
+                }
+                None => current_upload_limit.flatten(),
+            };
+            if let Some(tx) = &self.engine_cmd_tx {
+                use aria2_core::engine::engine_command::EngineCommand;
+                let _ = tx.send(EngineCommand::SetGlobalRateLimit {
+                    download_limit,
+                    upload_limit,
+                });
+            }
         }
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -88,121 +235,107 @@ impl RpcEngine {
     /// Handle `aria2.getOption` - Get per-task options.
     ///
     /// Resolution order:
-    /// 1. Per-task options stored via `aria2.changeOption` (returned as-is).
-    /// 2. If no per-task overrides exist but the task is registered in the
-    ///    shared `RequestGroupMan`, fall back to the current global options.
-    /// 3. Otherwise return `MethodNotFound`.
+    /// 1. A live group returns its creation snapshot overlaid with options
+    ///    already applied through `aria2.changeOption`.
+    /// 2. A stopped result returns the same snapshot persisted by core.
+    /// 3. Legacy groups without a snapshot use their applied options, then the
+    ///    current global options as their historical fallback.
+    /// 4. Otherwise return an execution error.
     pub async fn handle_get_option(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
 
-        // Step 1: per-task overrides.
-        let task_opts = self.task_opts.read().await;
-        if let Some(opts) = task_opts.get(&gid) {
+        // Pending changes are intentionally absent until the group restarts;
+        // this matches C++ getOption rather than exposing a queued value.
+        let (group_option_state, stopped_result) = if let Some(group_man) = self.group_man.as_ref()
+        {
+            let group_man = group_man.read().await;
+            let group_option_state = group_man.group_by_hex(&gid).map(|group| {
+                let group = group.recover();
+                (group.effective_option_snapshot(), group.runtime_options())
+            });
+            let stopped_result = if group_option_state.is_none() {
+                group_man.find_stopped_result(&gid)
+            } else {
+                None
+            };
+            (group_option_state, stopped_result)
+        } else {
+            (None, None)
+        };
+        let group_exists = group_option_state.is_some();
+
+        // Live groups own their option snapshot in core. This makes CLI,
+        // session-restored, and RPC-created tasks follow the same rule.
+        if let Some((Some(options), _)) = group_option_state.as_ref() {
             return Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
-                serde_json::to_value(opts).map_err(|e| {
-                    JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                })?,
+                serialize_request_options(options)?,
             ));
         }
-        // Release the task_opts read lock before awaiting on group_man to
-        // avoid holding it across an await point and keep lock hold times short.
-        drop(task_opts);
 
-        // Step 2: fall back to global options if the task is known to the
-        // shared RequestGroupMan.
-        if let Some(group_man) = self.group_man.as_ref() {
-            let task_exists = group_man.read().await.group_by_hex(&gid).is_some();
-            if task_exists {
-                let global_opts = self.global_opts.read().await;
-                return Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
-                    serde_json::to_value(&*global_opts).map_err(|e| {
-                        JsonRpcError::InternalError(format!("Serialization failed: {}", e))
-                    })?,
-                ));
-            }
+        // C++ `GetOptionRpcMethod` reads `DownloadResult::option` once the
+        // group is gone. A legacy result with no snapshot still exists, so it
+        // must produce an empty object instead of a spurious unknown-GID
+        // error.
+        if let Some(result) = stopped_result {
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serialize_request_options(&result.option_snapshot().cloned().unwrap_or_default())?,
+            ));
+        }
+
+        // Preserve the legacy group-only adapter behavior for callers that
+        // registered a RequestGroup without the RPC task snapshot.
+        if let Some((_, runtime_options)) = group_option_state
+            && !runtime_options.is_empty()
+        {
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serialize_request_options(&runtime_options)?,
+            ));
+        }
+
+        if group_exists {
+            let global_opts = self.global_opts.read().await;
+            return Ok(JsonRpcResponse::success(
+                req.id.clone().unwrap_or_default(),
+                serialize_request_options(&global_opts)?,
+            ));
         }
 
         // Step 3: task does not exist anywhere.
-        Err(JsonRpcError::MethodNotFound(format!(
-            "GID {} not found",
-            gid
-        )))
+        Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid)))
     }
 
     /// Handle `aria2.changeOption` - Modify per-task options.
     ///
-    /// Only runtime-changeable options (see [`RUNTIME_CHANGEABLE_OPTIONS`])
-    /// may be modified via this method; startup-only options are rejected
-    /// with `InvalidParams`. Accepted changes are:
-    ///
-    /// 1. Propagated to the running `RequestGroup` via `RequestGroupMan`
-    ///    (when the engine is wired to a live download engine), so they take
-    ///    effect immediately on the in-flight download.
-    /// 2. Stored in `task_opts` so `aria2.getOption` returns the current
-    ///    values and so they persist across session reloads.
+    /// Matches C++ `ChangeOptionRpcMethod::process()`:
+    /// - For **active** downloads: only options with `setChangeOption(true)`
+    ///   take effect immediately. Options with `setChangeOptionForReserved(true)`
+    ///   are stored as "pending" and applied when the download is paused/restarted.
+    ///   Other options are ignored.
+    /// - For **reserved/waiting** downloads: options with
+    ///   `setChangeOptionForReserved(true)` take effect immediately.
+    ///   Other options are ignored.
     pub async fn handle_change_option(
         &self,
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
-        let changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
+        let raw_changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
+        let changes = normalize_rpc_options(&raw_changes);
 
-        // Step 1: reject unknown option keys entirely.
-        for key in changes.keys() {
-            if !VALID_OPTION_KEYS.contains(&key.as_str()) {
-                return Err(JsonRpcError::InvalidParams(format!(
-                    "Unknown option: {}",
-                    key
-                )));
-            }
-        }
-
-        // Step 2: reject startup-only options. Per spec, only runtime-changeable
-        // options may be modified via aria2.changeOption on a live task.
-        for key in changes.keys() {
-            if !RUNTIME_CHANGEABLE_OPTIONS.contains(&key.as_str()) {
-                return Err(JsonRpcError::InvalidParams(format!(
-                    "Option '{}' cannot be changed at runtime",
-                    key
-                )));
-            }
-        }
-
-        // Step 3: propagate to the running RequestGroup (if any). The GID may
-        // not be known to RequestGroupMan yet (e.g., the task was added via
-        // RPC but the download has not started); in that case we still store
-        // the change in task_opts so it applies when the task starts.
-        // `changes` is cloned because we also consume it for task_opts below.
-        if let Some(ref group_man) = self.group_man {
-            let gm = group_man.read().await;
-            if let Err(e) = gm.update_group_options(&gid, changes.clone()).await {
-                // "not found" means the task isn't registered in group_man yet
-                // — that's acceptable, the change will apply from task_opts on
-                // start. Any other error is propagated as InvalidParams.
-                if !e.contains("not found") {
-                    return Err(JsonRpcError::InvalidParams(e));
-                }
-                tracing::debug!(
-                    "changeOption for GID {} not applied to a running group (not registered yet); storing in task_opts only",
-                    gid
-                );
-            }
-        }
-
-        // Step 4: persist in task_opts for getOption retrieval and session
-        // reload. This runs after propagation so a failed propagate (non-
-        // not-found error) returns early without mutating task_opts.
-        let mut task_opts = self.task_opts.write().await;
-        let entry = task_opts.entry(gid).or_insert_with(HashMap::new);
-        for (k, v) in changes {
-            entry.insert(k, v);
-        }
-        drop(task_opts);
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let manager = group_man.read().await;
+        manager
+            .change_group_options(&gid, changes)
+            .map_err(JsonRpcError::RpcExecution)?;
 
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),

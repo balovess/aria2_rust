@@ -15,9 +15,19 @@
 
 ---
 
-**aria2-rust** is a complete rewrite of the renowned [aria2](https://aria2.github.io/) download utility in Rust. It supports HTTP/HTTPS, FTP/SFTP, BitTorrent, and Metalink protocols, with JSON-RPC/XML-RPC/WebSocket remote control capabilities.
+**aria2-rust** is an independent Rust download engine. It provides practical
+compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
+users and tools can migrate easily, while its architecture, safety,
+performance, and product direction are its own. It supports HTTP/HTTPS,
+FTP/SFTP, BitTorrent, Metalink, and JSON-RPC/XML-RPC/WebSocket paths;
+compatibility status and verification evidence are tracked in
+[docs/compatibility-status.md](docs/compatibility-status.md).
 
-## Features
+## Implemented Capabilities
+
+The capability inventory below describes code paths, not a claim that every
+feature has passed the complete cross-platform E2E matrix. See the
+[compatibility status](docs/compatibility-status.md) for the current gate.
 
 - **Multi-Protocol Download**: HTTP/HTTPS, FTP/SFTP, BitTorrent (DHT/PEX/MSE), Metalink V3/V4
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
@@ -25,7 +35,7 @@
 - **Full BitTorrent Support**: 
   - ✅ DHT network (KRPC + routing table + bootstrap)
   - ✅ Tracker communication (UDP/HTTP)
-  - ✅ Peer Exchange (PEX)
+  - ✅ Peer Exchange (PEX, per-peer BEP 10 extension-ID negotiation)
   - ✅ MSE/PE encryption (BEP14 handshake)
   - ✅ Choking algorithms + seed-time/ratio support
   - ✅ RarestFirst piece selection
@@ -36,7 +46,7 @@
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (34 methods + 7 events, 94% coverage)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (36 all-features methods, 6 notifications; compatibility coverage tracked separately)
 - **Configuration System**: ~95 core options with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -193,8 +203,18 @@ aria2c -i uris.txt
 
 ## Architecture
 
-Total Codebase: ~35,000+ lines Rust/TS  
-Test Suite: 1432+ tests passing
+The workspace contains four Rust crates plus Python and Node.js bindings.
+Test status is reported from reproducible commands in
+[docs/compatibility-status.md](docs/compatibility-status.md), rather than as
+a fixed historical test count.
+
+Verification snapshot (2026-08-08): the protocol, RPC, and CLI crates pass
+their all-feature package test suites; the core all-feature targets executed
+3,411 passing tests with 11 ignored and 0 failures before a Windows build
+timeout while the final target was starting. Node.js binding tests pass 123/123
+and Python binding tests pass 137/137 with a real `aria2c` binary. The single
+workspace aggregate command is still a build-time timeout on this host, so
+these results do not mean the migration is complete.
 
 The project is organized as a Cargo workspace with 4 crates:
 
@@ -409,38 +429,45 @@ For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-gui
 
 ## Compatibility with Original aria2
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| CLI arguments | ✅ Core | ~50 most-used options |
-| Configuration file (`aria2.conf`) | ✅ | Same syntax format |
-| Environment variables | ✅ | `ARIA2_*` prefix mapping |
-| JSON-RPC API | ✅ | 34 methods (94% coverage) |
-| XML-RPC API | ✅ | Full methodCall/response/fault support |
-| WebSocket events | ✅ | 7 event types |
-| URI list file (`-i`) | ✅ | Mirror + inline options |
-| NetRC auth | ✅ | machine/default/macdef parsing |
-| Session save/load | ✅ | Round-trip consistent |
-| Metalink V3/V4 | ✅ | Full parsing |
-| BitTorrent DHT | ✅ | KRPC + routing table + bootstrap |
-| FTP/SFTP | ✅ | Passive mode + auth |
-| Rate limiting | ✅ | Token bucket algorithm |
-| Cookie management | ✅ | Netscape format persistence |
-| MSE/PE encryption | ✅ Complete | BEP14 handshake |
-| Magnet link support | ✅ Complete | ut_metadata fetching |
-| RarestFirst piece | ✅ Complete | Full implementation |
-| Endgame mode | ✅ Complete | Last-piece optimization |
-| DHT persistence | ✅ Complete | dht.dat serialization |
-| uTP Protocol | ✅ Complete | Not in original aria2 C++ |
-| Web Seeds | ✅ Complete | BEP 19 |
-| LPD | ✅ Complete | Local Peer Discovery |
-| Seeding Mode | ✅ Complete | Upload support |
+The table below records implemented code paths, not full compatibility. The
+authoritative status is the module matrix in
+[docs/compatibility-status.md](docs/compatibility-status.md); an implemented
+path can still be `PARTIAL` or `UNVERIFIED` there.
 
-**Not yet implemented** (planned for future):
-- `aria2.forceShutdown` RPC method
-- `system.listMethods/listNotifications`
-- HTTPS RPC support
-- IPv6 DHT
-- More CLI options (~132 missing)
+| Feature | Path state | Notes |
+|---------|--------|-------|
+| CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
+| Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
+| Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
+| JSON-RPC API | Implemented path | 36 all-features methods returned by `system.listMethods`; interoperability remains open |
+| XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
+| WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
+| URI list file (`-i`) | Implemented path | Mirror + inline options |
+| NetRC auth | Implemented path | machine/default/macdef parsing |
+| Session save/load | Implemented path | Round-trip tests exist; complete control-file parity remains open |
+| Metalink V3/V4 | Implemented path | Parsing and downloads exist; torrent metaurl lifecycle is partial |
+| BitTorrent DHT | Implemented path | KRPC + routing table + bootstrap; live interoperability remains open |
+| FTP/SFTP | Implemented path | Passive mode + auth; live-server evidence remains open |
+| Rate limiting | Implemented path | Shared token bucket and runtime updates are tested |
+| Cookie management | Implemented path | Netscape and SQLite parsing paths exist |
+| MSE/PE encryption | Implemented path | BEP14 handshake |
+| Magnet link support | Implemented path | ut_metadata fetching |
+| RarestFirst piece | Implemented path | Piece selection implementation and tests |
+| Endgame mode | Implemented path | Last-piece optimization |
+| DHT persistence | Implemented path | `dht.dat` serialization |
+| uTP Protocol | Extension path | Not in original aria2 C++ |
+| Web Seeds | Implemented path | BEP 19 |
+| LPD | Implemented path | Local Peer Discovery |
+| Seeding Mode | Implemented path | Upload support |
+
+**Known gaps and verification status:**
+- This table is a capability inventory, not a release compatibility claim.
+- The migration is not currently all pass; optional features, ignored
+  network tests, binding E2E suites, and the public C ABI remain tracked work.
+- `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
+- HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
+- IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
+- Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License
 

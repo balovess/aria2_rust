@@ -1,0 +1,836 @@
+#[allow(unused_imports)]
+use std::sync::Arc;
+
+#[allow(unused_imports)]
+use super::group::RequestGroup;
+#[allow(unused_imports)]
+use super::group_id::GroupId;
+#[allow(unused_imports)]
+use super::options::DownloadOptions;
+#[allow(unused_imports)]
+use super::result_code::DownloadResultCode;
+#[allow(unused_imports)]
+use crate::download::DownloadContext;
+
+#[test]
+fn test_bt_peer_snapshots_roundtrip() {
+    let group = RequestGroup::new(GroupId::new(99), Vec::new(), DownloadOptions::default());
+    let snapshot = super::BtPeerSnapshot {
+        peer_id: [1; 20],
+        addr: "127.0.0.1:6881".parse().expect("valid test address"),
+        uploaded_bytes: 1,
+        downloaded_bytes: 2,
+        upload_speed: 3.0,
+        download_speed: 4.0,
+        avg_upload_speed: 5,
+        avg_download_speed: 6,
+        am_choking: true,
+        peer_choking: false,
+        seeder: Some(true),
+        connection_duration_secs: 7,
+        last_data_age_secs: 8,
+        is_snubbed: false,
+        is_banned: false,
+    };
+    group.set_bt_peer_snapshots(vec![snapshot.clone()]);
+    assert_eq!(group.bt_peer_snapshots(), vec![snapshot]);
+    group.clear_bt_peer_snapshots();
+    assert!(group.bt_peer_snapshots().is_empty());
+}
+
+#[test]
+fn test_connection_contexts_are_deduplicated_and_reset() {
+    use std::net::SocketAddr;
+
+    let group = RequestGroup::new(GroupId::new(99), Vec::new(), DownloadOptions::default());
+    let first: SocketAddr = "192.0.2.1:80".parse().unwrap();
+    let second: SocketAddr = "192.0.2.2:80".parse().unwrap();
+    let first_context = crate::network::ConnectionContext::new("example.test", 80, first);
+    group.set_connection_context(first_context.clone());
+    group.set_connection_context(first_context);
+    group.set_connection_context(crate::network::ConnectionContext::new(
+        "example.test",
+        80,
+        second,
+    ));
+    assert_eq!(group.connection_contexts().len(), 2);
+    group.clear_connection_contexts();
+    assert!(group.connection_contexts().is_empty());
+}
+
+#[test]
+fn test_followed_by_gids_are_idempotent() {
+    let group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file.zip".to_string()],
+        DownloadOptions::default(),
+    );
+    let child = GroupId::new(2);
+    group.add_followed_by_gid(child);
+    group.add_followed_by_gid(child);
+    assert_eq!(group.followed_by_gids(), vec![child]);
+}
+
+#[test]
+fn test_child_relationship_fields_are_preserved() {
+    let group = RequestGroup::new(GroupId::new(2), Vec::new(), DownloadOptions::default());
+    let parent = GroupId::new(1);
+    group.set_following_gid(parent);
+    group.set_belongs_to_gid(parent);
+    assert_eq!(group.following_gid(), Some(parent));
+    assert_eq!(group.belongs_to_gid(), Some(parent));
+}
+
+#[test]
+fn test_mark_paused_preserves_existing_error_details() {
+    let group = RequestGroup::new(
+        GroupId::new(3),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_last_error(DownloadResultCode::TimeOut, "previous timeout");
+
+    group.mark_paused();
+
+    assert!(group.status().is_paused());
+    assert_eq!(group.get_last_error_code(), DownloadResultCode::TimeOut);
+    assert_eq!(group.get_last_error_message(), "previous timeout");
+}
+
+#[test]
+fn test_metadata_info_is_preserved_independently_of_parent_link() {
+    let group = RequestGroup::new(GroupId::new(2), Vec::new(), DownloadOptions::default());
+    group.set_metadata_info(super::metadata_info::MetadataInfo::new(
+        GroupId::new(9),
+        "https://example.test/metadata.torrent",
+    ));
+
+    let info = group
+        .metadata_info()
+        .expect("metadata info should be attached");
+    assert_eq!(info.gid(), Some(GroupId::new(9)));
+    assert_eq!(info.uri(), "https://example.test/metadata.torrent");
+    assert!(group.belongs_to_gid().is_none());
+}
+
+#[test]
+fn test_request_group_progress_fields_default() {
+    // New RequestGroup should have all zeros/None defaults for progress fields
+    let group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file.zip".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Verify all atomic fields default to 0
+    assert_eq!(
+        group.get_completed_length(),
+        0,
+        "completed_length_atomic should default to 0"
+    );
+    assert_eq!(
+        group.get_total_length_atomic(),
+        0,
+        "total_length_atomic should default to 0"
+    );
+    assert_eq!(
+        group.get_uploaded_length(),
+        0,
+        "uploaded_length should default to 0"
+    );
+    assert_eq!(
+        group.get_download_speed_cached(),
+        0,
+        "download_speed_cached should default to 0"
+    );
+    assert_eq!(
+        group.get_upload_speed_cached(),
+        0,
+        "upload_speed_cached should default to 0"
+    );
+}
+
+#[test]
+fn test_set_get_completed_length() {
+    let group = RequestGroup::new(
+        GroupId::new(2),
+        vec!["http://test.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Test set/get roundtrip
+    group.set_completed_length(1024);
+    assert_eq!(
+        group.get_completed_length(),
+        1024,
+        "Should return 1024 after setting"
+    );
+
+    // Test update to different value
+    group.set_completed_length(2048);
+    assert_eq!(
+        group.get_completed_length(),
+        2048,
+        "Should return 2048 after update"
+    );
+
+    // Test large value
+    group.set_completed_length(u64::MAX);
+    assert_eq!(
+        group.get_completed_length(),
+        u64::MAX,
+        "Should handle u64::MAX"
+    );
+
+    // Test zero
+    group.set_completed_length(0);
+    assert_eq!(group.get_completed_length(), 0, "Should handle 0");
+}
+
+#[test]
+fn test_validate_total_length() {
+    let group = RequestGroup::new(
+        GroupId(1),
+        vec!["ftp://example/file".into()],
+        DownloadOptions::default(),
+    );
+    assert!(group.validate_total_length(0, 1024).is_ok());
+    assert!(group.validate_total_length(1024, 1024).is_ok());
+    assert!(group.validate_total_length(1024, 2048).is_err());
+}
+
+#[test]
+fn test_set_get_total_length() {
+    let group = RequestGroup::new(
+        GroupId::new(3),
+        vec!["http://example.com/large.iso".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Test set/get roundtrip
+    group.set_total_length_atomic(1048576); // 1MB
+    assert_eq!(
+        group.get_total_length_atomic(),
+        1048576,
+        "Should return 1MB after setting"
+    );
+
+    // Test update
+    group.set_total_length_atomic(1073741824); // 1GB
+    assert_eq!(
+        group.get_total_length_atomic(),
+        1073741824,
+        "Should return 1GB after update"
+    );
+}
+
+#[test]
+fn test_set_get_bt_bitfield() {
+    let group = RequestGroup::new(
+        GroupId::new(4),
+        vec!["magnet:?xt=urn:btih:abc123".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Default should be None
+    let bf = group.get_bt_bitfield();
+    assert!(bf.is_none(), "bt_bitfield should default to None");
+
+    // Set and retrieve bitfield
+    let test_bitfield = vec![0xFF, 0xF0, 0x0F];
+    group.set_bt_bitfield(Some(test_bitfield.clone()));
+    let retrieved = group.get_bt_bitfield();
+    assert!(
+        retrieved.is_some(),
+        "bt_bitfield should be Some after setting"
+    );
+    assert_eq!(
+        retrieved.unwrap(),
+        test_bitfield,
+        "bitfield should match what was set"
+    );
+
+    // Set back to None
+    group.set_bt_bitfield(None);
+    let bf_none = group.get_bt_bitfield();
+    assert!(
+        bf_none.is_none(),
+        "bt_bitfield should be None after clearing"
+    );
+
+    // Test with empty bitfield
+    group.set_bt_bitfield(Some(vec![]));
+    let empty_bf = group.get_bt_bitfield();
+    assert!(empty_bf.is_some(), "empty bitfield should still be Some");
+    assert!(empty_bf.unwrap().is_empty(), "bitfield should be empty vec");
+}
+
+#[tokio::test]
+async fn test_concurrent_access() {
+    let group = Arc::new(RequestGroup::new(
+        GroupId::new(5),
+        vec!["http://load.test/file.dat".to_string()],
+        DownloadOptions::default(),
+    ));
+
+    // Spawn multiple tasks that read/write progress concurrently
+    let mut handles = Vec::new();
+
+    for i in 0..10 {
+        let g = Arc::clone(&group);
+        handles.push(tokio::spawn(async move {
+            // Write progress
+            g.set_completed_length(i * 100);
+            g.set_total_length_atomic(10000);
+            g.set_uploaded_length(i * 10);
+            g.set_download_speed_cached(i * 1000);
+
+            // Read progress (should not deadlock)
+            let _cl = g.get_completed_length();
+            let _tl = g.get_total_length_atomic();
+            let _ul = g.get_uploaded_length();
+            let _ds = g.get_download_speed_cached();
+
+            // Occasionally write bitfield (sync)
+            if i % 3 == 0 {
+                let bf = vec![i as u8; 8];
+                g.set_bt_bitfield(Some(bf));
+                let _retrieved = g.get_bt_bitfield();
+            }
+
+            // Small delay to increase chance of race conditions
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }));
+    }
+
+    // Wait for all tasks to complete without deadlock
+    for handle in handles {
+        handle.await.expect("Task should complete without panic");
+    }
+
+    // Verify final state is consistent
+    let final_cl = group.get_completed_length();
+    let final_tl = group.get_total_length_atomic();
+    let final_ul = group.get_uploaded_length();
+    let final_ds = group.get_download_speed_cached();
+
+    // Values should be from one of the concurrent writers (we don't know which)
+    assert!(final_cl <= 900, "completed_length should be <= 900");
+    assert_eq!(final_tl, 10000, "total_length should be 10000");
+    assert!(final_ul <= 90, "uploaded_length should be <= 90");
+    assert!(final_ds <= 9000, "download_speed should be <= 9000");
+}
+
+#[test]
+fn test_set_get_uploaded_length() {
+    let group = RequestGroup::new(
+        GroupId::new(6),
+        vec!["http://seed.test/file.torrent".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Test default
+    assert_eq!(group.get_uploaded_length(), 0);
+
+    // Test set/get
+    group.set_uploaded_length(512);
+    assert_eq!(group.get_uploaded_length(), 512);
+
+    // Test large value
+    group.set_uploaded_length(u64::MAX / 2);
+    assert_eq!(group.get_uploaded_length(), u64::MAX / 2);
+}
+
+#[test]
+fn test_set_get_download_speed_cached() {
+    let group = RequestGroup::new(
+        GroupId::new(7),
+        vec!["http://speed.test/large.file".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Test default
+    assert_eq!(group.get_download_speed_cached(), 0);
+
+    // Test realistic download speed (e.g., 5 MB/s = 5242880 bytes/s)
+    group.set_download_speed_cached(5242880);
+    assert_eq!(group.get_download_speed_cached(), 5242880);
+
+    // Test speed update (simulating periodic updates)
+    group.set_download_speed_cached(10485760); // 10 MB/s
+    assert_eq!(group.get_download_speed_cached(), 10485760);
+}
+
+#[test]
+fn test_download_options_choking_config_defaults() {
+    // New DownloadOptions should have None for choking algorithm fields (opt-in)
+    let opts = DownloadOptions::default();
+
+    assert!(
+        opts.bt_max_upload_slots.is_none(),
+        "bt_max_upload_slots should default to None"
+    );
+    assert!(
+        opts.bt_optimistic_unchoke_interval.is_none(),
+        "bt_optimistic_unchoke_interval should default to None"
+    );
+    assert!(
+        opts.bt_snubbed_timeout.is_none(),
+        "bt_snubbed_timeout should default to None"
+    );
+}
+
+#[test]
+fn test_download_options_choking_config_custom() {
+    // Verify that custom choking config values can be set
+    let opts = DownloadOptions {
+        bt_max_upload_slots: Some(8),
+        bt_optimistic_unchoke_interval: Some(15),
+        bt_snubbed_timeout: Some(45),
+        ..DownloadOptions::default()
+    };
+
+    assert_eq!(opts.bt_max_upload_slots, Some(8));
+    assert_eq!(opts.bt_optimistic_unchoke_interval, Some(15));
+    assert_eq!(opts.bt_snubbed_timeout, Some(45));
+}
+
+#[test]
+fn test_download_options_choking_config_clone() {
+    // Verify choking config fields are preserved through Clone
+    let opts = DownloadOptions {
+        bt_max_upload_slots: Some(6),
+        bt_optimistic_unchoke_interval: Some(20),
+        bt_snubbed_timeout: Some(90),
+        ..DownloadOptions::default()
+    };
+
+    let cloned = opts.clone();
+
+    assert_eq!(cloned.bt_max_upload_slots, Some(6));
+    assert_eq!(cloned.bt_optimistic_unchoke_interval, Some(20));
+    assert_eq!(cloned.bt_snubbed_timeout, Some(90));
+}
+
+// ==================== BT Metadata Tests ====================
+
+#[test]
+fn test_bt_metadata_defaults() {
+    let group = RequestGroup::new(
+        GroupId::new(8),
+        vec!["http://example.com/file.zip".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Non-BT downloads should have 0/None defaults
+    assert_eq!(
+        group.get_bt_num_pieces(),
+        0,
+        "bt_num_pieces should default to 0"
+    );
+    assert_eq!(
+        group.get_bt_piece_length(),
+        0,
+        "bt_piece_length should default to 0"
+    );
+    assert_eq!(
+        group.get_bt_info_hash_hex(),
+        None,
+        "bt_info_hash_hex should default to None"
+    );
+}
+
+#[test]
+fn test_set_bt_metadata() {
+    let group = RequestGroup::new(
+        GroupId::new(9),
+        vec!["magnet:?xt=urn:btih:abc123def456".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Set BT metadata
+    group.set_bt_metadata(
+        100,
+        262144,
+        "abc123def456789012345678901234567890abcd".to_string(),
+    );
+
+    // Verify values
+    assert_eq!(group.get_bt_num_pieces(), 100);
+    assert_eq!(group.get_bt_piece_length(), 262144); // 256KB
+    assert_eq!(
+        group.get_bt_info_hash_hex(),
+        Some("abc123def456789012345678901234567890abcd".to_string())
+    );
+}
+
+#[test]
+fn test_bt_metadata_update() {
+    let group = RequestGroup::new(
+        GroupId::new(10),
+        vec!["bt://test.torrent".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Initial set
+    group.set_bt_metadata(50, 16384, "first_hash".to_string());
+    assert_eq!(group.get_bt_num_pieces(), 50);
+
+    // Update with new values
+    group.set_bt_metadata(200, 524288, "updated_hash".to_string());
+    assert_eq!(group.get_bt_num_pieces(), 200);
+    assert_eq!(group.get_bt_piece_length(), 524288);
+    assert_eq!(
+        group.get_bt_info_hash_hex(),
+        Some("updated_hash".to_string())
+    );
+}
+
+#[test]
+fn test_bt_info_hash_hex() {
+    let group = RequestGroup::new(
+        GroupId::new(11),
+        vec!["magnet:?xt=urn:btih:test".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Set via blocking method
+    group.set_bt_metadata(10, 1024, "async_test_hash".to_string());
+
+    // Read via sync method
+    let hash = group.get_bt_info_hash_hex();
+    assert_eq!(hash, Some("async_test_hash".to_string()));
+}
+
+#[test]
+fn test_update_option_new_runtime_changeable() {
+    let gid = GroupId::new(1);
+    let uris = vec!["http://example.com/file".to_string()];
+    let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
+
+    // max-connection-per-server
+    assert!(group.update_option("max-connection-per-server", serde_json::json!(4)));
+    assert_eq!(group.options().max_connection_per_server, Some(4));
+
+    // bt-max-upload-slots
+    assert!(group.update_option("bt-max-upload-slots", serde_json::json!(8)));
+    assert_eq!(group.options().bt_max_upload_slots, Some(8));
+
+    // bt-snubbed-timeout
+    assert!(group.update_option("bt-snubbed-timeout", serde_json::json!(120)));
+    assert_eq!(group.options().bt_snubbed_timeout, Some(120));
+
+    // bt-optimistic-unchoke-interval
+    assert!(group.update_option("bt-optimistic-unchoke-interval", serde_json::json!(45)));
+    assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
+
+    // bt-endgame-threshold
+    assert!(group.update_option("bt-endgame-threshold", serde_json::json!(50)));
+    assert_eq!(group.options().bt_endgame_threshold, 50);
+
+    // seed-time
+    assert!(group.update_option("seed-time", serde_json::json!(3600)));
+    assert_eq!(group.options().seed_time, Some(3600.0));
+
+    // seed-ratio
+    assert!(group.update_option("seed-ratio", serde_json::json!(2.0)));
+    assert_eq!(group.options().seed_ratio, Some(2.0));
+
+    // RPC clients send option values as strings, including aria2 size suffixes.
+    assert!(group.update_option("max-download-limit", serde_json::json!("100K")));
+    assert_eq!(group.options().max_download_limit, Some(100 * 1024));
+    assert!(group.update_option("max-tries", serde_json::json!("7")));
+    assert_eq!(group.options().max_retries, 7);
+    assert!(group.update_option("bt-force-encrypt", serde_json::json!("true")));
+    assert!(group.options().bt_force_encrypt);
+
+    // Canonical reserved options without a dedicated execution field still
+    // use the shared registry validator and remain visible after applying.
+    assert!(group.update_option("allow-overwrite", serde_json::json!("true")));
+    assert_eq!(
+        group.runtime_options().get("allow-overwrite"),
+        Some(&serde_json::json!("true"))
+    );
+    assert!(
+        group
+            .try_update_option("allow-overwrite", serde_json::json!("maybe"))
+            .is_err()
+    );
+    // A recognized key with an invalid value must be observable by RPC
+    // callers and must not partially update the group.
+    let previous_limit = group.options().max_download_limit;
+    let error = group
+        .try_update_option("max-download-limit", serde_json::json!("badvalue"))
+        .expect_err("invalid size must be rejected");
+    assert!(error.contains("max-download-limit"));
+    assert_eq!(group.options().max_download_limit, previous_limit);
+
+    let previous_retries = group.options().max_retries;
+    assert!(
+        group
+            .try_update_option("max-tries", serde_json::json!("not-a-number"))
+            .is_err()
+    );
+    assert_eq!(group.options().max_retries, previous_retries);
+
+    let previous_dht = group.options().enable_dht;
+    assert!(
+        group
+            .try_update_option("enable-dht", serde_json::json!("maybe"))
+            .is_err()
+    );
+    assert_eq!(group.options().enable_dht, previous_dht);
+
+    // Unknown option returns false
+    assert!(!group.update_option("unknown-option", serde_json::json!(1)));
+}
+
+#[test]
+fn test_effective_option_snapshot_overlays_only_applied_runtime_changes() {
+    let mut group = RequestGroup::new(
+        GroupId::new(42),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([
+        ("dir".to_string(), serde_json::json!("/initial")),
+        ("max-download-limit".to_string(), serde_json::json!("1024")),
+    ]));
+
+    group
+        .apply_runtime_options(std::collections::HashMap::from([(
+            "max-download-limit".to_string(),
+            serde_json::json!("2048"),
+        )]))
+        .expect("runtime option update should apply");
+
+    let effective = group
+        .effective_option_snapshot()
+        .expect("task snapshot should be present");
+    assert_eq!(effective.get("dir"), Some(&serde_json::json!("/initial")));
+    assert_eq!(
+        effective.get("max-download-limit"),
+        Some(&serde_json::json!("2048"))
+    );
+}
+
+#[test]
+fn test_download_result_preserves_effective_option_snapshot() {
+    let mut group = RequestGroup::new(
+        GroupId::new(43),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([
+        ("dir".to_string(), serde_json::json!("/initial")),
+        ("max-download-limit".to_string(), serde_json::json!("1024")),
+    ]));
+    group
+        .apply_runtime_options(std::collections::HashMap::from([(
+            "max-download-limit".to_string(),
+            serde_json::json!("2048"),
+        )]))
+        .expect("runtime option update should apply");
+
+    let result = group.create_download_result();
+    let options = result
+        .option_snapshot()
+        .expect("stopped result must retain the group's effective option state");
+    assert_eq!(options.get("dir"), Some(&serde_json::json!("/initial")));
+    assert_eq!(
+        options.get("max-download-limit"),
+        Some(&serde_json::json!("2048"))
+    );
+}
+
+#[test]
+fn test_runtime_option_updates_populate_execution_fields() {
+    let mut group = RequestGroup::new(
+        GroupId::new(2),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert!(group.update_option("check-integrity", serde_json::json!("true")));
+    assert!(group.update_option("conditional-get", serde_json::json!("true")));
+    assert!(group.update_option("connect-timeout", serde_json::json!("12")));
+    assert!(group.update_option("lowest-speed-limit", serde_json::json!("4K")));
+    assert!(group.update_option("timeout", serde_json::json!("30")));
+    assert!(group.update_option("remote-time", serde_json::json!("true")));
+    assert!(group.update_option("ftp-pasv", serde_json::json!("false")));
+    assert!(group.update_option("ftp-user", serde_json::json!("alice")));
+    assert!(group.update_option("ftp-passwd", serde_json::json!("secret")));
+    assert!(group.update_option("http-auth-challenge", serde_json::json!("true")));
+    assert!(group.update_option("http-user", serde_json::json!("bob")));
+    assert!(group.update_option("http-passwd", serde_json::json!("password")));
+    assert!(group.update_option("metalink-location", serde_json::json!("JP")));
+    assert!(group.update_option("metalink-version", serde_json::json!("4.0")));
+    assert!(group.update_option("follow-metalink", serde_json::json!("mem")));
+    assert!(group.update_option(
+        "bt-tracker",
+        serde_json::json!("https://tracker.test/announce")
+    ));
+
+    let options = group.options();
+    assert!(options.check_integrity);
+    assert!(options.conditional_get);
+    assert_eq!(options.connect_timeout, Some(12));
+    assert_eq!(options.lowest_speed_limit, Some(4 * 1024));
+    assert_eq!(options.timeout, Some(30));
+    assert!(options.remote_time);
+    assert!(!options.ftp_pasv);
+    assert_eq!(options.ftp_user.as_deref(), Some("alice"));
+    assert_eq!(options.ftp_passwd.as_deref(), Some("secret"));
+    assert!(options.http_auth_challenge);
+    assert_eq!(options.http_user.as_deref(), Some("bob"));
+    assert_eq!(options.http_passwd.as_deref(), Some("password"));
+    assert_eq!(options.metalink_location.as_deref(), Some("JP"));
+    assert_eq!(options.metalink_version.as_deref(), Some("4.0"));
+    assert_eq!(options.follow_metalink, Some(super::FollowMode::Memory));
+    assert_eq!(
+        options
+            .bt_tracker
+            .as_ref()
+            .and_then(|values| values.first())
+            .map(String::as_str),
+        Some("https://tracker.test/announce")
+    );
+}
+
+#[test]
+fn test_runtime_option_enum_validation_is_shared_with_registry() {
+    assert!(
+        RequestGroup::validate_option_update(
+            "metalink-preferred-protocol",
+            &serde_json::json!("https")
+        )
+        .unwrap()
+    );
+    assert!(
+        RequestGroup::validate_option_update(
+            "metalink-preferred-protocol",
+            &serde_json::json!("gopher")
+        )
+        .is_err()
+    );
+    assert!(RequestGroup::validate_option_update("ftp-type", &serde_json::json!("ascii")).unwrap());
+    assert!(
+        RequestGroup::validate_option_update("ftp-type", &serde_json::json!("invalid")).is_err()
+    );
+}
+
+/// Verify that `is_removed()` correctly reflects the group's Removed
+/// status, and that it is non-blocking (does not deadlock when the
+/// status lock is contended).
+#[test]
+fn test_is_removed_reflects_status() {
+    let mut group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+
+    // Fresh group is in Waiting state, not Removed.
+    assert!(!group.is_removed(), "fresh group should not be removed");
+
+    // Mark as Removed (as RequestGroupMan::remove_group does).
+    group.remove().unwrap();
+    assert!(
+        group.is_removed(),
+        "is_removed() must return true after group.remove()"
+    );
+}
+
+/// `is_removed()` must be safe to call while a write lock on the status
+/// is held elsewhere. It uses `try_read` internally, so it should return
+/// `false` (not deadlock, not block) when the lock is contended by a writer.
+#[test]
+fn test_is_removed_returns_false_when_write_locked() {
+    let mut group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.remove().unwrap();
+
+    // Hold a write lock on the inner status to simulate contention.
+    // This blocks try_read() on the same lock.
+    let _guard = group.status.write().unwrap();
+    // is_removed() uses try_read(), which fails when a write lock is held.
+    // It must return false (not block, not panic).
+    assert!(
+        !group.is_removed(),
+        "is_removed() should return false when the status write lock is held (try_read fails)"
+    );
+    // Lock released when _guard drops.
+}
+
+// -----------------------------------------------------------------------
+// DownloadContext integration tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_download_context_default_is_none() {
+    let group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file.zip".to_string()],
+        DownloadOptions::default(),
+    );
+    assert!(
+        group.get_download_context().is_none(),
+        "download_context should default to None for non-BT downloads"
+    );
+}
+
+#[test]
+fn test_set_and_get_download_context() {
+    let group = RequestGroup::new(
+        GroupId::new(2),
+        vec!["bt://test".to_string()],
+        DownloadOptions::default(),
+    );
+
+    let ctx = Arc::new(DownloadContext::new(1024, 4096, "/tmp/file.bin".into()));
+    group.set_download_context(Arc::clone(&ctx));
+
+    let retrieved = group.get_download_context();
+    assert!(retrieved.is_some(), "download_context should be set");
+    assert!(
+        Arc::ptr_eq(&retrieved.unwrap(), &ctx),
+        "should return the same Arc"
+    );
+}
+
+#[test]
+fn test_torrent_attribute_on_download_context() {
+    use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+
+    let group = RequestGroup::new(
+        GroupId::new(3),
+        vec!["bt://test".to_string()],
+        DownloadOptions::default(),
+    );
+
+    let info_hash = "0123456789abcdef0123456789abcdef01234567";
+    let mut ctx = DownloadContext::new(1024, 4096, "/tmp/file.bin".into());
+    let ta = TorrentAttribute {
+        name: "test-torrent".to_string(),
+        mode: BtFileMode::Single,
+        announce_list: vec![vec!["http://tracker.example.com/announce".to_string()]],
+        nodes: Vec::new(),
+        info_hash: info_hash.to_string(),
+        metadata: Vec::new(),
+        metadata_size: 0,
+        private_torrent: false,
+        creation_date: 0,
+        comment: String::new(),
+        created_by: String::new(),
+        url_list: Vec::new(),
+    };
+    ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(ta));
+    group.set_download_context(Arc::new(ctx));
+
+    let ctx_ref = group.get_download_context().unwrap();
+    let hash = ctx_ref.get_bt_info_hash_hex();
+    assert_eq!(hash, Some(info_hash.to_string()));
+}

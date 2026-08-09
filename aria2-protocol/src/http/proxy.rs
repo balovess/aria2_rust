@@ -178,7 +178,7 @@ impl ProxyManager {
     pub fn new(config: Option<ProxyConfig>) -> Self {
         if let Some(ref cfg) = config {
             info!(
-                "代理配置已启用: {}:{} ({:?})",
+                "Proxy configuration enabled: {}:{} ({:?})",
                 cfg.host, cfg.port, cfg.proxy_type
             );
         }
@@ -195,7 +195,7 @@ impl ProxyManager {
         if let Some(hostname) = Self::extract_hostname(url)
             && config.should_bypass(&hostname)
         {
-            debug!("跳过代理 (NO_PROXY规则匹配): {}", hostname);
+            debug!("Skipping proxy (NO_PROXY rule matched): {}", hostname);
             return None;
         }
         Some(config.to_url())

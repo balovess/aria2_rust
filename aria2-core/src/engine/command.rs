@@ -1,5 +1,7 @@
 use crate::error::Result;
+use crate::request::request_group::{GroupId, RequestGroup};
 use async_trait::async_trait;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +37,10 @@ pub struct ProgressUpdate {
 pub trait Command: Send + Sync {
     async fn execute(&mut self) -> Result<()>;
 
+    /// Perform protocol-level asynchronous cleanup before task cancellation.
+    /// Commands with network lifecycle state may override this hook.
+    async fn shutdown(&mut self) {}
+
     fn status(&self) -> CommandStatus;
 
     fn timeout(&self) -> Option<Duration> {
@@ -55,4 +61,19 @@ pub trait Command: Send + Sync {
     /// background task. The default implementation is a no-op; commands that
     /// store the instant can expose it through [`started_at`].
     fn set_started_at(&mut self, _instant: Instant) {}
+
+    /// Returns the `GroupId` of the `RequestGroup` this command belongs to.
+    /// Used by the engine loop to track which group a completed task belongs
+    /// to, so it can decrement the `num_commands` counter and check whether
+    /// the group should be demoted from active to stopped.
+    fn gid(&self) -> GroupId;
+
+    /// Returns the `RequestGroup` this command drives, when it has one.
+    ///
+    /// Protocol commands use this association for shared progress and
+    /// cancellation state. Bookkeeping commands have no group and keep the
+    /// default `None`.
+    fn request_group(&self) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
+        None
+    }
 }

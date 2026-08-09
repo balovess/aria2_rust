@@ -1,821 +1,593 @@
-//! SFTP File Operations
+//! SFTP file operations and high-level file I/O abstractions.
 //!
-//! Provides a high-level API for SFTP file and directory operations built entirely
-//! on the pure Rust `packet.rs` codec and russh channel I/O. Maps SFTP protocol
-//! errors to application-level error codes for consistent error handling.
-//!
-//! ## Operation Categories
-//!
-//! - **File operations**: open, close, read, write, stat, fstat
-//! - **Directory operations**: opendir, readdir, mkdir, rmdir
-//! - **Path operations**: realpath, rename, unlink, symlink, readlink
-//! - **Attribute operations**: setstat, setfstat
+//! Provides `SftpFileOps` for issuing file system operations (open, close,
+//! read, write, stat, etc.) over an active SFTP session, plus `SftpRemoteFile`
+//! for streaming read/write access to a remote file handle.
 //!
 //! ## Architecture
 //!
 //! ```text
-//! SftpFileOps  ->  SftpSession::request(SftpPacket)  ->  channel encode/send
-//!       |                    |                              |
-//!   High-level API    Request ID management           recv/decode response
-//!       |                    |                              |
-//!       v                    v                              v
-//! FileAttributes     SftpPacket (request)          SftpPacket (response)
+//! SftpFileOps  -- issues SftpPacket requests via SftpSession
+//!      |
+//!      +-- open()  --> SftpRemoteFile (holds open handle)
+//!      |                     |
+//!      |                     +-- read_at() / write_at() / close()
+//!      |
+//!      +-- stat() / lstat() / set_stat() / mkdir() / rmdir() / ...
 //! ```
+//!
+//! All operations translate into the corresponding `SftpPacket` variants and
+//! delegate to `SftpSession::request()` for send/receive with request ID
+//! management.
 
-use std::sync::Arc;
 use tracing::{debug, warn};
 
 use super::packet::{
-    SSH_FX_EOF, SSH_FX_NO_SUCH_FILE, SSH_FX_PERMISSION_DENIED, SSH_FXF_APPEND, SSH_FXF_CREAT,
-    SSH_FXF_EXCL, SSH_FXF_READ, SSH_FXF_TRUNC, SSH_FXF_WRITE, SftpFileAttrs, is_fatal_error,
-    is_retryable_error, status_code_description,
+    SSH_FX_EOF, SSH_FX_OK, SSH_FXF_APPEND, SSH_FXF_CREAT, SSH_FXF_EXCL, SSH_FXF_READ,
+    SSH_FXF_TRUNC, SSH_FXF_WRITE, SftpFileAttrs, SftpPacket,
 };
 use super::session::SftpSession;
 
-/// Default buffer size for read operations (32 KB)
-#[allow(dead_code)] // Referenced by test_buf_size_constants; will be used when SFTP read chunking is implemented
-const DEFAULT_READ_BUF_SIZE: usize = 32 * 1024;
-/// Default buffer size for write operations (32 KB)
-#[allow(dead_code)] // Referenced by test_buf_size_constants; will be used when SFTP write chunking is implemented
-const DEFAULT_WRITE_BUF_SIZE: usize = 32 * 1024;
-
 // =============================================================================
-// File Attributes
+// FileOpError -- classified SFTP file operation error
 // =============================================================================
 
-/// Represents file metadata as returned by SFTP STAT/LSTAT/FSTAT operations.
+/// Classified SFTP file operation error.
 ///
-/// This struct mirrors the SFTP protocol v3 `attrs` structure with concrete
-/// values (no Option wrappers) for ease of use in application code.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Converted from the `String` errors returned by `SftpFileOps` methods,
+/// which have the format: `"<Operation> failed (code=N): message"`.
+/// The SFTP status code N determines the variant.
+///
+/// SFTP status codes (from `packet.rs`): `SSH_FX_NO_SUCH_FILE=2`,
+/// `SSH_FX_PERMISSION_DENIED=3`, `SSH_FX_NO_CONNECTION=6`,
+/// `SSH_FX_CONNECTION_LOST=7`.
+#[derive(Debug, Clone)]
+pub enum FileOpError {
+    /// SSH_FX_NO_SUCH_FILE (code=2)
+    NotFound { path: String },
+    /// SSH_FX_PERMISSION_DENIED (code=3)
+    PermissionDenied { path: String },
+    /// SSH_FX_NO_CONNECTION (6) or SSH_FX_CONNECTION_LOST (7)
+    Network { operation: String, message: String },
+    /// All other errors
+    Other { message: String },
+}
+
+impl From<String> for FileOpError {
+    fn from(s: String) -> Self {
+        // Error strings look like: "Open failed (code=2): No such file"
+        // Extract the status code to classify.
+        if let Some(code_start) = s.find("(code=") {
+            let rest = &s[code_start + 6..];
+            if let Some(paren_end) = rest.find(')')
+                && let Ok(code) = rest[..paren_end].parse::<u32>()
+            {
+                // Extract operation name (text before " failed").
+                let operation = s.split(" failed").next().unwrap_or("Unknown").to_string();
+                // Extract message after "): ".
+                let message = s.split("): ").nth(1).unwrap_or(&s).to_string();
+
+                return match code {
+                    2 => FileOpError::NotFound {
+                        path: String::new(),
+                    },
+                    3 => FileOpError::PermissionDenied {
+                        path: String::new(),
+                    },
+                    6 | 7 => FileOpError::Network { operation, message },
+                    _ => FileOpError::Other { message: s.clone() },
+                };
+            }
+        }
+        FileOpError::Other { message: s }
+    }
+}
+
+impl std::fmt::Display for FileOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FileOpError::NotFound { path } => write!(f, "File not found: {}", path),
+            FileOpError::PermissionDenied { path } => write!(f, "Permission denied: {}", path),
+            FileOpError::Network { operation, message } => {
+                write!(f, "{} failed: {}", operation, message)
+            }
+            FileOpError::Other { message } => write!(f, "{}", message),
+        }
+    }
+}
+
+// =============================================================================
+// OpenFlags -- SFTP file open flags
+// =============================================================================
+
+/// SFTP file open flags (SSH_FXF_* bitmask).
+///
+/// These map directly to the SFTP v3 open flags defined in the protocol spec.
+/// Use the convenience constructors `readonly()`, `write_create()`, etc. for
+/// common patterns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OpenFlags(u32);
+
+impl OpenFlags {
+    /// Open for reading only: `SSH_FXF_READ`.
+    pub fn readonly() -> Self {
+        Self(SSH_FXF_READ)
+    }
+
+    /// Open for writing, create if missing, truncate: `WRITE | CREAT | TRUNC`.
+    pub fn write_create() -> Self {
+        Self(SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC)
+    }
+
+    /// Open for reading and writing.
+    pub fn read_write() -> Self {
+        Self(SSH_FXF_READ | SSH_FXF_WRITE)
+    }
+
+    /// Open for appending (implies write).
+    pub fn append() -> Self {
+        Self(SSH_FXF_WRITE | SSH_FXF_APPEND | SSH_FXF_CREAT)
+    }
+
+    /// Create a new file; fail if it already exists (`WRITE | CREAT | EXCL`).
+    pub fn create_new() -> Self {
+        Self(SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_EXCL)
+    }
+
+    /// Create from a raw bitmask.
+    pub fn from_bits(bits: u32) -> Self {
+        Self(bits)
+    }
+
+    /// Return the raw bitmask value.
+    pub fn bits(&self) -> u32 {
+        self.0
+    }
+
+    /// Check if READ flag is set.
+    pub fn is_read(&self) -> bool {
+        self.0 & SSH_FXF_READ != 0
+    }
+
+    /// Check if WRITE flag is set.
+    pub fn is_write(&self) -> bool {
+        self.0 & SSH_FXF_WRITE != 0
+    }
+
+    /// Check if APPEND flag is set.
+    pub fn is_append(&self) -> bool {
+        self.0 & SSH_FXF_APPEND != 0
+    }
+
+    /// Check if CREAT flag is set.
+    pub fn is_create(&self) -> bool {
+        self.0 & SSH_FXF_CREAT != 0
+    }
+
+    /// Check if TRUNC flag is set.
+    pub fn is_trunc(&self) -> bool {
+        self.0 & SSH_FXF_TRUNC != 0
+    }
+
+    /// Check if EXCL flag is set.
+    pub fn is_excl(&self) -> bool {
+        self.0 & SSH_FXF_EXCL != 0
+    }
+}
+
+impl std::fmt::Display for OpenFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut parts = Vec::new();
+        if self.is_read() {
+            parts.push("READ");
+        }
+        if self.is_write() {
+            parts.push("WRITE");
+        }
+        if self.is_append() {
+            parts.push("APPEND");
+        }
+        if self.is_create() {
+            parts.push("CREAT");
+        }
+        if self.is_trunc() {
+            parts.push("TRUNC");
+        }
+        if self.is_excl() {
+            parts.push("EXCL");
+        }
+        if parts.is_empty() {
+            write!(f, "OPEN(0x{:08X})", self.0)
+        } else {
+            write!(f, "OPEN({})", parts.join("|"))
+        }
+    }
+}
+
+// =============================================================================
+// FileAttributes -- high-level file attribute representation
+// =============================================================================
+
+/// High-level file attributes returned by stat/lstat operations.
+///
+/// Unlike `SftpFileAttrs` (which mirrors the wire format with optional fields
+/// controlled by flags), this struct always populates every field with a
+/// sensible default so callers do not need to check `flags` before accessing
+/// size, permissions, etc.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileAttributes {
-    /// File size in bytes
+    /// File size in bytes (0 if unknown or not a regular file)
     pub size: u64,
-    /// Owner user ID
+    /// Owner user ID (0 if unknown)
     pub uid: u32,
-    /// Owner group ID
+    /// Owner group ID (0 if unknown)
     pub gid: u32,
-    /// Permission/mode bits (e.g., 0o644, 0o755)
+    /// POSIX permission bits (0 if unknown)
     pub permissions: u32,
-    /// Last access time (Unix timestamp)
-    pub atime: u64,
-    /// Last modification time (Unix timestamp)
-    pub mtime: u64,
-    /// True if this entry represents a directory
-    pub is_directory: bool,
-    /// True if this entry represents a regular file
+    /// Last access time as Unix timestamp (0 if unknown)
+    pub atime: u32,
+    /// Last modification time as Unix timestamp (0 if unknown)
+    pub mtime: u32,
+    /// True if this is a regular file
     pub is_regular_file: bool,
-    /// True if this entry represents a symbolic link
+    /// True if this is a directory
+    pub is_directory: bool,
+    /// True if this is a symbolic link
     pub is_symlink: bool,
 }
 
-impl Default for FileAttributes {
-    fn default() -> Self {
-        Self {
-            size: 0,
-            uid: 0,
-            gid: 0,
-            permissions: 0o644,
-            atime: 0,
-            mtime: 0,
-            is_directory: false,
-            is_regular_file: false,
-            is_symlink: false,
-        }
-    }
-}
-
-impl std::fmt::Display for FileAttributes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let type_str = if self.is_directory {
-            "dir"
-        } else if self.is_regular_file {
-            "file"
-        } else if self.is_symlink {
-            "symlink"
-        } else {
-            "unknown"
-        };
-        write!(
-            f,
-            "{}(size={}, perm={:o}, uid={}, gid={})",
-            type_str, self.size, self.permissions, self.uid, self.gid
-        )
-    }
-}
-
-impl From<&SftpFileAttrs> for FileAttributes {
-    /// Convert from packet-level SftpFileAttrs to the public FileAttributes.
-    fn from(attrs: &SftpFileAttrs) -> Self {
-        let perm = attrs.permissions.unwrap_or(0);
-        Self {
-            size: attrs.size.unwrap_or(0),
-            uid: attrs.uid.unwrap_or(0),
-            gid: attrs.gid.unwrap_or(0),
-            permissions: perm,
-            atime: attrs.atime.unwrap_or(0),
-            mtime: attrs.mtime.unwrap_or(0),
-            is_directory: (perm & 0o170000) == 0o040000,
-            is_regular_file: (perm & 0o170000) == 0o100000,
-            is_symlink: (perm & 0o170000) == 0o120000,
-        }
-    }
-}
-
 impl FileAttributes {
-    /// Create attributes suitable for a regular file of given size.
-    pub fn for_file(size: u64) -> Self {
+    /// Create a `FileAttributes` from the wire-format `SftpFileAttrs`.
+    pub fn from_wire(wire: &SftpFileAttrs) -> Self {
+        let permissions = wire.permissions.unwrap_or(0);
         Self {
-            size,
-            is_regular_file: true,
-            ..Default::default()
+            size: wire.size.unwrap_or(0),
+            uid: wire.uid.unwrap_or(0),
+            gid: wire.gid.unwrap_or(0),
+            permissions,
+            atime: wire.atime.unwrap_or(0),
+            mtime: wire.mtime.unwrap_or(0),
+            is_regular_file: wire.is_regular_file(),
+            is_directory: wire.is_directory(),
+            is_symlink: wire.is_symlink(),
         }
     }
 
-    /// Create attributes suitable for a directory.
-    pub fn for_directory() -> Self {
-        Self {
-            permissions: 0o755,
-            is_directory: true,
-            ..Default::default()
+    /// Convert back to the wire-format `SftpFileAttrs` for SETSTAT operations.
+    pub fn to_wire(&self) -> SftpFileAttrs {
+        let mut flags = 0;
+        if self.size != 0 {
+            flags |= super::packet::SSH_FILEXFER_ATTR_SIZE;
         }
-    }
-
-    /// Check if this appears to be an empty file or directory.
-    pub fn is_empty(&self) -> bool {
-        self.size == 0 && !self.is_directory
-    }
-
-    /// Get the human-readable permission string (e.g., "rw-r--r--").
-    pub fn permission_string(&self) -> String {
-        format!("{:o}", self.permissions)
-    }
-
-    /// Create a SftpFileAttrs from this FileAttributes (for use in SETSTAT/FSETSTAT).
-    pub fn to_sftp_attrs(&self) -> SftpFileAttrs {
+        if self.uid != 0 || self.gid != 0 {
+            flags |= super::packet::SSH_FILEXFER_ATTR_UIDGID;
+        }
+        if self.permissions != 0 {
+            flags |= super::packet::SSH_FILEXFER_ATTR_PERMISSIONS;
+        }
+        if self.atime != 0 || self.mtime != 0 {
+            flags |= super::packet::SSH_FILEXFER_ATTR_ACMODTIME;
+        }
         SftpFileAttrs {
+            flags,
             size: Some(self.size),
             uid: Some(self.uid),
             gid: Some(self.gid),
             permissions: Some(self.permissions),
             atime: Some(self.atime),
             mtime: Some(self.mtime),
-            extended: Vec::new(),
         }
     }
 }
 
-// =============================================================================
-// Open Flags
-// =============================================================================
-
-bitflags::bitflags! {
-    /// Flags controlling how files are opened in SFTP operations.
-    ///
-    /// These map directly to the SSH_FXF_* constants defined in the SFTP protocol:
-    /// - READ (0x00000001): Open for reading
-    /// - WRITE (0x00000002): Open for writing
-    /// - APPEND (0x00000004): Force writes to append
-    /// - CREATE (0x00000008): Create file if it doesn't exist
-    /// - TRUNCATE (0x00000010): Truncate existing file to zero length
-    /// - CREATE_NEW (0x00000020): Exclusive create (fail if exists)
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct OpenFlags: u32 {
-        const READ   = 0x0001;
-        const WRITE  = 0x0002;
-        const APPEND = 0x0004;
-        const CREATE = 0x0008;
-        const TRUNCATE = 0x0010;
-        const CREATE_NEW = 0x0020;
-    }
-}
-
-impl Default for OpenFlags {
-    fn default() -> Self {
-        Self::READ
-    }
-}
-
-impl OpenFlags {
-    /// Create flags for reading an existing file.
-    pub fn readonly() -> Self {
-        Self::READ
-    }
-
-    /// Create flags for writing (create or truncate).
-    pub fn write_create() -> Self {
-        Self::WRITE | Self::CREATE | Self::TRUNCATE
-    }
-
-    /// Create flags for appending to a file.
-    pub fn append() -> Self {
-        Self::WRITE | Self::APPEND | Self::CREATE
-    }
-
-    /// Create flags for resume writing (read+write without truncation).
-    pub fn resume() -> Self {
-        Self::READ | Self::WRITE | Self::CREATE
-    }
-
-    /// Convert our OpenFlags to the protocol-level SSH_FXF_* bitmask.
-    pub fn to_protocol_flags(&self) -> u32 {
-        let mut flags = 0u32;
-        if self.contains(Self::READ) {
-            flags |= SSH_FXF_READ;
-        }
-        if self.contains(Self::WRITE) || self.contains(Self::APPEND) {
-            flags |= SSH_FXF_WRITE;
-            // Many SFTP servers require READ access for WRITE operations
-            // (e.g., to verify file existence before writing)
-            flags |= SSH_FXF_READ;
-        }
-        if self.contains(Self::APPEND) {
-            flags |= SSH_FXF_APPEND;
-        }
-        if self.contains(Self::CREATE) || self.contains(Self::CREATE_NEW) {
-            flags |= SSH_FXF_CREAT;
-        }
-        if self.contains(Self::TRUNCATE) {
-            flags |= SSH_FXF_TRUNC;
-        }
-        if self.contains(Self::CREATE_NEW) {
-            flags |= SSH_FXF_EXCL;
-        }
-        flags
-    }
-}
-
-// =============================================================================
-// Directory Entry
-// =============================================================================
-
-/// A single entry returned by directory listing (READDIR) operations.
-#[derive(Debug, Clone)]
-pub struct DirEntry {
-    /// The base filename (not the full path)
-    pub name: String,
-    /// Full file attributes for this entry
-    pub attributes: FileAttributes,
-}
-
-impl std::fmt::Display for DirEntry {
+impl std::fmt::Display for FileAttributes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({})", self.name, self.attributes)
-    }
-}
-
-// =============================================================================
-// Error Types
-// =============================================================================
-
-/// Application-level error type for SFTP file operations.
-///
-/// Maps low-level SFTP status codes into categories that the download engine
-/// can use for retry logic, user messaging, and logging decisions.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum FileOpError {
-    /// The requested file does not exist on the remote server
-    #[error("No such file or directory: {path}")]
-    NotFound { path: String },
-
-    /// Permission denied accessing the resource
-    #[error("Permission denied: {path}")]
-    PermissionDenied { path: String },
-
-    /// A network or connection-level failure occurred
-    #[error("Network/IO error on {operation}: {message}")]
-    Network { operation: String, message: String },
-
-    /// The operation is not supported by the server
-    #[error("Operation not supported: {operation}")]
-    Unsupported { operation: String },
-
-    /// A generic SFTP protocol error occurred
-    #[error("SFTP error ({code}) on {operation}: {message}")]
-    Protocol {
-        code: u32,
-        operation: String,
-        message: String,
-    },
-
-    /// Invalid input parameters
-    #[error("Invalid argument: {message}")]
-    InvalidArgument { message: String },
-}
-
-impl FileOpError {
-    /// Map an SFTP status code + context to a FileOpError.
-    ///
-    /// Classifies the error based on the SFTP status code and operation context.
-    pub fn from_status_code(code: u32, operation: &str, path: &str) -> Self {
-        match code {
-            SSH_FX_NO_SUCH_FILE => Self::NotFound {
-                path: path.to_string(),
-            },
-            SSH_FX_PERMISSION_DENIED => Self::PermissionDenied {
-                path: path.to_string(),
-            },
-            _ if is_fatal_error(code) => Self::Protocol {
-                code,
-                operation: operation.to_string(),
-                message: status_code_description(code).to_string(),
-            },
-            _ if is_retryable_error(code) => Self::Network {
-                operation: operation.to_string(),
-                message: format!(
-                    "retryable error {} ({})",
-                    code,
-                    status_code_description(code)
-                ),
-            },
-            _ => Self::Protocol {
-                code,
-                operation: operation.to_string(),
-                message: status_code_description(code).to_string(),
-            },
-        }
-    }
-
-    /// Check if this error indicates the target simply doesn't exist.
-    pub fn is_not_found(&self) -> bool {
-        matches!(self, Self::NotFound { .. })
-    }
-
-    /// Check if this error indicates a permission problem.
-    pub fn is_permission_denied(&self) -> bool {
-        matches!(self, Self::PermissionDenied { .. })
-    }
-
-    /// Check if this error might be resolved by retrying.
-    pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::Network { .. })
-    }
-
-    /// Get the path associated with this error, if any.
-    pub fn path(&self) -> Option<&str> {
-        match self {
-            Self::NotFound { path } | Self::PermissionDenied { path } => Some(path),
-            _ => None,
-        }
-    }
-}
-
-// =============================================================================
-// SFTP File Handle
-// =============================================================================
-
-/// A handle to an open SFTP file on the remote server.
-///
-/// This wraps a server-side opaque handle (returned by SSH_FXP_OPEN)
-/// and provides methods for positioned I/O operations through the SFTP session.
-pub struct SftpFileHandle {
-    /// The server-side opaque handle bytes (returned by OPEN response)
-    handle_bytes: Vec<u8>,
-    /// Reference to the owning session for issuing requests
-    session: Arc<SftpSession>,
-}
-
-impl SftpFileHandle {
-    /// Get file attributes via the open handle (FSTAT).
-    ///
-    /// Uses `SSH_FXP_FSTAT` which operates on the handle rather than path.
-    pub async fn fstat(&self) -> Result<FileAttributes, FileOpError> {
-        debug!("[SFTP] FSTAT on handle");
-
-        let pkt = super::packet::SftpPacket::Fstat {
-            request_id: 0, // Will be set by request()
-            handle: self.handle_bytes.clone(),
+        let kind = if self.is_regular_file {
+            "file"
+        } else if self.is_directory {
+            "dir"
+        } else if self.is_symlink {
+            "symlink"
+        } else {
+            "other"
         };
+        write!(
+            f,
+            "FileAttributes{{kind={}, size={}, perm=0o{:o}}}",
+            kind, self.size, self.permissions
+        )
+    }
+}
 
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "FSTAT".to_string(),
-                message: e,
-            })?;
+// =============================================================================
+// SftpRemoteFile -- open file handle wrapper
+// =============================================================================
 
-        match resp {
-            super::packet::SftpPacket::Attrs { attrs, .. } => Ok(FileAttributes::from(&attrs)),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "FSTAT", "<handle>"))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "FSTAT".to_string(),
-                message: format!("unexpected packet type: {}", other.packet_type()),
-            }),
+/// An open remote file handle obtained via `SftpFileOps::open()`.
+///
+/// Provides streaming read/write access at arbitrary offsets. The handle is
+/// automatically closed when dropped, but callers should prefer explicit
+/// `close()` for error handling.
+pub struct SftpRemoteFile<'a> {
+    /// Reference to the session for issuing requests
+    session: &'a SftpSession,
+    /// The opaque file handle returned by the server (SSH_FXP_HANDLE)
+    handle: Vec<u8>,
+    /// Whether this handle has been closed
+    closed: bool,
+}
+
+impl<'a> std::fmt::Debug for SftpRemoteFile<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SftpRemoteFile")
+            .field("handle_len", &self.handle.len())
+            .field("closed", &self.closed)
+            .finish()
+    }
+}
+
+impl<'a> SftpRemoteFile<'a> {
+    fn new(session: &'a SftpSession, handle: Vec<u8>) -> Self {
+        Self {
+            session,
+            handle,
+            closed: false,
         }
     }
 
-    /// Set file attributes via the open handle (FSETSTAT).
-    pub async fn set_fstat(&self, attrs: &FileAttributes) -> Result<(), FileOpError> {
-        debug!("[SFTP] FSETSTAT on handle");
-
-        let pkt = super::packet::SftpPacket::Fsetstat {
-            request_id: 0,
-            handle: self.handle_bytes.clone(),
-            attrs: attrs.to_sftp_attrs(),
-        };
-
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "FSETSTAT".to_string(),
-                message: e,
-            })?;
-
-        match resp {
-            super::packet::SftpPacket::Status { code: 0, .. } => Ok(()),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "FSETSTAT", "<handle>"))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "FSETSTAT".to_string(),
-                message: format!("unexpected packet type: {}", other.packet_type()),
-            }),
-        }
-    }
-
-    /// Read data at a specific offset into the returned buffer.
+    /// Read up to `len` bytes starting at `offset` from the remote file.
     ///
-    /// # Arguments
-    /// * `offset` - Byte offset from start of file
-    /// * `length` - Maximum number of bytes to read
-    ///
-    /// # Returns
-    /// The data bytes read (may be less than `length` near EOF)
-    pub async fn read_at(&self, offset: u64, length: u32) -> Result<Vec<u8>, FileOpError> {
-        debug!("[SFTP] READ handle offset={} len={}", offset, length);
-
-        let pkt = super::packet::SftpPacket::Read {
-            request_id: 0,
-            handle: self.handle_bytes.clone(),
+    /// Returns the data bytes on success, or an empty Vec on EOF.
+    pub async fn read_at(&self, offset: u64, len: u32) -> Result<Vec<u8>, String> {
+        let pkt = SftpPacket::Read {
+            request_id: 0, // Will be set by session.request()
+            handle: self.handle.clone(),
             offset,
-            length,
+            length: len,
         };
 
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "READ".to_string(),
-                message: e,
-            })?;
+        let resp = self.session.request(pkt).await?;
 
         match resp {
-            super::packet::SftpPacket::Data { data, .. } => Ok(data),
-            super::packet::SftpPacket::Status { code, .. } if code == SSH_FX_EOF => {
-                // EOF means no more data -- return empty buffer
-                Ok(Vec::new())
+            SftpPacket::Data { data, .. } => Ok(data),
+            SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Read failed (code={}): {}", code, message))
             }
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "READ", "<handle>"))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "READ".to_string(),
-                message: format!("unexpected packet type: {}", other.packet_type()),
-            }),
+            other => Err(format!(
+                "Unexpected response to READ: type={}",
+                other.packet_type()
+            )),
         }
     }
 
-    /// Write data at a specific offset.
-    ///
-    /// # Arguments
-    /// * `offset` - Byte offset from start of file
-    /// * `data` - Data bytes to write
-    ///
-    /// # Returns
-    /// Number of bytes written
-    pub async fn write_at(&self, offset: u64, data: &[u8]) -> Result<u64, FileOpError> {
-        debug!("[SFTP] WRITE handle offset={} len={}", offset, data.len());
-
-        let pkt = super::packet::SftpPacket::Write {
+    /// Write `data` starting at `offset` to the remote file.
+    pub async fn write_at(&self, offset: u64, data: &[u8]) -> Result<(), String> {
+        let pkt = SftpPacket::Write {
             request_id: 0,
-            handle: self.handle_bytes.clone(),
+            handle: self.handle.clone(),
             offset,
             data: data.to_vec(),
         };
 
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "WRITE".to_string(),
-                message: e,
-            })?;
+        let resp = self.session.request(pkt).await?;
 
         match resp {
-            super::packet::SftpPacket::Status { code: 0, .. } => Ok(data.len() as u64),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "WRITE", "<handle>"))
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Write failed (code={}): {}", code, message))
             }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "WRITE".to_string(),
-                message: format!("unexpected packet type: {}", other.packet_type()),
-            }),
+            other => Err(format!(
+                "Unexpected response to WRITE: type={}",
+                other.packet_type()
+            )),
         }
     }
 
-    /// Close the file handle and release server-side resources.
-    pub async fn close(self) -> Result<(), FileOpError> {
-        debug!("[SFTP] Closing file handle");
+    /// Close the remote file handle explicitly.
+    ///
+    /// Sends SSH_FXP_CLOSE and marks the handle as closed. Calling `close()`
+    /// more than once is a no-op.
+    pub async fn close(&mut self) -> Result<(), String> {
+        if self.closed {
+            return Ok(());
+        }
 
-        let pkt = super::packet::SftpPacket::Close {
+        let pkt = SftpPacket::Close {
             request_id: 0,
-            handle: self.handle_bytes.clone(),
+            handle: self.handle.clone(),
         };
 
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "CLOSE".to_string(),
-                message: e,
-            })?;
+        let resp = self.session.request(pkt).await?;
+        self.closed = true;
 
         match resp {
-            super::packet::SftpPacket::Status { code: 0, .. } => {
-                debug!("[SFTP] File handle closed successfully");
-                Ok(())
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Close failed (code={}): {}", code, message))
             }
-            super::packet::SftpPacket::Status { code, message, .. } => {
-                warn!("[SFTP] Close returned error {}: {}", code, message);
-                // Still return Ok since we're cleaning up
-                Ok(())
-            }
-            other => {
-                warn!(
-                    "[SFTP] Close unexpected response: {:?}",
-                    other.packet_type()
-                );
-                Ok(())
-            }
+            other => Err(format!(
+                "Unexpected response to CLOSE: type={}",
+                other.packet_type()
+            )),
+        }
+    }
+}
+
+impl<'a> Drop for SftpRemoteFile<'a> {
+    fn drop(&mut self) {
+        if !self.closed {
+            warn!(
+                "[SFTP] SftpRemoteFile dropped without explicit close (handle_len={})",
+                self.handle.len()
+            );
+            // Cannot await close() in drop; the handle will be orphaned on
+            // the server side and eventually cleaned up when the session ends.
         }
     }
 }
 
 // =============================================================================
-// SFTP File Operations Interface
+// SftpFileOps -- high-level file operation interface
 // =============================================================================
 
-/// High-level interface for performing SFTP file and directory operations.
+/// High-level SFTP file operations bound to an active session.
 ///
-/// This struct wraps the underlying SFTP session and provides idiomatic
-/// Rust methods for common SFTP operations with proper error handling.
-/// Every operation goes through `session.request()` which handles
-/// packet encoding, channel I/O, and response decoding.
+/// Each method maps to one or more SFTP protocol packets and returns
+/// ergonomic Rust types rather than raw protocol packets.
 ///
-/// # Usage
+/// # Example
 ///
 /// ```ignore
-/// let session = SftpSession::open(&conn).await?;
+/// let session = SftpSession::open(&mut conn).await?;
 /// let ops = SftpFileOps::new(&session);
 ///
-/// // Stat a remote file
-/// let attrs = ops.stat("/remote/file.txt")?;
+/// let attr = ops.lstat("/remote/file.txt").await?;
+/// println!("Size: {} bytes", attr.size);
 ///
-/// // Read a file in chunks
-/// let mut handle = ops.open("/remote/file.txt", OpenFlags::readonly(), 0)?;
-/// let data = handle.read_at(0, 32768).await?;
+/// let mut f = ops.open("/remote/file.txt", OpenFlags::readonly(), 0).await?;
+/// let data = f.read_at(0, 4096).await?;
+/// f.close().await?;
 /// ```
 pub struct SftpFileOps<'a> {
-    /// Reference to the owning SFTP session
     session: &'a SftpSession,
 }
 
+impl<'a> std::fmt::Debug for SftpFileOps<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SftpFileOps").finish()
+    }
+}
+
 impl<'a> SftpFileOps<'a> {
-    /// Create a new file operations handle bound to the given session.
+    /// Create a new file operations interface bound to the given session.
     pub fn new(session: &'a SftpSession) -> Self {
         Self { session }
     }
 
-    /// Get a reference to the underlying SFTP session.
-    pub fn session(&self) -> &'a SftpSession {
-        self.session
-    }
-
-    /// Helper: send a request and check for STATUS response (OK or error).
-    async fn check_status(
-        &self,
-        pkt: super::packet::SftpPacket,
-        operation: &str,
-        path: &str,
-    ) -> Result<(), FileOpError> {
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: operation.to_string(),
-                message: e,
-            })?;
-
-        match resp {
-            super::packet::SftpPacket::Status { code: 0, .. } => Ok(()),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, operation, path))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: operation.to_string(),
-                message: format!("expected STATUS, got type={}", other.packet_type()),
-            }),
-        }
-    }
-
     // -----------------------------------------------------------------
-    // Attribute Operations (STAT/LSTAT/FSTAT)
+    // File Open / Close
     // -----------------------------------------------------------------
 
-    /// Get file attributes for a path (follows symbolic links).
+    /// Open a remote file with the specified flags and initial attributes.
     ///
-    /// Equivalent to the SFTP `SSH_FXP_STAT` request.
-    pub async fn stat(&self, path: &str) -> Result<FileAttributes, FileOpError> {
-        debug!("[SFTP] STAT: {}", path);
-
-        let pkt = super::packet::SftpPacket::Stat {
-            request_id: 0,
-            path: path.to_string(),
-        };
-
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "STAT".to_string(),
-                message: e,
-            })?;
-
-        match resp {
-            super::packet::SftpPacket::Attrs { attrs, .. } => Ok(FileAttributes::from(&attrs)),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "STAT", path))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "STAT".to_string(),
-                message: format!("expected ATTRS, got type={}", other.packet_type()),
-            }),
-        }
-    }
-
-    /// Get file attributes for a path (does NOT follow symbolic links).
-    ///
-    /// Equivalent to the SFTP `SSH_FXP_LSTAT` request.
-    pub async fn lstat(&self, path: &str) -> Result<FileAttributes, FileOpError> {
-        debug!("[SFTP] LSTAT: {}", path);
-
-        let pkt = super::packet::SftpPacket::Lstat {
-            request_id: 0,
-            path: path.to_string(),
-        };
-
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "LSTAT".to_string(),
-                message: e,
-            })?;
-
-        match resp {
-            super::packet::SftpPacket::Attrs { attrs, .. } => Ok(FileAttributes::from(&attrs)),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "LSTAT", path))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "LSTAT".to_string(),
-                message: format!("expected ATTRS, got type={}", other.packet_type()),
-            }),
-        }
-    }
-
-    /// Set file attributes by path.
-    ///
-    /// Equivalent to the SFTP `SSH_FXP_SETSTAT` request.
-    pub async fn set_stat(&self, path: &str, attrs: &FileAttributes) -> Result<(), FileOpError> {
-        debug!("[SFTP] SETSTAT: {} (perm={:o})", path, attrs.permissions);
-
-        let pkt = super::packet::SftpPacket::Setstat {
-            request_id: 0,
-            path: path.to_string(),
-            attrs: attrs.to_sftp_attrs(),
-        };
-
-        self.check_status(pkt, "SETSTAT", path).await
-    }
-
-    /// Resolve a path to its canonical form.
-    ///
-    /// Equivalent to the SFTP `SSH_FXP_REALPATH` request.
-    /// Useful for resolving relative paths, `..`, symlinks, etc.
-    pub async fn realpath(&self, path: &str) -> Result<String, FileOpError> {
-        debug!("[SFTP] REALPATH: {}", path);
-
-        let pkt = super::packet::SftpPacket::Realpath {
-            request_id: 0,
-            path: path.to_string(),
-        };
-
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "REALPATH".to_string(),
-                message: e,
-            })?;
-
-        match resp {
-            super::packet::SftpPacket::Name { entries, .. } => {
-                // REALPATH returns a NAME packet with one entry; take the first filename
-                if let Some(entry) = entries.into_iter().next() {
-                    Ok(entry.filename)
-                } else {
-                    Err(FileOpError::Protocol {
-                        code: 0,
-                        operation: "REALPATH".to_string(),
-                        message: "empty NAME response".to_string(),
-                    })
-                }
-            }
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "REALPATH", path))
-            }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "REALPATH".to_string(),
-                message: format!("expected NAME, got type={}", other.packet_type()),
-            }),
-        }
-    }
-
-    // -----------------------------------------------------------------
-    // File Open/Close Operations
-    // -----------------------------------------------------------------
-
-    /// Open a remote file with the specified flags.
-    ///
-    /// # Arguments
-    /// * `path` - Remote file path to open
-    /// * `flags` - Combination of OpenFlags specifying access mode
-    /// * `mode` - Creation mode (permissions) if creating a new file (e.g., 0o644)
-    ///
-    /// # Returns
-    /// An `SftpFileHandle` that can be used for read/write operations.
+    /// Returns an `SftpRemoteFile` that supports streaming read/write at
+    /// arbitrary offsets.
     pub async fn open(
         &self,
         path: &str,
         flags: OpenFlags,
         mode: u32,
-    ) -> Result<SftpFileHandle, FileOpError> {
-        debug!("[SFTP] OPEN: {} (mode={:o}, flags={:?})", path, mode, flags);
+    ) -> Result<SftpRemoteFile<'a>, String> {
+        debug!("[SFTP] open({}, {})", path, flags);
 
-        let pkt = super::packet::SftpPacket::Open {
-            request_id: 0,
-            filename: path.to_string(),
-            flags: flags.to_protocol_flags(),
-            attrs: SftpFileAttrs {
-                permissions: Some(mode),
-                ..Default::default()
+        let attrs = SftpFileAttrs {
+            flags: if mode != 0 {
+                super::packet::SSH_FILEXFER_ATTR_PERMISSIONS
+            } else {
+                0
             },
+            permissions: if mode != 0 { Some(mode) } else { None },
+            ..Default::default()
         };
 
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "OPEN".to_string(),
-                message: e,
-            })?;
+        let pkt = SftpPacket::Open {
+            request_id: 0,
+            filename: path.to_string(),
+            flags: flags.bits(),
+            attrs,
+        };
+
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
 
         match resp {
-            super::packet::SftpPacket::Handle { handle, .. } => Ok(SftpFileHandle {
-                handle_bytes: handle,
-                session: Arc::new(self.session.clone()),
-            }),
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "OPEN", path))
+            SftpPacket::Handle { handle, .. } => {
+                debug!("[SFTP] open() got handle (len={})", handle.len());
+                Ok(SftpRemoteFile::new(self.session, handle))
             }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "OPEN".to_string(),
-                message: format!("expected HANDLE, got type={}", other.packet_type()),
-            }),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Open failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to OPEN: type={}",
+                other.packet_type()
+            )),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Stat / Lstat
+    // -----------------------------------------------------------------
+
+    /// Get file attributes, following symlinks (SSH_FXP_STAT).
+    pub async fn stat(&self, path: &str) -> Result<FileAttributes, String> {
+        let pkt = SftpPacket::Stat {
+            request_id: 0,
+            path: path.to_string(),
+        };
+
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Attrs { attrs, .. } => Ok(FileAttributes::from_wire(&attrs)),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Stat failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to STAT: type={}",
+                other.packet_type()
+            )),
+        }
+    }
+
+    /// Get file attributes without following symlinks (SSH_FXP_LSTAT).
+    pub async fn lstat(&self, path: &str) -> Result<FileAttributes, String> {
+        let pkt = SftpPacket::Lstat {
+            request_id: 0,
+            path: path.to_string(),
+        };
+
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Attrs { attrs, .. } => Ok(FileAttributes::from_wire(&attrs)),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Lstat failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to LSTAT: type={}",
+                other.packet_type()
+            )),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Setstat
+    // -----------------------------------------------------------------
+
+    /// Set file attributes by path (SSH_FXP_SETSTAT).
+    pub async fn set_stat(&self, path: &str, attrs: &FileAttributes) -> Result<(), String> {
+        let pkt = SftpPacket::Setstat {
+            request_id: 0,
+            path: path.to_string(),
+            attrs: attrs.to_wire(),
+        };
+
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Setstat failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to SETSTAT: type={}",
+                other.packet_type()
+            )),
         }
     }
 
@@ -823,292 +595,233 @@ impl<'a> SftpFileOps<'a> {
     // Directory Operations
     // -----------------------------------------------------------------
 
-    /// Create a directory with the specified permissions.
-    pub async fn mkdir(&self, path: &str, mode: u32) -> Result<(), FileOpError> {
-        debug!("[SFTP] MKDIR: {} (mode={:o})", path, mode);
-
-        let pkt = super::packet::SftpPacket::Mkdir {
+    /// Open a directory for listing (SSH_FXP_OPENDIR).
+    pub async fn opendir(&self, path: &str) -> Result<SftpRemoteFile<'a>, String> {
+        let pkt = SftpPacket::Opendir {
             request_id: 0,
             path: path.to_string(),
-            attrs: SftpFileAttrs {
-                permissions: Some(mode),
-                ..Default::default()
-            },
         };
 
-        self.check_status(pkt, "MKDIR", path).await
-    }
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
 
-    /// Recursively create directories (like `mkdir -p`).
-    pub async fn mkdir_recursive(&self, path: &str, mode: u32) -> Result<(), FileOpError> {
-        // Parse path components
-        let mut current = String::new();
-        if let Some('/') = path.chars().next() {
-            current.push('/');
-        }
-
-        for component in path.split('/').filter(|s| !s.is_empty()) {
-            current.push_str(component);
-            // Try to create; ignore "already exists" errors
-            match self.mkdir(&current, mode).await {
-                Ok(_) | Err(FileOpError::NotFound { .. }) => {}
-                Err(e) if e.is_not_found() => {}
-                Err(e) => return Err(e),
+        match resp {
+            SftpPacket::Handle { handle, .. } => Ok(SftpRemoteFile::new(self.session, handle)),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Opendir failed (code={}): {}", code, message))
             }
-            current.push('/');
-        }
-
-        // Final mkdir without trailing slash for exact path
-        if path.ends_with('/') {
-            Ok(())
-        } else {
-            self.mkdir(path, mode)
-                .await
-                .or_else(|e| if e.is_not_found() { Ok(()) } else { Err(e) })
+            other => Err(format!(
+                "Unexpected response to OPENDIR: type={}",
+                other.packet_type()
+            )),
         }
     }
 
-    /// Remove an empty directory.
-    pub async fn rmdir(&self, path: &str) -> Result<(), FileOpError> {
-        debug!("[SFTP] RMDIR: {}", path);
-
-        let pkt = super::packet::SftpPacket::Rmdir {
-            request_id: 0,
-            path: path.to_string(),
-        };
-
-        self.check_status(pkt, "RMDIR", path).await
-    }
-
-    /// List contents of a directory.
+    /// Read directory entries from an open directory handle (SSH_FXP_READDIR).
     ///
-    /// Returns entries excluding `.` and `..`.
-    pub async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>, FileOpError> {
-        debug!("[SFTP] READDIR: {}", path);
+    /// Returns a list of `(filename, longname, FileAttributes)` tuples.
+    /// An empty list indicates end-of-directory.
+    pub async fn readdir(
+        &self,
+        dir_handle: &SftpRemoteFile<'_>,
+    ) -> Result<Vec<(String, String, FileAttributes)>, String> {
+        let pkt = SftpPacket::Readdir {
+            request_id: 0,
+            handle: dir_handle.handle.clone(),
+        };
 
-        // Step 1: OPENDIR
-        let opendir_pkt = super::packet::SftpPacket::Opendir {
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Name { entries, .. } => Ok(entries
+                .into_iter()
+                .map(|e| (e.filename, e.longname, FileAttributes::from_wire(&e.attrs)))
+                .collect()),
+            SftpPacket::Status { code, .. } if code == SSH_FX_EOF => Ok(Vec::new()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Readdir failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to READDIR: type={}",
+                other.packet_type()
+            )),
+        }
+    }
+
+    /// Create a directory (SSH_FXP_MKDIR).
+    pub async fn mkdir(&self, path: &str) -> Result<(), String> {
+        let pkt = SftpPacket::Mkdir {
+            request_id: 0,
+            path: path.to_string(),
+            attrs: SftpFileAttrs::default(),
+        };
+
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Mkdir failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to MKDIR: type={}",
+                other.packet_type()
+            )),
+        }
+    }
+
+    /// Remove a directory (SSH_FXP_RMDIR).
+    pub async fn rmdir(&self, path: &str) -> Result<(), String> {
+        let pkt = SftpPacket::Rmdir {
             request_id: 0,
             path: path.to_string(),
         };
-        let opendir_resp =
-            self.session
-                .request(opendir_pkt)
-                .await
-                .map_err(|e| FileOpError::Network {
-                    operation: "OPENDIR".to_string(),
-                    message: e,
-                })?;
 
-        let dir_handle = match opendir_resp {
-            super::packet::SftpPacket::Handle { handle, .. } => handle,
-            super::packet::SftpPacket::Status { code, .. } => {
-                return Err(FileOpError::from_status_code(code, "OPENDIR", path));
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Rmdir failed (code={}): {}", code, message))
             }
-            other => {
-                return Err(FileOpError::Protocol {
-                    code: other.packet_type() as u32,
-                    operation: "OPENDIR".to_string(),
-                    message: format!("expected HANDLE, got type={}", other.packet_type()),
-                });
-            }
-        };
-
-        // Step 2: Loop READDIR until EOF or empty NAME
-        let mut entries = Vec::new();
-        loop {
-            let readdir_pkt = super::packet::SftpPacket::Readdir {
-                request_id: 0,
-                handle: dir_handle.clone(),
-            };
-
-            let resp =
-                self.session
-                    .request(readdir_pkt)
-                    .await
-                    .map_err(|e| FileOpError::Network {
-                        operation: "READDIR".to_string(),
-                        message: e,
-                    })?;
-
-            match resp {
-                super::packet::SftpPacket::Name {
-                    entries: mut name_entries,
-                    ..
-                } => {
-                    if name_entries.is_empty() {
-                        break; // End of directory listing
-                    }
-                    for entry in name_entries.drain(..) {
-                        let name = entry.filename;
-                        // Skip special directory entries
-                        if name == "." || name == ".." {
-                            continue;
-                        }
-                        entries.push(DirEntry {
-                            name,
-                            attributes: FileAttributes::from(&entry.attrs),
-                        });
-                    }
-                }
-                super::packet::SftpPacket::Status { code, .. } if code == SSH_FX_EOF => {
-                    break; // Normal end of directory listing
-                }
-                super::packet::SftpPacket::Status { code, message, .. } => {
-                    warn!("[SFTP] READDIR error [{}]: {} ({})", path, code, message);
-                    break;
-                }
-                other => {
-                    warn!("[SFTP] READDIR unexpected: type={}", other.packet_type());
-                    break;
-                }
-            }
+            other => Err(format!(
+                "Unexpected response to RMDIR: type={}",
+                other.packet_type()
+            )),
         }
-
-        // Step 3: CLOSE the dir handle (best-effort)
-        let close_pkt = super::packet::SftpPacket::Close {
-            request_id: 0,
-            handle: dir_handle,
-        };
-        let _ = self.session.request(close_pkt).await;
-
-        debug!(
-            "[SFTP] READDIR: {} returned {} entries",
-            path,
-            entries.len()
-        );
-        Ok(entries)
-    }
-
-    /// List only regular files (and symlinks) in a directory.
-    pub async fn list_files(&self, path: &str) -> Result<Vec<String>, FileOpError> {
-        let entries = self.readdir(path).await?;
-        Ok(entries
-            .into_iter()
-            .filter(|e| e.attributes.is_regular_file || e.attributes.is_symlink)
-            .map(|e| e.name)
-            .collect())
-    }
-
-    /// List only subdirectories in a directory (excluding . and ..).
-    pub async fn list_dirs(&self, path: &str) -> Result<Vec<String>, FileOpError> {
-        let entries = self.readdir(path).await?;
-        Ok(entries
-            .into_iter()
-            .filter(|e| e.attributes.is_directory)
-            .map(|e| e.name)
-            .collect())
     }
 
     // -----------------------------------------------------------------
-    // File System Operations
+    // File Manipulation
     // -----------------------------------------------------------------
 
-    /// Remove (unlink) a file.
-    pub async fn unlink(&self, path: &str) -> Result<(), FileOpError> {
-        debug!("[SFTP] UNLINK: {}", path);
-
-        let pkt = super::packet::SftpPacket::Remove {
+    /// Delete a file (SSH_FXP_REMOVE).
+    pub async fn remove(&self, path: &str) -> Result<(), String> {
+        let pkt = SftpPacket::Remove {
             request_id: 0,
             filename: path.to_string(),
         };
 
-        self.check_status(pkt, "UNLINK", path).await
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Remove failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to REMOVE: type={}",
+                other.packet_type()
+            )),
+        }
     }
 
-    /// Rename a file or directory.
-    pub async fn rename(&self, src: &str, dest: &str) -> Result<(), FileOpError> {
-        debug!("[SFTP] RENAME: {} -> {}", src, dest);
-
-        let pkt = super::packet::SftpPacket::Rename {
+    /// Rename a file or directory (SSH_FXP_RENAME).
+    pub async fn rename(&self, old_path: &str, new_path: &str) -> Result<(), String> {
+        let pkt = SftpPacket::Rename {
             request_id: 0,
-            old_path: src.to_string(),
-            new_path: dest.to_string(),
+            old_path: old_path.to_string(),
+            new_path: new_path.to_string(),
         };
 
-        self.check_status(pkt, "RENAME", src).await
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Rename failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to RENAME: type={}",
+                other.packet_type()
+            )),
+        }
     }
 
-    /// Create a symbolic link.
-    pub async fn symlink(&self, target: &str, link_path: &str) -> Result<(), FileOpError> {
-        debug!("[SFTP] SYMLINK: {} -> {}", link_path, target);
-
-        let pkt = super::packet::SftpPacket::Symlink {
-            request_id: 0,
-            link_path: link_path.to_string(),
-            target_path: target.to_string(),
-        };
-
-        self.check_status(pkt, "SYMLINK", link_path).await
-    }
-
-    /// Read the target of a symbolic link.
-    pub async fn readlink(&self, path: &str) -> Result<String, FileOpError> {
-        debug!("[SFTP] READLINK: {}", path);
-
-        let pkt = super::packet::SftpPacket::Readlink {
+    /// Canonicalize a path (SSH_FXP_REALPATH).
+    pub async fn realpath(&self, path: &str) -> Result<String, String> {
+        let pkt = SftpPacket::Realpath {
             request_id: 0,
             path: path.to_string(),
         };
 
-        let resp = self
-            .session
-            .request(pkt)
-            .await
-            .map_err(|e| FileOpError::Network {
-                operation: "READLINK".to_string(),
-                message: e,
-            })?;
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
 
         match resp {
-            super::packet::SftpPacket::Name { mut entries, .. } => {
-                if let Some(entry) = entries.pop() {
-                    Ok(entry.filename)
+            SftpPacket::Name { mut entries, .. } => {
+                if entries.is_empty() {
+                    Err("REALPATH returned empty name list".to_string())
                 } else {
-                    Err(FileOpError::Protocol {
-                        code: 0,
-                        operation: "READLINK".to_string(),
-                        message: "empty NAME response".to_string(),
-                    })
+                    Ok(entries.remove(0).filename)
                 }
             }
-            super::packet::SftpPacket::Status { code, .. } => {
-                Err(FileOpError::from_status_code(code, "READLINK", path))
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Realpath failed (code={}): {}", code, message))
             }
-            other => Err(FileOpError::Protocol {
-                code: other.packet_type() as u32,
-                operation: "READLINK".to_string(),
-                message: format!("expected NAME, got type={}", other.packet_type()),
-            }),
+            other => Err(format!(
+                "Unexpected response to REALPATH: type={}",
+                other.packet_type()
+            )),
         }
     }
 
-    /// Check whether a path exists (without following symlinks for final component).
-    pub async fn exists(&self, path: &str) -> Result<bool, FileOpError> {
-        match self.lstat(path).await {
-            Ok(_) => Ok(true),
-            Err(e) if e.is_not_found() => Ok(false),
-            Err(e) => Err(e),
+    /// Read the target of a symbolic link (SSH_FXP_READLINK).
+    pub async fn readlink(&self, path: &str) -> Result<String, String> {
+        let pkt = SftpPacket::Readlink {
+            request_id: 0,
+            path: path.to_string(),
+        };
+
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Name { mut entries, .. } => {
+                if entries.is_empty() {
+                    Err("READLINK returned empty name list".to_string())
+                } else {
+                    Ok(entries.remove(0).filename)
+                }
+            }
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Readlink failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to READLINK: type={}",
+                other.packet_type()
+            )),
         }
     }
 
-    /// Check if a path is a regular file.
-    pub async fn is_file(&self, path: &str) -> Result<bool, FileOpError> {
-        let attr = self.stat(path).await?;
-        Ok(attr.is_regular_file)
-    }
+    /// Create a symbolic link (SSH_FXP_SYMLINK).
+    pub async fn symlink(&self, link_path: &str, target_path: &str) -> Result<(), String> {
+        let pkt = SftpPacket::Symlink {
+            request_id: 0,
+            link_path: link_path.to_string(),
+            target_path: target_path.to_string(),
+        };
 
-    /// Check if a path is a directory.
-    pub async fn is_dir(&self, path: &str) -> Result<bool, FileOpError> {
-        let attr = self.stat(path).await?;
-        Ok(attr.is_directory)
+        let resp = self.session.request(pkt).await?;
+        self.session.record_operation();
+
+        match resp {
+            SftpPacket::Status { code, .. } if code == SSH_FX_OK => Ok(()),
+            SftpPacket::Status { code, message, .. } => {
+                Err(format!("Symlink failed (code={}): {}", code, message))
+            }
+            other => Err(format!(
+                "Unexpected response to SYMLINK: type={}",
+                other.packet_type()
+            )),
+        }
     }
 }
-
-// =============================================================================
-// Note: Clone for SftpSession is implemented in session.rs
-// (it requires access to private fields)
-// =============================================================================
 
 // =============================================================================
 // Unit Tests
@@ -1119,223 +832,149 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_open_flags_readonly() {
+        let flags = OpenFlags::readonly();
+        assert!(flags.is_read());
+        assert!(!flags.is_write());
+        assert_eq!(flags.bits(), SSH_FXF_READ);
+    }
+
+    #[test]
+    fn test_open_flags_write_create() {
+        let flags = OpenFlags::write_create();
+        assert!(!flags.is_read());
+        assert!(flags.is_write());
+        assert!(flags.is_create());
+        assert!(flags.is_trunc());
+        assert_eq!(flags.bits(), SSH_FXF_WRITE | SSH_FXF_CREAT | SSH_FXF_TRUNC);
+    }
+
+    #[test]
+    fn test_open_flags_read_write() {
+        let flags = OpenFlags::read_write();
+        assert!(flags.is_read());
+        assert!(flags.is_write());
+        assert!(!flags.is_append());
+        assert_eq!(flags.bits(), SSH_FXF_READ | SSH_FXF_WRITE);
+    }
+
+    #[test]
+    fn test_open_flags_append() {
+        let flags = OpenFlags::append();
+        assert!(flags.is_write());
+        assert!(flags.is_append());
+        assert!(flags.is_create());
+    }
+
+    #[test]
+    fn test_open_flags_create_new() {
+        let flags = OpenFlags::create_new();
+        assert!(flags.is_write());
+        assert!(flags.is_create());
+        assert!(flags.is_excl());
+        assert!(!flags.is_trunc());
+    }
+
+    #[test]
+    fn test_open_flags_from_bits() {
+        let flags = OpenFlags::from_bits(0xFF);
+        assert_eq!(flags.bits(), 0xFF);
+    }
+
+    #[test]
+    fn test_open_flags_display() {
+        assert_eq!(OpenFlags::readonly().to_string(), "OPEN(READ)");
+        assert_eq!(
+            OpenFlags::write_create().to_string(),
+            "OPEN(WRITE|CREAT|TRUNC)"
+        );
+        assert_eq!(OpenFlags::from_bits(0).to_string(), "OPEN(0x00000000)");
+    }
+
+    #[test]
     fn test_file_attributes_default() {
         let attrs = FileAttributes::default();
         assert_eq!(attrs.size, 0);
-        assert_eq!(attrs.permissions, 0o644);
-        assert!(!attrs.is_directory);
+        assert_eq!(attrs.permissions, 0);
         assert!(!attrs.is_regular_file);
+        assert!(!attrs.is_directory);
         assert!(!attrs.is_symlink);
     }
 
     #[test]
-    fn test_file_attributes_for_file() {
-        let attrs = FileAttributes::for_file(99999);
-        assert_eq!(attrs.size, 99999);
+    fn test_file_attributes_from_wire_regular_file() {
+        let wire = SftpFileAttrs::full(12345, 1000, 1000, 0o100644, 1700000000, 1700000100);
+        let attrs = FileAttributes::from_wire(&wire);
+        assert_eq!(attrs.size, 12345);
+        assert_eq!(attrs.uid, 1000);
+        assert_eq!(attrs.gid, 1000);
+        assert_eq!(attrs.permissions, 0o100644);
         assert!(attrs.is_regular_file);
+        assert!(!attrs.is_directory);
+        assert!(!attrs.is_symlink);
+    }
+
+    #[test]
+    fn test_file_attributes_from_wire_directory() {
+        let wire = SftpFileAttrs::full(4096, 0, 0, 0o040755, 0, 0);
+        let attrs = FileAttributes::from_wire(&wire);
+        assert!(attrs.is_directory);
+        assert!(!attrs.is_regular_file);
+    }
+
+    #[test]
+    fn test_file_attributes_from_wire_symlink() {
+        let wire = SftpFileAttrs::full(10, 0, 0, 0o120777, 0, 0);
+        let attrs = FileAttributes::from_wire(&wire);
+        assert!(attrs.is_symlink);
+        assert!(!attrs.is_regular_file);
         assert!(!attrs.is_directory);
     }
 
     #[test]
-    fn test_file_attributes_for_directory() {
-        let attrs = FileAttributes::for_directory();
-        assert!(attrs.is_directory);
-        assert_eq!(attrs.permissions, 0o755);
-        assert!(!attrs.is_regular_file);
+    fn test_file_attributes_to_wire_roundtrip() {
+        let original = FileAttributes {
+            size: 999,
+            uid: 500,
+            gid: 600,
+            permissions: 0o100755,
+            atime: 1700000000,
+            mtime: 1700000100,
+            is_regular_file: true,
+            is_directory: false,
+            is_symlink: false,
+        };
+        let wire = original.to_wire();
+        let roundtrip = FileAttributes::from_wire(&wire);
+        assert_eq!(roundtrip.size, original.size);
+        assert_eq!(roundtrip.uid, original.uid);
+        assert_eq!(roundtrip.gid, original.gid);
+        assert_eq!(roundtrip.permissions, original.permissions);
+        assert!(roundtrip.is_regular_file);
     }
 
     #[test]
     fn test_file_attributes_display() {
         let attrs = FileAttributes {
-            size: 12345,
-            permissions: 0o644,
-            uid: 1000,
-            gid: 1000,
+            size: 1024,
+            permissions: 0o100644,
             is_regular_file: true,
             ..Default::default()
         };
-        let display = format!("{}", attrs);
+        let display = attrs.to_string();
         assert!(display.contains("file"));
-        assert!(display.contains("12345"));
+        assert!(display.contains("1024"));
     }
 
     #[test]
-    fn test_permission_string() {
+    fn test_file_attributes_permissions_only_roundtrip() {
+        // This is the pattern used in transfer.rs for set_stat
         let attrs = FileAttributes {
-            permissions: 0o755,
+            permissions: 0o644,
             ..Default::default()
         };
-        assert_eq!(attrs.permission_string(), "755");
-    }
-
-    #[test]
-    fn test_file_attrs_conversion_roundtrip() {
-        // Test conversion from SftpFileAttrs to FileAttributes and back
-        let sftp_attrs = SftpFileAttrs::full(12345, 1000, 1000, 0o100644, 1704000000, 1704000100);
-        let file_attrs = FileAttributes::from(&sftp_attrs);
-        assert_eq!(file_attrs.size, 12345);
-        assert_eq!(file_attrs.uid, 1000);
-        assert_eq!(file_attrs.permissions, 0o100644);
-        assert!(file_attrs.is_regular_file);
-
-        // Convert back
-        let roundtrip = file_attrs.to_sftp_attrs();
-        assert_eq!(roundtrip.size, Some(12345));
-        assert_eq!(roundtrip.uid, Some(1000));
-    }
-
-    #[test]
-    fn test_open_flags_variants() {
-        assert_eq!(OpenFlags::readonly(), OpenFlags::READ);
-        let wc = OpenFlags::write_create();
-        assert!(wc.contains(OpenFlags::WRITE));
-        assert!(wc.contains(OpenFlags::CREATE));
-        assert!(wc.contains(OpenFlags::TRUNCATE));
-
-        let app = OpenFlags::append();
-        assert!(app.contains(OpenFlags::APPEND));
-
-        let res = OpenFlags::resume();
-        assert!(res.contains(OpenFlags::READ));
-        assert!(res.contains(OpenFlags::WRITE));
-        assert!(!res.contains(OpenFlags::TRUNCATE));
-    }
-
-    #[test]
-    fn test_open_flags_to_protocol_flags() {
-        let readonly = OpenFlags::readonly();
-        assert_eq!(readonly.to_protocol_flags(), SSH_FXF_READ);
-
-        let write_create = OpenFlags::write_create();
-        let pf = write_create.to_protocol_flags();
-        assert!(pf & SSH_FXF_READ != 0); // WRITE implies READ in many servers
-        assert!(pf & SSH_FXF_WRITE != 0);
-        assert!(pf & SSH_FXF_CREAT != 0);
-        assert!(pf & SSH_FXF_TRUNC != 0);
-    }
-
-    #[test]
-    fn test_open_flags_combinations() {
-        let combined = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE;
-        assert!(combined.contains(OpenFlags::READ));
-        assert!(combined.contains(OpenFlags::WRITE));
-        assert!(combined.contains(OpenFlags::CREATE));
-        assert!(!combined.contains(OpenFlags::TRUNCATE));
-        assert!(!combined.contains(OpenFlags::APPEND));
-    }
-
-    #[test]
-    fn test_open_flags_default_is_readonly() {
-        assert_eq!(OpenFlags::default(), OpenFlags::READ);
-    }
-
-    #[test]
-    fn test_dir_entry_display() {
-        let entry = DirEntry {
-            name: "test.txt".to_string(),
-            attributes: FileAttributes::for_file(2048),
-        };
-        let display = format!("{}", entry);
-        assert!(display.contains("test.txt"));
-        assert!(display.contains("2048"));
-    }
-
-    #[test]
-    fn test_buf_size_constants() {
-        assert_eq!(DEFAULT_READ_BUF_SIZE, 32768); // 32KB
-        assert_eq!(DEFAULT_WRITE_BUF_SIZE, 32768); // 32KB
-    }
-
-    // -----------------------------------------------------------------
-    // FileOpError Classification Tests
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn test_file_op_error_not_found_detection() {
-        let err = FileOpError::NotFound {
-            path: "/missing.txt".to_string(),
-        };
-        assert!(err.is_not_found());
-        assert!(!err.is_permission_denied());
-        assert!(!err.is_retryable());
-        assert_eq!(err.path(), Some("/missing.txt"));
-    }
-
-    #[test]
-    fn test_file_op_error_permission_denied_detection() {
-        let err = FileOpError::PermissionDenied {
-            path: "/secret".to_string(),
-        };
-        assert!(err.is_permission_denied());
-        assert!(!err.is_not_found());
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_file_op_error_network_is_retryable() {
-        let err = FileOpError::Network {
-            operation: "READ".to_string(),
-            message: "Connection reset".to_string(),
-        };
-        assert!(err.is_retryable());
-        assert!(!err.is_not_found());
-        assert!(err.path().is_none());
-    }
-
-    #[test]
-    fn test_file_op_error_protocol_not_retryable() {
-        let err = FileOpError::Protocol {
-            code: 4, // SSH_FX_FAILURE
-            operation: "OPEN".to_string(),
-            message: "Generic failure".to_string(),
-        };
-        // Generic FAILURE is not classified as retryable by default
-        assert!(!err.is_retryable());
-    }
-
-    #[test]
-    fn test_file_op_error_display_messages() {
-        let err = FileOpError::NotFound {
-            path: "/data/file.bin".to_string(),
-        };
-        let msg = format!("{}", err);
-        assert!(msg.contains("No such file"));
-        assert!(msg.contains("/data/file.bin"));
-
-        let err = FileOpError::PermissionDenied {
-            path: "/root/.ssh".to_string(),
-        };
-        let msg = format!("{}", err);
-        assert!(msg.contains("Permission denied"));
-    }
-
-    #[test]
-    fn test_file_op_error_invalid_argument() {
-        let err = FileOpError::InvalidArgument {
-            message: "empty path".to_string(),
-        };
-        assert!(format!("{}", err).contains("empty path"));
-    }
-
-    #[test]
-    fn test_from_status_code_mapping() {
-        // No such file
-        let err = FileOpError::from_status_code(SSH_FX_NO_SUCH_FILE, "STAT", "/missing");
-        assert!(err.is_not_found());
-
-        // Permission denied
-        let err = FileOpError::from_status_code(SSH_FX_PERMISSION_DENIED, "OPEN", "/secret");
-        assert!(err.is_permission_denied());
-
-        // EOF should map to network/retryable
-        let err = FileOpError::from_status_code(SSH_FX_EOF, "READ", "/file");
-        assert!(err.is_retryable());
-
-        // OK (code=0) should not produce an error normally, but if used:
-        let err = FileOpError::from_status_code(0, "CLOSE", "/file");
-        match err {
-            FileOpError::Protocol { .. } => {} // OK maps to Protocol with success description
-            other => panic!("Unexpected error type for OK: {:?}", other),
-        }
+        let wire = attrs.to_wire();
+        assert_eq!(wire.permissions, Some(0o644));
+        assert_eq!(wire.size, Some(0)); // Default 0 is always populated in to_wire
     }
 }

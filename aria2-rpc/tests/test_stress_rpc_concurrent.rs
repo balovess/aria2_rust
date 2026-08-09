@@ -6,6 +6,8 @@
 //! - WebSocket event publishing stability
 //! - No response loss verification
 
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::server::RpcAuthMiddleware;
@@ -13,7 +15,8 @@ use aria2_rpc::websocket::{DownloadEvent, EventPublisher, NotificationBatcher};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Semaphore};
+use tokio::net::TcpListener;
+use tokio::sync::{RwLock, Semaphore, oneshot};
 
 /// Test 1000 concurrent RPC requests using RpcEngine
 /// Verifies:
@@ -54,7 +57,7 @@ async fn test_stress_1000_concurrent_rpc_requests() {
 
             // Create request
             let params = if method == "aria2.addUri" {
-                json!([format!("http://example.com/file{}.zip", i)])
+                json!([[format!("http://example.com/file{}.zip", i)]])
             } else {
                 json!([])
             };
@@ -142,7 +145,7 @@ async fn test_stress_concurrent_add_uri_tasks() {
         handles.push(tokio::spawn(async move {
             let request = JsonRpcRequest::new(
                 "aria2.addUri",
-                json!([format!("http://test.com/download{}.bin", i)]),
+                json!([[format!("http://test.com/download{}.bin", i)]]),
             )
             .with_id(i);
 
@@ -235,8 +238,7 @@ async fn test_stress_websocket_event_publisher() {
         let publisher_clone = publisher.clone();
 
         publish_handles.push(tokio::spawn(async move {
-            let event =
-                DownloadEvent::download_start(format!("gid-{}", i), vec![json!({"index": i})]);
+            let event = DownloadEvent::download_start(format!("gid-{}", i));
 
             publisher_clone.publish_event(event).unwrap_or_else(|e| {
                 eprintln!("Publish error: {}", e);
@@ -291,7 +293,7 @@ fn test_stress_notification_batcher_high_throughput() {
 
     for i in 0..1000 {
         let gid = format!("gid-{}", i % 50); // 50 unique GIDs (creates duplicates)
-        let event = DownloadEvent::download_complete(gid, vec![json!({"index": i})]);
+        let event = DownloadEvent::download_complete(gid);
 
         if batcher.push(event) {
             // Auto-flush triggered
@@ -408,14 +410,44 @@ async fn test_stress_rpc_auth_concurrent() {
 /// Verifies state transitions work correctly under concurrent load
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn test_stress_task_lifecycle_operations() {
-    let engine = Arc::new(RpcEngine::new());
+    // Keep the first promoted request alive so this test exercises lifecycle
+    // ordering rather than racing a connection-refused error and demotion.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let mut accepted_tx = Some(accepted_tx);
+        while let Ok((socket, _)) = listener.accept().await {
+            if let Some(accepted_tx) = accepted_tx.take() {
+                let _ = accepted_tx.send(());
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(socket);
+        }
+    });
+
+    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let mut download_engine = DownloadEngine::new(1);
+    download_engine.set_request_group_man(Arc::clone(&group_man));
+    download_engine.set_keep_alive(true);
+    let engine_cmd_tx = download_engine.engine_command_sender();
+    let shutdown_tx = download_engine
+        .take_shutdown_sender()
+        .expect("download engine must provide a shutdown sender");
+    let engine_task = tokio::spawn(async move {
+        download_engine
+            .run()
+            .await
+            .expect("download engine should run");
+    });
+    let engine = Arc::new(RpcEngine::wired(Arc::clone(&group_man), engine_cmd_tx));
 
     // Create tasks first
     let mut gids = Vec::new();
     for i in 0..100 {
         let request = JsonRpcRequest::new(
             "aria2.addUri",
-            json!([format!("http://test.com/lifecycle{}.bin", i)]),
+            json!([[format!("http://127.0.0.1:{port}/lifecycle{}.bin", i)]]),
         )
         .with_id(i);
 
@@ -427,6 +459,15 @@ async fn test_stress_task_lifecycle_operations() {
     }
 
     assert_eq!(gids.len(), 100, "Should create 100 tasks");
+
+    // Wait until the first promoted request has established a real TCP
+    // connection. Port readiness alone is insufficient: without this
+    // barrier, the lifecycle calls can race the engine's first promotion and
+    // observe a transiently unavailable GID.
+    tokio::time::timeout(Duration::from_secs(2), accepted_rx)
+        .await
+        .expect("the first promoted download should connect to the fixture")
+        .expect("the lifecycle fixture should report its first accepted connection");
 
     // Now perform concurrent lifecycle operations on all tasks
     let mut handles = Vec::new();
@@ -458,10 +499,11 @@ async fn test_stress_task_lifecycle_operations() {
             let remove_resp = engine_clone.handle_request(&remove_req).await;
 
             (
-                pause_resp.is_success(),
-                unpause_resp.is_success(),
-                status_resp.is_success(),
-                remove_resp.is_success(),
+                gid_clone,
+                pause_resp,
+                unpause_resp,
+                status_resp,
+                remove_resp,
             )
         }));
     }
@@ -472,14 +514,47 @@ async fn test_stress_task_lifecycle_operations() {
     let all_success = results
         .iter()
         .filter_map(|r| r.as_ref().ok())
-        .filter(|(p, u, s, r)| *p && *u && *s && *r)
+        .filter(|(_, p, u, s, r)| {
+            p.is_success() && u.is_success() && s.is_success() && r.is_success()
+        })
         .count();
 
-    assert_eq!(all_success, 100, "All lifecycle operations should succeed");
+    let failures: Vec<_> = results
+        .iter()
+        .filter_map(|r| r.as_ref().ok())
+        .filter(|(_, p, u, s, r)| {
+            !(p.is_success() && u.is_success() && s.is_success() && r.is_success())
+        })
+        .map(|(gid, p, u, s, r)| {
+            let error = |response: &aria2_rpc::json_rpc::JsonRpcResponse| {
+                response
+                    .error
+                    .as_ref()
+                    .map(|e| format!("{}: {}", e.code, e.message))
+                    .unwrap_or_else(|| "success".to_string())
+            };
+            (gid.clone(), error(p), error(u), error(s), error(r))
+        })
+        .collect();
 
-    // Verify engine has no active tasks
-    let task_count = engine.task_count().await;
+    assert_eq!(
+        all_success, 100,
+        "All lifecycle operations should succeed; failures={failures:?}"
+    );
+
+    // `remove` is asynchronous; wait for the real engine loop to finalize all
+    // completion notifications and demote the groups to stopped results.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let mut task_count = engine.task_count().await;
+    while task_count != 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        task_count = engine.task_count().await;
+    }
     assert_eq!(task_count, 0, "All tasks should be removed");
+
+    let _ = shutdown_tx.send(());
+    engine_task.abort();
+    server_task.abort();
 
     println!(
         "Task lifecycle stress test: 100 tasks, 400 operations in {}ms",
@@ -681,10 +756,7 @@ async fn test_stress_event_publish_subscribe_mixed() {
         let publisher_clone = publisher.clone();
 
         pub_handles.push(tokio::spawn(async move {
-            let event = DownloadEvent::download_complete(
-                format!("event-gid-{}", i),
-                vec![json!({"seq": i})],
-            );
+            let event = DownloadEvent::download_complete(format!("event-gid-{}", i));
 
             publisher_clone.publish_event(event).ok();
 

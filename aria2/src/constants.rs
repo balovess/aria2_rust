@@ -36,7 +36,8 @@ pub const LABEL_INFO: &str = "INFO:";
 // Engine defaults
 pub const DEFAULT_TICK_INTERVAL_MS: u64 = 100;
 pub const DEFAULT_BT_ENDGAME_THRESHOLD: usize = 20;
-pub const DEFAULT_MAX_RETRIES: u32 = 3;
+/// Default value of aria2's `--max-tries`: total attempts, not retries.
+pub const DEFAULT_MAX_RETRIES: u32 = 5;
 pub const DEFAULT_RETRY_WAIT_SECS: u64 = 1;
 pub const DEFAULT_MAX_UPLOAD_SLOTS: usize = 4;
 pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";

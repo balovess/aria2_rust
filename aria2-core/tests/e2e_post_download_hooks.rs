@@ -3,11 +3,13 @@
 //! Tests the complete hook system including MoveHook, RenameHook,
 //! and hook chain execution order.
 
+#![cfg(feature = "bittorrent")]
+
 mod tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    use aria2_core::engine::bt_post_download_handler::*;
+    use aria2_core::engine::hook_manager::*;
     use aria2_core::request::request_group::GroupId;
 
     #[tokio::test]

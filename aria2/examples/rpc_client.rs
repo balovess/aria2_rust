@@ -4,12 +4,12 @@ use colored::Colorize;
 
 #[tokio::main]
 async fn main() {
-    println!("{}", "=== aria2-rust RPC 客户端示例 ===".cyan().bold());
+    println!("{}", "=== aria2-rust RPC Client Example ===".cyan().bold());
     println!();
 
     let engine = RpcEngine::new();
 
-    println!("1. 添加下载任务...");
+    println!("1. Adding download task...");
     let req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.addUri".into(),
@@ -26,13 +26,13 @@ async fn main() {
             .unwrap_or("")
             .to_string()
     } else {
-        eprintln!("   错误: 无法添加任务");
+        eprintln!("   Error: failed to add task");
         return;
     };
 
-    println!("   任务已添加, GID: {}", gid.yellow());
+    println!("   Task added, GID: {}", gid.yellow());
 
-    println!("\n2. 查询全局统计...");
+    println!("\n2. Querying global stats...");
     let stat_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.getGlobalStat".into(),
@@ -43,11 +43,11 @@ async fn main() {
     if stat_resp.is_success() {
         let result = stat_resp.result.as_ref().unwrap();
         let stat = result.as_object().unwrap();
-        println!("   活跃任务: {}", stat.get("numActive").unwrap());
-        println!("   等待任务: {}", stat.get("numWaiting").unwrap());
+        println!("   Active tasks: {}", stat.get("numActive").unwrap());
+        println!("   Waiting tasks: {}", stat.get("numWaiting").unwrap());
     }
 
-    println!("\n3. 暂停并移除任务...");
+    println!("\n3. Pausing and removing task...");
     let pause_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.pause".into(),
@@ -64,6 +64,6 @@ async fn main() {
     };
     engine.handle_request(&remove_req).await;
 
-    println!("   任务已移除");
-    println!("\n{} RPC 示例完成!", "✓".green().bold());
+    println!("   Task removed");
+    println!("\n{} RPC example complete!", "✓".green().bold());
 }

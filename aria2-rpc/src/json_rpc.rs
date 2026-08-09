@@ -11,7 +11,9 @@ pub enum JsonRpcError {
     InvalidParams(String),
     InternalError(String),
     ServerError(i32, String),
-    /// Authentication failure — token missing or invalid (code: -32001)
+    /// Domain error (e.g. "GID not found", "No such method") — code: 1 (matches C++).
+    RpcExecution(String),
+    /// Authentication failure; aria2 reports this as execution error code 1.
     Unauthorized(String),
 }
 
@@ -24,6 +26,7 @@ impl fmt::Display for JsonRpcError {
             Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
             Self::InternalError(s) => write!(f, "Internal error: {}", s),
             Self::ServerError(code, s) => write!(f, "Server error ({}): {}", code, s),
+            Self::RpcExecution(s) => write!(f, "Error: {}", s),
             Self::Unauthorized(s) => write!(f, "Unauthorized: {}", s),
         }
     }
@@ -40,7 +43,8 @@ impl JsonRpcError {
             Self::InvalidParams(_) => -32602,
             Self::InternalError(_) => -32603,
             Self::ServerError(c, _) => *c,
-            Self::Unauthorized(_) => -32001,
+            Self::RpcExecution(_) => 1,
+            Self::Unauthorized(_) => 1,
         }
     }
 
@@ -51,7 +55,11 @@ impl JsonRpcError {
             | Self::MethodNotFound(s)
             | Self::InvalidParams(s)
             | Self::InternalError(s)
-            | Self::Unauthorized(s) => s.clone(),
+            | Self::RpcExecution(s) => s.clone(),
+            // C++ aria2 throws `DL_ABORT_EX("Unauthorized")` for both a
+            // missing and an invalid rpc-secret. Keep diagnostic details
+            // internal so the wire message remains compatible.
+            Self::Unauthorized(_) => "Unauthorized".to_string(),
             Self::ServerError(_, s) => s.clone(),
         }
     }
@@ -145,6 +153,38 @@ impl JsonRpcRequest {
                 index
             ))),
         }
+    }
+
+    /// Return a positional parameter without changing its wire type.
+    ///
+    /// RPC handlers use this only when an optional parameter has multiple
+    /// valid positions. The value is borrowed so a handler can distinguish a
+    /// missing argument from a present argument with the wrong type without
+    /// silently accepting an extension-shaped request.
+    pub(crate) fn optional_param_value(&self, index: usize) -> Option<&serde_json::Value> {
+        match &self.params {
+            serde_json::Value::Array(params) => params.get(index),
+            serde_json::Value::Object(params) => params.get(&format!("p{index}")),
+            _ => None,
+        }
+    }
+
+    /// Read a positional or named parameter when it is present.
+    ///
+    /// Unlike [`Self::get_param_or_default`], a present value is still
+    /// type-checked. This preserves aria2's distinction between an omitted
+    /// optional argument and a supplied argument with an invalid type.
+    pub fn get_optional_param<T: serde::de::DeserializeOwned>(
+        &self,
+        index: usize,
+    ) -> Result<Option<T>, JsonRpcError> {
+        self.optional_param_value(index)
+            .map(|value| {
+                serde_json::from_value(value.clone()).map_err(|error| {
+                    JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
+                })
+            })
+            .transpose()
     }
 
     pub fn get_param_or_default<T: serde::de::DeserializeOwned + Default>(
@@ -244,30 +284,135 @@ impl JsonRpcBatchResponse {
     }
 }
 
+/// One item in the original aria2 JSON-RPC wire envelope.
+///
+/// The C++ parser handles object-level failures while iterating a batch, so a
+/// batch can contain both executable requests and already-materialized error
+/// responses. Keeping that distinction at the wire seam prevents malformed
+/// entries from reaching the engine dispatcher.
+#[derive(Debug, Clone, PartialEq)]
+pub enum JsonRpcWireEntry {
+    Request(JsonRpcRequest),
+    Error(JsonRpcResponse),
+}
+
+/// Parsed JSON-RPC document using aria2_original's envelope semantics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JsonRpcWireDocument {
+    /// Whether the input was a JSON array. A one-item batch is still encoded
+    /// as an array in the response.
+    pub is_batch: bool,
+    pub entries: Vec<JsonRpcWireEntry>,
+}
+
+fn parse_aria2_wire_object(object: serde_json::Map<String, serde_json::Value>) -> JsonRpcWireEntry {
+    let id = match object.get("id") {
+        Some(id) => id.clone(),
+        None => {
+            return JsonRpcWireEntry::Error(
+                JsonRpcError::InvalidRequest("Invalid Request.".to_string()).into_response(None),
+            );
+        }
+    };
+
+    let method = match object.get("method").and_then(serde_json::Value::as_str) {
+        Some(method) => method.to_string(),
+        None => {
+            return JsonRpcWireEntry::Error(
+                JsonRpcError::InvalidRequest("Invalid Request.".to_string())
+                    .into_response(Some(id)),
+            );
+        }
+    };
+
+    // aria2_original ignores the jsonrpc member and treats an omitted params
+    // member as an empty positional list. Named/object params are rejected by
+    // rpc_helper.cc before a method is executed.
+    let params = match object.get("params") {
+        None => serde_json::Value::Array(Vec::new()),
+        Some(serde_json::Value::Array(params)) => serde_json::Value::Array(params.clone()),
+        Some(_) => {
+            return JsonRpcWireEntry::Error(
+                JsonRpcError::InvalidParams("Invalid params.".to_string()).into_response(Some(id)),
+            );
+        }
+    };
+
+    JsonRpcWireEntry::Request(JsonRpcRequest {
+        version: object
+            .get("jsonrpc")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        method,
+        params,
+        id: Some(id),
+    })
+}
+
+/// Parse a JSON-RPC document with the externally observable aria2 semantics.
+///
+/// This adapter intentionally differs from the general-purpose
+/// [`parse_request`] helper used by typed Rust callers. `aria2_original`:
+///
+/// - does not validate the `jsonrpc` member;
+/// - defaults an omitted `params` member to an empty list;
+/// - requires an `id` before dispatching an object request;
+/// - returns object-level errors inside a batch;
+/// - ignores non-object elements in a batch; and
+/// - returns an empty array for an empty batch.
+pub fn parse_aria2_wire_document(data: &[u8]) -> Result<JsonRpcWireDocument, JsonRpcError> {
+    let parsed: serde_json::Value = serde_json::from_slice(data)
+        .map_err(|_| JsonRpcError::ParseError("Parse error.".to_string()))?;
+
+    match parsed {
+        serde_json::Value::Object(object) => Ok(JsonRpcWireDocument {
+            is_batch: false,
+            entries: vec![parse_aria2_wire_object(object)],
+        }),
+        serde_json::Value::Array(items) => Ok(JsonRpcWireDocument {
+            is_batch: true,
+            entries: items
+                .into_iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::Object(object) => Some(parse_aria2_wire_object(object)),
+                    _ => None,
+                })
+                .collect(),
+        }),
+        _ => Err(JsonRpcError::InvalidRequest("Invalid Request.".to_string())),
+    }
+}
+
 pub fn parse_request(data: &[u8]) -> Result<Vec<JsonRpcRequest>, JsonRpcError> {
     let parsed: serde_json::Value =
         serde_json::from_slice(data).map_err(|e| JsonRpcError::ParseError(e.to_string()))?;
 
-    if let Ok(req) = serde_json::from_value::<JsonRpcRequest>(parsed.clone()) {
-        req.validate()?;
-        return Ok(vec![req]);
-    }
-
-    if let Ok(batch) = serde_json::from_value::<Vec<JsonRpcRequest>>(parsed) {
-        if batch.is_empty() {
-            return Err(JsonRpcError::InvalidRequest(
-                "batch request cannot be empty".to_string(),
-            ));
-        }
-        for req in &batch {
+    match parsed {
+        serde_json::Value::Object(object) => {
+            let req = serde_json::from_value::<JsonRpcRequest>(serde_json::Value::Object(object))
+                .map_err(|e| JsonRpcError::InvalidRequest(e.to_string()))?;
             req.validate()?;
+            Ok(vec![req])
         }
-        return Ok(batch);
+        serde_json::Value::Array(items) => {
+            if items.is_empty() {
+                return Err(JsonRpcError::InvalidRequest(
+                    "batch request cannot be empty".to_string(),
+                ));
+            }
+            let mut batch = Vec::with_capacity(items.len());
+            for item in items {
+                let req = serde_json::from_value::<JsonRpcRequest>(item)
+                    .map_err(|e| JsonRpcError::InvalidRequest(e.to_string()))?;
+                req.validate()?;
+                batch.push(req);
+            }
+            Ok(batch)
+        }
+        _ => Err(JsonRpcError::InvalidRequest(
+            "request must be an object or batch array".to_string(),
+        )),
     }
-
-    Err(JsonRpcError::ParseError(
-        "invalid request format".to_string(),
-    ))
 }
 
 pub fn parse_single_request(data: &[u8]) -> Result<JsonRpcRequest, JsonRpcError> {
@@ -315,6 +460,50 @@ mod tests {
     }
 
     #[test]
+    fn test_aria2_wire_parser_ignores_version_and_defaults_params() {
+        let raw = br#"{"jsonrpc":"1.0","id":1,"method":"aria2.getVersion"}"#;
+        let document = parse_aria2_wire_document(raw).unwrap();
+        assert!(!document.is_batch);
+
+        let JsonRpcWireEntry::Request(request) = &document.entries[0] else {
+            panic!("expected a request entry");
+        };
+        assert_eq!(request.version.as_deref(), Some("1.0"));
+        assert_eq!(request.params, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_aria2_wire_parser_materializes_object_errors() {
+        let raw = br#"[{"id":1,"method":"aria2.getVersion","params":{}},{"method":"aria2.getVersion"},42]"#;
+        let document = parse_aria2_wire_document(raw).unwrap();
+        assert!(document.is_batch);
+        assert_eq!(
+            document.entries.len(),
+            2,
+            "non-object batch items are ignored"
+        );
+
+        let JsonRpcWireEntry::Error(error) = &document.entries[0] else {
+            panic!("object params must be rejected before dispatch");
+        };
+        assert_eq!(error.error.as_ref().map(|error| error.code), Some(-32602));
+        assert_eq!(error.id, serde_json::json!(1));
+
+        let JsonRpcWireEntry::Error(error) = &document.entries[1] else {
+            panic!("missing id must be rejected before dispatch");
+        };
+        assert_eq!(error.error.as_ref().map(|error| error.code), Some(-32600));
+        assert!(error.id.is_null());
+    }
+
+    #[test]
+    fn test_aria2_wire_parser_preserves_empty_batch() {
+        let document = parse_aria2_wire_document(b"[]").unwrap();
+        assert!(document.is_batch);
+        assert!(document.entries.is_empty());
+    }
+
+    #[test]
     fn test_invalid_json() {
         let raw = b"{broken";
         let err = parse_request(raw).unwrap_err();
@@ -325,6 +514,12 @@ mod tests {
     fn test_invalid_method() {
         let raw = r#"{"jsonrpc":"2.0","id":1,"method":""}"#;
         let err = parse_request(raw.as_bytes()).unwrap_err();
+        assert_eq!(err.code(), -32600);
+    }
+
+    #[test]
+    fn test_valid_json_scalar_is_invalid_request() {
+        let err = parse_request(b"42").unwrap_err();
         assert_eq!(err.code(), -32600);
     }
 
@@ -383,10 +578,11 @@ mod tests {
         assert_eq!(JsonRpcError::ParseError("x".into()).code(), -32700);
         assert_eq!(JsonRpcError::InvalidRequest("x".into()).code(), -32600);
         assert_eq!(JsonRpcError::MethodNotFound("x".into()).code(), -32601);
+        assert_eq!(JsonRpcError::RpcExecution("x".into()).code(), 1);
         assert_eq!(JsonRpcError::InvalidParams("x".into()).code(), -32602);
         assert_eq!(JsonRpcError::InternalError("x".into()).code(), -32603);
         assert_eq!(JsonRpcError::ServerError(-100, "x".into()).code(), -100);
-        assert_eq!(JsonRpcError::Unauthorized("x".into()).code(), -32001);
+        assert_eq!(JsonRpcError::Unauthorized("x".into()).code(), 1);
     }
 
     #[test]

@@ -1,11 +1,11 @@
 [package]
 name = "aria2-rpc"
-version = "0.2.3"
+version = "0.2.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Remote control server for aria2-rust: JSON-RPC 2.0, XML-RPC, and WebSocket download management with 34+ methods and 7 event types"
+description = "Remote control server for aria2-rust: aria2-compatible JSON-RPC 2.0, XML-RPC, and WebSocket download management"
 documentation = "https://docs.rs/aria2-rpc"
 homepage = "https://github.com/balovess/aria2_rust/"
 readme = "../README.md"
@@ -15,6 +15,7 @@ include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
 aria2-core.workspace = true
+aria2-protocol.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 futures.workspace = true
@@ -26,24 +27,41 @@ tracing.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
 tungstenite = "0.20"
-base64 = "0.21"
+base64.workspace = true
 quick-xml = "0.31"
-rand = "0.8"
+url = "2.5"
+rand.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 
-# TLS/HTTPS support
-tokio-rustls = "0.26"
-rustls = "0.23"
-rustls-pemfile = "2.1"
+# TLS/HTTPS support (use ring instead of aws-lc-rs to avoid STATUS_STACK_BUFFER_OVERRUN on Windows)
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls = { workspace = true, features = ["ring", "logging", "std", "tls12"] }
+rustls-pemfile.workspace = true
+# Low-level hyper server used to serve axum over TLS streams (axum::serve
+# only accepts plain TCP; wrapping with tokio-rustls requires hyper directly).
+hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower-service = "0.3"
 
 [dev-dependencies]
-tempfile = "3.8"
+reqwest = { workspace = true, features = ["json"] }
+tokio-tungstenite.workspace = true
+futures.workspace = true
+tempfile.workspace = true
 criterion.workspace = true
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_ProcessStatus", "Win32_Foundation", "Win32_System_Threading"] }
+
+[features]
+default = []
+bittorrent = ["aria2-core/bittorrent", "aria2-protocol/bittorrent"]
+metalink = ["aria2-core/metalink", "aria2-protocol/metalink"]
+sftp = ["aria2-core/sftp", "aria2-protocol/sftp"]
 
 [[bench]]
 name = "rpc_bench"

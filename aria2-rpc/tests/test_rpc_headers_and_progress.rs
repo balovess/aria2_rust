@@ -8,7 +8,7 @@
 //! 3. `aria2.getGlobalStat` / `aria2.tellActive` aggregate live data from
 //!    all registered groups.
 
-use aria2_core::engine::command::Command;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
@@ -20,19 +20,19 @@ use tokio::sync::{RwLock, mpsc};
 // Test Helpers
 // =========================================================================
 
-/// Create an `RpcEngine` wired to a real `RequestGroupMan` + command channel,
+/// Create an `RpcEngine` wired to a real `RequestGroupMan` + engine command channel,
 /// simulating the shared-state setup that the app uses in RPC mode.
 fn create_engine_with_shared_state() -> (
     RpcEngine,
     Arc<RwLock<RequestGroupMan>>,
-    mpsc::UnboundedReceiver<Box<dyn Command>>,
+    mpsc::UnboundedReceiver<EngineCommand>,
 ) {
     let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<Box<dyn Command>>();
+    let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
     let engine = RpcEngine::new()
         .with_group_man(group_man.clone())
-        .with_cmd_tx(cmd_tx);
-    (engine, group_man, cmd_rx)
+        .with_engine_cmd_tx(engine_cmd_tx);
+    (engine, group_man, engine_cmd_rx)
 }
 
 // =========================================================================
@@ -66,19 +66,19 @@ async fn test_add_uri_with_array_headers_stored_in_group() {
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(gid.len(), 16, "GID should be 16 hex chars");
 
-    // Verify a DownloadCommand was dispatched to the engine channel
-    let cmd = tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv())
+    // Verify an EngineCommand::AddDownload was dispatched to the v2 engine channel
+    let command = tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv())
         .await
-        .expect("DownloadCommand should have been sent to cmd_tx")
+        .expect("EngineCommand should have been sent to engine_cmd_tx")
         .expect("channel should not be closed");
-    drop(cmd); // We don't execute it; just verifying it was sent
+    assert!(matches!(command, EngineCommand::AddDownload { .. }));
 
     // Verify the RequestGroup has the correct options stored
     let man = group_man.read().await;
     let group_lock = man
         .group_by_hex(&gid)
         .expect("group should be registered in RequestGroupMan");
-    let g = group_lock.read().await;
+    let g = group_lock.read().unwrap();
     let opts = g.options();
 
     assert_eq!(
@@ -119,7 +119,7 @@ async fn test_add_uri_with_string_headers_stored_in_group() {
 
     let man = group_man.read().await;
     let group_lock = man.group_by_hex(&gid).expect("group should exist");
-    let g = group_lock.read().await;
+    let g = group_lock.read().unwrap();
     let opts = g.options();
 
     // Newline-separated string should be split into individual headers
@@ -138,8 +138,11 @@ async fn test_tell_status_returns_live_progress() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
     // Add a download
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://example.com/largefile.bin"])).with_id(1);
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        json!([["http://example.com/largefile.bin"]]),
+    )
+    .with_id(1);
     let resp = engine.handle_request(&add_req).await;
     assert!(resp.is_success());
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
@@ -156,8 +159,8 @@ async fn test_tell_status_returns_live_progress() {
     {
         let man = group_man.read().await;
         let group_lock = man.group_by_hex(&gid).unwrap();
-        let mut g = group_lock.write().await;
-        g.start().await.unwrap(); // Status → Active
+        let mut g = group_lock.write().unwrap();
+        g.start().unwrap(); // Status → Active
         g.set_total_length_atomic(10_000_000);
         g.set_completed_length(4_200_000);
         g.set_download_speed_cached(512_000);
@@ -171,9 +174,10 @@ async fn test_tell_status_returns_live_progress() {
     let status = resp.result.unwrap();
     assert_eq!(status["gid"], gid);
     assert_eq!(status["status"], "active");
-    assert_eq!(status["totalLength"], 10_000_000);
-    assert_eq!(status["completedLength"], 4_200_000);
-    assert_eq!(status["downloadSpeed"], 512_000);
+    // Wire format: all numbers as strings
+    assert_eq!(status["totalLength"].as_str(), Some("10000000"));
+    assert_eq!(status["completedLength"].as_str(), Some("4200000"));
+    assert_eq!(status["downloadSpeed"].as_str(), Some("512000"));
 }
 
 // =========================================================================
@@ -189,12 +193,13 @@ async fn test_get_global_stat_aggregates_live_data() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
     let stat = resp.result.unwrap();
-    assert_eq!(stat["downloadSpeed"], 0);
-    assert_eq!(stat["numActive"], 0);
+    // Wire format: all numbers as strings
+    assert_eq!(stat["downloadSpeed"].as_str(), Some("0"));
+    assert_eq!(stat["numActive"].as_str(), Some("0"));
 
     // Add two downloads with different speeds
-    let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(2);
-    let add2 = JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(3);
+    let add1 = JsonRpcRequest::new("aria2.addUri", json!([["http://a.com/f1"]])).with_id(2);
+    let add2 = JsonRpcRequest::new("aria2.addUri", json!([["http://b.com/f2"]])).with_id(3);
     let gid1: String =
         serde_json::from_value(engine.handle_request(&add1).await.result.unwrap()).unwrap();
     let gid2: String =
@@ -205,11 +210,11 @@ async fn test_get_global_stat_aggregates_live_data() {
         let man = group_man.read().await;
         let g1 = man.group_by_hex(&gid1).unwrap();
         let g2 = man.group_by_hex(&gid2).unwrap();
-        let mut rg1 = g1.write().await;
-        rg1.start().await.unwrap();
+        let mut rg1 = g1.write().unwrap();
+        rg1.start().unwrap();
         rg1.set_download_speed_cached(300_000);
-        let mut rg2 = g2.write().await;
-        rg2.start().await.unwrap();
+        let mut rg2 = g2.write().unwrap();
+        rg2.start().unwrap();
         rg2.set_download_speed_cached(200_000);
     }
 
@@ -218,9 +223,10 @@ async fn test_get_global_stat_aggregates_live_data() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
     let stat = resp.result.unwrap();
-    assert_eq!(stat["downloadSpeed"], 500_000);
-    assert_eq!(stat["numActive"], 2);
-    assert_eq!(stat["numWaiting"], 0);
+    // Wire format: all numbers as strings
+    assert_eq!(stat["downloadSpeed"].as_str(), Some("500000"));
+    assert_eq!(stat["numActive"].as_str(), Some("2"));
+    assert_eq!(stat["numWaiting"].as_str(), Some("0"));
 }
 
 // =========================================================================
@@ -232,8 +238,8 @@ async fn test_tell_active_lists_active_downloads() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
     // Add two downloads
-    let add1 = JsonRpcRequest::new("aria2.addUri", json!(["http://a.com/f1"])).with_id(1);
-    let add2 = JsonRpcRequest::new("aria2.addUri", json!(["http://b.com/f2"])).with_id(2);
+    let add1 = JsonRpcRequest::new("aria2.addUri", json!([["http://a.com/f1"]])).with_id(1);
+    let add2 = JsonRpcRequest::new("aria2.addUri", json!([["http://b.com/f2"]])).with_id(2);
     let gid1: String =
         serde_json::from_value(engine.handle_request(&add1).await.result.unwrap()).unwrap();
     let _gid2: String =
@@ -243,17 +249,17 @@ async fn test_tell_active_lists_active_downloads() {
     {
         let man = group_man.read().await;
         let g1 = man.group_by_hex(&gid1).unwrap();
-        let mut rg1 = g1.write().await;
-        rg1.start().await.unwrap();
+        let mut rg1 = g1.write().unwrap();
+        rg1.start().unwrap();
     }
 
-    // tellActive should include both (is_active() returns true for Active AND Waiting)
+    // tellActive follows aria2 semantics and includes only the active group.
     let req = JsonRpcRequest::new("aria2.tellActive", json!([])).with_id(3);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
     let active = resp.result.unwrap();
     let arr = active.as_array().expect("tellActive should return array");
-    assert_eq!(arr.len(), 2, "both downloads should be active/waiting");
+    assert_eq!(arr.len(), 1, "tellActive should exclude the waiting group");
 
     // Verify GIDs are present
     let gids: Vec<&str> = arr.iter().map(|v| v["gid"].as_str().unwrap()).collect();
@@ -271,7 +277,7 @@ async fn test_progress_changes_reflected_in_tell_status() {
     // Add a download
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        json!(["http://example.com/progressive.bin"]),
+        json!([["http://example.com/progressive.bin"]]),
     )
     .with_id(1);
     let resp = engine.handle_request(&add_req).await;
@@ -281,8 +287,8 @@ async fn test_progress_changes_reflected_in_tell_status() {
     {
         let man = group_man.read().await;
         let g = man.group_by_hex(&gid).unwrap();
-        let mut rg = g.write().await;
-        rg.start().await.unwrap();
+        let mut rg = g.write().unwrap();
+        rg.start().unwrap();
         rg.set_total_length_atomic(1_000_000);
         rg.set_completed_length(100_000);
         rg.set_download_speed_cached(50_000);
@@ -292,14 +298,15 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let tell1 = JsonRpcRequest::new("aria2.tellStatus", json!([gid.clone()])).with_id(2);
     let resp = engine.handle_request(&tell1).await;
     let s1 = resp.result.unwrap();
-    assert_eq!(s1["completedLength"], 100_000);
-    assert_eq!(s1["totalLength"], 1_000_000);
+    // Wire format: all numbers as strings
+    assert_eq!(s1["completedLength"].as_str(), Some("100000"));
+    assert_eq!(s1["totalLength"].as_str(), Some("1000000"));
 
     // Simulate more progress
     {
         let man = group_man.read().await;
         let g = man.group_by_hex(&gid).unwrap();
-        let rg = g.read().await; // atomic setters only need &self
+        let rg = g.read().unwrap(); // atomic setters only need &self
         rg.set_completed_length(500_000);
         rg.set_download_speed_cached(120_000);
     }
@@ -308,23 +315,30 @@ async fn test_progress_changes_reflected_in_tell_status() {
     let tell2 = JsonRpcRequest::new("aria2.tellStatus", json!([gid.clone()])).with_id(3);
     let resp = engine.handle_request(&tell2).await;
     let s2 = resp.result.unwrap();
-    assert_eq!(s2["completedLength"], 500_000, "progress should update");
-    assert_eq!(s2["downloadSpeed"], 120_000, "speed should update");
+    // Wire format: all numbers as strings
+    assert_eq!(
+        s2["completedLength"].as_str(),
+        Some("500000"),
+        "progress should update"
+    );
+    assert_eq!(
+        s2["downloadSpeed"].as_str(),
+        Some("120000"),
+        "speed should update"
+    );
 }
 
 // =========================================================================
-// Test 7: aria2.getOption falls back to global options for tasks that exist
-// in RequestGroupMan but have no per-task overrides stored via changeOption.
+// Test 7: aria2.getOption returns the option snapshot captured for the task.
 // =========================================================================
 
 #[tokio::test]
-async fn test_get_option_falls_back_to_global_for_group_man_task() {
+async fn test_get_option_preserves_task_snapshot_after_global_change() {
     let (engine, group_man, _cmd_rx) = create_engine_with_shared_state();
 
-    // Add a download — this registers the GID in RequestGroupMan but does
-    // NOT create a task_opts entry (changeOption is never called).
-    let add_req =
-        JsonRpcRequest::new("aria2.addUri", json!(["http://example.com/fallback.bin"])).with_id(1);
+    // addUri captures the current global option set for this RequestGroup.
+    let add_req = JsonRpcRequest::new("aria2.addUri", json!([["http://example.com/fallback.bin"]]))
+        .with_id(1);
     let resp = engine.handle_request(&add_req).await;
     assert!(resp.is_success());
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
@@ -335,8 +349,8 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
         "task should be registered in RequestGroupMan"
     );
 
-    // Set a known global option value so we can verify the fallback returns
-    // the live global options (not a stale snapshot or an error).
+    // Changing a global option updates future tasks, but must not rewrite the
+    // option snapshot held by this existing group.
     let change_global = JsonRpcRequest::new(
         "aria2.changeGlobalOption",
         json!([{"dir": "/tmp/fallback-test"}]),
@@ -345,13 +359,21 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
     let cg_resp = engine.handle_request(&change_global).await;
     assert!(cg_resp.is_success(), "changeGlobalOption should succeed");
 
-    // getOption on the task (no per-task overrides) should succeed and
-    // return the global options, including the value we just set.
-    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid.clone()])).with_id(3);
+    let get_global = JsonRpcRequest::new("aria2.getGlobalOption", json!([])).with_id(3);
+    let global_resp = engine.handle_request(&get_global).await;
+    assert_eq!(
+        global_resp.result.unwrap()["dir"],
+        "/tmp/fallback-test",
+        "the global option should have changed"
+    );
+
+    // C++ GetOptionRpcMethod serializes group->getOption(), so this task
+    // keeps its creation-time directory even though the global value changed.
+    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid.clone()])).with_id(4);
     let get_resp = engine.handle_request(&get_req).await;
     assert!(
         get_resp.is_success(),
-        "getOption should fall back to global options, not error"
+        "getOption should return the task option snapshot"
     );
 
     let opts = get_resp.result.unwrap();
@@ -360,17 +382,64 @@ async fn test_get_option_falls_back_to_global_for_group_man_task() {
         .expect("getOption result should be a JSON object");
     assert!(
         opts_map.contains_key("dir"),
-        "fallback result should contain global 'dir' option"
+        "task option snapshot should contain 'dir'"
     );
     assert_eq!(
-        opts_map["dir"], "/tmp/fallback-test",
-        "fallback should reflect the current global option value"
+        opts_map["dir"], ".",
+        "getOption should not reflect a later changeGlobalOption call"
+    );
+    assert!(
+        !opts_map.contains_key("enable-rpc"),
+        "getOption must not expose process-wide RPC listener settings"
     );
 }
 
 // =========================================================================
-// Test 8: aria2.getOption returns MethodNotFound for a GID that exists
-// neither in task_opts nor in RequestGroupMan.
+// Test 8: aria2.getOption combines a task snapshot with applied changes.
+// =========================================================================
+
+#[tokio::test]
+async fn test_get_option_merges_task_snapshot_with_applied_runtime_change() {
+    let (engine, _group_man, _cmd_rx) = create_engine_with_shared_state();
+
+    let add_req = JsonRpcRequest::new(
+        "aria2.addUri",
+        json!([
+            ["http://example.com/runtime-change.bin"],
+            {"dir": "/tmp/task-snapshot", "max-download-limit": "1024"}
+        ]),
+    )
+    .with_id(1);
+    let add_resp = engine.handle_request(&add_req).await;
+    assert!(add_resp.is_success());
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        json!([gid.clone(), {"max-download-limit": "2048"}]),
+    )
+    .with_id(2);
+    let change_resp = engine.handle_request(&change_req).await;
+    assert!(change_resp.is_success(), "changeOption should succeed");
+
+    let get_req = JsonRpcRequest::new("aria2.getOption", json!([gid])).with_id(3);
+    let get_resp = engine.handle_request(&get_req).await;
+    assert!(get_resp.is_success());
+    let opts = get_resp.result.unwrap();
+
+    assert_eq!(
+        opts["dir"], "/tmp/task-snapshot",
+        "getOption must retain unchanged fields from the task snapshot"
+    );
+    assert_eq!(
+        opts["max-download-limit"], "2048",
+        "getOption must expose the value applied by changeOption"
+    );
+}
+
+// =========================================================================
+// Test 9: aria2.getOption returns RpcExecution error for a GID that exists
+// neither in RequestGroupMan nor in its stopped results.
 // =========================================================================
 
 #[tokio::test]
@@ -385,7 +454,7 @@ async fn test_get_option_errors_for_unknown_gid() {
     );
     assert_eq!(
         resp.error.unwrap().code,
-        -32601,
-        "unknown GID should yield MethodNotFound (-32601)"
+        1,
+        "unknown GID should yield RpcExecution (1)"
     );
 }

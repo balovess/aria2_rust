@@ -10,6 +10,7 @@ use tracing::debug;
 use super::save_session_command::SaveSessionCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::Result;
+use crate::request::request_group::GroupId;
 use crate::request::request_group_man::RequestGroupMan;
 
 pub struct AutoSaveSession {
@@ -42,6 +43,25 @@ impl AutoSaveSession {
 
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// Save the session if the dirty flag is set and the interval has elapsed.
+    ///
+    /// Unlike the `Command::execute()` interface, this is a direct method
+    /// call suitable for use from the engine loop's housekeeping tick.
+    pub async fn save_if_dirty(&mut self) {
+        let _ = self.execute().await;
+    }
+
+    /// Force an immediate session save regardless of interval or dirty flag.
+    ///
+    /// Used during shutdown to persist state. Mirrors C++ `onEndOfRun()`
+    /// which unconditionally saves the session file.
+    pub async fn force_save(&mut self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        // Reset interval so the save always executes.
+        self.last_saved = Instant::now() - self.interval - Duration::from_secs(1);
+        let _ = self.execute().await;
     }
 }
 
@@ -78,6 +98,10 @@ impl Command for AutoSaveSession {
 
     fn status(&self) -> CommandStatus {
         self.status.clone()
+    }
+
+    fn gid(&self) -> GroupId {
+        GroupId(0)
     }
 }
 
@@ -122,7 +146,7 @@ mod tests {
         let mut auto = AutoSaveSession::new(path.clone(), Duration::from_secs(0), man);
 
         auto.execute().await.unwrap();
-        assert!(!path.exists(), "非 dirty 不应写入文件");
+        assert!(!path.exists(), "Non-dirty should not write file");
 
         let _ = tokio::fs::remove_file(&path).await;
     }
@@ -140,7 +164,7 @@ mod tests {
         auto.mark_dirty();
 
         auto.execute().await.unwrap();
-        assert!(!path.exists(), "间隔未到不应写入文件");
+        assert!(!path.exists(), "Interval not reached should not write file");
 
         let _ = tokio::fs::remove_file(&path).await;
     }
@@ -157,7 +181,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         let dir = std::env::temp_dir();
@@ -167,7 +190,7 @@ mod tests {
         auto.mark_dirty();
 
         auto.execute().await.unwrap();
-        assert!(path.exists(), "满足间隔+dirty 条件应写入文件");
+        assert!(path.exists(), "Interval+dirty condition should write file");
 
         let content = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(content.contains("http://example.com/auto.bin"));
@@ -186,7 +209,7 @@ mod tests {
         assert!(auto.is_dirty());
 
         auto.execute().await.unwrap();
-        assert!(!auto.is_dirty(), "保存后应重置 dirty 标记");
+        assert!(!auto.is_dirty(), "After save dirty flag should be reset");
 
         let _ = tokio::fs::remove_file(&path).await;
     }

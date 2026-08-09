@@ -130,15 +130,16 @@ mod j2_j5_integration_tests {
 
         let headers = cond.to_headers();
 
+        // Should have If-None-Match (matches C++ aria2 behavior)
         assert!(
             headers
                 .iter()
                 .any(|(k, v)| k == "If-None-Match" && v == "\"abc123\"")
         );
+        // Should NOT have If-Match (C++ aria2 only sends If-None-Match)
         assert!(
-            headers
-                .iter()
-                .any(|(k, v)| k == "If-Match" && v == "\"abc123\"")
+            !headers.iter().any(|(k, _)| k == "If-Match"),
+            "If-Match should not be sent (matches C++ aria2)"
         );
 
         cond.update_from_response(
@@ -155,8 +156,13 @@ mod j2_j5_integration_tests {
 
         let headers = cond.to_headers();
 
+        // Should have If-Modified-Since (matches C++ aria2 behavior)
         assert!(headers.iter().any(|(k, _)| k == "If-Modified-Since"));
-        assert!(headers.iter().any(|(k, _)| k == "If-Unmodified-Since"));
+        // Should NOT have If-Unmodified-Since (C++ aria2 only sends If-Modified-Since)
+        assert!(
+            !headers.iter().any(|(k, _)| k == "If-Unmodified-Since"),
+            "If-Unmodified-Since should not be sent (matches C++ aria2)"
+        );
 
         let ims_header = headers
             .iter()

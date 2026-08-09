@@ -135,19 +135,38 @@ impl UtpPacket {
     }
 
     /// Create a SYN packet
-    pub fn syn(connection_id: u16, seq_nr: u16) -> Self {
+    pub fn syn(connection_id: u16, seq_nr: u16, ack_nr: u16, wnd_size: u32) -> Self {
         let mut packet = Self::new(PacketType::StSyn);
         packet.connection_id = connection_id;
         packet.seq_nr = seq_nr;
+        packet.ack_nr = ack_nr;
+        packet.wnd_size = wnd_size;
+        packet
+    }
+
+    /// Create a SYN-ACK packet (server response to SYN)
+    pub fn syn_ack(connection_id: u16, seq_nr: u16, ack_nr: u16, wnd_size: u32) -> Self {
+        let mut packet = Self::new(PacketType::StSyn);
+        packet.connection_id = connection_id;
+        packet.seq_nr = seq_nr;
+        packet.ack_nr = ack_nr;
+        packet.wnd_size = wnd_size;
         packet
     }
 
     /// Create a DATA packet
-    pub fn data(connection_id: u16, seq_nr: u16, ack_nr: u16, payload: Vec<u8>) -> Self {
+    pub fn data(
+        connection_id: u16,
+        seq_nr: u16,
+        ack_nr: u16,
+        wnd_size: u32,
+        payload: Vec<u8>,
+    ) -> Self {
         let mut packet = Self::new(PacketType::StData);
         packet.connection_id = connection_id;
         packet.seq_nr = seq_nr;
         packet.ack_nr = ack_nr;
+        packet.wnd_size = wnd_size;
         packet.payload = payload;
         packet
     }
@@ -163,11 +182,12 @@ impl UtpPacket {
     }
 
     /// Create a FIN packet
-    pub fn fin(connection_id: u16, seq_nr: u16, ack_nr: u16) -> Self {
+    pub fn fin(connection_id: u16, seq_nr: u16, ack_nr: u16, wnd_size: u32) -> Self {
         let mut packet = Self::new(PacketType::StFin);
         packet.connection_id = connection_id;
         packet.seq_nr = seq_nr;
         packet.ack_nr = ack_nr;
+        packet.wnd_size = wnd_size;
         packet
     }
 
@@ -349,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_syn_packet_creation() {
-        let packet = UtpPacket::syn(12345, 1);
+        let packet = UtpPacket::syn(12345, 1, 0, 0);
         assert_eq!(packet.packet_type().unwrap(), PacketType::StSyn);
         assert_eq!(packet.connection_id, 12345);
         assert_eq!(packet.seq_nr, 1);
@@ -359,7 +379,7 @@ mod tests {
     #[test]
     fn test_data_packet_creation() {
         let payload = vec![1, 2, 3, 4, 5];
-        let packet = UtpPacket::data(100, 10, 5, payload.clone());
+        let packet = UtpPacket::data(100, 10, 5, 0, payload.clone());
         assert_eq!(packet.packet_type().unwrap(), PacketType::StData);
         assert_eq!(packet.connection_id, 100);
         assert_eq!(packet.seq_nr, 10);
@@ -379,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_fin_packet_creation() {
-        let packet = UtpPacket::fin(300, 100, 99);
+        let packet = UtpPacket::fin(300, 100, 99, 0);
         assert_eq!(packet.packet_type().unwrap(), PacketType::StFin);
         assert_eq!(packet.connection_id, 300);
         assert_eq!(packet.seq_nr, 100);
@@ -429,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_packet_header_size() {
-        let packet = UtpPacket::syn(1, 1);
+        let packet = UtpPacket::syn(1, 1, 0, 0);
         let bytes = packet.to_bytes();
         assert_eq!(bytes.len(), UTP_HEADER_SIZE);
     }
@@ -437,7 +457,7 @@ mod tests {
     #[test]
     fn test_packet_with_payload_size() {
         let payload = vec![0u8; 100];
-        let packet = UtpPacket::data(1, 1, 1, payload);
+        let packet = UtpPacket::data(1, 1, 1, 0, payload);
         let bytes = packet.to_bytes();
         assert_eq!(bytes.len(), UTP_HEADER_SIZE + 100);
     }
@@ -496,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_packet_display() {
-        let packet = UtpPacket::syn(12345, 1);
+        let packet = UtpPacket::syn(12345, 1, 0, 0);
         let display = format!("{}", packet);
         assert!(display.contains("SYN"));
         assert!(display.contains("12345"));
@@ -513,7 +533,7 @@ mod tests {
     #[test]
     fn test_large_payload_packet() {
         let payload = vec![0xAB; 1400]; // Typical MTU-sized payload
-        let packet = UtpPacket::data(1, 1, 1, payload.clone());
+        let packet = UtpPacket::data(1, 1, 1, 0, payload.clone());
         let bytes = packet.to_bytes();
         let decoded = UtpPacket::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.payload, payload);

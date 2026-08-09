@@ -59,7 +59,7 @@ impl Checksum {
 
     pub fn verify(&self, data: &[u8]) -> bool {
         let computed = MessageDigest::hash_hex(self.hash_type, data);
-        computed == self.expected_hex
+        computed.eq_ignore_ascii_case(&self.expected_hex)
     }
 
     pub fn create_validator<'a>(&'a self) -> ChecksumValidator<'a> {
@@ -82,7 +82,7 @@ impl<'a> ChecksumValidator<'a> {
 
     pub fn finalize(self) -> Result<bool> {
         let computed = self.digest.finalize_hex();
-        Ok(computed == self.checksum.expected_hex)
+        Ok(computed.eq_ignore_ascii_case(&self.checksum.expected_hex))
     }
 }
 

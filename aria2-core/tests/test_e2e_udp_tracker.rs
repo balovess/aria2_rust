@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
     AnnounceParams, AsyncUdpTrackerClient, UdpAction, UdpEvent, UdpTrackerClient,
 };
@@ -8,8 +10,7 @@ use fixtures::mock_udp_tracker::MockUdpTracker;
 #[tokio::test]
 async fn test_udp_tracker_connect() {
     // Start mock tracker
-    let tracker = MockUdpTracker::new().expect("Failed to create mock tracker");
-    tracker.start();
+    let tracker = MockUdpTracker::start().await;
 
     // Give server time to start
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -30,8 +31,7 @@ async fn test_udp_tracker_connect() {
 #[tokio::test]
 async fn test_udp_tracker_announce() {
     // Start mock tracker
-    let tracker = MockUdpTracker::new().expect("Failed to create mock tracker");
-    tracker.start();
+    let tracker = MockUdpTracker::start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -74,8 +74,7 @@ async fn test_udp_tracker_announce() {
 #[tokio::test]
 async fn test_udp_tracker_scrape() {
     // Start mock tracker
-    let tracker = MockUdpTracker::new().expect("Failed to create mock tracker");
-    tracker.start();
+    let tracker = MockUdpTracker::start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -104,8 +103,7 @@ async fn test_udp_tracker_scrape() {
 #[tokio::test]
 async fn test_async_udp_tracker_announce() {
     // Start mock tracker
-    let tracker = MockUdpTracker::new().expect("Failed to create mock tracker");
-    tracker.start();
+    let tracker = MockUdpTracker::start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -141,8 +139,7 @@ async fn test_async_udp_tracker_announce() {
 #[tokio::test]
 async fn test_udp_tracker_connection_caching() {
     // Start mock tracker
-    let tracker = MockUdpTracker::new().expect("Failed to create mock tracker");
-    tracker.start();
+    let tracker = MockUdpTracker::start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -184,8 +181,7 @@ async fn test_udp_tracker_connection_caching() {
 #[tokio::test]
 async fn test_udp_tracker_multiple_events() {
     // Start mock tracker
-    let tracker = MockUdpTracker::new().expect("Failed to create mock tracker");
-    tracker.start();
+    let tracker = MockUdpTracker::start().await;
 
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 

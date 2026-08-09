@@ -32,7 +32,7 @@ impl EncryptedConnection {
         .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
         let my_peer_id = crate::bittorrent::peer::id::generate_peer_id();
-        let handshake = Handshake::new(info_hash, &my_peer_id).with_extensions(true);
+        let handshake = Handshake::new(info_hash, &my_peer_id).with_dht(true);
         let handshake_bytes = handshake.to_bytes();
 
         stream
@@ -73,12 +73,13 @@ impl EncryptedConnection {
 
     async fn complete_mse_handshake(
         mut stream: tokio::net::TcpStream,
-        _info_hash: &[u8; 20],
+        info_hash: &[u8; 20],
         remote_hs: &Handshake,
         _require_encryption: bool,
     ) -> Result<Self, String> {
-        let mut initiator = MseHandshake::new_initiator();
+        let mut initiator = MseHandshake::new_initiator(*info_hash);
 
+        // Step 1: Exchange DH public keys
         let step1_i = initiator.build_step1();
         stream
             .write_all(&step1_i)
@@ -89,6 +90,7 @@ impl EncryptedConnection {
             .await
             .map_err(|e| format!("MSE Step1 flush failed: {}", e))?;
 
+        // Read responder's public key (minimum KEY_LENGTH bytes, up to KEY_LENGTH + MAX_PAD_LENGTH)
         let mut step1_r_buf = vec![0u8; step1_i.len()];
         match stream.read_exact(&mut step1_r_buf).await {
             Ok(_) => {}
@@ -103,26 +105,30 @@ impl EncryptedConnection {
 
         initiator.receive_step1(&step1_r_buf)?;
 
-        let step2_i = initiator.build_step2()?;
+        // Step 3 (initiator): Send req1 + req2^req3 + encrypted payload
+        let step3_i = initiator.build_initiator_step2()?;
         stream
-            .write_all(&step2_i)
+            .write_all(&step3_i)
             .await
-            .map_err(|e| format!("MSE Step2 send failed: {}", e))?;
+            .map_err(|e| format!("MSE Step3 send failed: {}", e))?;
         stream
             .flush()
             .await
-            .map_err(|e| format!("MSE Step2 flush failed: {}", e))?;
+            .map_err(|e| format!("MSE Step3 flush failed: {}", e))?;
 
-        let mut step2_r_buf = vec![0u8; step2_i.len()];
-        match stream.read_exact(&mut step2_r_buf).await {
+        // Step 4: Receive receiver's response (VC + crypto_select + len(PadD) + PadD)
+        // The encrypted payload is at most VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + MAX_PAD_LENGTH = 526 bytes
+        let max_step4_len = 8 + 4 + 2 + 512;
+        let mut step4_r_buf = vec![0u8; max_step4_len];
+        match stream.read_exact(&mut step4_r_buf).await {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err("MSE Step2: peer closed connection".to_string());
+                return Err("MSE Step4: peer closed connection".to_string());
             }
-            Err(e) => return Err(format!("MSE Step2 read failed: {}", e)),
+            Err(e) => return Err(format!("MSE Step4 read failed: {}", e)),
         }
 
-        let _method = initiator.receive_step2(&step2_r_buf)?;
+        let _method = initiator.receive_receiver_step2(&step4_r_buf)?;
         let crypto = initiator.finalize()?;
 
         info!(
@@ -278,10 +284,11 @@ mod tests {
 
     #[test]
     fn test_is_encrypted_flag() {
-        let enc = MseCryptoState::new_encrypted(
-            &crate::bittorrent::extension::mse_crypto::MseDerivedKeys::derive(b"test"),
-            true,
-        );
+        let secret = [0x42u8; 96];
+        let info_hash = [0xABu8; 20];
+        let keys =
+            crate::bittorrent::extension::mse_crypto::MseDerivedKeys::derive(&secret, &info_hash);
+        let enc = MseCryptoState::new_encrypted(&keys, true);
         assert!(enc.is_encrypted());
 
         let plain = MseCryptoState::new_plain();
@@ -290,10 +297,17 @@ mod tests {
 
     #[test]
     fn test_should_negotiate_all_combos() {
-        assert!(!MseHandshake::should_negotiate(true, &[0x00]));
-        assert!(MseHandshake::should_negotiate(true, &[0x01]));
-        assert!(MseHandshake::should_negotiate(true, &[0xFF]));
-        assert!(!MseHandshake::should_negotiate(false, &[0x01]));
+        // MSE reserved bit is at reserved[7] bit 0
+        let reserved_zero = [0u8; 8];
+        let mut reserved_mse = [0u8; 8];
+        reserved_mse[7] = 0x01;
+        let mut reserved_ff = [0u8; 8];
+        reserved_ff[7] = 0xFF;
+
+        assert!(!MseHandshake::should_negotiate(true, &reserved_zero));
+        assert!(MseHandshake::should_negotiate(true, &reserved_mse));
+        assert!(MseHandshake::should_negotiate(true, &reserved_ff));
+        assert!(!MseHandshake::should_negotiate(false, &reserved_mse));
         assert!(!MseHandshake::should_negotiate(true, &[]));
     }
 

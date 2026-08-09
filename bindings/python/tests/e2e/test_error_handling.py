@@ -22,13 +22,15 @@ class TestErrorHandling:
 
     async def test_timeout_raises_timeout_error(self):
         async def silent_handler(reader, writer):
-            await asyncio.sleep(100)
-            writer.close()
+            try:
+                await asyncio.sleep(1)
+            finally:
+                writer.close()
 
         server = await asyncio.start_server(silent_handler, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
         try:
-            async with Aria2Client(url=f"http://127.0.0.1:{port}/jsonrpc", timeout=0.001) as client:
+            async with Aria2Client(url=f"http://127.0.0.1:{port}/jsonrpc", timeout=0.5) as client:
                 with pytest.raises(TimeoutError):
                     await client.get_version()
         finally:

@@ -8,11 +8,21 @@ use crate::constants;
 pub struct RangeProber {
     client: Arc<reqwest::Client>,
     headers: Vec<(String, String)>,
+    cookie_header: Option<String>,
 }
 
 impl RangeProber {
     pub fn new(client: Arc<reqwest::Client>, headers: Vec<(String, String)>) -> Self {
-        Self { client, headers }
+        Self {
+            client,
+            headers,
+            cookie_header: None,
+        }
+    }
+
+    pub fn with_cookie_header(mut self, cookie_header: Option<String>) -> Self {
+        self.cookie_header = cookie_header;
+        self
     }
 
     pub async fn probe_range_support(&self, uri: &str, total_length: u64) -> bool {
@@ -64,6 +74,9 @@ impl RangeProber {
                 .timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
                 ));
+        if let Some(cookie_header) = &self.cookie_header {
+            req = req.header("Cookie", cookie_header);
+        }
         for (name, value) in &self.headers {
             req = req.header(name, value);
         }

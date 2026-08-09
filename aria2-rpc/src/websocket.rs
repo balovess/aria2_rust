@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 
 /// Configuration for WebSocket connection keepalive behavior.
 ///
@@ -47,6 +47,11 @@ impl WsConfig {
     }
 }
 
+/// Download event types matching C++ aria2 WebSocketSessionMan.
+///
+/// C++ aria2 defines exactly 6 notification events.
+/// Non-standard events (BtCacheChanged, BtDownloadError, DownloadResume)
+/// are intentionally excluded for client compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventType {
     DownloadStart,
@@ -55,8 +60,6 @@ pub enum EventType {
     DownloadComplete,
     DownloadError,
     BtDownloadComplete,
-    BtDownloadError,
-    DownloadResume,
 }
 
 impl EventType {
@@ -68,8 +71,6 @@ impl EventType {
             Self::DownloadComplete => crate::constants::WS_EVENT_DOWNLOAD_COMPLETE,
             Self::DownloadError => crate::constants::WS_EVENT_DOWNLOAD_ERROR,
             Self::BtDownloadComplete => crate::constants::WS_EVENT_BT_DOWNLOAD_COMPLETE,
-            Self::BtDownloadError => crate::constants::WS_EVENT_BT_DOWNLOAD_ERROR,
-            Self::DownloadResume => crate::constants::WS_EVENT_DOWNLOAD_RESUME,
         }
     }
 
@@ -81,13 +82,17 @@ impl EventType {
             crate::constants::WS_EVENT_DOWNLOAD_COMPLETE => Some(Self::DownloadComplete),
             crate::constants::WS_EVENT_DOWNLOAD_ERROR => Some(Self::DownloadError),
             crate::constants::WS_EVENT_BT_DOWNLOAD_COMPLETE => Some(Self::BtDownloadComplete),
-            crate::constants::WS_EVENT_BT_DOWNLOAD_ERROR => Some(Self::BtDownloadError),
-            crate::constants::WS_EVENT_DOWNLOAD_RESUME => Some(Self::DownloadResume),
             _ => None,
         }
     }
 }
 
+/// JSON-RPC notification matching C++ aria2 WebSocketSessionMan::addNotification format.
+///
+/// C++ format: `{"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"hexgid"}]}`
+///
+/// The `params` array contains a single object with only the `gid` field,
+/// matching the C++ implementation exactly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DownloadEvent {
     #[serde(rename = "jsonrpc")]
@@ -97,12 +102,18 @@ pub struct DownloadEvent {
 }
 
 impl DownloadEvent {
+    /// Create a new notification event with custom params.
     pub fn new(event_type: EventType, params: Vec<serde_json::Value>) -> Self {
         Self {
             version: "2.0".to_string(),
             method: event_type.method_name().to_string(),
             params,
         }
+    }
+
+    /// Create a notification matching C++ format: `params: [{"gid": gid}]`.
+    fn from_gid(event_type: EventType, gid: impl Into<String>) -> Self {
+        Self::new(event_type, vec![serde_json::json!({"gid": gid.into()})])
     }
 
     pub fn event_type(&self) -> Option<EventType> {
@@ -139,77 +150,68 @@ impl DownloadEvent {
         self.method.clone()
     }
 
-    pub fn download_start(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(
-            EventType::DownloadStart,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
-        )
+    // -- C++ compatible notification constructors (5 core + BT event) --
+
+    pub fn download_start(gid: impl Into<String>) -> Self {
+        Self::from_gid(EventType::DownloadStart, gid)
     }
 
-    pub fn download_complete(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(
-            EventType::DownloadComplete,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
-        )
+    pub fn download_complete(gid: impl Into<String>) -> Self {
+        Self::from_gid(EventType::DownloadComplete, gid)
     }
 
-    pub fn download_error(
-        gid: impl Into<String>,
-        error_code: i32,
-        files: Vec<serde_json::Value>,
-    ) -> Self {
-        Self::new(
-            EventType::DownloadError,
-            vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
-        )
+    pub fn download_error(gid: impl Into<String>) -> Self {
+        Self::from_gid(EventType::DownloadError, gid)
     }
 
     pub fn download_pause(gid: impl Into<String>) -> Self {
-        Self::new(
-            EventType::DownloadPause,
-            vec![serde_json::json!({"gid": gid.into()})],
-        )
+        Self::from_gid(EventType::DownloadPause, gid)
     }
 
-    pub fn download_stop(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(
-            EventType::DownloadStop,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
-        )
+    pub fn download_stop(gid: impl Into<String>) -> Self {
+        Self::from_gid(EventType::DownloadStop, gid)
     }
 
-    pub fn bt_download_complete(gid: impl Into<String>, files: Vec<serde_json::Value>) -> Self {
-        Self::new(
-            EventType::BtDownloadComplete,
-            vec![serde_json::json!({"gid": gid.into(), "files": files})],
-        )
-    }
-
-    pub fn bt_download_error(
-        gid: impl Into<String>,
-        error_code: i32,
-        files: Vec<serde_json::Value>,
-    ) -> Self {
-        Self::new(
-            EventType::BtDownloadError,
-            vec![serde_json::json!({"gid": gid.into(), "errorCode": error_code, "files": files})],
-        )
-    }
-
-    pub fn download_resume(gid: impl Into<String>) -> Self {
-        Self::new(
-            EventType::DownloadResume,
-            vec![serde_json::json!({"gid": gid.into()})],
-        )
+    pub fn bt_download_complete(gid: impl Into<String>) -> Self {
+        Self::from_gid(EventType::BtDownloadComplete, gid)
     }
 }
 
-#[derive(Clone)]
 struct Subscriber {
     #[allow(dead_code)] // Subscriber ID for debugging and connection management
     id: String,
     #[allow(dead_code)] // Event filter; stored for per-subscriber event filtering
     filter: Option<Vec<EventType>>,
+}
+
+/// Receiver registration that removes its bookkeeping entry when dropped.
+///
+/// The broadcast receiver itself already releases its channel slot on drop;
+/// this companion guard keeps `EventPublisher::subscriber_count` aligned with
+/// the active WebSocket session lifecycle as well.
+pub(crate) struct ScopedSubscription {
+    id: String,
+    receiver: broadcast::Receiver<(EventType, DownloadEvent)>,
+    subscribers: Arc<RwLock<HashMap<String, Subscriber>>>,
+}
+
+impl ScopedSubscription {
+    pub(crate) async fn recv(
+        &mut self,
+    ) -> Result<(EventType, DownloadEvent), broadcast::error::RecvError> {
+        self.receiver.recv().await
+    }
+}
+
+impl Drop for ScopedSubscription {
+    fn drop(&mut self) {
+        // Never panic while tearing down a WebSocket task. A poisoned lock can
+        // only result from an earlier internal panic, and must not prevent the
+        // receiver itself from being released.
+        if let Ok(mut subscribers) = self.subscribers.write() {
+            subscribers.remove(&self.id);
+        }
+    }
 }
 
 pub struct EventPublisher {
@@ -226,30 +228,55 @@ impl EventPublisher {
         }
     }
 
+    fn register(&self, id: String, filter: Option<Vec<EventType>>) {
+        let mut subscribers = self
+            .subscribers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        subscribers.insert(id.clone(), Subscriber { id, filter });
+    }
+
     pub async fn subscribe(
         &self,
         sub_id: impl Into<String>,
         filter: Option<Vec<EventType>>,
     ) -> broadcast::Receiver<(EventType, DownloadEvent)> {
-        let mut subs = self.subscribers.write().await;
         let id = sub_id.into();
-        subs.insert(
-            id.clone(),
-            Subscriber {
-                id: id.clone(),
-                filter,
-            },
-        );
+        self.register(id, filter);
         self.tx.subscribe()
     }
 
+    /// Subscribe a connection whose bookkeeping must end with its receiver.
+    ///
+    /// This is intentionally crate-private: public callers retain the
+    /// established explicit `subscribe` / `unsubscribe` lifecycle.
+    pub(crate) fn subscribe_scoped(
+        &self,
+        sub_id: impl Into<String>,
+        filter: Option<Vec<EventType>>,
+    ) -> ScopedSubscription {
+        let id = sub_id.into();
+        self.register(id.clone(), filter);
+        ScopedSubscription {
+            id,
+            receiver: self.tx.subscribe(),
+            subscribers: Arc::clone(&self.subscribers),
+        }
+    }
+
     pub async fn unsubscribe(&self, sub_id: &str) {
-        let mut subs = self.subscribers.write().await;
-        subs.remove(sub_id);
+        let mut subscribers = self
+            .subscribers
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        subscribers.remove(sub_id);
     }
 
     pub async fn subscriber_count(&self) -> usize {
-        self.subscribers.read().await.len()
+        self.subscribers
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len()
     }
 
     pub fn publish(&self, event_type: EventType, event: DownloadEvent) -> Result<usize, String> {
@@ -481,8 +508,7 @@ mod tests {
 
     #[test]
     fn test_download_event_creation() {
-        let event =
-            DownloadEvent::download_start("abc123", vec![serde_json::json!({"path": "/file.iso"})]);
+        let event = DownloadEvent::download_start("abc123");
         assert_eq!(event.event_type().unwrap(), EventType::DownloadStart);
         assert_eq!(event.method(), "aria2.onDownloadStart");
         assert_eq!(event.params().len(), 1);
@@ -490,40 +516,174 @@ mod tests {
 
     #[test]
     fn test_download_event_serialization() {
-        let event = DownloadEvent::download_error("def456", -1, vec![serde_json::json!({})]);
+        let event = DownloadEvent::download_error("def456");
         let json = event.to_json().unwrap();
         assert!(json.contains("\"method\":\"aria2.onDownloadError\""));
-        assert!(json.contains("\"errorCode\":-1"));
+        // C++ format: params only contains {"gid": "..."}, no errorCode
+        assert!(json.contains("\"gid\":\"def456\""));
+        assert!(
+            !json.contains("errorCode"),
+            "C++ notification should not contain errorCode"
+        );
     }
 
     #[test]
     fn test_all_event_constructors() {
-        let _ = DownloadEvent::download_start("g1", vec![]);
+        let _ = DownloadEvent::download_start("g1");
         let _ = DownloadEvent::download_pause("g2");
-        let _ = DownloadEvent::download_stop("g3", vec![]);
-        let _ = DownloadEvent::download_complete("g4", vec![]);
-        let _ = DownloadEvent::download_error("g5", 0, vec![]);
-        let _ = DownloadEvent::bt_download_complete("g6", vec![]);
-        let _ = DownloadEvent::bt_download_error("g7", 0, vec![]);
-        let _ = DownloadEvent::download_resume("g8");
+        let _ = DownloadEvent::download_stop("g3");
+        let _ = DownloadEvent::download_complete("g4");
+        let _ = DownloadEvent::download_error("g5");
+        let _ = DownloadEvent::bt_download_complete("g6");
     }
 
     #[test]
     fn test_download_event_gid_extraction() {
-        let event = DownloadEvent::download_complete("gid-001", vec![]);
+        let event = DownloadEvent::download_complete("gid-001");
         assert_eq!(event.gid(), "gid-001");
 
-        let event2 = DownloadEvent::download_error("gid-err", -1, vec![]);
+        let event2 = DownloadEvent::download_error("gid-err");
         assert_eq!(event2.gid(), "gid-err");
     }
 
     #[test]
     fn test_download_event_event_type_str() {
-        let event = DownloadEvent::download_start("g1", vec![]);
+        let event = DownloadEvent::download_start("g1");
         assert_eq!(event.event_type_str(), "aria2.onDownloadStart");
 
-        let event2 = DownloadEvent::bt_download_complete("g2", vec![]);
+        let event2 = DownloadEvent::bt_download_complete("g2");
         assert_eq!(event2.event_type_str(), "aria2.onBtDownloadComplete");
+    }
+
+    // =========================================================================
+    // C++ Compatibility Format Tests
+    // =========================================================================
+
+    /// Verify that all 6 C++ notification events serialize to the exact
+    /// JSON-RPC format produced by C++ aria2's WebSocketSessionMan::addNotification.
+    ///
+    /// C++ produces: `{"jsonrpc":"2.0","method":"aria2.on<Event>","params":[{"gid":"<hex>"}]}`
+    #[test]
+    fn test_cpp_compatible_notification_format() {
+        let test_cases: Vec<(EventType, &str, &str)> = vec![
+            (
+                EventType::DownloadStart,
+                "aria2.onDownloadStart",
+                "2089b05ecca3d829",
+            ),
+            (
+                EventType::DownloadPause,
+                "aria2.onDownloadPause",
+                "a2bc3d4e5f6a7b8c",
+            ),
+            (
+                EventType::DownloadStop,
+                "aria2.onDownloadStop",
+                "deadbeef12345678",
+            ),
+            (
+                EventType::DownloadComplete,
+                "aria2.onDownloadComplete",
+                "c0ffee0000000001",
+            ),
+            (
+                EventType::DownloadError,
+                "aria2.onDownloadError",
+                "bada5590abcdef01",
+            ),
+            (
+                EventType::BtDownloadComplete,
+                "aria2.onBtDownloadComplete",
+                "1a2b3c4d5e6f7a8b",
+            ),
+        ];
+
+        for (event_type, expected_method, gid) in &test_cases {
+            let event = match event_type {
+                EventType::DownloadStart => DownloadEvent::download_start(*gid),
+                EventType::DownloadPause => DownloadEvent::download_pause(*gid),
+                EventType::DownloadStop => DownloadEvent::download_stop(*gid),
+                EventType::DownloadComplete => DownloadEvent::download_complete(*gid),
+                EventType::DownloadError => DownloadEvent::download_error(*gid),
+                EventType::BtDownloadComplete => DownloadEvent::bt_download_complete(*gid),
+            };
+
+            let json_str = event.to_json().expect("serialization should succeed");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json_str).expect("should parse back");
+
+            // Verify jsonrpc version
+            assert_eq!(
+                parsed["jsonrpc"], "2.0",
+                "jsonrpc version mismatch for {}",
+                expected_method
+            );
+
+            // Verify method name
+            assert_eq!(parsed["method"], *expected_method, "method mismatch");
+
+            // Verify params structure: must be an array with exactly 1 element
+            let params = parsed["params"].as_array().expect("params should be array");
+            assert_eq!(
+                params.len(),
+                1,
+                "params should have exactly 1 element for {}",
+                expected_method
+            );
+
+            // The single param must be an object containing ONLY "gid"
+            let param_obj = params[0].as_object().expect("param[0] should be object");
+            assert_eq!(
+                param_obj.len(),
+                1,
+                "param[0] should contain only 'gid' for {}",
+                expected_method
+            );
+            assert_eq!(
+                param_obj["gid"], *gid,
+                "gid mismatch for {}",
+                expected_method
+            );
+
+            // Verify no extra fields (files, errorCode, etc.)
+            assert!(
+                !param_obj.contains_key("files"),
+                "C++ notification should NOT contain 'files' for {}",
+                expected_method
+            );
+            assert!(
+                !param_obj.contains_key("errorCode"),
+                "C++ notification should NOT contain 'errorCode' for {}",
+                expected_method
+            );
+
+            // Also verify the exact expected JSON string for one case
+            if *expected_method == "aria2.onDownloadStart" {
+                let expected = r#"{"jsonrpc":"2.0","method":"aria2.onDownloadStart","params":[{"gid":"2089b05ecca3d829"}]}"#;
+                assert_eq!(
+                    json_str, expected,
+                    "exact C++ format mismatch for onDownloadStart"
+                );
+            }
+        }
+    }
+
+    /// Verify only 6 EventType variants exist (matching C++).
+    #[test]
+    fn test_exactly_six_event_types() {
+        let all_methods: Vec<&'static str> = vec![
+            EventType::DownloadStart.method_name(),
+            EventType::DownloadPause.method_name(),
+            EventType::DownloadStop.method_name(),
+            EventType::DownloadComplete.method_name(),
+            EventType::DownloadError.method_name(),
+            EventType::BtDownloadComplete.method_name(),
+        ];
+        assert_eq!(
+            all_methods.len(),
+            6,
+            "Should have exactly 6 event types matching C++"
+        );
     }
 
     // =========================================================================
@@ -562,7 +722,7 @@ mod tests {
         let publisher = EventPublisher::new(16);
         let mut rx = publisher.subscribe("client-1", None).await;
 
-        let event = DownloadEvent::download_start("test-gid", vec![]);
+        let event = DownloadEvent::download_start("test-gid");
         let count = publisher.publish(EventType::DownloadStart, event).unwrap();
         assert_eq!(count, 1);
 
@@ -578,6 +738,26 @@ mod tests {
         assert_eq!(publisher.subscriber_count().await, 1);
 
         publisher.unsubscribe("client-1").await;
+        assert_eq!(publisher.subscriber_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_scoped_subscription_releases_bookkeeping_on_drop() {
+        let publisher = EventPublisher::new(16);
+        let mut subscription = publisher.subscribe_scoped("ws-conn-1", None);
+        assert_eq!(publisher.subscriber_count().await, 1);
+
+        publisher
+            .publish(
+                EventType::DownloadStart,
+                DownloadEvent::download_start("gid-1"),
+            )
+            .expect("scoped subscription must receive broadcast events");
+        let (event_type, event) = subscription.recv().await.unwrap();
+        assert_eq!(event_type, EventType::DownloadStart);
+        assert_eq!(event.gid(), "gid-1");
+
+        drop(subscription);
         assert_eq!(publisher.subscriber_count().await, 0);
     }
 
@@ -633,8 +813,8 @@ mod tests {
     fn test_dedup_same_event_replaces_old() {
         let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
 
-        let event1 = DownloadEvent::download_complete("gid-same-001", vec![]);
-        let event2 = DownloadEvent::download_complete("gid-same-001", vec![]);
+        let event1 = DownloadEvent::download_complete("gid-same-001");
+        let event2 = DownloadEvent::download_complete("gid-same-001");
 
         batcher.push(event1);
         batcher.push(event2); // Should deduplicate: same GID + same event type
@@ -663,8 +843,8 @@ mod tests {
     fn test_different_events_not_deduped() {
         let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
 
-        let complete = DownloadEvent::download_complete("gid-mixed-001", vec![]);
-        let error = DownloadEvent::download_error("gid-mixed-001", -1, vec![]);
+        let complete = DownloadEvent::download_complete("gid-mixed-001");
+        let error = DownloadEvent::download_error("gid-mixed-001");
 
         batcher.push(complete);
         batcher.push(error); // Different event type → NOT deduplicated
@@ -687,13 +867,13 @@ mod tests {
 
         // Push 19 events — no flush yet
         for i in 0..19 {
-            let flushed = batcher.push(DownloadEvent::download_start(format!("gid-{}", i), vec![]));
+            let flushed = batcher.push(DownloadEvent::download_start(format!("gid-{}", i)));
             assert!(!flushed, "Push {} should not trigger flush yet", i);
         }
         assert_eq!(batcher.pending_count(), 19);
 
         // Push 20th event — hits limit, should auto-flush
-        let flushed = batcher.push(DownloadEvent::download_start("gid-19", vec![]));
+        let flushed = batcher.push(DownloadEvent::download_start("gid-19"));
         assert!(flushed, "20th push should trigger auto-flush");
 
         // After auto-flush, pending should be empty (all 20 were drained)
@@ -715,10 +895,7 @@ mod tests {
 
         // Push some events
         for i in 0..5 {
-            batcher.push(DownloadEvent::download_complete(
-                format!("gid-timer-{}", i),
-                vec![],
-            ));
+            batcher.push(DownloadEvent::download_complete(format!("gid-timer-{}", i)));
         }
         assert_eq!(batcher.pending_count(), 5);
 
@@ -750,7 +927,7 @@ mod tests {
             .with_max_batch_size(100)
             .with_flush_interval_ms(60_000); // Long interval
 
-        batcher.push(DownloadEvent::download_start("gid-fresh", vec![]));
+        batcher.push(DownloadEvent::download_start("gid-fresh"));
 
         // Immediately after push, before interval elapses
         let result = batcher.maybe_flush();
@@ -773,9 +950,9 @@ mod tests {
     fn test_different_gids_not_deduped() {
         let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
 
-        batcher.push(DownloadEvent::download_complete("gid-a", vec![]));
-        batcher.push(DownloadEvent::download_complete("gid-b", vec![]));
-        batcher.push(DownloadEvent::download_complete("gid-c", vec![]));
+        batcher.push(DownloadEvent::download_complete("gid-a"));
+        batcher.push(DownloadEvent::download_complete("gid-b"));
+        batcher.push(DownloadEvent::download_complete("gid-c"));
 
         assert_eq!(
             batcher.pending_count(),

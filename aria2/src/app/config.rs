@@ -8,11 +8,37 @@
 
 use super::App;
 use super::cli::CliArgs;
-use aria2_core::config::{OptionValue, UriListFile};
+use aria2_core::config::{OptionValue, UriListFile, project_initial_options};
+use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
 
 impl App {
+    async fn global_option_values(&self) -> std::collections::HashMap<String, OptionValue> {
+        let config = self.config.read().await;
+        config.get_all_global_options().await
+    }
+
+    /// Return the typed execution options together with the canonical raw
+    /// request values that must remain attached to each CLI-created
+    /// `RequestGroup`.
+    pub(super) async fn download_options_with_snapshot(
+        &self,
+    ) -> (
+        DownloadOptions,
+        std::collections::HashMap<String, serde_json::Value>,
+    ) {
+        let values = self.global_option_values().await;
+        let options = DownloadOptions::from_option_values(&values);
+        let snapshot = project_initial_options(
+            values
+                .into_iter()
+                .filter(|(_, value)| !value.is_none())
+                .map(|(name, value)| (name, serde_json::Value::from(&value))),
+        );
+        (options, snapshot)
+    }
+
     /// Load parsed CLI arguments (from clap `CliArgs`) into the configuration.
     ///
     /// Each option that was explicitly set on the command line is applied to
@@ -28,65 +54,73 @@ impl App {
     pub async fn load_cli_args(&mut self, cli: CliArgs) -> std::result::Result<(), String> {
         let mut conf = self.config.write().await;
 
-        // Helper macros: set option only if value is present; ignore unknown
-        // options (they may be CLI-only flags like verbose/no-color not in registry)
+        // Helper macros: set option only if value is present and propagate the
+        // registry's validation error back to the CLI entry point.
         macro_rules! set_str {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf.set_global_option($name, OptionValue::Str(v)).await;
+                    conf.set_global_option($name, OptionValue::Str(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_path {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option(
-                            $name,
-                            OptionValue::Str(v.to_string_lossy().into_owned()),
-                        )
-                        .await;
+                    conf.set_global_option(
+                        $name,
+                        OptionValue::Str(v.to_string_lossy().into_owned()),
+                    )
+                    .await
+                    .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_u64 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option($name, OptionValue::Int(v as i64))
-                        .await;
+                    let v = i64::try_from(v)
+                        .map_err(|_| format!("--{}: value is out of range", $name))?;
+                    conf.set_global_option($name, OptionValue::Int(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_u16 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf
-                        .set_global_option($name, OptionValue::Int(v as i64))
-                        .await;
+                    conf.set_global_option($name, OptionValue::Int(i64::from(v)))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_f64 {
             ($name:expr, $value:expr) => {
                 if let Some(v) = $value {
-                    let _ = conf.set_global_option($name, OptionValue::Float(v)).await;
+                    conf.set_global_option($name, OptionValue::Float(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_bool_true {
             ($name:expr, $value:expr) => {
-                if $value {
-                    let _ = conf.set_global_option($name, OptionValue::Bool(true)).await;
+                if let Some(v) = $value {
+                    conf.set_global_option($name, OptionValue::Bool(v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
         macro_rules! set_bool_false {
             ($name:expr, $value:expr) => {
-                if $value {
-                    let _ = conf
-                        .set_global_option($name, OptionValue::Bool(false))
-                        .await;
+                if let Some(v) = $value {
+                    conf.set_global_option($name, OptionValue::Bool(!v))
+                        .await
+                        .map_err(|e| format!("--{}: {}", $name, e))?;
                 }
             };
         }
@@ -113,19 +147,94 @@ impl App {
         set_bool_true!("dry-run", g.dry_run);
         set_bool_true!("daemon", g.daemon);
         set_path!("pid-file", g.pid_file);
+        set_bool_true!("allow-piece-length-change", g.allow_piece_length_change);
+        set_bool_true!("always-resume", g.always_resume);
+        set_bool_true!("check-integrity", g.check_integrity);
+        set_bool_true!("conditional-get", g.conditional_get);
+        set_bool_true!("deferred-input", g.deferred_input);
+        set_bool_true!("disable-ipv6", g.disable_ipv6);
+        set_bool_true!("hash-check-only", g.hash_check_only);
+        set_str!("follow-metalink", g.follow_metalink);
+        set_str!("metalink-version", g.metalink_version);
+        set_str!("metalink-language", g.metalink_language);
+        set_str!("metalink-os", g.metalink_os);
+        set_str!("metalink-location", g.metalink_location);
+        set_str!("metalink-preferred-protocol", g.metalink_preferred_protocol);
+        set_bool_true!("parameterized-uri", g.parameterized_uri);
+        set_bool_true!("pause", g.pause);
+        set_bool_true!("remove-control-file", g.remove_control_file);
+        set_bool_true!("reuse-uri", g.reuse_uri);
+        set_bool_true!("save-not-found", g.save_not_found);
+        set_bool_true!("force-sequential", g.force_sequential);
+        set_bool_true!("no-netrc", g.no_netrc);
+        set_bool_true!("realtime-chunk-checksum", g.realtime_chunk_checksum);
+        set_str!("download-result", g.download_result);
+        set_bool_true!("human-readable", g.human_readable);
+        set_bool_true!(
+            "keep-unfinished-download-result",
+            g.keep_unfinished_download_result
+        );
+        set_bool_true!("truncate-console-readout", g.truncate_console_readout);
+        set_bool_true!("stderr", g.stderr);
+        set_u64!("max-download-result", g.max_download_result);
+        set_str!("lowest-speed-limit", g.lowest_speed_limit);
+        set_u64!("max-file-not-found", g.max_file_not_found);
+        set_str!("no-file-allocation-limit", g.no_file_allocation_limit);
+        set_u64!("stop-with-process", g.stop_with_process);
+        set_str!("uri-selector", g.uri_selector);
+        set_str!("stream-piece-selector", g.stream_piece_selector);
+        set_str!("interface", g.interface);
+        set_str!("multiple-interface", g.multiple_interface);
+        set_str!("gid", g.gid);
+        set_bool_true!("async-dns", g.async_dns);
+        set_str!("async-dns-server", g.async_dns_server);
+        set_bool_true!("enable-async-dns6", g.enable_async_dns6);
+        set_str!("event-poll", g.event_poll);
+        set_path!("server-stat-if", g.server_stat_if);
+        set_path!("server-stat-of", g.server_stat_of);
+        set_u64!("server-stat-timeout", g.server_stat_timeout);
+        set_path!("netrc-path", g.netrc_path);
+        set_bool_true!("show-files", g.show_files);
+        set_path!("torrent-file", g.torrent_file);
+        set_path!("metalink-file", g.metalink_file);
+        set_str!("checksum", g.checksum);
+        set_bool_true!("enable-mmap", g.enable_mmap);
+        set_str!("max-mmap-limit", g.max_mmap_limit);
+        set_bool_true!(
+            "metalink-enable-unique-protocol",
+            g.metalink_enable_unique_protocol
+        );
+        set_str!("metalink-base-uri", g.metalink_base_uri);
+        set_bool_true!("pause-metadata", g.pause_metadata);
+        set_str!("on-download-start", g.on_download_start);
+        set_str!("on-download-stop", g.on_download_stop);
+        set_str!("on-download-pause", g.on_download_pause);
+        set_str!("on-download-complete", g.on_download_complete);
+        set_str!("on-download-error", g.on_download_error);
+        set_bool_true!("show-console-readout", g.show_console_readout);
+        set_u64!("rlimit-nofile", g.rlimit_nofile);
 
         // --- HTTP/FTP options ---
         set_str!("all-proxy", h.all_proxy);
         set_str!("http-proxy", h.http_proxy);
         set_str!("https-proxy", h.https_proxy);
         set_str!("ftp-proxy", h.ftp_proxy);
+        set_str!("all-proxy-user", h.all_proxy_user);
+        set_str!("all-proxy-passwd", h.all_proxy_passwd);
+        set_str!("http-proxy-user", h.http_proxy_user);
+        set_str!("http-proxy-passwd", h.http_proxy_passwd);
+        set_str!("https-proxy-user", h.https_proxy_user);
+        set_str!("https-proxy-passwd", h.https_proxy_passwd);
+        set_str!("ftp-proxy-user", h.ftp_proxy_user);
+        set_str!("ftp-proxy-passwd", h.ftp_proxy_passwd);
+        set_str!("proxy-method", h.proxy_method);
         set_str!("no-proxy", h.no_proxy);
         set_str!("user-agent", h.user_agent);
         set_str!("referer", h.referer);
         if !h.header.is_empty() {
-            let _ = conf
-                .set_global_option("header", OptionValue::List(h.header))
-                .await;
+            conf.set_global_option("header", OptionValue::List(h.header))
+                .await
+                .map_err(|e| format!("--header: {}", e))?;
         }
         set_path!("load-cookies", h.load_cookies);
         set_path!("save-cookies", h.save_cookies);
@@ -137,20 +246,42 @@ impl App {
         set_str!("min-split-size", h.min_split_size);
         set_u64!("max-connection-per-server", h.max_connection_per_server);
         // Negation: --no-check-certificate takes precedence over --check-certificate
-        if h.no_check_certificate {
-            set_bool_false!("check-certificate", true);
+        if h.no_check_certificate.unwrap_or(false) {
+            set_bool_false!("check-certificate", Some(true));
         } else {
             set_bool_true!("check-certificate", h.check_certificate);
         }
         set_path!("ca-certificate", h.ca_certificate);
+        set_path!("certificate", h.certificate);
+        set_path!("private-key", h.private_key);
+        set_str!("min-tls-version", h.min_tls_version);
         set_bool_true!("allow-overwrite", h.allow_overwrite);
         set_bool_true!("auto-file-renaming", h.auto_file_renaming);
-        if h.no_continue {
-            set_bool_false!("continue", true);
+        if h.no_continue.unwrap_or(false) {
+            set_bool_false!("continue", Some(true));
         } else {
             set_bool_true!("continue", h.continue_dl);
         }
         set_bool_true!("remote-time", h.remote_time);
+        set_bool_true!("enable-http-keep-alive", h.enable_http_keep_alive);
+        set_bool_true!("enable-http-pipelining", h.enable_http_pipelining);
+        set_bool_true!("http-accept-gzip", h.http_accept_gzip);
+        set_bool_true!("http-auth-challenge", h.http_auth_challenge);
+        set_bool_true!("http-no-cache", h.http_no_cache);
+        set_bool_true!(
+            "content-disposition-default-utf8",
+            h.content_disposition_default_utf8
+        );
+        set_bool_true!("use-head", h.use_head);
+        set_bool_true!("no-want-digest-header", h.no_want_digest_header);
+        set_str!("http-user", h.http_user);
+        set_str!("http-passwd", h.http_passwd);
+        set_str!("ftp-user", h.ftp_user);
+        set_str!("ftp-passwd", h.ftp_passwd);
+        set_bool_true!("ftp-pasv", h.ftp_pasv);
+        set_bool_true!("ftp-reuse-connection", h.ftp_reuse_connection);
+        set_str!("ftp-type", h.ftp_type);
+        set_str!("ssh-host-key-md", h.ssh_host_key_md);
 
         // --- BitTorrent options ---
         set_f64!("seed-time", b.seed_time);
@@ -166,12 +297,12 @@ impl App {
         set_bool_true!("enable-lpd", b.enable_lpd);
         set_u64!("lpd-listen-port", b.lpd_listen_port);
         set_bool_true!("bt-enable-web-seed", b.bt_enable_web_seed);
-        if b.no_enable_dht {
-            set_bool_false!("enable-dht", true);
+        if b.no_enable_dht.unwrap_or(false) {
+            set_bool_false!("enable-dht", Some(true));
         } else {
             set_bool_true!("enable-dht", b.enable_dht);
         }
-        set_u64!("dht-listen-port", b.dht_listen_port);
+        set_str!("dht-listen-port", b.dht_listen_port);
         set_str!("dht-entry-point", b.dht_entry_point);
         set_path!("dht-file-path", b.dht_file_path);
         set_path!("dht-message-path", b.dht_message_path);
@@ -183,6 +314,37 @@ impl App {
         set_str!("bt-prioritize-piece", b.bt_prioritize_piece);
         set_bool_true!("enable-utp", b.enable_utp);
         set_u64!("utp-listen-port", b.utp_listen_port);
+        set_bool_true!("bt-detach-seed-only", b.bt_detach_seed_only);
+        set_bool_true!(
+            "bt-enable-hook-after-hash-check",
+            b.bt_enable_hook_after_hash_check
+        );
+        set_str!("bt-exclude-tracker", b.bt_exclude_tracker);
+        set_str!("bt-external-ip", b.bt_external_ip);
+        set_bool_true!("bt-hash-check-seed", b.bt_hash_check_seed);
+        set_bool_true!("bt-load-saved-metadata", b.bt_load_saved_metadata);
+        set_str!("bt-lpd-interface", b.bt_lpd_interface);
+        set_bool_true!("bt-metadata-only", b.bt_metadata_only);
+        set_bool_true!("bt-remove-unselected-file", b.bt_remove_unselected_file);
+        set_bool_true!("bt-require-crypto", b.bt_require_crypto);
+        set_u64!("bt-stop-timeout", b.bt_stop_timeout);
+        set_str!("bt-tracker", b.bt_tracker);
+        set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
+        set_u64!("bt-tracker-interval", b.bt_tracker_interval);
+        set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);
+        set_u64!("dht-message-timeout", b.dht_message_timeout);
+        set_bool_true!("enable-dht6", b.enable_dht6);
+        set_str!("dht-listen-addr6", b.dht_listen_addr6);
+        set_str!("dht-entry-point6", b.dht_entry_point6);
+        set_path!("dht-file-path6", b.dht_file_path6);
+        set_str!("peer-id-prefix", b.peer_id_prefix);
+        set_str!("peer-agent", b.peer_agent);
+        set_str!("select-file", b.select_file);
+        if !b.index_out.is_empty() {
+            conf.set_global_option("index-out", OptionValue::Str(b.index_out.join("\n")))
+                .await
+                .map_err(|e| format!("--index-out: {}", e))?;
+        }
 
         // --- RPC options ---
         set_bool_true!("enable-rpc", r.enable_rpc);
@@ -197,6 +359,9 @@ impl App {
         set_bool_true!("rpc-secure", r.rpc_secure);
         set_path!("rpc-certificate", r.rpc_certificate);
         set_path!("rpc-private-key", r.rpc_private_key);
+        set_bool_true!("rpc-allow-origin-all", r.rpc_allow_origin_all);
+        set_str!("rpc-max-request-size", r.rpc_max_request_size);
+        set_bool_true!("rpc-save-upload-metadata", r.rpc_save_upload_metadata);
 
         // --- Advanced options ---
         set_str!("file-allocation", a.file_allocation);
@@ -213,6 +378,13 @@ impl App {
         set_bool_true!("force-save", a.force_save);
         set_path!("server-stat-file", a.server_stat_file);
         set_u64!("save-server-stat-interval", a.save_server_stat_interval);
+        set_u64!("dscp", a.dscp);
+        set_str!("socket-recv-buffer-size", a.socket_recv_buffer_size);
+        set_u64!("max-resume-failure-tries", a.max_resume_failure_tries);
+        set_bool_true!(
+            "optimize-concurrent-downloads",
+            a.optimize_concurrent_downloads
+        );
 
         drop(conf);
 
@@ -254,6 +426,15 @@ impl App {
             }
         }
 
+        // `-T`/`-M` are input selectors in the original CLI, not merely
+        // configuration values. Feed them through the same detector as
+        // positional metadata paths so the engine receives their file data.
+        for option_name in ["torrent-file", "metalink-file"] {
+            if let Some(path) = self.get_opt_str(option_name).await {
+                positional_uris.push(path);
+            }
+        }
+
         self.detected_inputs = positional_uris
             .into_iter()
             .map(|uri| {
@@ -269,18 +450,53 @@ impl App {
         conf.load_env().await;
     }
 
+    /// Load environment and file configuration according to CLI startup
+    /// precedence. `--no-conf` suppresses both the default and explicit file.
+    pub(super) async fn load_startup_config(
+        &mut self,
+        no_conf: bool,
+        path: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        self.load_env().await;
+        if no_conf {
+            return Ok(());
+        }
+        self.load_config_file(path).await
+    }
+
     /// Load configuration from a file.
     ///
     /// If no path is provided, looks for ~/.aria2/aria2.conf
+    /// Matching original aria2 behavior (option_processing.cc):
+    /// - `HOME` first on all platforms, then USERPROFILE, then HOMEDRIVE+HOMEPATH.
+    /// - When `--conf-path` is explicitly given and file not found → error.
+    /// - When default path is not found → silently skip (graceful fallback).
     pub async fn load_config_file(
         &mut self,
         path: Option<&str>,
     ) -> std::result::Result<(), String> {
         let conf_path = if let Some(p) = path {
+            // --conf-path explicitly given: error if file doesn't exist
+            // (matches original aria2 option_processing.cc lines 254-260)
+            if !std::path::Path::new(p).exists() {
+                let msg = format!("Config file not found: {}", p);
+                eprintln!("[-] {}", msg);
+                return Err(msg);
+            }
             p.to_string()
         } else {
+            // Home resolution matching original aria2 util.cc getHomeDir():
+            // 1. HOME (primary on all platforms)
+            // 2. USERPROFILE (Windows fallback)
+            // 3. HOMEDRIVE+HOMEPATH (last resort Windows fallback)
+            // 4. "." (fallback if nothing works)
             let home = std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
+                .or_else(|| {
+                    let drive = std::env::var_os("HOMEDRIVE")?;
+                    let path = std::env::var_os("HOMEPATH")?;
+                    Some(std::path::Path::new(&drive).join(&path).into())
+                })
                 .and_then(|h| h.into_string().ok())
                 .unwrap_or_else(|| ".".to_string());
 
@@ -290,15 +506,20 @@ impl App {
                 crate::constants::CONFIG_DIR_NAME,
                 crate::constants::CONFIG_FILE_NAME
             );
+
+            eprintln!("[*] Looking for config file at: {}", candidate);
+
             if std::path::Path::new(&candidate).exists() {
                 candidate
             } else {
+                eprintln!("[*] Config file not found, using default options");
                 return Ok(());
             }
         };
 
         let mut conf = self.config.write().await;
         conf.load_file(&conf_path).await;
+        eprintln!("[+] Loaded config file: {}", conf_path);
         Ok(())
     }
 

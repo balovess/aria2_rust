@@ -123,7 +123,7 @@ impl TimerA2 {
                     .values()
                     .map(|t| t.next_fire)
                     .min()
-                    .expect("至少有一个定时器");
+                    .expect("at least one timer exists");
 
                 sleep_until(next_fire).await;
             }

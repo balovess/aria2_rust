@@ -15,24 +15,28 @@
 
 ***
 
-**aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的完整 Rust 重写版本。支持 HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，提供 JSON-RPC/XML-RPC/WebSocket 远程控制接口。
+**aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
+实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。支持
+HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，并提供
+JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
+[docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 
 ## 特性
 
 - **多协议下载**: HTTP/HTTPS、FTP/SFTP、BitTorrent (DHT/PEX/MSE)、Metalink V3/V4
 - **多源镜像**: 自动从多个 URI 分段并行下载，最大化带宽利用率
-- **断点续传**: 支持所有协议的断点续传，网络中断后无缝恢复
+- **断点续传**: HTTP/HTTPS 等主要路径支持控制文件续传；不同协议、并发控制文件和多 URI 失败回退仍按兼容性矩阵逐项验证
 - **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
   - ✅ Tracker 通信（UDP/HTTP）
-  - ✅ Peer 交换（PEX）
+  - ✅ Peer 交换（PEX，按 peer 进行 BEP 10 扩展 ID 协商）
   - ✅ MSE/PE 加密（BEP14 握手）
   - ✅ 阻塞算法 + seed-time/ratio 支持
   - ✅ RarestFirst Piece 选择
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（34 个方法 + 7 种事件，94% 覆盖率）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（按编译 feature 返回原版方法/通知目录：核心 33 个方法和 5 个通知，BitTorrent/Metalink 启用后分别增加对应能力；全 feature 为 36/6）
 - **配置系统**: \~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -117,8 +121,8 @@ aria2c -i uris.txt
 
 ## 项目架构
 
-总代码量：\~14,500+ 行 Rust/TS\
-测试套件：\~300+ 测试通过
+总代码量：以当前 workspace 源码为准（持续统计中）\
+测试套件：按 Cargo 测试目标和 feature 分层统计，未使用单一总数冒充全量覆盖
 
 本项目组织为 Cargo workspace，包含 4 个子项目：
 
@@ -333,14 +337,23 @@ cargo bench --bench config_bench
 
 ## 与原版 aria2 的兼容性
 
+下表表示代码路径已实现，不等同于完整兼容。模块级 `PARTIAL`、
+`UNVERIFIED`、`MISSING` 状态和验收证据以
+[兼容性矩阵](docs/compatibility-status.md) 为准。
+
+对外 RPC/JSON-RPC、XML-RPC、WebSocket、认证、参数、错误码、HTTP 状态和
+任务生命周期是严格兼容边界，必须与 `aria2_original` 一致，以保证原版
+Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个边界之后使用
+更强的类型、所有权和并发模型继续优化；内部改进不能改变外部可观察契约。
+
 | 功能                  | 状态    | 说明                              |
 | ------------------- | ----- | ------------------------------- |
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
-| JSON-RPC API        | ✅     | 25 个方法兼容                        |
-| XML-RPC API         | ✅     | 完整 methodCall/response/fault 支持 |
-| WebSocket 事件        | ✅     | 7 种事件类型                         |
+| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回原版顺序和清单（33/35/36）；RPC E2E 通过，原版客户端矩阵仍在验证 |
+| XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
+| WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
 | NetRC 认证            | ✅     | machine/default/macdef 解析       |
 | 会话保存/加载             | ✅     | 往返一致                            |
@@ -359,13 +372,16 @@ cargo bench --bench config_bench
 | LPD                 | ✅ 完整 | 本地 Peer 发现                      |
 | 做种模式             | ✅ 完整 | 上传支持                           |
 
-**尚未实现**（计划中）：
+**已知缺口与验证状态**：
 
-- `aria2.forceShutdown` RPC 方法
-- `system.listMethods/listNotifications`
-- HTTPS RPC 支持
-- IPv6 DHT
-- 更多 CLI 选项（约 132 个缺失）
+- `aria2.forceShutdown`、`system.listMethods` 和 `system.listNotifications` 已实现，并有 handler/集成测试覆盖。
+- HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
+- IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
+- 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
+- `aria2-core/src/c_api.rs` 已提供 opaque-handle `extern "C"`/cdylib 迁移接口；它不是原版 C++ STL 类 ABI 的二进制兼容实现。
+- Metalink torrent `metaurl` 依赖生命周期、完整性回调路径和部分协议互操作仍未闭环。
+- 尚未建立与 aria2 C++ 的可比性能基线；Rust-only 基准不能证明优于原版。
+- Windows 上 workspace all-features 聚合测试仍可能在构建阶段超时，不能据此宣称一次性全量通过。
 
 ## 许可证
 
@@ -379,4 +395,3 @@ Copyright (C) 2024 aria2-rust contributors.
 - [Tokio](https://tokio.rs/) — Rust 异步运行时
 - [Reqwest](https://docs.rs/reqwest/) — HTTP 客户端基础
 - [Axum](https://docs.rs/axum/) — RPC 服务器的 Web 框架
-

@@ -27,6 +27,8 @@ use std::fmt;
 use std::sync::RwLock;
 use zeroize::Zeroize;
 
+use crate::util::rwlock_ext::RwLockRecover;
+
 /// A credential entry containing username and password for a specific domain.
 ///
 /// The password field uses `Zeroize` to ensure secure memory erasure when the
@@ -105,7 +107,7 @@ impl CredentialStore {
     /// store.store("api.example.com", "admin", b"secure-password-123");
     /// ```
     pub fn store(&self, domain: &str, username: &str, password: &[u8]) {
-        let mut creds = self.credentials.write().unwrap();
+        let mut creds = self.credentials.recover_mut();
         let entry = PasswordEntry {
             username: username.to_string(),
             password: password.to_vec(),
@@ -141,7 +143,7 @@ impl CredentialStore {
     /// } // Password is zeroized when creds goes out of scope
     /// ```
     pub fn get(&self, domain: &str) -> Option<PasswordEntry> {
-        let creds = self.credentials.read().unwrap();
+        let creds = self.credentials.recover();
         creds.get(domain).cloned()
     }
 
@@ -167,7 +169,7 @@ impl CredentialStore {
     /// }
     /// ```
     pub fn remove(&self, domain: &str) -> Option<PasswordEntry> {
-        let mut creds = self.credentials.write().unwrap();
+        let mut creds = self.credentials.recover_mut();
         creds.remove(domain)
     }
 
@@ -186,13 +188,13 @@ impl CredentialStore {
     /// assert_eq!(store.count(), 0);
     /// ```
     pub fn clear(&self) {
-        let mut creds = self.credentials.write().unwrap();
+        let mut creds = self.credentials.recover_mut();
         creds.clear(); // All PasswordEntries are dropped, triggering zeroization
     }
 
     /// Returns the number of stored credential entries.
     pub fn count(&self) -> usize {
-        let creds = self.credentials.read().unwrap();
+        let creds = self.credentials.recover();
         creds.len()
     }
 
@@ -204,7 +206,7 @@ impl CredentialStore {
     /// # Returns
     /// `true` if credentials exist, `false` otherwise
     pub fn has_credentials(&self, domain: &str) -> bool {
-        let creds = self.credentials.read().unwrap();
+        let creds = self.credentials.recover();
         creds.contains_key(domain)
     }
 
@@ -216,7 +218,7 @@ impl CredentialStore {
     /// # Note
     /// This does not expose any sensitive data, only domain names.
     pub fn list_domains(&self) -> Vec<String> {
-        let creds = self.credentials.read().unwrap();
+        let creds = self.credentials.recover();
         creds.keys().cloned().collect()
     }
 }

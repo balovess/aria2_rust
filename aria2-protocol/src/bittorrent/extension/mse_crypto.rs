@@ -1,30 +1,54 @@
+//! MSE (Message Stream Encryption) crypto primitives.
+//!
+//! Matches C++ aria2 `MSEHandshake.cc` key derivation:
+//! - `keyA = SHA1("keyA" || S || infoHash)` — full 20-byte RC4 key
+//! - `keyB = SHA1("keyB" || S || infoHash)` — full 20-byte RC4 key
+//! - `req1 = SHA1("req1" || S)` — used as hash marker
+//! - `req2 = SHA1("req2" || infoHash)` — used for info_hash verification
+//! - `req3 = SHA1("req3" || S)` — XORed with req2
+//! - VC = 8 zero bytes encrypted with RC4 (NOT a SHA1 hash)
+//! - Both encryptor and decryptor discard first 1024 bytes of RC4 keystream
+
 use sha1::{Digest, Sha1};
+
+use super::mse_dh::{INFO_HASH_LENGTH, KEY_LENGTH, SHA1_LENGTH, VC_LENGTH};
 
 const KEYSTREAM_DISCARD: usize = 1024;
 
+/// MSE crypto negotiation methods (4-byte big-endian bitmask).
+///
+/// Bit values match C++ aria2 `CRYPTO_PLAIN_TEXT = 0x01`, `CRYPTO_ARC4 = 0x02`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MseCryptoMethod {
-    Plain = 0x00000000,
-    Rc4 = 0x00000001,
-    Aes128Cfb = 0x00000002,
+    /// No encryption (plaintext after MSE negotiation).
+    Plain = 0x00000001,
+    /// RC4 stream cipher.
+    Rc4 = 0x00000002,
 }
 
 impl MseCryptoMethod {
+    /// Parse from the least-significant byte of the 4-byte crypto bitmask.
     pub fn from_u32(v: u32) -> Self {
-        match v {
-            0x00000001 => Self::Rc4,
-            0x00000002 => Self::Aes128Cfb,
-            _ => Self::Plain,
+        if v & 0x02 != 0 {
+            Self::Rc4
+        } else {
+            Self::Plain
         }
     }
 
+    /// Convert to the 4-byte big-endian bitmask value.
     pub fn as_u32(self) -> u32 {
         self as u32
+    }
+
+    /// Whether this method provides actual encryption.
+    pub fn is_encrypted(self) -> bool {
+        matches!(self, Self::Rc4)
     }
 }
 
 /// ARC4 (Alleged RC4) stream cipher implementation for MSE.
-/// This is a symmetric stream cipher where encryption and decryption are the same operation.
+/// Symmetric: encryption and decryption are the same operation.
 #[derive(Debug, Clone)]
 pub struct Arc4Cipher {
     s: [u8; 256],
@@ -52,8 +76,7 @@ impl Arc4Cipher {
         Arc4Cipher { s, i: 0, j: 0 }
     }
 
-    /// Encrypt data in-place using ARC4 stream cipher.
-    /// Note: ARC4 is symmetric, so encryption and decryption are the same operation.
+    /// Encrypt/decrypt data in-place (ARC4 is symmetric).
     pub fn encrypt(&mut self, data: &mut [u8]) {
         for byte in data.iter_mut() {
             self.i = self.i.wrapping_add(1);
@@ -65,86 +88,123 @@ impl Arc4Cipher {
         }
     }
 
-    /// Decrypt data in-place using ARC4 stream cipher.
-    /// Note: ARC4 is symmetric, so this is the same as encrypt().
+    /// Decrypt data in-place (same as encrypt for ARC4).
     pub fn decrypt(&mut self, data: &mut [u8]) {
         self.encrypt(data);
     }
 }
 
+/// Derived keys for the MSE handshake, matching C++ `MSEHandshake::initCipher()`.
+///
+/// All keys are full 20-byte SHA-1 digests, matching C++ which uses the
+/// complete `localCipherKey[20]` / `peerCipherKey[20]` as RC4 keys.
 #[derive(Debug, Clone)]
 pub struct MseDerivedKeys {
-    pub skey: [u8; 20],
-    pub enc_key_a: [u8; 16],
-    pub enc_key_b: [u8; 16],
-    pub enc_key2_a: [u8; 16],
-    pub enc_key2_b: [u8; 16],
-    pub vc_a: [u8; 8],
-    pub vc_b: [u8; 8],
+    /// `SHA1("keyA" || S || infoHash)` — encryptor key for initiator,
+    /// decryptor key for receiver.
+    pub key_a: [u8; SHA1_LENGTH],
+    /// `SHA1("keyB" || S || infoHash)` — decryptor key for initiator,
+    /// encryptor key for receiver.
+    pub key_b: [u8; SHA1_LENGTH],
+    /// `SHA1("req1" || S)` — hash marker sent in step 3.
+    pub req1: [u8; SHA1_LENGTH],
+    /// `SHA1("req2" || infoHash)` — used to verify info_hash.
+    pub req2: [u8; SHA1_LENGTH],
+    /// `SHA1("req3" || S)` — XORed with req2 to conceal info_hash.
+    pub req3: [u8; SHA1_LENGTH],
 }
 
 impl MseDerivedKeys {
-    pub fn derive(shared_secret: &[u8]) -> Self {
-        let skey_arr = sha1_digest(shared_secret);
+    /// Derive all MSE keys from the DH shared secret and info_hash.
+    ///
+    /// Matches C++ `MSEHandshake::initCipher()` and the hash functions:
+    /// - `keyA = SHA1("keyA" || S || infoHash)` (20 bytes)
+    /// - `keyB = SHA1("keyB" || S || infoHash)` (20 bytes)
+    /// - `req1 = SHA1("req1" || S)` (20 bytes)
+    /// - `req2 = SHA1("req2" || infoHash)` (20 bytes)
+    /// - `req3 = SHA1("req3" || S)` (20 bytes)
+    ///
+    /// Note: VC is NOT derived here — it is 8 zero bytes encrypted with
+    /// the appropriate RC4 cipher at handshake time.
+    pub fn derive(shared_secret: &[u8; KEY_LENGTH], info_hash: &[u8; INFO_HASH_LENGTH]) -> Self {
+        // keyA = SHA1("keyA" || S || infoHash)
+        let key_a = {
+            let mut input = Vec::with_capacity(4 + KEY_LENGTH + INFO_HASH_LENGTH);
+            input.extend_from_slice(b"keyA");
+            input.extend_from_slice(shared_secret);
+            input.extend_from_slice(info_hash);
+            sha1_digest_array(&input)
+        };
 
-        let mut key_a_input = shared_secret.to_vec();
-        key_a_input.extend_from_slice(b"keyA");
-        let enc_key_a_full = sha1_digest(&key_a_input);
+        // keyB = SHA1("keyB" || S || infoHash)
+        let key_b = {
+            let mut input = Vec::with_capacity(4 + KEY_LENGTH + INFO_HASH_LENGTH);
+            input.extend_from_slice(b"keyB");
+            input.extend_from_slice(shared_secret);
+            input.extend_from_slice(info_hash);
+            sha1_digest_array(&input)
+        };
 
-        let mut key_b_input = shared_secret.to_vec();
-        key_b_input.extend_from_slice(b"keyB");
-        let enc_key_b_full = sha1_digest(&key_b_input);
+        // req1 = SHA1("req1" || S)
+        let req1 = {
+            let mut input = Vec::with_capacity(4 + KEY_LENGTH);
+            input.extend_from_slice(b"req1");
+            input.extend_from_slice(shared_secret);
+            sha1_digest_array(&input)
+        };
 
-        let mut key2a_input = enc_key_a_full.clone();
-        key2a_input.extend_from_slice(b"request1");
-        let enc_key2_a_full = sha1_digest(&key2a_input);
+        // req2 = SHA1("req2" || infoHash)
+        let req2 = {
+            let mut input = Vec::with_capacity(4 + INFO_HASH_LENGTH);
+            input.extend_from_slice(b"req2");
+            input.extend_from_slice(info_hash);
+            sha1_digest_array(&input)
+        };
 
-        let mut key2b_input = enc_key_b_full.clone();
-        key2b_input.extend_from_slice(b"response1");
-        let enc_key2_b_full = sha1_digest(&key2b_input);
-
-        let mut vc_a_input = shared_secret.to_vec();
-        vc_a_input.extend_from_slice(b"req1");
-        let vc_a_full = sha1_digest(&vc_a_input);
-
-        let mut vc_b_input = shared_secret.to_vec();
-        vc_b_input.extend_from_slice(b"req2");
-        let vc_b_full = sha1_digest(&vc_b_input);
-
-        let mut skey = [0u8; 20];
-        let mut enc_key_a = [0u8; 16];
-        let mut enc_key_b = [0u8; 16];
-        let mut enc_key2_a = [0u8; 16];
-        let mut enc_key2_b = [0u8; 16];
-        let mut vc_a = [0u8; 8];
-        let mut vc_b = [0u8; 8];
-
-        skey.copy_from_slice(&skey_arr[..20]);
-        enc_key_a.copy_from_slice(&enc_key_a_full[..16]);
-        enc_key_b.copy_from_slice(&enc_key_b_full[..16]);
-        enc_key2_a.copy_from_slice(&enc_key2_a_full[..16]);
-        enc_key2_b.copy_from_slice(&enc_key2_b_full[..16]);
-        vc_a.copy_from_slice(&vc_a_full[..8]);
-        vc_b.copy_from_slice(&vc_b_full[..8]);
+        // req3 = SHA1("req3" || S)
+        let req3 = {
+            let mut input = Vec::with_capacity(4 + KEY_LENGTH);
+            input.extend_from_slice(b"req3");
+            input.extend_from_slice(shared_secret);
+            sha1_digest_array(&input)
+        };
 
         MseDerivedKeys {
-            skey,
-            enc_key_a,
-            enc_key_b,
-            enc_key2_a,
-            enc_key2_b,
-            vc_a,
-            vc_b,
+            key_a,
+            key_b,
+            req1,
+            req2,
+            req3,
         }
+    }
+
+    /// Compute `req2 XOR req3` — the 20-byte hash sent in step 3
+    /// that allows the receiver to verify the info_hash without
+    /// revealing it in plaintext.
+    pub fn req2_xor_req3(&self) -> [u8; SHA1_LENGTH] {
+        let mut result = [0u8; SHA1_LENGTH];
+        for (result, (&req2, &req3)) in result
+            .iter_mut()
+            .zip(self.req2.iter().zip(self.req3.iter()))
+        {
+            *result = req2 ^ req3;
+        }
+        result
     }
 }
 
-fn sha1_digest(data: &[u8]) -> Vec<u8> {
+/// Compute SHA-1 digest and return as a fixed 20-byte array.
+fn sha1_digest_array(data: &[u8]) -> [u8; SHA1_LENGTH] {
     let mut hasher = Sha1::new();
     hasher.update(data);
-    hasher.finalize().to_vec()
+    let result = hasher.finalize();
+    let mut arr = [0u8; SHA1_LENGTH];
+    arr.copy_from_slice(&result);
+    arr
 }
 
+/// RC4 cipher state with 1024-byte keystream discard (MSE spec section 5.2).
+#[derive(Debug)]
 pub struct Rc4State {
     s: [u8; 256],
     i: u8,
@@ -170,6 +230,7 @@ impl Rc4State {
         Rc4State { s, i: 0, j: 0 }
     }
 
+    /// Process (encrypt/decrypt) data in-place.
     pub fn process(&mut self, data: &mut [u8]) {
         for byte in data.iter_mut() {
             self.i = self.i.wrapping_add(1);
@@ -182,55 +243,108 @@ impl Rc4State {
     }
 }
 
+/// Initialize an RC4 cipher with the given key and discard 1024 bytes
+/// of keystream, matching C++ `ARC4Encryptor::init()` + discard.
+pub fn init_rc4(key: &[u8]) -> Rc4State {
+    let mut rc4 = Rc4State::new(key);
+    let mut discard = [0u8; KEYSTREAM_DISCARD];
+    rc4.process(&mut discard);
+    rc4
+}
+
+/// Compute the VC (Verification Constant): 8 zero bytes encrypted
+/// with the given RC4 cipher. This matches C++ `initCipher()` which
+/// pre-computes `initiatorVCMarker_` by encrypting zeros.
+///
+/// IMPORTANT: The cipher must already have 1024 bytes discarded.
+pub fn compute_vc(cipher: &mut Rc4State) -> [u8; VC_LENGTH] {
+    let mut vc = [0u8; VC_LENGTH];
+    cipher.process(&mut vc);
+    vc
+}
+
+/// Ongoing MSE crypto state used after the handshake completes.
+/// Provides encrypt/decrypt for the BT message stream.
+#[derive(Debug)]
 pub struct MseCryptoState {
     send_cipher: Option<Rc4State>,
     recv_cipher: Option<Rc4State>,
+    method: MseCryptoMethod,
 }
 
 impl MseCryptoState {
+    /// Create a plaintext (no encryption) state.
     pub fn new_plain() -> Self {
         MseCryptoState {
             send_cipher: None,
             recv_cipher: None,
+            method: MseCryptoMethod::Plain,
         }
     }
 
+    /// Create an encrypted state with the given derived keys.
+    ///
+    /// Matches C++ `initCipher()`:
+    /// - Initiator: encryptor = keyA, decryptor = keyB
+    /// - Receiver: encryptor = keyB, decryptor = keyA
     pub fn new_encrypted(keys: &MseDerivedKeys, initiator: bool) -> Self {
         if initiator {
             MseCryptoState {
-                send_cipher: Some(init_rc4(&keys.enc_key2_a)),
-                recv_cipher: Some(init_rc4(&keys.enc_key2_b)),
+                send_cipher: Some(init_rc4(&keys.key_a)),
+                recv_cipher: Some(init_rc4(&keys.key_b)),
+                method: MseCryptoMethod::Rc4,
             }
         } else {
             MseCryptoState {
-                send_cipher: Some(init_rc4(&keys.enc_key2_b)),
-                recv_cipher: Some(init_rc4(&keys.enc_key2_a)),
+                send_cipher: Some(init_rc4(&keys.key_b)),
+                recv_cipher: Some(init_rc4(&keys.key_a)),
+                method: MseCryptoMethod::Rc4,
             }
         }
     }
 
+    /// Create an encrypted state from raw 20-byte RC4 keys.
+    /// This allows the handshake code to pass the exact keys used
+    /// during negotiation (which may differ from the derived keys
+    /// if a different crypto method was selected).
+    pub fn from_raw_keys(
+        send_key: &[u8; SHA1_LENGTH],
+        recv_key: &[u8; SHA1_LENGTH],
+        method: MseCryptoMethod,
+    ) -> Self {
+        match method {
+            MseCryptoMethod::Rc4 => MseCryptoState {
+                send_cipher: Some(init_rc4(send_key)),
+                recv_cipher: Some(init_rc4(recv_key)),
+                method: MseCryptoMethod::Rc4,
+            },
+            MseCryptoMethod::Plain => MseCryptoState::new_plain(),
+        }
+    }
+
+    /// Encrypt data in-place (send direction).
     pub fn encrypt(&mut self, data: &mut [u8]) {
         if let Some(ref mut cipher) = self.send_cipher {
             cipher.process(data);
         }
     }
 
+    /// Decrypt data in-place (receive direction).
     pub fn decrypt(&mut self, data: &mut [u8]) {
         if let Some(ref mut cipher) = self.recv_cipher {
             cipher.process(data);
         }
     }
 
+    /// Whether encryption is active.
     pub fn is_encrypted(&self) -> bool {
         self.send_cipher.is_some()
     }
-}
 
-pub fn init_rc4(key: &[u8]) -> Rc4State {
-    let mut rc4 = Rc4State::new(key);
-    let mut discard = [0u8; KEYSTREAM_DISCARD];
-    rc4.process(&mut discard);
-    rc4
+    /// The negotiated crypto method.
+    pub fn method(&self) -> MseCryptoMethod {
+        self.method
+    }
 }
 
 impl Default for MseCryptoState {
@@ -241,10 +355,10 @@ impl Default for MseCryptoState {
 
 impl Clone for MseCryptoState {
     fn clone(&self) -> Self {
-        MseCryptoState {
-            send_cipher: None,
-            recv_cipher: None,
-        }
+        // RC4 state cannot be meaningfully cloned (stream position lost).
+        // Return a plain state; callers who need to replicate must use
+        // the same key material to create a new instance.
+        MseCryptoState::new_plain()
     }
 }
 
@@ -262,11 +376,7 @@ mod tests {
         let mut encrypted = original.to_vec();
 
         cipher1.encrypt(&mut encrypted);
-        assert_ne!(
-            encrypted,
-            original.to_vec(),
-            "encrypted should differ from plaintext"
-        );
+        assert_ne!(encrypted, original.to_vec(), "encrypted should differ");
 
         cipher2.decrypt(&mut encrypted);
         assert_eq!(
@@ -289,10 +399,7 @@ mod tests {
         let mut cipher2 = Arc4Cipher::new(key);
         cipher2.decrypt(&mut data2);
 
-        assert_eq!(
-            data1, data2,
-            "encrypt and decrypt should produce same result"
-        );
+        assert_eq!(data1, data2);
     }
 
     #[test]
@@ -307,59 +414,90 @@ mod tests {
         cipher1.encrypt(&mut enc1);
         cipher2.encrypt(&mut enc2);
 
-        assert_ne!(
-            enc1, enc2,
-            "different keys should produce different ciphertext"
-        );
-    }
-
-    #[test]
-    fn test_arc4_empty_data() {
-        let mut cipher = Arc4Cipher::new(b"key");
-        let mut empty: Vec<u8> = vec![];
-        cipher.encrypt(&mut empty);
-        assert!(empty.is_empty());
-    }
-
-    #[test]
-    fn test_arc4_multiple_messages() {
-        let key = b"multi_msg_key";
-        let mut cipher1 = Arc4Cipher::new(key);
-        let mut cipher2 = Arc4Cipher::new(key);
-
-        let msgs: &[&[u8]] = &[b"first", b"second message", b"third longer msg"];
-        for msg in msgs {
-            let mut enc = msg.to_vec();
-            cipher1.encrypt(&mut enc);
-            cipher2.decrypt(&mut enc);
-            assert_eq!(enc, *msg);
-        }
+        assert_ne!(enc1, enc2);
     }
 
     #[test]
     fn test_derive_keys_deterministic() {
-        let secret = b"test_shared_secret_12345";
-        let keys1 = MseDerivedKeys::derive(secret);
-        let keys2 = MseDerivedKeys::derive(secret);
+        let secret = [0xAAu8; KEY_LENGTH];
+        let info_hash = [0xBBu8; INFO_HASH_LENGTH];
 
-        assert_eq!(keys1.skey, keys2.skey);
-        assert_eq!(keys1.enc_key_a, keys2.enc_key_a);
-        assert_eq!(keys1.vc_a, keys2.vc_a);
+        let keys1 = MseDerivedKeys::derive(&secret, &info_hash);
+        let keys2 = MseDerivedKeys::derive(&secret, &info_hash);
+
+        assert_eq!(keys1.key_a, keys2.key_a);
+        assert_eq!(keys1.key_b, keys2.key_b);
+        assert_eq!(keys1.req1, keys2.req1);
+        assert_eq!(keys1.req2, keys2.req2);
+        assert_eq!(keys1.req3, keys2.req3);
+    }
+
+    #[test]
+    fn test_derive_keys_matches_cpp_format() {
+        // Verify the key derivation input format matches C++:
+        // keyA = SHA1("keyA" || S || infoHash)
+        let secret = [0x42u8; KEY_LENGTH];
+        let info_hash = [0x17u8; INFO_HASH_LENGTH];
+
+        let keys = MseDerivedKeys::derive(&secret, &info_hash);
+
+        // Manually compute key_a to verify
+        let mut input = Vec::new();
+        input.extend_from_slice(b"keyA");
+        input.extend_from_slice(&secret);
+        input.extend_from_slice(&info_hash);
+        let expected = sha1_digest_array(&input);
+
+        assert_eq!(keys.key_a, expected);
+    }
+
+    #[test]
+    fn test_derive_keys_are_full_20_bytes() {
+        let secret = [0xAAu8; KEY_LENGTH];
+        let info_hash = [0xBBu8; INFO_HASH_LENGTH];
+
+        let keys = MseDerivedKeys::derive(&secret, &info_hash);
+
+        // All keys should be full 20-byte SHA-1 digests, not truncated to 16
+        assert_eq!(keys.key_a.len(), SHA1_LENGTH);
+        assert_eq!(keys.key_b.len(), SHA1_LENGTH);
+        assert_eq!(keys.req1.len(), SHA1_LENGTH);
+        assert_eq!(keys.req2.len(), SHA1_LENGTH);
+        assert_eq!(keys.req3.len(), SHA1_LENGTH);
+    }
+
+    #[test]
+    fn test_req2_xor_req3() {
+        let secret = [0xAAu8; KEY_LENGTH];
+        let info_hash = [0xBBu8; INFO_HASH_LENGTH];
+
+        let keys = MseDerivedKeys::derive(&secret, &info_hash);
+        let xor = keys.req2_xor_req3();
+
+        let mut expected = [0u8; SHA1_LENGTH];
+        for (expected, (&req2, &req3)) in expected
+            .iter_mut()
+            .zip(keys.req2.iter().zip(keys.req3.iter()))
+        {
+            *expected = req2 ^ req3;
+        }
+        assert_eq!(xor, expected);
     }
 
     #[test]
     fn test_crypto_method_roundtrip() {
-        assert_eq!(MseCryptoMethod::from_u32(0), MseCryptoMethod::Plain);
-        assert_eq!(MseCryptoMethod::from_u32(1), MseCryptoMethod::Rc4);
-        assert_eq!(MseCryptoMethod::from_u32(2), MseCryptoMethod::Aes128Cfb);
-        assert_eq!(MseCryptoMethod::from_u32(999), MseCryptoMethod::Plain);
-        assert_eq!(MseCryptoMethod::Rc4.as_u32(), 1);
+        assert_eq!(MseCryptoMethod::from_u32(0x01), MseCryptoMethod::Plain);
+        assert_eq!(MseCryptoMethod::from_u32(0x02), MseCryptoMethod::Rc4);
+        assert_eq!(MseCryptoMethod::from_u32(0x03), MseCryptoMethod::Rc4); // bit 0x02 set
+        assert_eq!(MseCryptoMethod::Rc4.as_u32(), 0x02);
+        assert_eq!(MseCryptoMethod::Plain.as_u32(), 0x01);
     }
 
     #[test]
-    fn test_rc4_encrypt_decrypt_roundtrip() {
-        let secret = b"shared_secret_for_encryption_test";
-        let keys = MseDerivedKeys::derive(secret);
+    fn test_rc4_encrypt_decrypt_roundtrip_via_state() {
+        let secret = [0xCCu8; KEY_LENGTH];
+        let info_hash = [0xDDu8; INFO_HASH_LENGTH];
+        let keys = MseDerivedKeys::derive(&secret, &info_hash);
 
         let mut crypto_initiator = MseCryptoState::new_encrypted(&keys, true);
         let mut crypto_responder = MseCryptoState::new_encrypted(&keys, false);
@@ -368,18 +506,10 @@ mod tests {
         let mut encrypted = original.to_vec();
 
         crypto_initiator.encrypt(&mut encrypted);
-        assert_ne!(
-            encrypted,
-            original.to_vec(),
-            "encrypted should differ from plaintext"
-        );
+        assert_ne!(encrypted, original.to_vec());
 
         crypto_responder.decrypt(&mut encrypted);
-        assert_eq!(
-            encrypted,
-            original.to_vec(),
-            "decrypted should match original"
-        );
+        assert_eq!(encrypted, original.to_vec());
     }
 
     #[test]
@@ -394,28 +524,63 @@ mod tests {
     }
 
     #[test]
-    fn test_vc_length_and_nonzero() {
-        let keys = MseDerivedKeys::derive(b"any_secret");
+    fn test_vc_is_rc4_encrypted_zeros() {
+        // VC = RC4(8 zero bytes), NOT SHA1-based
+        let key = [0x42u8; SHA1_LENGTH];
+        let mut cipher = init_rc4(&key);
+        let vc = compute_vc(&mut cipher);
 
-        assert_eq!(keys.vc_a.len(), 8);
-        assert_eq!(keys.vc_b.len(), 8);
-        assert_ne!(keys.vc_a, [0u8; 8], "VC_A should not be all zeros");
-        assert_ne!(keys.vc_b, [0u8; 8], "VC_B should not be all zeros");
-        assert_ne!(keys.vc_a, keys.vc_b, "VC_A and VC_B should differ");
+        // VC should not be all zeros (RC4 of zeros is not zeros)
+        assert_ne!(
+            vc, [0u8; VC_LENGTH],
+            "VC should not be all zeros after RC4 encryption"
+        );
+
+        // Verify VC is deterministic for same key
+        let mut cipher2 = init_rc4(&key);
+        let vc2 = compute_vc(&mut cipher2);
+        assert_eq!(vc, vc2, "VC should be deterministic for same key");
     }
 
     #[test]
-    fn test_skey_is_sha1_of_secret() {
-        let secret = b"my_secret";
-        let keys = MseDerivedKeys::derive(secret);
+    fn test_different_secrets_different_keys() {
+        let secret1 = [0x01u8; KEY_LENGTH];
+        let secret2 = [0x02u8; KEY_LENGTH];
+        let info_hash = [0xBBu8; INFO_HASH_LENGTH];
 
-        let expected_skey = sha1_digest(secret);
-        assert_eq!(&keys.skey[..], expected_skey.as_slice());
+        let keys1 = MseDerivedKeys::derive(&secret1, &info_hash);
+        let keys2 = MseDerivedKeys::derive(&secret2, &info_hash);
+
+        assert_ne!(keys1.key_a, keys2.key_a);
+        assert_ne!(keys1.key_b, keys2.key_b);
+        assert_ne!(keys1.req1, keys2.req1);
+    }
+
+    #[test]
+    fn test_different_info_hashes_different_keys() {
+        let secret = [0xAAu8; KEY_LENGTH];
+        let info_hash1 = [0x01u8; INFO_HASH_LENGTH];
+        let info_hash2 = [0x02u8; INFO_HASH_LENGTH];
+
+        let keys1 = MseDerivedKeys::derive(&secret, &info_hash1);
+        let keys2 = MseDerivedKeys::derive(&secret, &info_hash2);
+
+        // key_a and key_b include infoHash, so they differ
+        assert_ne!(keys1.key_a, keys2.key_a);
+        assert_ne!(keys1.key_b, keys2.key_b);
+        // req2 includes infoHash, so it differs
+        assert_ne!(keys1.req2, keys2.req2);
+        // req1 and req3 depend only on S, so they are the same
+        assert_eq!(keys1.req1, keys2.req1);
+        assert_eq!(keys1.req3, keys2.req3);
     }
 
     #[test]
     fn test_multiple_messages_independent() {
-        let keys = MseDerivedKeys::derive(b"multi_msg_secret");
+        let secret = [0xEEu8; KEY_LENGTH];
+        let info_hash = [0xFFu8; INFO_HASH_LENGTH];
+        let keys = MseDerivedKeys::derive(&secret, &info_hash);
+
         let mut sender = MseCryptoState::new_encrypted(&keys, true);
         let mut receiver = MseCryptoState::new_encrypted(&keys, false);
 

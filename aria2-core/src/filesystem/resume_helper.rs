@@ -33,6 +33,21 @@ impl ResumeHelper {
     }
 
     pub async fn detect(&self, total_length: u64) -> Result<ResumeState> {
+        let file_exists = self.output_path.exists();
+        // Match C++ `RequestGroup::removeDefunctControlFile`: a control file
+        // without its data file cannot be used for resume.
+        if !file_exists && self.control_path.exists() {
+            tokio::fs::remove_file(&self.control_path)
+                .await
+                .map_err(|error| {
+                    crate::error::Aria2Error::FileIo(format!(
+                        "Failed to remove defunct control file {}: {}",
+                        self.control_path.display(),
+                        error
+                    ))
+                })?;
+        }
+
         if !self.continue_opt || total_length == 0 {
             return Ok(ResumeState {
                 existing_length: 0,
@@ -43,7 +58,6 @@ impl ResumeHelper {
             });
         }
 
-        let file_exists = self.output_path.exists();
         let existing_length = if file_exists {
             tokio::fs::metadata(&self.output_path)
                 .await
@@ -65,12 +79,24 @@ impl ResumeHelper {
 
         let ctrl = ControlFile::load(&self.control_path).await?;
         let (start_offset, should_resume, is_complete) = match (&ctrl, existing_length) {
-            (Some(cf), _) if cf.completed_pieces() > 0 => {
-                let offset = std::cmp::max(existing_length, cf.completed_length());
-                let complete = existing_length >= total_length && cf.total_length() == total_length;
+            // Control file exists with tracked progress (either via piece
+            // bitfield or completed_length). Sequential downloads only update
+            // completed_length (never mark_piece_done), so we must check
+            // both signals. The control file's completed_length is the
+            // authoritative source for the resume offset — existing_length
+            // (file size on disk) is unreliable for preallocated files which
+            // have total_length bytes on disk regardless of actual progress.
+            (Some(cf), _) if cf.completed_pieces() > 0 || cf.completed_length() > 0 => {
+                let offset = cf.completed_length();
+                let complete =
+                    cf.completed_length() >= total_length && cf.total_length() == total_length;
                 (offset, true, complete)
             }
-            (_, len) if len >= total_length => (0, false, true),
+            // No control file — if the file already exists at full size,
+            // assume it was previously downloaded completely. This path is
+            // taken when a download completes without a control file (e.g.
+            // single-connection download that never created one).
+            (_, len) if len >= total_length && total_length > 0 => (0, false, true),
             (_, len) if len > 0 => (len, true, false),
             _ => (0, false, false),
         };
@@ -160,6 +186,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_defunct_control_file_is_removed_when_output_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("missing.bin");
+        let ctrl_path = ControlFile::control_path_for(&out_path);
+        let cf = ControlFile::open_or_create(&ctrl_path, 1000, 10)
+            .await
+            .unwrap();
+        cf.save().await.unwrap();
+        assert!(ctrl_path.exists());
+
+        let helper = ResumeHelper::new(&out_path, true);
+        let state = helper.detect(1000).await.unwrap();
+
+        assert!(!state.should_resume);
+        assert_eq!(state.start_offset, 0);
+        assert!(!ctrl_path.exists());
+    }
+
+    #[tokio::test]
     async fn test_detect_file_already_complete() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("complete.bin");
@@ -215,5 +260,80 @@ mod tests {
         let helper = ResumeHelper::new(Path::new("/downloads/bigfile.iso"), true);
         let cp = helper.control_path();
         assert!(cp.to_str().unwrap().ends_with(".aria2"));
+    }
+
+    /// Regression test: a sequential download that was paused mid-transfer
+    /// creates a control file with only `completed_length` updated (no pieces
+    /// marked via `mark_piece_done`). When the file is preallocated, the file
+    /// on disk appears full (`existing_length >= total_length`). The old logic
+    /// only checked `completed_pieces() > 0`, which was always 0 for
+    /// sequential downloads, causing the fallback path to incorrectly mark the
+    /// download as `is_complete = true`.
+    #[tokio::test]
+    async fn test_detect_preallocated_file_with_control_file_no_pieces() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("prealloc.bin");
+        let ctrl_path = ControlFile::control_path_for(&out_path);
+
+        // Simulate a preallocated file: file on disk is total_length bytes
+        // even though only 4000 bytes were actually downloaded.
+        let total_length: u64 = 10000;
+        tokio::fs::write(&out_path, vec![0x00; total_length as usize])
+            .await
+            .unwrap();
+
+        // Create a control file with completed_length = 4000 but NO pieces marked.
+        // This mirrors what SequentialDownloader does (update_completed_length only).
+        let mut cf = ControlFile::open_or_create(&ctrl_path, total_length, 1)
+            .await
+            .unwrap();
+        cf.update_completed_length(4000);
+        cf.save().await.unwrap();
+
+        let helper = ResumeHelper::new(&out_path, true);
+        let state = helper.detect(total_length).await.unwrap();
+
+        // MUST resume from offset 4000, NOT mark as complete.
+        assert!(
+            state.should_resume,
+            "should_resume must be true when control file has completed_length > 0"
+        );
+        assert!(
+            !state.is_complete,
+            "is_complete must be false — only 4000/10000 bytes downloaded"
+        );
+        assert_eq!(
+            state.start_offset, 4000,
+            "start_offset should be the control file's completed_length"
+        );
+    }
+
+    /// When a control file exists with completed_length == total_length and
+    /// total_length matches, the download IS complete (even without pieces
+    /// marked in the bitfield).
+    #[tokio::test]
+    async fn test_detect_control_file_completed_length_equals_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("done.bin");
+        let ctrl_path = ControlFile::control_path_for(&out_path);
+
+        let total_length: u64 = 5000;
+        tokio::fs::write(&out_path, vec![0x42; total_length as usize])
+            .await
+            .unwrap();
+
+        let mut cf = ControlFile::open_or_create(&ctrl_path, total_length, 1)
+            .await
+            .unwrap();
+        cf.update_completed_length(total_length);
+        cf.save().await.unwrap();
+
+        let helper = ResumeHelper::new(&out_path, true);
+        let state = helper.detect(total_length).await.unwrap();
+
+        assert!(
+            state.is_complete,
+            "is_complete must be true when completed_length >= total_length"
+        );
     }
 }

@@ -7,6 +7,8 @@ pub enum XmlRpcError {
     InvalidRequest(String),
     MethodNotFound(String),
     InvalidParams(String),
+    /// Domain error — fault_code: 1 (matches C++).
+    RpcExecution(String),
     ServerFault(i32, String),
 }
 
@@ -17,6 +19,7 @@ impl fmt::Display for XmlRpcError {
             Self::InvalidRequest(s) => write!(f, "Invalid Request: {}", s),
             Self::MethodNotFound(s) => write!(f, "Method not found: {}", s),
             Self::InvalidParams(s) => write!(f, "Invalid params: {}", s),
+            Self::RpcExecution(s) => write!(f, "Error: {}", s),
             Self::ServerFault(c, s) => write!(f, "Server fault ({}): {}", c, s),
         }
     }
@@ -31,6 +34,7 @@ impl XmlRpcError {
             Self::InvalidRequest(_) => -32600,
             Self::MethodNotFound(_) => -32601,
             Self::InvalidParams(_) => -32602,
+            Self::RpcExecution(_) => 1,
             Self::ServerFault(c, _) => *c,
         }
     }
@@ -41,6 +45,7 @@ impl XmlRpcError {
             | Self::InvalidRequest(s)
             | Self::MethodNotFound(s)
             | Self::InvalidParams(s)
+            | Self::RpcExecution(s)
             | Self::ServerFault(_, s) => s.clone(),
         }
     }
@@ -134,9 +139,23 @@ impl XmlRpcValue {
             None
         }
     }
+    pub fn as_double(&self) -> Option<f64> {
+        if let XmlRpcValueInner::Double(value) = &self.inner {
+            Some(*value)
+        } else {
+            None
+        }
+    }
     pub fn as_array(&self) -> Option<&Vec<XmlRpcValue>> {
         if let XmlRpcValueInner::Array(a) = &self.inner {
             Some(a)
+        } else {
+            None
+        }
+    }
+    pub fn as_struct(&self) -> Option<&[XmlRpcMember]> {
+        if let XmlRpcValueInner::Struct(members) = &self.inner {
+            Some(members)
         } else {
             None
         }
@@ -216,6 +235,72 @@ impl XmlRpcValue {
     pub fn to_xml(&self) -> String {
         value_to_xml(self, 0)
     }
+
+    /// Convert an XML-RPC value to the JSON value shape consumed by the
+    /// shared RPC engine. Binary XML-RPC values remain base64 strings because
+    /// aria2's JSON methods use base64 for uploaded torrent/Metalink data.
+    pub fn to_json_value(&self) -> Result<serde_json::Value, XmlRpcError> {
+        match &self.inner {
+            XmlRpcValueInner::Int(value) => Ok(serde_json::json!(value)),
+            XmlRpcValueInner::Boolean(value) => Ok(serde_json::json!(value)),
+            XmlRpcValueInner::String_(value) | XmlRpcValueInner::DateTime(value) => {
+                Ok(serde_json::Value::String(value.clone()))
+            }
+            // C++ aria2 parses XML-RPC <double> using its string state and
+            // forwards the textual value to the RPC method. Keep that wire
+            // contract even though the value type remains available for
+            // Rust-side XML-RPC response construction.
+            XmlRpcValueInner::Double(value) => Ok(serde_json::Value::String(value.to_string())),
+            XmlRpcValueInner::Base64(data) => Ok(serde_json::Value::String(
+                base64::engine::general_purpose::STANDARD.encode(data),
+            )),
+            XmlRpcValueInner::Array(values) => values
+                .iter()
+                .map(Self::to_json_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(serde_json::Value::Array),
+            XmlRpcValueInner::Struct(members) => {
+                let mut object = serde_json::Map::with_capacity(members.len());
+                for member in members {
+                    object.insert(member.name.clone(), member.value.to_json_value()?);
+                }
+                Ok(serde_json::Value::Object(object))
+            }
+            XmlRpcValueInner::Nil => Ok(serde_json::Value::Null),
+        }
+    }
+
+    /// Construct an XML-RPC value from a JSON-RPC response value.
+    pub fn from_json_value(value: serde_json::Value) -> Result<Self, XmlRpcError> {
+        match value {
+            serde_json::Value::Null => Ok(Self::nil()),
+            serde_json::Value::Bool(value) => Ok(Self::bool_(value)),
+            serde_json::Value::String(value) => Ok(Self::string(value)),
+            serde_json::Value::Number(value) => {
+                if let Some(integer) = value.as_i64() {
+                    Ok(Self::int(integer))
+                } else if let Some(double) = value.as_f64() {
+                    Ok(Self::double(double))
+                } else {
+                    Err(XmlRpcError::InvalidParams(
+                        "JSON number is outside XML-RPC integer range".into(),
+                    ))
+                }
+            }
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .map(Self::from_json_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::array),
+            serde_json::Value::Object(object) => object
+                .into_iter()
+                .map(|(name, value)| {
+                    Self::from_json_value(value).map(|value| XmlRpcMember::new(name, value))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::struct_),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -283,7 +368,7 @@ impl XmlRpcResponse {
         Self::Fault(code, msg.to_string())
     }
     pub fn method_not_found(method: &str) -> Self {
-        Self::Fault(-32601, format!("Method '{}' not found", method))
+        Self::Fault(1, format!("Method '{}' not found", method))
     }
     pub fn invalid_params(msg: &str) -> Self {
         Self::Fault(-32602, msg.to_string())
@@ -325,94 +410,216 @@ impl XmlRpcResponse {
     }
 }
 
-fn parse_value(e: &quick_xml::events::BytesStart) -> Result<XmlRpcValue, XmlRpcError> {
-    let tag_bytes = e.local_name();
-    let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
+fn xml_tag(e: &quick_xml::events::BytesStart<'_>) -> Result<String, XmlRpcError> {
+    std::str::from_utf8(e.local_name().as_ref())
+        .map(str::to_owned)
+        .map_err(|e| XmlRpcError::ParseError(e.to_string()))
+}
+
+fn read_scalar(
+    reader: &mut quick_xml::Reader<&[u8]>,
+    e: &quick_xml::events::BytesStart<'_>,
+    tag: &str,
+) -> Result<XmlRpcValue, XmlRpcError> {
+    let text = reader
+        .read_text(e.name())
+        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+        .into_owned();
+    let numeric_text = text.trim();
     match tag {
-        "int" | "i4" | "i8" => {
-            let text = e
-                .attributes()
-                .flatten()
-                .next()
-                .map(|a| std::str::from_utf8(&a.value).unwrap_or("0").to_string())
-                .unwrap_or_else(|| "0".to_string());
-            Ok(XmlRpcValue::int(text.trim().parse::<i64>().unwrap_or(0)))
-        }
-        "boolean" => {
-            let text = e
-                .attributes()
-                .flatten()
-                .next()
-                .map(|a| std::str::from_utf8(&a.value).unwrap_or("0").to_string())
-                .unwrap_or_else(|| "0".to_string());
-            let val = text.trim() == "1" || text.trim().to_lowercase() == "true";
-            Ok(XmlRpcValue::bool_(val))
-        }
-        "string" => {
-            let text = e
-                .attributes()
-                .flatten()
-                .next()
-                .map(|a| std::str::from_utf8(&a.value).unwrap_or("").to_string())
-                .unwrap_or_default();
-            Ok(XmlRpcValue::string(text))
-        }
-        "double" => {
-            let text = e
-                .attributes()
-                .flatten()
-                .next()
-                .map(|a| std::str::from_utf8(&a.value).unwrap_or("0.0").to_string())
-                .unwrap_or_else(|| "0.0".to_string());
-            Ok(XmlRpcValue::double(
-                text.trim().parse::<f64>().unwrap_or(0.0),
-            ))
-        }
-        "array" => Ok(XmlRpcValue::array(vec![])),
-        "struct" => Ok(XmlRpcValue::array(vec![])),
-        "nil" => Ok(XmlRpcValue::nil()),
+        "int" | "i4" | "i8" => numeric_text
+            .parse()
+            .map(XmlRpcValue::int)
+            .map_err(|e| XmlRpcError::InvalidParams(format!("invalid integer: {e}"))),
+        "boolean" => match numeric_text {
+            "1" | "true" => Ok(XmlRpcValue::bool_(true)),
+            "0" | "false" => Ok(XmlRpcValue::bool_(false)),
+            _ => Err(XmlRpcError::InvalidParams(format!(
+                "invalid boolean: {numeric_text}"
+            ))),
+        },
+        // aria2_original's XML-RPC parser keeps both explicit string values
+        // and double values as strings. The latter is observable for option
+        // maps such as {"seed-ratio": <double>0.99</double>}.
+        "string" | "double" => Ok(XmlRpcValue::string(text)),
+        "dateTime.iso8601" => Ok(XmlRpcValue {
+            inner: XmlRpcValueInner::DateTime(text),
+        }),
+        "base64" => base64::engine::general_purpose::STANDARD
+            .decode(text.trim())
+            .map(|data| XmlRpcValue {
+                inner: XmlRpcValueInner::Base64(data),
+            })
+            .map_err(|e| XmlRpcError::InvalidParams(format!("invalid base64: {e}"))),
         _ => Err(XmlRpcError::ParseError(format!(
-            "unknown XML-RPC type: {}",
-            tag
+            "unknown XML-RPC type: {tag}"
         ))),
+    }
+}
+
+fn parse_xml_value(
+    reader: &mut quick_xml::Reader<&[u8]>,
+    value_start: &quick_xml::events::BytesStart<'_>,
+) -> Result<XmlRpcValue, XmlRpcError> {
+    use quick_xml::events::Event;
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+        {
+            Event::Start(e) => {
+                let tag = xml_tag(&e)?;
+                return match tag.as_str() {
+                    "array" => parse_xml_array(reader, &e),
+                    "struct" => parse_xml_struct(reader, &e),
+                    "nil" => {
+                        reader
+                            .read_to_end(e.name())
+                            .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                        Ok(XmlRpcValue::nil())
+                    }
+                    scalar => read_scalar(reader, &e, scalar),
+                };
+            }
+            Event::Empty(e) if xml_tag(&e)? == "nil" => return Ok(XmlRpcValue::nil()),
+            Event::Text(text) => {
+                let text = text
+                    .unescape()
+                    .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                if !text.trim().is_empty() {
+                    reader
+                        .read_to_end(value_start.name())
+                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                    return Ok(XmlRpcValue::string(text.into_owned()));
+                }
+            }
+            Event::End(e) if e.name() == value_start.name() => return Ok(XmlRpcValue::string("")),
+            Event::Eof => return Err(XmlRpcError::ParseError("unexpected end of value".into())),
+            _ => {}
+        }
+    }
+}
+
+fn parse_xml_array(
+    reader: &mut quick_xml::Reader<&[u8]>,
+    array_start: &quick_xml::events::BytesStart<'_>,
+) -> Result<XmlRpcValue, XmlRpcError> {
+    use quick_xml::events::Event;
+    let mut values = Vec::new();
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+        {
+            Event::Start(e) if xml_tag(&e)? == "value" => values.push(parse_xml_value(reader, &e)?),
+            Event::End(e) if e.name() == array_start.name() => {
+                return Ok(XmlRpcValue::array(values));
+            }
+            Event::Eof => return Err(XmlRpcError::ParseError("unexpected end of array".into())),
+            _ => {}
+        }
+    }
+}
+
+fn parse_xml_struct(
+    reader: &mut quick_xml::Reader<&[u8]>,
+    struct_start: &quick_xml::events::BytesStart<'_>,
+) -> Result<XmlRpcValue, XmlRpcError> {
+    use quick_xml::events::Event;
+    let mut members = Vec::new();
+    loop {
+        match reader
+            .read_event()
+            .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+        {
+            Event::Start(member) if xml_tag(&member)? == "member" => {
+                let mut name = None;
+                let mut value = None;
+                loop {
+                    match reader
+                        .read_event()
+                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+                    {
+                        Event::Start(e) if xml_tag(&e)? == "name" => {
+                            name = Some(
+                                reader
+                                    .read_text(e.name())
+                                    .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+                                    .into_owned(),
+                            );
+                        }
+                        Event::Start(e) if xml_tag(&e)? == "value" => {
+                            value = Some(parse_xml_value(reader, &e)?)
+                        }
+                        Event::End(e) if e.name() == member.name() => break,
+                        Event::Eof => {
+                            return Err(XmlRpcError::ParseError("unexpected end of member".into()));
+                        }
+                        _ => {}
+                    }
+                }
+                let name = name.ok_or_else(|| {
+                    XmlRpcError::InvalidParams("struct member name is missing".into())
+                })?;
+                let value = value.ok_or_else(|| {
+                    XmlRpcError::InvalidParams("struct member value is missing".into())
+                })?;
+                members.push(XmlRpcMember::new(name, value));
+            }
+            Event::End(e) if e.name() == struct_start.name() => {
+                return Ok(XmlRpcValue::struct_(members));
+            }
+            Event::Eof => return Err(XmlRpcError::ParseError("unexpected end of struct".into())),
+            _ => {}
+        }
     }
 }
 
 pub fn parse_request(data: &[u8]) -> Result<XmlRpcRequest, XmlRpcError> {
     use quick_xml::{Reader, events::Event};
     let mut reader = Reader::from_reader(data);
-    let mut method_name = String::new();
+    let mut method_name = None;
     let mut params = Vec::new();
-    let mut in_params = false;
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref e)) => {
-                let tag_bytes = e.local_name();
-                let tag = std::str::from_utf8(tag_bytes.as_ref()).unwrap_or("");
-                match tag {
-                    "methodName" => {
-                        let text = reader.read_text(e.name()).unwrap_or_default();
-                        method_name = text.to_string();
+        match reader
+            .read_event()
+            .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+        {
+            Event::Start(e) if xml_tag(&e)? == "methodName" => {
+                method_name = Some(
+                    reader
+                        .read_text(e.name())
+                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+                        .into_owned(),
+                );
+            }
+            Event::Start(e) if xml_tag(&e)? == "param" => loop {
+                match reader
+                    .read_event()
+                    .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
+                {
+                    Event::Start(value) if xml_tag(&value)? == "value" => {
+                        params.push(parse_xml_value(&mut reader, &value)?);
+                        reader
+                            .read_to_end(e.name())
+                            .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                        break;
                     }
-                    "params" => in_params = true,
-                    "value" => { /* wrapper tag, inner type will be handled next */ }
-                    "int" | "string" | "boolean" | "double" | "array" | "struct" | "nil"
-                        if in_params =>
-                    {
-                        params.push(parse_value(e)?);
+                    Event::End(end) if end.name() == e.name() => break,
+                    Event::Eof => {
+                        return Err(XmlRpcError::ParseError("unexpected end of param".into()));
                     }
                     _ => {}
                 }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(XmlRpcError::ParseError(e.to_string())),
+            },
+            Event::Eof => break,
             _ => {}
         }
     }
+    let method_name =
+        method_name.ok_or_else(|| XmlRpcError::InvalidRequest("methodName is required".into()))?;
     if method_name.is_empty() {
-        return Err(XmlRpcError::InvalidRequest(
-            "methodName is required".to_string(),
-        ));
+        return Err(XmlRpcError::InvalidRequest("methodName is required".into()));
     }
     Ok(XmlRpcRequest::new(method_name, params))
 }
@@ -483,6 +690,7 @@ mod tests {
     fn test_error_codes() {
         assert_eq!(XmlRpcError::ParseError("x".into()).fault_code(), -32700);
         assert_eq!(XmlRpcError::MethodNotFound("x".into()).fault_code(), -32601);
+        assert_eq!(XmlRpcError::RpcExecution("x".into()).fault_code(), 1);
         assert_eq!(XmlRpcError::InvalidParams("x".into()).fault_code(), -32602);
         assert_eq!(XmlRpcError::ServerFault(400, "x".into()).fault_code(), 400);
     }
@@ -522,6 +730,74 @@ mod tests {
         let req = parse_request(xml.as_bytes()).unwrap();
         assert_eq!(req.method_name, "aria2.addUri");
         assert_eq!(req.params.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_nested_array_and_struct_without_parameter_leakage() {
+        let xml = r#"<methodCall><methodName>aria2.addUri</methodName><params><param><value><array><data>
+            <value><string>one</string></value>
+            <value><struct><member><name>dir</name><value><string>/downloads</string></value></member>
+                <member><name>timeout</name><value><int>120</int></value></member>
+            </struct></value>
+        </data></array></value></param></params></methodCall>"#;
+        let req = parse_request(xml.as_bytes()).unwrap();
+        assert_eq!(req.params.len(), 1);
+        let items = req.params[0].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].as_str(), Some("one"));
+        let members = items[1].as_struct().unwrap();
+        assert_eq!(members[0].name(), "dir");
+        assert_eq!(members[0].value().as_str(), Some("/downloads"));
+        assert_eq!(members[1].value().as_i64(), Some(120));
+    }
+
+    #[test]
+    fn test_parse_struct_with_nested_array_and_implicit_string() {
+        let xml = r#"<methodCall><methodName>aria2.changeOption</methodName><params><param><value><struct>
+            <member><name>uris</name><value><array><data><value>jp</value><value><string>us</string></value></data></array></value></member>
+            <member><name>enabled</name><value><boolean>1</boolean></value></member>
+        </struct></value></param></params></methodCall>"#;
+        let req = parse_request(xml.as_bytes()).unwrap();
+        assert_eq!(req.params.len(), 1);
+        let members = req.params[0].as_struct().unwrap();
+        assert_eq!(
+            members[0].value().as_array().unwrap()[0].as_str(),
+            Some("jp")
+        );
+        assert_eq!(
+            members[0].value().as_array().unwrap()[1].as_str(),
+            Some("us")
+        );
+        assert_eq!(members[1].value().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_parse_scalar_text_values() {
+        let xml = r#"<methodCall><methodName>test</methodName><params>
+            <param><value><int>100</int></value></param>
+            <param><value><double>0.5</double></value></param>
+            <param><value><boolean>0</boolean></value></param>
+        </params></methodCall>"#;
+        let req = parse_request(xml.as_bytes()).unwrap();
+        assert_eq!(req.params.len(), 3);
+        assert_eq!(req.params[0].as_i64(), Some(100));
+        assert_eq!(req.params[1].as_str(), Some("0.5"));
+        assert_eq!(req.params[2].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_xmlrpc_wire_conversion_preserves_strings_and_coerces_doubles() {
+        let xml = r#"<methodCall><methodName>aria2.changeOption</methodName><params>
+            <param><value><struct>
+                <member><name>dir</name><value><string>  /downloads  </string></value></member>
+                <member><name>seed-ratio</name><value><double>0.99</double></value></member>
+            </struct></value></param>
+        </params></methodCall>"#;
+        let req = parse_request(xml.as_bytes()).unwrap();
+        let value = req.params[0].to_json_value().unwrap();
+
+        assert_eq!(value["dir"], serde_json::json!("  /downloads  "));
+        assert_eq!(value["seed-ratio"], serde_json::json!("0.99"));
     }
 
     #[test]

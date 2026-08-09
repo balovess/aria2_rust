@@ -160,7 +160,7 @@ async fn test_force_pause() {
     let add_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.addUri".into(),
-        params: serde_json::json!(["http://example.com/file"]),
+        params: serde_json::json!([["http://example.com/file"]]),
         id: Some(serde_json::Value::String("add".into())),
     };
     let add_resp = engine.handle_request(&add_req).await;
@@ -176,11 +176,15 @@ async fn test_force_pause() {
     let force_pause_resp = engine.handle_request(&force_pause_req).await;
     assert!(force_pause_resp.is_success(), "forcePause should succeed");
 
-    // Verify the result is "OK"
+    // C++ aria2 returns the GID string (not "OK") — see RpcMethodImpl.cc:pauseDownload
     let result: String = serde_json::from_value(force_pause_resp.result.unwrap()).unwrap();
-    assert_eq!(result, "OK", "forcePause should return 'OK'");
+    assert_eq!(
+        result, gid,
+        "forcePause should return the GID (C++ aria2 behavior)"
+    );
 
-    // Verify the task status is Paused
+    // The test fixture intentionally does not run an engine loop; forcePause is queued.
+    // Verify the task remains waiting until the core command consumer executes it.
     let status_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.tellStatus".into(),
@@ -193,8 +197,8 @@ async fn test_force_pause() {
     let status_json = status_resp.result.unwrap();
     let status_str = status_json.get("status").unwrap().as_str().unwrap();
     assert_eq!(
-        status_str, "paused",
-        "Task status should be 'paused' after forcePause"
+        status_str, "waiting",
+        "Without an engine loop, forcePause remains queued"
     );
 }
 
@@ -216,8 +220,8 @@ async fn test_force_pause_nonexistent_gid() {
     );
     assert_eq!(
         force_pause_resp.error.unwrap().code,
-        -32601,
-        "Error code should be MethodNotFound"
+        -32602,
+        "Invalid GID syntax is an invalid-params error"
     );
 }
 
@@ -230,13 +234,13 @@ async fn test_force_pause_all() {
         let add_req = JsonRpcRequest {
             version: Some("2.0".into()),
             method: "aria2.addUri".into(),
-            params: serde_json::json!([format!("http://example.com/file{}", i)]),
+            params: serde_json::json!([[format!("http://example.com/file{}", i)]]),
             id: Some(serde_json::Value::String(format!("add-{}", i))),
         };
         engine.handle_request(&add_req).await;
     }
 
-    // Verify tasks are active
+    // The fixture has no engine loop, so newly added tasks remain waiting.
     let tell_active_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.tellActive".into(),
@@ -246,7 +250,7 @@ async fn test_force_pause_all() {
     let active_resp = engine.handle_request(&tell_active_req).await;
     let active_tasks: Vec<serde_json::Value> =
         serde_json::from_value(active_resp.result.unwrap()).unwrap();
-    assert_eq!(active_tasks.len(), 3, "Should have 3 active tasks");
+    assert_eq!(active_tasks.len(), 0, "Waiting tasks are not active");
 
     // Force pause all
     let force_pause_all_req = JsonRpcRequest {
@@ -313,7 +317,6 @@ async fn setup_group_man_with_group() -> (Arc<RwLock<RequestGroupMan>>, String) 
                 vec!["http://example.com/file.bin".to_string()],
                 DownloadOptions::default(),
             )
-            .await
             .expect("add_group should succeed")
     };
     (man, gid.to_hex_string())
@@ -334,15 +337,18 @@ async fn test_change_option_propagates_to_running_group() {
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success(), "changeOption should succeed");
 
-    // getOption should return the new value from task_opts.
+    // getOption should return the value from the live core group state.
     let get_req =
         JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid_hex.clone()])).with_id(2);
     let get_resp = engine.handle_request(&get_req).await;
     assert!(get_resp.is_success());
     let opts: HashMap<String, serde_json::Value> =
         serde_json::from_value(get_resp.result.unwrap()).unwrap();
+    // Wire format: numbers are strings
     assert_eq!(
-        opts.get("max-download-limit").and_then(|v| v.as_u64()),
+        opts.get("max-download-limit")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok()),
         Some(102400),
         "getOption should reflect the new max-download-limit"
     );
@@ -356,7 +362,7 @@ async fn test_change_option_propagates_to_running_group() {
         .await
         .group_by_id(gid)
         .expect("group should still exist");
-    let g = group.read().await;
+    let g = group.read().unwrap();
     assert_eq!(
         g.options().max_download_limit,
         Some(102400),
@@ -365,35 +371,86 @@ async fn test_change_option_propagates_to_running_group() {
 }
 
 #[tokio::test]
-async fn test_change_option_rejects_startup_only_with_group_man() {
+async fn test_change_option_active_reserved_value_applies_after_restart() {
     let (man, gid_hex) = setup_group_man_with_group().await;
-    let engine = RpcEngine::new().with_group_man(man);
+    {
+        let manager = man.read().await;
+        assert_eq!(manager.fill_from_reserver().len(), 1);
+    }
 
-    // `dir` is a known option (in VALID_OPTION_KEYS) but startup-only, so
-    // changeOption must reject it with InvalidParams even when a running
-    // group exists.
+    let engine = RpcEngine::new().with_group_man(man.clone());
     let req = JsonRpcRequest::new(
         "aria2.changeOption",
-        serde_json::json!([gid_hex, {"dir": "/tmp/downloads"}]),
+        serde_json::json!([gid_hex.clone(), {"dir": "restart-dir"}]),
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(
-        resp.is_error(),
-        "changeOption with a startup-only key should fail"
+        resp.is_success(),
+        "active reserved option should be accepted"
     );
+
+    let gid = aria2_core::request::request_group::GroupId::from_hex_string(&gid_hex)
+        .expect("GID hex should parse");
+    {
+        let group = man
+            .read()
+            .await
+            .group_by_id(gid)
+            .expect("group should still exist");
+        let group = group.read().unwrap();
+        assert!(group.status().is_paused());
+        assert_eq!(
+            group.pending_options().get("dir"),
+            Some(&serde_json::json!("restart-dir"))
+        );
+        assert!(!group.runtime_options().contains_key("dir"));
+    }
+
+    {
+        let manager = man.read().await;
+        assert_eq!(manager.requeue_non_terminal_groups(None), 1);
+    }
+
+    let group = man
+        .read()
+        .await
+        .group_by_id(gid)
+        .expect("requeued group should still exist");
+    let group = group.read().unwrap();
+    assert_eq!(group.options().dir.as_deref(), Some("restart-dir"));
     assert_eq!(
-        resp.error.unwrap().code,
-        -32602,
-        "error code should be InvalidParams (-32602)"
+        group.runtime_options().get("dir"),
+        Some(&serde_json::json!("restart-dir"))
+    );
+    assert!(group.pending_options().is_empty());
+}
+
+#[tokio::test]
+async fn test_change_option_ignores_startup_only_with_group_man() {
+    let (man, gid_hex) = setup_group_man_with_group().await;
+    let engine = RpcEngine::new().with_group_man(man);
+
+    // `enable-rpc` is NOT in either RUNTIME_CHANGEABLE_OPTIONS or
+    // RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS (it has no setChangeOption
+    // or setChangeOptionForReserved in C++), so changeOption must ignore it
+    // and still return OK even when a group exists.
+    let req = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid_hex, {"enable-rpc": "true"}]),
+    )
+    .with_id(1);
+    let resp = engine.handle_request(&req).await;
+    assert!(
+        resp.is_success(),
+        "changeOption with a non-changeable key should be ignored"
     );
 }
 
 #[tokio::test]
-async fn test_change_option_unknown_gid_stores_in_task_opts() {
-    // When group_man is set but the GID is not registered (task not started
-    // yet), changeOption should still succeed and store in task_opts so the
-    // change applies when the task starts later.
+async fn test_change_option_unknown_gid_returns_execution_error() {
+    // C++ aria2 resolves the GID before gathering options, so an unknown
+    // download cannot be staged through changeOption.
     let man = Arc::new(RwLock::new(RequestGroupMan::new()));
     let engine = RpcEngine::new().with_group_man(man);
 
@@ -404,21 +461,6 @@ async fn test_change_option_unknown_gid_stores_in_task_opts() {
     )
     .with_id(1);
     let resp = engine.handle_request(&req).await;
-    assert!(
-        resp.is_success(),
-        "changeOption for unregistered GID should still succeed (stored in task_opts)"
-    );
-
-    // getOption should return the stored value.
-    let get_req =
-        JsonRpcRequest::new("aria2.getOption", serde_json::json!([unknown_gid])).with_id(2);
-    let get_resp = engine.handle_request(&get_req).await;
-    assert!(get_resp.is_success());
-    let opts: HashMap<String, serde_json::Value> =
-        serde_json::from_value(get_resp.result.unwrap()).unwrap();
-    assert_eq!(
-        opts.get("max-retries").and_then(|v| v.as_u64()),
-        Some(7),
-        "getOption should return the stored max-retries"
-    );
+    assert!(resp.is_error());
+    assert_eq!(resp.error.unwrap().code, 1);
 }

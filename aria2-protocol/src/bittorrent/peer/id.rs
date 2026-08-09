@@ -1,37 +1,20 @@
-use rand::Rng;
+use std::sync::OnceLock;
 
-/// Peer ID prefix for aria2-rust following BEP 20 format
-/// Format: -AR2rs-XXXXXX (where XXXXXX is random alphanumeric)
-/// This identifies the client as aria2-rust implementation
-const PEER_ID_PREFIX: &[u8] = b"-AR2rs-";
+use rand::RngCore;
 
+/// Return the process-wide peer ID, matching aria2's static peer identity.
 pub fn generate_peer_id() -> [u8; 20] {
-    let mut id = [0u8; 20];
-    id[..7].copy_from_slice(PEER_ID_PREFIX);
-    // Pad to 8 characters if needed (BEP 20 requires 8-char prefix)
-    id[7] = b'-';
-    let mut rng = rand::thread_rng();
-    // Fill remaining 12 bytes with random alphanumeric characters
-    for slot in &mut id[8..] {
-        // Use alphanumeric characters (0-9, A-Z, a-z)
-        let charset: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-        *slot = charset[rng.gen_range(0..charset.len())];
-    }
-    id
+    static PEER_ID: OnceLock<[u8; 20]> = OnceLock::new();
+    *PEER_ID.get_or_init(|| generate_peer_id_with_prefix(crate::identity::DEFAULT_PEER_ID_PREFIX))
 }
 
 pub fn generate_peer_id_with_prefix(prefix: &str) -> [u8; 20] {
     let mut id = [0u8; 20];
     let prefix_bytes = prefix.as_bytes();
-    let copy_len = prefix_bytes.len().min(8);
+    let copy_len = prefix_bytes.len().min(id.len());
     id[..copy_len].copy_from_slice(&prefix_bytes[..copy_len]);
-    for slot in &mut id[copy_len..8] {
-        *slot = b'-';
-    }
     let mut rng = rand::thread_rng();
-    for slot in &mut id[8..] {
-        *slot = rng.gen_range(b'0'..=b'9');
-    }
+    rng.fill_bytes(&mut id[copy_len..]);
     id
 }
 
@@ -47,21 +30,21 @@ mod tests {
     fn test_generate_peer_id() {
         let id = generate_peer_id();
         assert_eq!(id.len(), 20);
-        assert!(id.starts_with(PEER_ID_PREFIX));
+        assert!(id.starts_with(crate::identity::DEFAULT_PEER_ID_PREFIX.as_bytes()));
         assert!(is_valid_peer_id(&id));
     }
 
     #[test]
-    fn test_generate_peer_id_uniqueness() {
+    fn test_generate_peer_id_is_static_per_process() {
         let id1 = generate_peer_id();
         let id2 = generate_peer_id();
-        assert_ne!(id1, id2);
+        assert_eq!(id1, id2);
     }
 
     #[test]
     fn test_custom_prefix() {
-        let id = generate_peer_id_with_prefix("-UT3460-");
-        assert!(id.starts_with(b"-UT3460-"));
+        let id = generate_peer_id_with_prefix("A2-1-37-0-");
+        assert!(id.starts_with(b"A2-1-37-0-"));
         assert!(is_valid_peer_id(&id));
     }
 

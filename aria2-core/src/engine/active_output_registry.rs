@@ -3,13 +3,47 @@
 //! When multiple `DownloadCommand` instances target the same output directory with the same
 //! inferred filename, the last writer would silently overwrite previous results. This module
 //! provides a process-wide registry that detects such collisions and automatically appends
-//! a `(N)` suffix (Windows/Mac style) to produce unique filenames.
+//! a `.N` suffix (aria2-compatible style) to produce unique filenames.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+use crate::error::{Aria2Error, Result};
+use crate::filesystem::control_file::ControlFile;
+
+/// Compatibility policy used when selecting a local output path.
+///
+/// This captures the pre-local-file decisions made by aria2's
+/// `RequestGroup::adjustFilename` and `shouldCancelDownloadForSafety`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputPathPolicy {
+    /// Permit replacing an existing output file from scratch.
+    pub allow_overwrite: bool,
+    /// Select a numbered output when an existing file cannot be reused.
+    pub auto_file_renaming: bool,
+    /// Reuse an existing file without a control file when it is no larger
+    /// than the known remote file.
+    pub continue_download: bool,
+    /// Existing data is eligible for a pre-download integrity check.
+    pub check_integrity: bool,
+    /// Known remote length, when the protocol has already provided it.
+    pub total_length: Option<u64>,
+}
+
+impl Default for OutputPathPolicy {
+    fn default() -> Self {
+        Self {
+            allow_overwrite: false,
+            auto_file_renaming: true,
+            continue_download: false,
+            check_integrity: false,
+            total_length: None,
+        }
+    }
+}
 
 /// Process-wide registry of output paths that are currently being written by active downloads.
 ///
@@ -37,7 +71,7 @@ impl ActiveOutputRegistry {
     /// Resolve the final output path for a download, registering it to prevent collisions.
     ///
     /// If `desired` is not currently claimed by another active download, it is registered
-    /// and returned as-is.  If a collision is detected, the method appends ` (1)`, ` (2)`,
+    /// and returned as-is. If a collision is detected, the method appends `.1`, `.2`,
     /// etc. (before the file extension) until an unused name is found.
     ///
     /// # Returns
@@ -71,7 +105,7 @@ impl ActiveOutputRegistry {
 
         let mut counter: u32 = 1;
         loop {
-            let candidate = parent.join(format!("{} ({}){}", stem, counter, ext));
+            let candidate = parent.join(format!("{}.{}{}", stem, counter, ext));
 
             // Check both the in-progress registry AND the filesystem to avoid conflicts
             // with previously completed downloads that happened to use the same suffix.
@@ -89,7 +123,7 @@ impl ActiveOutputRegistry {
 
             // Safety upper bound to prevent unbounded looping in pathological cases.
             if counter > 10_000 {
-                let fallback = parent.join(format!("{}_collision_{}", stem, counter));
+                let fallback = parent.join(format!("{}.{}", stem, counter));
                 registry.insert(fallback.clone());
                 warn!(
                     "Exhausted normal suffix range for '{}', using fallback '{}'",
@@ -99,6 +133,66 @@ impl ActiveOutputRegistry {
                 return fallback;
             }
         }
+    }
+
+    /// Resolve and register an output path using aria2-compatible file policy.
+    ///
+    /// A control file takes precedence over the existence of the data file.
+    /// Without a control file, an existing output is reusable only when
+    /// overwrite, integrity checking, or compatible `--continue` semantics
+    /// explicitly allow it. Otherwise the original `.N` filename policy is
+    /// applied, or `FileAlreadyExists` is returned when auto-renaming is off.
+    pub async fn resolve_with_policy(
+        &self,
+        desired: &Path,
+        policy: OutputPathPolicy,
+    ) -> Result<PathBuf> {
+        let mut registry = self.inner.write().await;
+        let desired_claimed = registry.contains(desired);
+        let desired_exists = desired.exists();
+        let desired_has_control = ControlFile::control_path_for(desired).exists();
+
+        let reusable_existing = desired_exists
+            && !desired_claimed
+            && (policy.allow_overwrite
+                || desired_has_control
+                || policy.check_integrity
+                || (policy.continue_download
+                    && compatible_existing_length(desired, policy.total_length)));
+
+        if !desired_claimed && (!desired_exists || reusable_existing) {
+            registry.insert(desired.to_path_buf());
+            debug!(
+                path = %desired.display(),
+                reused = desired_exists,
+                "Output path registered"
+            );
+            return Ok(desired.to_path_buf());
+        }
+
+        if !policy.auto_file_renaming {
+            return Err(Aria2Error::FileAlreadyExists(desired.display().to_string()));
+        }
+
+        let (stem, ext) = split_filename_for_aria2(desired);
+        let parent = desired.parent().unwrap_or_else(|| Path::new("."));
+        for counter in 1..10_000u32 {
+            let candidate = parent.join(format!("{stem}.{counter}{ext}"));
+            let candidate_has_control = ControlFile::control_path_for(&candidate).exists();
+            if !registry.contains(&candidate) && (!candidate.exists() || candidate_has_control) {
+                registry.insert(candidate.clone());
+                warn!(
+                    original = %desired.display(),
+                    resolved = %candidate.display(),
+                    "Filename collision resolved"
+                );
+                return Ok(candidate);
+            }
+        }
+
+        Err(Aria2Error::FileRenamingFailed(
+            desired.display().to_string(),
+        ))
     }
 
     /// Release a previously-resolved path from the registry.
@@ -123,6 +217,34 @@ impl ActiveOutputRegistry {
     }
 }
 
+fn compatible_existing_length(path: &Path, total_length: Option<u64>) -> bool {
+    let Some(total_length) = total_length else {
+        return false;
+    };
+    std::fs::metadata(path)
+        .map(|metadata| metadata.len() <= total_length)
+        .unwrap_or(false)
+}
+
+/// Split a path using the same extension rules as aria2's
+/// `RequestGroup::tryAutoFileRenaming`.
+fn split_filename_for_aria2(path: &Path) -> (String, String) {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension_start = file_name
+        .rfind('.')
+        .filter(|index| *index > 0 && *index + 1 < file_name.len());
+    match extension_start {
+        Some(index) => (
+            file_name[..index].to_string(),
+            file_name[index..].to_string(),
+        ),
+        None => (file_name, String::new()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Global singleton — every download command shares the same instance so that
 // cross-task collisions are caught regardless of how commands are spawned.
@@ -144,6 +266,8 @@ pub fn global_registry() -> &'static ActiveOutputRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Aria2Error;
+    use crate::filesystem::control_file::ControlFile;
 
     #[tokio::test]
     async fn test_no_collision_when_unique() {
@@ -161,7 +285,7 @@ mod tests {
         let p2 = reg.resolve(Path::new("/tmp/file.txt")).await;
 
         assert_eq!(p1, PathBuf::from("/tmp/file.txt"));
-        assert_eq!(p2, PathBuf::from("/tmp/file (1).txt"));
+        assert_eq!(p2, PathBuf::from("/tmp/file.1.txt"));
         assert_eq!(reg.len().await, 2);
     }
 
@@ -173,7 +297,7 @@ mod tests {
         let _p2 = reg.resolve(Path::new("/tmp/data.bin")).await;
         let p3 = reg.resolve(Path::new("/tmp/data.bin")).await;
 
-        assert_eq!(p3, PathBuf::from("/tmp/data (2).bin"));
+        assert_eq!(p3, PathBuf::from("/tmp/data.2.bin"));
     }
 
     #[tokio::test]
@@ -198,7 +322,7 @@ mod tests {
 
         assert_eq!(p1, PathBuf::from("/tmp/Makefile"));
         // Files without extension should still get suffixed correctly.
-        assert_eq!(p2, PathBuf::from("/tmp/Makefile (1)"));
+        assert_eq!(p2, PathBuf::from("/tmp/Makefile.1"));
     }
 
     #[tokio::test]
@@ -207,5 +331,132 @@ mod tests {
         let r2 = global_registry();
         // Both references must point to the same underlying registry.
         assert!(Arc::ptr_eq(&r1.inner, &r2.inner));
+    }
+
+    #[tokio::test]
+    async fn existing_file_is_auto_renamed_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("download.bin");
+        tokio::fs::write(&desired, b"existing").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let resolved = registry
+            .resolve_with_policy(&desired, OutputPathPolicy::default())
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, dir.path().join("download.1.bin"));
+        assert_eq!(tokio::fs::read(&desired).await.unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn allow_overwrite_keeps_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("download.bin");
+        tokio::fs::write(&desired, b"existing").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let resolved = registry
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    allow_overwrite: true,
+                    ..OutputPathPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, desired);
+    }
+
+    #[tokio::test]
+    async fn continue_keeps_partial_file_when_length_is_compatible() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("download.bin");
+        tokio::fs::write(&desired, b"partial").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let resolved = registry
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    continue_download: true,
+                    total_length: Some(100),
+                    ..OutputPathPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, desired);
+    }
+
+    #[tokio::test]
+    async fn existing_file_without_auto_rename_returns_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("download.bin");
+        tokio::fs::write(&desired, b"existing").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let error = registry
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    auto_file_renaming: false,
+                    ..OutputPathPolicy::default()
+                },
+            )
+            .await
+            .expect_err("existing output must not be silently overwritten");
+
+        assert!(matches!(error, Aria2Error::FileAlreadyExists(_)));
+    }
+
+    #[tokio::test]
+    async fn existing_control_file_reuses_output_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("download.bin");
+        tokio::fs::write(&desired, b"partial").await.unwrap();
+        let control = ControlFile::control_path_for(&desired);
+        tokio::fs::write(&control, b"control").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let resolved = registry
+            .resolve_with_policy(&desired, OutputPathPolicy::default())
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, desired);
+    }
+
+    #[tokio::test]
+    async fn occupied_output_is_renamed_even_when_overwrite_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("download.bin");
+        let registry = ActiveOutputRegistry::new();
+        let first = registry
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    allow_overwrite: true,
+                    ..OutputPathPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+        let second = registry
+            .resolve_with_policy(
+                &desired,
+                OutputPathPolicy {
+                    allow_overwrite: true,
+                    ..OutputPathPolicy::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first, desired);
+        assert_eq!(second, dir.path().join("download.1.bin"));
     }
 }

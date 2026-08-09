@@ -6,9 +6,8 @@
 
 use std::path::PathBuf;
 
-use aria2::app::cli::{CliArgs, Commands};
+use aria2::app::cli::{CliArgs, Commands, HelpRequest, render_help};
 use aria2_core::config::{ConfigParser, OptionCategory, OptionRegistry, OptionType, OptionValue};
-use clap::Parser;
 
 /// Helper: parse CLI args via clap. Panics on parse error.
 fn parse(args: &[&str]) -> CliArgs {
@@ -82,28 +81,28 @@ fn regression_short_option_log() {
 #[test]
 fn regression_short_option_quiet() {
     let cli = parse(&["-q"]);
-    assert!(cli.general.quiet);
+    assert_eq!(cli.general.quiet, Some(true));
 }
 
 /// Test: -D maps to "daemon" boolean option.
 #[test]
 fn regression_short_option_daemon() {
     let cli = parse(&["-D"]);
-    assert!(cli.general.daemon);
+    assert_eq!(cli.general.daemon, Some(true));
 }
 
 /// Test: -c maps to "continue" boolean option.
 #[test]
 fn regression_short_option_continue() {
     let cli = parse(&["-c"]);
-    assert!(cli.http_ftp.continue_dl);
+    assert_eq!(cli.http_ftp.continue_dl, Some(true));
 }
 
 /// Test: -e maps to "enable-rpc" boolean option.
 #[test]
 fn regression_short_option_enable_rpc() {
     let cli = parse(&["-e"]);
-    assert!(cli.rpc.enable_rpc);
+    assert_eq!(cli.rpc.enable_rpc, Some(true));
 }
 
 /// Test: -r maps to "rpc-listen-port" option.
@@ -127,24 +126,66 @@ fn regression_short_option_user_agent() {
     assert_eq!(cli.http_ftp.user_agent.as_deref(), Some("aria2/1.0"));
 }
 
-/// Test: -H maps to "header" option (list, can be repeated).
+/// Test: --header maps to "header" option (list, can be repeated).
 #[test]
 fn regression_short_option_header() {
-    let cli = parse(&["-H", "Accept: application/json"]);
+    let cli = parse(&["--header", "Accept: application/json"]);
     assert_eq!(
         cli.http_ftp.header,
         vec!["Accept: application/json".to_string()]
     );
 }
 
-/// Test: -p maps to "all-proxy" option.
+/// Test: -p maps to the original "ftp-pasv" option.
 #[test]
-fn regression_short_option_all_proxy() {
-    let cli = parse(&["-p", "http://proxy.example.com:8080"]);
-    assert_eq!(
-        cli.http_ftp.all_proxy.as_deref(),
-        Some("http://proxy.example.com:8080")
-    );
+fn regression_short_option_ftp_pasv() {
+    let cli = parse(&["-p"]);
+    assert_eq!(cli.http_ftp.ftp_pasv, Some(true));
+}
+
+/// Test: -a maps to the original file-allocation option.
+#[test]
+fn regression_short_option_file_allocation() {
+    let cli = parse(&["-a", "prealloc"]);
+    assert_eq!(cli.advanced.file_allocation.as_deref(), Some("prealloc"));
+}
+
+/// Test: -P maps to parameterized-uri rather than http-proxy.
+#[test]
+fn regression_short_option_parameterized_uri() {
+    let cli = parse(&["-P"]);
+    assert_eq!(cli.general.parameterized_uri, Some(true));
+    assert_eq!(cli.http_ftp.http_proxy, None);
+}
+
+/// Test: -Z maps to force-sequential.
+#[test]
+fn regression_short_option_force_sequential() {
+    let cli = parse(&["-Z"]);
+    assert_eq!(cli.general.force_sequential, Some(true));
+}
+
+/// Test: -n maps to no-netrc rather than dry-run.
+#[test]
+fn regression_short_option_no_netrc() {
+    let cli = parse(&["-n"]);
+    assert_eq!(cli.general.no_netrc, Some(true));
+    assert_eq!(cli.general.dry_run, None);
+}
+
+/// Test: -R maps to remote-time rather than referer.
+#[test]
+fn regression_short_option_remote_time() {
+    let cli = parse(&["-R"]);
+    assert_eq!(cli.http_ftp.remote_time, Some(true));
+    assert_eq!(cli.http_ftp.referer, None);
+}
+
+/// Test: -u maps to the original per-torrent upload limit.
+#[test]
+fn regression_short_option_max_upload_limit() {
+    let cli = parse(&["-u", "2M"]);
+    assert_eq!(cli.advanced.max_upload_limit.as_deref(), Some("2M"));
 }
 
 /// Test: -g maps to "seed-ratio" option (float).
@@ -190,31 +231,31 @@ fn regression_long_option_space_format() {
 #[test]
 fn regression_long_option_boolean_flag() {
     let cli = parse(&["--quiet"]);
-    assert!(cli.general.quiet);
+    assert_eq!(cli.general.quiet, Some(true));
 }
 
 /// Test: --no-check-certificate negation flag.
 #[test]
 fn regression_long_option_negation() {
     let cli = parse(&["--no-check-certificate"]);
-    assert!(cli.http_ftp.no_check_certificate);
+    assert_eq!(cli.http_ftp.no_check_certificate, Some(true));
     // The positive flag should not be set
-    assert!(!cli.http_ftp.check_certificate);
+    assert_eq!(cli.http_ftp.check_certificate, None);
 }
 
 /// Test: --no-continue negation flag.
 #[test]
 fn regression_long_option_negation_continue() {
     let cli = parse(&["--no-continue"]);
-    assert!(cli.http_ftp.no_continue);
-    assert!(!cli.http_ftp.continue_dl);
+    assert_eq!(cli.http_ftp.no_continue, Some(true));
+    assert_eq!(cli.http_ftp.continue_dl, None);
 }
 
 /// Test: --check-certificate flag (positive).
 #[test]
 fn regression_long_option_check_certificate_positive() {
     let cli = parse(&["--check-certificate"]);
-    assert!(cli.http_ftp.check_certificate);
+    assert_eq!(cli.http_ftp.check_certificate, Some(true));
 }
 
 /// Test: --split with integer value.
@@ -294,29 +335,29 @@ fn regression_long_option_rpc_listen_port() {
 #[test]
 fn regression_long_option_bt_enable_lpd() {
     let cli = parse(&["--bt-enable-lpd"]);
-    assert!(cli.bittorrent.bt_enable_lpd);
+    assert_eq!(cli.bittorrent.bt_enable_lpd, Some(true));
 }
 
 /// Test: --enable-dht boolean flag.
 #[test]
 fn regression_long_option_enable_dht() {
     let cli = parse(&["--enable-dht"]);
-    assert!(cli.bittorrent.enable_dht);
+    assert_eq!(cli.bittorrent.enable_dht, Some(true));
 }
 
 /// Test: --no-enable-dht negation flag.
 #[test]
 fn regression_long_option_no_enable_dht() {
     let cli = parse(&["--no-enable-dht"]);
-    assert!(cli.bittorrent.no_enable_dht);
-    assert!(!cli.bittorrent.enable_dht);
+    assert_eq!(cli.bittorrent.no_enable_dht, Some(true));
+    assert_eq!(cli.bittorrent.enable_dht, None);
 }
 
 /// Test: --bt-force-encryption boolean flag.
 #[test]
 fn regression_long_option_bt_force_encryption() {
     let cli = parse(&["--bt-force-encryption"]);
-    assert!(cli.bittorrent.bt_force_encryption);
+    assert_eq!(cli.bittorrent.bt_force_encryption, Some(true));
 }
 
 /// Test: --follow-torrent with enum value.
@@ -337,7 +378,7 @@ fn regression_long_option_listen_port() {
 #[test]
 fn regression_long_option_dht_listen_port() {
     let cli = parse(&["--dht-listen-port=6881"]);
-    assert_eq!(cli.bittorrent.dht_listen_port, Some(6881));
+    assert_eq!(cli.bittorrent.dht_listen_port.as_deref(), Some("6881"));
 }
 
 /// Test: --input-file with path value.
@@ -458,7 +499,7 @@ fn regression_long_option_no_proxy() {
 #[test]
 fn regression_long_option_dry_run() {
     let cli = parse(&["--dry-run"]);
-    assert!(cli.general.dry_run);
+    assert_eq!(cli.general.dry_run, Some(true));
 }
 
 /// Test: --summary-interval with integer value.
@@ -486,10 +527,9 @@ fn regression_long_option_auto_save_interval() {
 // New CLI Conflict Resolution Tests (clap-specific)
 // =========================================================================
 
-/// Test: -L maps to "listen-port" (renamed from -h).
-/// This is a key conflict resolution: -h no longer sets listen-port.
+/// Test: -L is an additional listen-port alias.
 #[test]
-fn regression_short_option_listen_port_renamed() {
+fn regression_short_option_listen_port_alias() {
     let cli = parse(&["-L", "6881"]);
     assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881"));
 }
@@ -501,57 +541,150 @@ fn regression_short_option_listen_port_range() {
     assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881-6999"));
 }
 
-/// Test: -h does NOT set listen-port (it triggers help in clap).
-/// Verify that -h with a value is rejected (clap treats -h as help, no arg).
+/// Test: -h preserves aria2's optional help argument semantics.
 #[test]
 fn regression_h_does_not_set_listen_port() {
-    // -h triggers help in clap; try_parse_from should return Err for -h with
-    // an extra positional value, OR succeed as help request.
-    // The key assertion: -h never sets listen_port.
-    let result = CliArgs::try_parse_from(["aria2c", "-h", "6881"]);
-    // clap will either show help (Err with DisplayHelp) or error.
-    // Either way, it should NOT produce a CliArgs where listen_port is set.
-    if let Ok(cli) = result {
-        assert!(
-            cli.bittorrent.listen_port.is_none(),
-            "-h must not set listen-port"
-        );
-    }
-    // If Err, that's also acceptable (clap exits with help or error).
+    let cli = CliArgs::try_parse_from(["aria2c", "-h", "6881"])
+        .expect("the optional help argument must not consume a space-separated token");
+    assert_eq!(cli.help, Some(HelpRequest::Basic));
+    assert_eq!(cli.uris, vec!["6881"]);
+    assert!(
+        cli.bittorrent.listen_port.is_none(),
+        "-h must not set listen-port"
+    );
+}
+
+/// Test: long help selectors are preserved as filters instead of being
+/// collapsed into clap's DisplayHelp action.
+#[test]
+fn regression_help_selector() {
+    let cli = parse(&["--help=#http"]);
+    assert_eq!(cli.help, Some(HelpRequest::Filter("#http".to_string())));
+
+    let cli = parse(&["-h=timeout"]);
+    assert_eq!(cli.help, Some(HelpRequest::Basic));
+
+    let cli = parse(&["-htimeout"]);
+    assert_eq!(cli.help, Some(HelpRequest::Filter("timeout".to_string())));
+}
+
+/// Test: process-level help rendering consumes selectors without loading a
+/// config file or starting the download engine.
+#[test]
+fn regression_help_rendering_filters_options() {
+    let timeout_help = render_help(&HelpRequest::Filter("timeout".to_string()));
+    assert!(timeout_help.contains("--timeout"));
+    assert!(!timeout_help.contains("--dir"));
+
+    let http_help = render_help(&HelpRequest::Filter("#http".to_string()));
+    assert!(http_help.contains("--http-proxy"));
+    assert!(!http_help.contains("--rpc-listen-port"));
+}
+
+/// Test: original public options added from the registry remain reachable
+/// through the CLI, including the original short file selectors.
+#[test]
+fn regression_original_public_option_entries() {
+    let cli = parse(&[
+        "--async-dns=false",
+        "--async-dns-server=127.0.0.1",
+        "--event-poll=select",
+        "-S",
+        "-T",
+        "sample.torrent",
+        "-M",
+        "sample.meta4",
+        "--certificate=client.pem",
+        "--private-key=client.key",
+        "--min-tls-version=TLSv1.2",
+        "--ssh-host-key-md=sha-1=deadbeef",
+        "--dht-entry-point6=seed.example:6881",
+        "--dht-file-path6=dht6.dat",
+        "--metalink-enable-unique-protocol=false",
+        "--metalink-base-uri=https://example.test/meta4",
+        "--on-download-start=hook-start",
+        "--pause-metadata",
+        "--show-console-readout=false",
+        "--dscp=46",
+        "--socket-recv-buffer-size=1M",
+        "--max-resume-failure-tries=3",
+        "--optimize-concurrent-downloads",
+    ]);
+
+    assert_eq!(cli.general.async_dns, Some(false));
+    assert_eq!(cli.general.async_dns_server.as_deref(), Some("127.0.0.1"));
+    assert_eq!(cli.general.event_poll.as_deref(), Some("select"));
+    assert_eq!(cli.general.show_files, Some(true));
+    assert_eq!(
+        cli.general.torrent_file,
+        Some(PathBuf::from("sample.torrent"))
+    );
+    assert_eq!(
+        cli.general.metalink_file,
+        Some(PathBuf::from("sample.meta4"))
+    );
+    assert_eq!(cli.http_ftp.certificate, Some(PathBuf::from("client.pem")));
+    assert_eq!(cli.http_ftp.private_key, Some(PathBuf::from("client.key")));
+    assert_eq!(
+        cli.http_ftp.ssh_host_key_md.as_deref(),
+        Some("sha-1=deadbeef")
+    );
+    assert_eq!(
+        cli.bittorrent.dht_entry_point6.as_deref(),
+        Some("seed.example:6881")
+    );
+    assert_eq!(cli.general.metalink_enable_unique_protocol, Some(false));
+    assert_eq!(cli.general.on_download_start.as_deref(), Some("hook-start"));
+    assert_eq!(cli.advanced.dscp, Some(46));
+    assert_eq!(cli.advanced.socket_recv_buffer_size.as_deref(), Some("1M"));
+    assert_eq!(cli.advanced.max_resume_failure_tries, Some(3));
+    assert_eq!(cli.advanced.optimize_concurrent_downloads, Some(true));
 }
 
 /// Test: --no-color flag exists and is parsed.
 #[test]
 fn regression_no_color_flag() {
     let cli = parse(&["--no-color"]);
-    assert!(cli.no_color);
+    assert_eq!(cli.no_color, Some(true));
 }
 
 /// Test: --no-color defaults to false when not specified.
 #[test]
 fn regression_no_color_default_false() {
     let cli = parse(&[]);
-    assert!(!cli.no_color);
+    assert_eq!(cli.no_color, None);
 }
 
-/// Test: -v maps to verbose (not version).
+/// Test: -v is handled by the CLI version action.
 #[test]
-fn regression_v_maps_to_verbose() {
-    let cli = parse(&["-v"]);
-    assert!(cli.verbose);
-}
-
-/// Test: -V maps to version (clap exits with version, not listen-port).
-/// This verifies -V does NOT set save-cookies.
-#[test]
-fn regression_v_does_not_set_save_cookies() {
-    // -V triggers version output in clap; try_parse_from returns Err
-    // with DisplayVersion kind.
-    let result = CliArgs::try_parse_from(["aria2c", "-V"]);
+fn regression_v_triggers_version() {
+    let result = CliArgs::try_parse_from(["aria2c", "-v"]);
+    let error = result.expect_err("-v must trigger the CLI version action");
+    assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
     assert!(
-        result.is_err(),
-        "-V should trigger version output (clap error)"
+        error.to_string().starts_with(&format!(
+            "aria2c {}",
+            aria2_protocol::identity::PRODUCT_VERSION
+        )),
+        "--version must use the product version number"
     );
+}
+
+/// Test: -O/--index-out is repeatable and preserves argument order.
+#[test]
+fn regression_index_out_is_repeatable() {
+    let cli = parse(&["-O", "1=first.iso", "--index-out=2=second.iso"]);
+    assert_eq!(
+        cli.bittorrent.index_out,
+        vec!["1=first.iso", "2=second.iso"]
+    );
+}
+
+/// Test: -V is the original aria2 check-integrity short option.
+#[test]
+fn regression_v_uppercase_enables_check_integrity() {
+    let cli = parse(&["-V"]);
+    assert_eq!(cli.general.check_integrity, Some(true));
 }
 
 /// Test: completions subcommand is parsed correctly.
@@ -597,8 +730,8 @@ fn regression_multiple_options_parsed() {
     assert_eq!(cli.general.dir, Some(PathBuf::from("/downloads")));
     assert_eq!(cli.http_ftp.split, Some(8));
     assert_eq!(cli.http_ftp.timeout, Some(120));
-    assert!(cli.general.quiet);
-    assert!(cli.rpc.enable_rpc);
+    assert_eq!(cli.general.quiet, Some(true));
+    assert_eq!(cli.rpc.enable_rpc, Some(true));
     assert_eq!(cli.rpc.rpc_listen_port, Some(6801));
 }
 
@@ -617,8 +750,8 @@ fn regression_mixed_short_long_options() {
 
     assert_eq!(cli.general.dir, Some(PathBuf::from("/downloads")));
     assert_eq!(cli.http_ftp.split, Some(8));
-    assert!(cli.general.quiet);
-    assert!(cli.rpc.enable_rpc);
+    assert_eq!(cli.general.quiet, Some(true));
+    assert_eq!(cli.rpc.enable_rpc, Some(true));
     assert_eq!(cli.rpc.rpc_listen_port, Some(6801));
 }
 
@@ -627,12 +760,12 @@ fn regression_mixed_short_long_options() {
 fn regression_options_with_negation() {
     let cli = parse(&["--no-check-certificate", "--no-continue", "--no-enable-dht"]);
 
-    assert!(cli.http_ftp.no_check_certificate);
-    assert!(!cli.http_ftp.check_certificate);
-    assert!(cli.http_ftp.no_continue);
-    assert!(!cli.http_ftp.continue_dl);
-    assert!(cli.bittorrent.no_enable_dht);
-    assert!(!cli.bittorrent.enable_dht);
+    assert_eq!(cli.http_ftp.no_check_certificate, Some(true));
+    assert_eq!(cli.http_ftp.check_certificate, None);
+    assert_eq!(cli.http_ftp.no_continue, Some(true));
+    assert_eq!(cli.http_ftp.continue_dl, None);
+    assert_eq!(cli.bittorrent.no_enable_dht, Some(true));
+    assert_eq!(cli.bittorrent.enable_dht, None);
 }
 
 /// Test: Positional URIs are collected.
@@ -879,6 +1012,10 @@ fn regression_registry_default_values() {
         registry.get("rpc-listen-port").unwrap().default_value(),
         &OptionValue::Int(6800)
     );
+    assert_eq!(
+        registry.get("file-allocation").unwrap().default_value(),
+        &OptionValue::Str("prealloc".to_string())
+    );
 }
 
 /// Test: OptionRegistry short name mappings.
@@ -887,6 +1024,10 @@ fn regression_registry_short_names() {
     let registry = OptionRegistry::new();
 
     assert_eq!(registry.get("dir").unwrap().short_name(), Some('d'));
+    assert_eq!(
+        registry.get("check-integrity").unwrap().short_name(),
+        Some('V')
+    );
     assert_eq!(registry.get("out").unwrap().short_name(), Some('o'));
     assert_eq!(registry.get("split").unwrap().short_name(), Some('s'));
     assert_eq!(registry.get("timeout").unwrap().short_name(), Some('t'));
@@ -904,6 +1045,96 @@ fn regression_registry_short_names() {
             .short_name(),
         Some('j')
     );
+}
+
+/// The short-option table is an external CLI contract. These values are
+/// copied from aria2_original/src/usage_text.h and must not be inferred from
+/// the Rust field layout or from a convenient unused character.
+#[test]
+fn regression_original_short_option_contract() {
+    let registry = OptionRegistry::new();
+    let expected = [
+        ("dir", Some('d')),
+        ("out", Some('o')),
+        ("log", Some('l')),
+        ("daemon", Some('D')),
+        ("split", Some('s')),
+        ("timeout", Some('t')),
+        ("max-tries", Some('m')),
+        ("ftp-pasv", Some('p')),
+        ("file-allocation", Some('a')),
+        ("force-sequential", Some('Z')),
+        ("parameterized-uri", Some('P')),
+        ("check-integrity", Some('V')),
+        ("continue", Some('c')),
+        ("user-agent", Some('U')),
+        ("no-netrc", Some('n')),
+        ("input-file", Some('i')),
+        ("max-concurrent-downloads", Some('j')),
+        ("show-files", Some('S')),
+        ("torrent-file", Some('T')),
+        ("metalink-file", Some('M')),
+        ("remote-time", Some('R')),
+        ("index-out", Some('O')),
+        ("max-upload-limit", Some('u')),
+        ("max-connection-per-server", Some('x')),
+        ("min-split-size", Some('k')),
+        ("quiet", Some('q')),
+        ("enable-rpc", Some('e')),
+        ("rpc-listen-port", Some('r')),
+        ("rpc-secret", Some('I')),
+        ("summary-interval", None),
+        ("log-level", None),
+        ("dry-run", None),
+        ("all-proxy", None),
+        ("http-proxy", None),
+        ("https-proxy", None),
+        ("ftp-proxy", None),
+        ("no-proxy", None),
+        ("referer", None),
+        ("header", None),
+        ("load-cookies", None),
+        ("save-cookies", None),
+        ("connect-timeout", None),
+        ("retry-wait", None),
+        ("check-certificate", None),
+        ("ca-certificate", None),
+        ("allow-overwrite", None),
+        ("disk-cache", None),
+        ("piece-length", None),
+        ("stop", None),
+        ("seed-time", Some('G')),
+        ("seed-ratio", Some('g')),
+        ("bt-max-peers", Some('B')),
+        ("bt-save-metadata", None),
+        ("bt-force-encryption", Some('X')),
+        ("enable-dht", None),
+        ("follow-torrent", None),
+        ("listen-port", None),
+    ];
+
+    for (name, short_name) in expected {
+        let actual = registry
+            .get(name)
+            .unwrap_or_else(|| panic!("registry is missing option {name}"))
+            .short_name();
+        assert_eq!(
+            actual, short_name,
+            "short option for {name} diverges from aria2_original"
+        );
+    }
+
+    let mut owners = std::collections::HashMap::new();
+    for definition in registry.all().values() {
+        if let Some(short_name) = definition.short_name() {
+            let previous = owners.insert(short_name, definition.name());
+            assert!(
+                previous.is_none(),
+                "short option -{short_name} is assigned to both {previous:?} and {}",
+                definition.name()
+            );
+        }
+    }
 }
 
 /// Test: OptionRegistry count.
@@ -961,7 +1192,7 @@ fn regression_invalid_integer_value() {
 #[test]
 fn regression_out_of_range_value() {
     let mut parser = ConfigParser::new();
-    parser.set_raw("split", "100");
+    parser.set_raw("retry-wait", "601");
     assert!(parser.has_errors());
 }
 
@@ -1060,7 +1291,7 @@ fn regression_option_value_none() {
 fn regression_empty_args() {
     let cli = parse(&[]);
     assert!(cli.uris.is_empty());
-    assert!(!cli.verbose);
-    assert!(!cli.no_color);
+    assert_eq!(cli.verbose, None);
+    assert_eq!(cli.no_color, None);
     assert!(cli.command.is_none());
 }

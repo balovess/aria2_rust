@@ -23,7 +23,10 @@ impl HttpResponse {
     }
 
     pub fn is_redirect(&self) -> bool {
-        [301, 302, 303, 307, 308].contains(&self.status_code)
+        // 300 Multiple Choices is also a redirect per RFC 7231 Section 6.4.1
+        // when a Location header is present. Per C++ aria2 behavior, 300
+        // with Location is treated as a redirect.
+        [300, 301, 302, 303, 307, 308].contains(&self.status_code)
     }
 
     pub fn is_partial_content(&self) -> bool {
@@ -126,20 +129,20 @@ impl ContentRange {
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         if !value.starts_with("bytes ") {
-            debug!("Content-Range格式异常: 非bytes单位");
+            debug!("Content-Range format error: not 'bytes' unit");
             return None;
         }
 
         let range_part = &value[6..];
         let parts: Vec<&str> = range_part.split('/').collect();
         if parts.len() != 2 {
-            debug!("Content-Range格式异常: 分割失败");
+            debug!("Content-Range format error: split failed");
             return None;
         }
 
         let range_values: Vec<&str> = parts[0].split('-').collect();
         if range_values.len() != 2 {
-            debug!("Content-Range范围解析失败");
+            debug!("Content-Range range parse failed");
             return None;
         }
 
@@ -223,14 +226,14 @@ mod tests {
     fn test_request_builder() {
         let req = HttpRequest::get("https://example.com/file.bin")
             .with_range(500, Some(999))
-            .with_user_agent("aria2/1.37.0-Rust");
+            .with_user_agent(crate::identity::DEFAULT_USER_AGENT);
 
         assert_eq!(req.method, "GET");
         assert!(req.has_range());
         assert_eq!(req.get_header("Range"), Some(&"bytes=500-999".to_string()));
         assert_eq!(
             req.get_header("User-Agent"),
-            Some(&"aria2/1.37.0-Rust".to_string())
+            Some(&crate::identity::DEFAULT_USER_AGENT.to_string())
         );
     }
 }

@@ -1,3 +1,5 @@
+#![cfg(feature = "metalink")]
+
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
@@ -23,7 +25,8 @@ async fn test_e2e_metalink_parse_and_validate() {
     let sha = compute_sha256(SMALL_CONTENT);
 
     let metalink_xml = build_metalink_v3("small.bin", 4, &[(url.clone(), 1)], &sha);
-    let doc = aria2_protocol::metalink::parser::MetalinkDocument::parse(&metalink_xml).unwrap();
+    let doc =
+        aria2_protocol::metalink::parser::MetalinkDocument::parse(&metalink_xml, None).unwrap();
 
     assert_eq!(doc.files.len(), 1);
     assert_eq!(doc.files[0].name, "small.bin");
@@ -90,6 +93,31 @@ async fn test_e2e_metalink_medium_file_download() {
     let data = std::fs::read(&output_path).unwrap();
     assert_eq!(data.len(), 1024 * 1024);
     assert!(data.iter().all(|&b| b == MEDIUM_PATTERN));
+}
+
+#[tokio::test]
+async fn test_e2e_metalink_size_mismatch_is_rejected() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let bad_size_url = format!("{}/files/small.bin", server.base_url());
+    let good_url = format!("{}/files/small.bin", server.base_url());
+    let sha = compute_sha256(SMALL_CONTENT);
+    let metalink_xml = build_metalink_v3(
+        "size_fallback.bin",
+        5,
+        &[(bad_size_url, 1), (good_url, 2)],
+        &sha,
+    );
+    let mut cmd = MetalinkDownloadCommand::new(
+        GroupId::new(30),
+        &metalink_xml,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+    )
+    .unwrap();
+    let result = cmd.execute().await;
+    assert!(result.is_err());
+    assert!(!dir.path().join("size_fallback.bin").exists());
 }
 
 #[tokio::test]
@@ -177,18 +205,18 @@ async fn test_e2e_metalink_progress_tracking() {
     )
     .expect("创建MetalinkDownloadCommand失败");
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!((progress_before - 0.0).abs() < 1.0, "下载前进度应为0%");
 
     cmd.execute().await.expect("Metalink下载失败");
 
-    let progress_after = cmd.group().await.progress().await;
+    let progress_after = cmd.group().progress();
     assert!(
         (progress_after - 100.0).abs() < 1.0,
         "下载后进度应接近100%, got: {}",
         progress_after
     );
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 }

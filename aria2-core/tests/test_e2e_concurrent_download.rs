@@ -1,3 +1,5 @@
+#![cfg(feature = "metalink")]
+
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::concurrent_download_command::ConcurrentDownloadCommand;
@@ -154,12 +156,12 @@ async fn test_e2e_concurrent_progress_tracking() {
     )
     .expect("创建ConcurrentDownloadCommand失败");
 
-    let progress_before = cmd.group().await.progress().await;
+    let progress_before = cmd.group().progress();
     assert!((progress_before - 0.0).abs() < 1.0, "下载前进度应为0%");
 
     cmd.execute().await.expect("并发下载失败");
 
-    let status = cmd.group().await.status().await;
+    let status = cmd.group().status();
     assert!(status.is_completed());
 
     let output_path = Path::new(dir.path()).join("progress_test.bin");
@@ -237,20 +239,17 @@ fn test_segment_manager_fail_reassign() {
 }
 
 #[test]
-fn test_segment_manager_assemble() {
+fn test_segment_manager_complete() {
     let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
 
-    mgr.complete_segment(0, bytes::Bytes::from(vec![0xAA; 100]));
+    mgr.complete_segment(0, 100);
     assert!((mgr.progress() - 50.0).abs() < 0.01);
 
-    mgr.complete_segment(1, bytes::Bytes::from(vec![0xBB; 100]));
+    mgr.complete_segment(1, 100);
     assert!(mgr.is_complete());
     assert!((mgr.progress() - 100.0).abs() < 0.01);
 
-    let assembled = mgr.assemble().unwrap();
-    assert_eq!(assembled.len(), 200);
-    assert_eq!(&assembled[..100], &[0xAA; 100][..]);
-    assert_eq!(&assembled[100..], &[0xBB; 100][..]);
+    assert_eq!(mgr.completed_bytes(), 200);
 }
 
 #[test]
@@ -258,5 +257,4 @@ fn test_segment_manager_empty_file() {
     let mgr = ConcurrentSegmentManager::new(0, vec!["http://x.com/f".to_string()], None);
     assert_eq!(mgr.num_segments(), 0);
     assert!(mgr.is_complete());
-    assert!(mgr.assemble().is_none());
 }

@@ -22,7 +22,6 @@ class EventType(str, Enum):
     DOWNLOAD_COMPLETE = "DOWNLOAD_COMPLETE"
     DOWNLOAD_ERROR = "DOWNLOAD_ERROR"
     BT_DOWNLOAD_COMPLETE = "BT_DOWNLOAD_COMPLETE"
-    BT_DOWNLOAD_ERROR = "BT_DOWNLOAD_ERROR"
 
 
 class DownloadStatus(str, Enum):
@@ -41,7 +40,6 @@ _EVENT_METHOD_MAP: Dict[str, EventType] = {
     "aria2.onDownloadComplete": EventType.DOWNLOAD_COMPLETE,
     "aria2.onDownloadError": EventType.DOWNLOAD_ERROR,
     "aria2.onBtDownloadComplete": EventType.BT_DOWNLOAD_COMPLETE,
-    "aria2.onBtDownloadError": EventType.BT_DOWNLOAD_ERROR,
 }
 
 

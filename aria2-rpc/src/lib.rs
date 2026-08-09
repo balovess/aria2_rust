@@ -12,14 +12,15 @@
 //!   8 value types (Int/String/Boolean/Double/Array/Struct/Base64/Nil), quick-xml codec.
 //!
 //! - **[`websocket`]** — Real-time event notifications via WebSocket:
-//!   7 event types (DownloadStart/Pause/Stop/Complete/Error/BtComplete/BtError),
+//!   5 core event types plus the BitTorrent completion event when enabled,
 //!   `EventPublisher` pub/sub using tokio::broadcast.
 //!
 //! - **[`server`]** — HTTP server framework: `AuthConfig` (Token + Basic dual auth),
 //!   `CorsConfig`, status models (`StatusInfo`, `GlobalStat`, `DownloadStatus`),
 //!   GID generation utility.
 //!
-//! - **[`engine`]** — `RpcEngine` bridge implementing 36 aria2 RPC methods:
+//! - **[`engine`]** — `RpcEngine` bridge implementing the feature-specific
+//!   aria2 RPC catalog (33 core methods, plus BitTorrent/Metalink extensions):
 //!   addUri/addTorrent/remove/pause/unpause/tellStatus/tellActive/tellWaiting/
 //!   tellStopped/getGlobalStat/purgeDownloadResult/getGlobalOption/changeGlobalOption/
 //!   getOption/changeOption/getVersion/getSessionInfo/saveSession/shutdown/forceShutdown/
@@ -51,16 +52,18 @@
 //!
 //! ## Compatibility
 //!
-//! All 36 implemented methods follow the original aria2 RPC specification at
+//! The implemented catalog follows the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
 pub mod constants;
 pub mod engine;
 pub mod handlers;
 pub mod json_rpc;
+pub mod rpc_helpers;
 pub mod server;
 pub mod types;
 pub mod websocket;
+mod wire;
 pub mod xml_rpc;
 
 pub use engine::RpcEngine;

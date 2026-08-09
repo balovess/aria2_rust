@@ -8,6 +8,7 @@ use tracing::{debug, info};
 use super::session_serializer;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::Result;
+use crate::request::request_group::GroupId;
 use crate::request::request_group_man::RequestGroupMan;
 
 pub struct SaveSessionCommand {
@@ -36,7 +37,7 @@ impl Command for SaveSessionCommand {
         self.status = CommandStatus::Running;
         debug!("Starting session save to {}", self.path.display());
 
-        let groups = self.request_group_man.read().await.list_groups().await;
+        let groups = self.request_group_man.read().await.list_groups();
         session_serializer::save_to_file(&self.path, &groups).await?;
 
         self.status = CommandStatus::Completed;
@@ -46,6 +47,10 @@ impl Command for SaveSessionCommand {
 
     fn status(&self) -> CommandStatus {
         self.status.clone()
+    }
+
+    fn gid(&self) -> GroupId {
+        GroupId(0)
     }
 }
 
@@ -74,7 +79,6 @@ mod tests {
                     ..Default::default()
                 },
             )
-            .await
             .unwrap();
 
         let dir = std::env::temp_dir();
@@ -117,7 +121,6 @@ mod tests {
                 vec!["http://example.com/atomic.bin".into()],
                 DownloadOptions::default(),
             )
-            .await
             .unwrap();
 
         let dir = std::env::temp_dir();
@@ -126,9 +129,12 @@ mod tests {
 
         cmd.execute().await.unwrap();
 
-        assert!(path.exists(), "目标文件应存在");
+        assert!(path.exists(), "Target file should exist");
         let tmp_path = path.with_extension("sess.tmp");
-        assert!(!tmp_path.exists(), "临时文件应已被 rename 删除");
+        assert!(
+            !tmp_path.exists(),
+            "Temp file should have been renamed away"
+        );
 
         let _ = tokio::fs::remove_file(&path).await;
     }

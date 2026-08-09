@@ -76,7 +76,8 @@ impl ChunkedDecoder {
                 .position(|&b| b == b'\r' || b == b'\n')
                 .ok_or("Chunked encoding format error: cannot find chunk size line")?;
 
-            let size_str = unsafe { std::str::from_utf8_unchecked(&data[pos..pos + line_end]) };
+            let size_str = std::str::from_utf8(&data[pos..pos + line_end])
+                .map_err(|e| format!("Invalid UTF-8 in chunk size line: {}", e))?;
             let size_str = size_str.trim();
             let chunk_size: usize = usize::from_str_radix(size_str, 16)
                 .map_err(|e| format!("Chunk size parsing failed: {}", e))?;

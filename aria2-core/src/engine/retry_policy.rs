@@ -6,6 +6,9 @@ use crate::error::Aria2Error;
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
+    /// Maximum total attempts. `0` means unlimited, matching aria2's
+    /// `--max-tries` contract. The field name is retained for source
+    /// compatibility with existing internal callers.
     pub max_retries: u32,
     pub base_wait_ms: u64,
     pub max_wait_ms: u64,
@@ -52,9 +55,15 @@ impl RetryPolicy {
         self
     }
 
-    /// Alias for `max_retries` for compatibility with the engine retry loop.
+    /// Return the configured maximum total attempts.
     pub fn max_tries(&self) -> u32 {
         self.max_retries
+    }
+
+    /// Return whether another attempt is allowed after `attempts` attempts
+    /// have already been made. `0` is the public unlimited value.
+    pub fn can_retry_after(&self, attempts: u32) -> bool {
+        self.max_retries == 0 || attempts < self.max_retries
     }
 
     pub fn compute_wait(&self, attempt: u32) -> Option<Duration> {
@@ -84,15 +93,13 @@ impl RetryPolicy {
         }
     }
 
-    /// Check whether a retry should be attempted based on the error type.
+    /// Check whether a retry should be attempted after a zero-based attempt.
     ///
-    /// Returns `true` if the attempt count has not been exhausted and the
-    /// error is a recoverable [`Aria2Error`].
+    /// `attempt` is the index of the failed attempt, so attempt `0` is the
+    /// first request. The policy stores total attempts; `0` means unlimited.
     pub fn should_retry(&self, attempt: u32, error: &Aria2Error) -> bool {
-        if attempt + 1 >= self.max_retries {
-            return false;
-        }
-        matches!(error, Aria2Error::Recoverable(_))
+        self.can_retry_after(attempt.saturating_add(1))
+            && matches!(error, Aria2Error::Recoverable(_))
     }
 
     pub fn should_retry_http(&self, status_code: u16) -> bool {
@@ -116,13 +123,19 @@ impl RetryPolicy {
             || lower.contains("try again")
     }
 
+    /// Return whether `attempts` completed attempts have exhausted the limit.
+    /// Unlimited policies are never exhausted.
     pub fn is_exhausted(&self, attempts: u32) -> bool {
-        attempts > self.max_retries
+        self.max_retries != 0 && attempts >= self.max_retries
     }
 
     pub fn total_estimated_wait_sec(&self) -> f64 {
+        if self.max_retries == 0 {
+            return f64::INFINITY;
+        }
+
         let mut total = 0.0f64;
-        for a in 1..=self.max_retries {
+        for a in 1..self.max_retries {
             total += (self.base_wait_ms as f64) * self.backoff_factor.powi(a as i32 - 1);
         }
         total / 1000.0
@@ -175,7 +188,7 @@ mod tests {
     #[test]
     fn test_default_policy_values() {
         let p = RetryPolicy::default();
-        assert_eq!(p.max_retries, 3);
+        assert_eq!(p.max_retries, 5);
         assert_eq!(p.base_wait_ms, 1000);
         assert_eq!(p.max_wait_ms, 30000);
         assert!((p.backoff_factor - 2.0).abs() < 0.001);
@@ -275,23 +288,47 @@ mod tests {
         assert!(!p.is_exhausted(0));
         assert!(!p.is_exhausted(1));
         assert!(!p.is_exhausted(2));
-        assert!(!p.is_exhausted(3));
+        assert!(p.is_exhausted(3));
     }
 
     #[test]
     fn test_is_exhausted_true_at_limit() {
         let p = RetryPolicy::with_max_retries(RetryPolicy::default(), 3);
         assert!(
-            p.is_exhausted(4),
-            "attempt 4 should be exhausted when max=3"
+            p.is_exhausted(3),
+            "three completed attempts should exhaust max=3"
         );
+    }
+
+    #[test]
+    fn test_zero_max_tries_is_unlimited() {
+        let p = RetryPolicy::new(0, 0);
+        assert!(!p.is_exhausted(u32::MAX));
+        assert!(p.can_retry_after(u32::MAX));
+        assert!(p.should_retry(
+            u32::MAX,
+            &Aria2Error::Recoverable(crate::error::RecoverableError::Timeout)
+        ));
+        assert!(p.total_estimated_wait_sec().is_infinite());
+    }
+
+    #[test]
+    fn test_max_tries_is_total_attempts() {
+        let p = RetryPolicy::new(1, 0);
+        let error = Aria2Error::Recoverable(crate::error::RecoverableError::Timeout);
+        assert!(!p.should_retry(0, &error));
+
+        let p = RetryPolicy::new(3, 0);
+        assert!(p.should_retry(0, &error));
+        assert!(p.should_retry(1, &error));
+        assert!(!p.should_retry(2, &error));
     }
 
     #[test]
     fn test_stats_reasonable_values() {
         let p = RetryPolicy::default();
         let s = p.stats();
-        assert_eq!(s.max_retries, 3);
+        assert_eq!(s.max_retries, 5);
         assert_eq!(s.retryable_codes_count, 6);
         assert!(s.estimated_max_total_wait_sec > 0.0);
         assert!(s.estimated_max_total_wait_sec < 30.0 + 10.0);

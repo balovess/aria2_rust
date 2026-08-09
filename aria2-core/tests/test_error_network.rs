@@ -150,20 +150,21 @@ async fn test_connection_timeout_slow_server() {
         read_timeout: Duration::from_millis(100),
         write_timeout: Duration::from_millis(100),
         idle_timeout: Duration::from_secs(5),
+        max_idle_per_host: 4,
     };
 
     let mut manager = HttpConnectionManager::new(&config);
     let url = Url::parse(&format!("{}/slow.bin", server.base_url())).unwrap();
 
     // Acquire should timeout due to slow response
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
 
     // Either succeeds (connection established) or times out
     // The timeout behavior depends on whether the TCP handshake completes
     match result {
         Ok(conn) => {
             // Connection succeeded, but read might timeout
-            manager.release(conn.id).await;
+            manager.release(conn).await;
         }
         Err(Aria2Error::Recoverable(RecoverableError::Timeout)) => {
             // Expected: timeout occurred
@@ -241,13 +242,13 @@ fn test_dns_negative_cache_blocks_immediate_retry() {
     let mut cache = DnsCache::with_ttl(300, 5); // 5 second negative TTL
 
     // Record a failed lookup
-    cache.record_failure("nonexistent.invalid");
+    cache.record_failure("nonexistent.invalid", 80);
 
     // Immediate retry should be blocked
     let result = cache.resolve_no_network("nonexistent.invalid", 80);
     assert!(result.is_err(), "Should be blocked by negative cache");
 
-    let err_msg = result.unwrap_err();
+    let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("recently failed"),
         "Error should mention recent failure: {}",
@@ -261,7 +262,7 @@ fn test_dns_negative_cache_expiration_allows_retry() {
     let mut cache = DnsCache::with_ttl(300, 1); // 1 second negative TTL
 
     // Record a failed lookup
-    cache.record_failure("expired.invalid");
+    cache.record_failure("expired.invalid", 80);
 
     // Clear the cache to simulate expiration
     cache.clear();
@@ -269,7 +270,7 @@ fn test_dns_negative_cache_expiration_allows_retry() {
     // Now retry should not be blocked by negative cache
     let result = cache.resolve_no_network("expired.invalid", 80);
     // Should still fail because no actual DNS resolution, but not due to negative cache
-    let err_msg = result.unwrap_err();
+    let err_msg = result.unwrap_err().to_string();
     assert!(
         !err_msg.contains("recently failed"),
         "Error should not mention recent failure after expiration: {}",
@@ -294,7 +295,7 @@ async fn test_dns_resolution_invalid_hostname() {
             retry_result.is_err(),
             "Retry should be blocked by negative cache"
         );
-        let err_msg = retry_result.unwrap_err();
+        let err_msg = retry_result.unwrap_err().to_string();
         assert!(
             err_msg.contains("recently failed"),
             "Error should mention recent failure due to negative cache: {}",
@@ -458,6 +459,7 @@ async fn test_max_connections_limit_error() {
         read_timeout: Duration::from_secs(5),
         write_timeout: Duration::from_secs(5),
         idle_timeout: Duration::from_secs(60),
+        max_idle_per_host: 2,
     };
 
     let mut manager = HttpConnectionManager::new(&config);
@@ -485,18 +487,18 @@ async fn test_max_connections_limit_error() {
 
     // Acquire first connection
     let conn1 = manager
-        .acquire(&url)
+        .acquire(&url, None)
         .await
         .expect("First connection should succeed");
 
     // Acquire second connection
     let conn2 = manager
-        .acquire(&url)
+        .acquire(&url, None)
         .await
         .expect("Second connection should succeed");
 
     // Third connection should fail (max limit reached)
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
     assert!(result.is_err(), "Should fail when max connections reached");
 
     match result {
@@ -527,8 +529,8 @@ async fn test_max_connections_limit_error() {
     }
 
     // Cleanup
-    manager.release(conn1.id).await;
-    manager.release(conn2.id).await;
+    manager.release(conn1).await;
+    manager.release(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -542,6 +544,7 @@ async fn test_connection_cleanup_on_error() {
         read_timeout: Duration::from_secs(1),
         write_timeout: Duration::from_secs(1),
         idle_timeout: Duration::from_secs(5),
+        max_idle_per_host: 2,
     };
 
     let mut manager = HttpConnectionManager::new(&config);
@@ -550,7 +553,7 @@ async fn test_connection_cleanup_on_error() {
     // Use a valid IP format that won't respond
     let url = Url::parse("http://10.255.255.1:9999/unreachable").unwrap();
 
-    let result = manager.acquire(&url).await;
+    let result = manager.acquire(&url, None).await;
 
     // Connection may fail due to timeout or unreachable address
     // Either outcome is acceptable
@@ -566,7 +569,7 @@ async fn test_connection_cleanup_on_error() {
         }
         Ok(conn) => {
             // If connection somehow succeeded, release it
-            manager.release(conn.id).await;
+            manager.release(conn).await;
         }
     }
 
@@ -603,8 +606,10 @@ fn test_redirect_loop_detection() {
     assert!(result.is_err(), "Redirect loop should be detected");
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("loop") || err.to_string().contains("循环"),
-        "Error should mention loop: {}",
+        err.to_string().to_lowercase().contains("loop")
+            || err.to_string().to_lowercase().contains("circular")
+            || err.to_string().contains("循环"),
+        "Error should mention loop/circular: {}",
         err
     );
 }
@@ -632,7 +637,9 @@ fn test_max_redirects_exceeded() {
     assert!(result.is_err(), "Should fail when max redirects exceeded");
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("max") || err.to_string().contains("最大"),
+        err.to_string().to_lowercase().contains("max")
+            || err.to_string().to_lowercase().contains("exceeded")
+            || err.to_string().contains("最大"),
         "Error should mention max redirects: {}",
         err
     );

@@ -99,9 +99,35 @@ class TestSendRequest:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_rpc_domain_code_one_is_not_auth_error(self, transport):
+        respx.post("http://localhost:6800/jsonrpc").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": 1, "message": "GID bad-gid not found"},
+                },
+            )
+        )
+        with pytest.raises(RpcError) as exc_info:
+            await transport.send_request("aria2.tellStatus", ["bad-gid"])
+        assert exc_info.value.code == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_connection_error_on_network_failure(self, transport):
         respx.post("http://localhost:6800/jsonrpc").mock(
             side_effect=httpx.ConnectError("Connection refused")
+        )
+        with pytest.raises(ConnectionError):
+            await transport.send_request("aria2.getVersion", [])
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_connect_timeout_is_connection_error(self, transport):
+        respx.post("http://localhost:6800/jsonrpc").mock(
+            side_effect=httpx.ConnectTimeout("Connection timed out")
         )
         with pytest.raises(ConnectionError):
             await transport.send_request("aria2.getVersion", [])
@@ -156,6 +182,24 @@ class TestSendRequest:
 
     @respx.mock
     @pytest.mark.asyncio
+    async def test_rpc_error_body_is_decoded_before_non_2xx_status(self, transport):
+        respx.post("http://localhost:6800/jsonrpc").mock(
+            return_value=httpx.Response(
+                400,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": 1, "message": "GID not found"},
+                },
+            )
+        )
+        with pytest.raises(RpcError) as exc_info:
+            await transport.send_request("aria2.tellStatus", ["bad-gid"])
+        assert exc_info.value.code == 1
+        assert "GID not found" in str(exc_info.value)
+
+    @respx.mock
+    @pytest.mark.asyncio
     async def test_auth_error_code_2_in_rpc_error(self, transport):
         respx.post("http://localhost:6800/jsonrpc").mock(
             return_value=httpx.Response(
@@ -165,6 +209,23 @@ class TestSendRequest:
         )
         with pytest.raises(AuthError):
             await transport.send_request("aria2.getVersion", [])
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_auth_error_code_minus_32001_in_rpc_error(self, transport):
+        respx.post("http://localhost:6800/jsonrpc").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {"code": -32001, "message": "Invalid token"},
+                },
+            )
+        )
+        with pytest.raises(AuthError) as exc_info:
+            await transport.send_request("aria2.getVersion", [])
+        assert exc_info.value.code == -32001
 
     @pytest.mark.asyncio
     async def test_close(self, transport):

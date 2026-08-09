@@ -152,11 +152,11 @@ async fn test_perf_request_group_speed_tracking_accuracy() {
 
     cmd.execute().await.unwrap();
 
-    let reported_speed = cmd.group().await.download_speed().await;
-    let group = cmd.group().await;
+    let reported_speed = cmd.group().download_speed();
+    let group = cmd.group();
 
-    let completed = group.completed_length().await;
-    let elapsed = group.elapsed_time().await.expect("应有elapsed_time");
+    let completed = group.completed_length();
+    let elapsed = group.elapsed_time().expect("应有elapsed_time");
     let actual_speed = if elapsed.as_secs_f64() > 0.0 {
         completed as f64 / elapsed.as_secs_f64()
     } else {
@@ -210,7 +210,7 @@ async fn test_perf_memory_efficiency_check() {
     );
     assert_eq!(file_size, 10 * 1024 * 1024, "文件大小不匹配");
 
-    let speed = cmd.group().await.download_speed().await;
+    let speed = cmd.group().download_speed();
     println!(
         "[PERF] Reported download speed: {} bytes/s ({:.2} MB/s)",
         speed,

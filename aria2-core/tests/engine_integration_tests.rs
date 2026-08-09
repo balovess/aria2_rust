@@ -13,10 +13,13 @@ use std::time::{Duration, Instant};
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+#[cfg(feature = "metalink")]
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 use aria2_core::rate_limiter::RateLimiterConfig;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 
 // Re-export helpers from test harness module
 use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
@@ -234,34 +237,19 @@ async fn engine_ftp_download_basic() {
         "FTP command construction should succeed for valid URI"
     );
 
-    // GAP: Actual execution requires a running FTP server
-    // In a full test environment, you would:
-    // 1. Start MockFtpServer (from fixtures/mock_ftp_server.rs)
-    // 2. Register a file on the server
-    // 3. Execute the command
-    // 4. Verify file contents match
-    //
-    // For now, validate that the command struct is properly initialized
-    if let Ok(mut cmd) = result {
-        // Verify initial state
-        let status: CommandStatus = cmd.status();
-        assert_eq!(
-            status,
-            CommandStatus::Pending,
-            "New command should be Pending"
-        );
-
-        // Attempting execute will fail (no FTP server), but shouldn't panic
-        let exec_result: Result<(), _> = cmd.execute().await;
-        assert!(
-            exec_result.is_err(),
-            "Execute should fail without FTP server: {:?}",
-            exec_result
-        );
-    }
+    // This test covers URI parsing and command initialization only. A real
+    // transfer belongs in the dedicated FTP server integration target.
+    let cmd = result.expect("valid FTP URI should construct a command");
+    let status: CommandStatus = cmd.status();
+    assert_eq!(
+        status,
+        CommandStatus::Pending,
+        "New command should be Pending"
+    );
 }
 
 /// D4: Metalink download via MetalinkDownloadCommand
+#[cfg(feature = "metalink")]
 ///
 /// Tests Metalink-based download which can mirror from multiple URLs.
 /// Uses a metalink XML document pointing to our mock HTTP server.
@@ -337,6 +325,7 @@ async fn engine_metalink_download_basic() {
 }
 
 /// D6: BT progress persistence (.aria2 control file creation)
+#[cfg(feature = "bittorrent")]
 ///
 /// Tests that BtDownloadCommand with BtProgressManager enabled
 /// creates progress tracking files during/after download.
@@ -345,7 +334,6 @@ async fn engine_metalink_download_basic() {
 #[tokio::test]
 async fn engine_bt_progress_persistence() {
     use aria2_core::engine::bt_download_command::BtDownloadCommand;
-    use aria2_core::engine::bt_progress_info_file::BtProgressManager;
 
     let temp_dir = setup_temp_dir();
 
@@ -389,6 +377,8 @@ async fn engine_bt_progress_persistence() {
     fn bencode_dict(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut result = b"d".to_vec();
         for (key, val) in entries {
+            result.extend_from_slice(key.len().to_string().as_bytes());
+            result.push(b':');
             result.extend_from_slice(key);
             result.extend_from_slice(val);
         }
@@ -418,30 +408,12 @@ async fn engine_bt_progress_persistence() {
         &opts,
         Some(temp_dir.path().to_str().unwrap()),
     );
-    // GAP: BT command construction may fail due to internal validation or missing fields.
-    // If construction fails, document the reason but don't fail the test.
-    match result {
-        Ok(cmd) => {
-            let _cmd = cmd;
-            // Verify output directory exists for potential .aria2 file placement
-            assert!(temp_dir.path().exists(), "Output directory should exist");
-
-            // Note: Actual .aria2 file creation happens during execute() when
-            // BtProgressManager::save_progress() is called. Full end-to-end test
-            // would require MockTrackerServer + MockBtSeeder infrastructure.
-        }
-        Err(e) => {
-            println!("GAP: BtDownloadCommand construction failed: {:?}", e);
-            // This is acceptable for now - full BT infrastructure may not be complete
-        }
-    }
-
-    // Verify BtProgressManager type exists (compilation check)
-    let _manager_check: Option<BtProgressManager> = None;
-    let _ = _manager_check;
+    let _cmd = result.expect("valid torrent metadata should construct a BT command");
+    assert!(temp_dir.path().exists(), "Output directory should exist");
 }
 
 /// D7: BT hook chain fires on completion
+#[cfg(feature = "bittorrent")]
 ///
 /// Tests that post-download hooks (MoveHook, TouchHook) are executed
 /// when a BT download completes.
@@ -450,7 +422,7 @@ async fn engine_bt_progress_persistence() {
 #[tokio::test]
 async fn engine_bt_hook_chain_fires() {
     use aria2_core::engine::bt_download_command::BtDownloadCommand;
-    use aria2_core::engine::bt_post_download_handler::HookManager;
+    use aria2_core::engine::hook_manager::HookManager;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -461,7 +433,7 @@ async fn engine_bt_hook_chain_fires() {
     let touch_executed = Arc::new(AtomicBool::new(false));
 
     // Create HookManager with custom hooks (simulating MoveHook + TouchHook)
-    let hook_config = aria2_core::engine::bt_post_download_handler::HookConfig::default();
+    let hook_config = aria2_core::engine::hook_manager::HookConfig::default();
     let hook_mgr = HookManager::new(hook_config);
     // GAP: HookManager::add_move_hook() and add_touch_hook() may not exist yet
     // or may have different API signatures. Adjust based on actual implementation.
@@ -505,9 +477,11 @@ async fn engine_bt_hook_chain_fires() {
     }
     fn bencode_dict(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut result = b"d".to_vec();
-        for (k, v) in entries {
-            result.extend_from_slice(k);
-            result.extend_from_slice(v);
+        for (key, val) in entries {
+            result.extend_from_slice(key.len().to_string().as_bytes());
+            result.push(b':');
+            result.extend_from_slice(key);
+            result.extend_from_slice(val);
         }
         result.push(b'e');
         result
@@ -535,25 +509,9 @@ async fn engine_bt_hook_chain_fires() {
         &opts,
         Some(temp_dir.path().to_str().unwrap()),
     );
-    // GAP: BT command construction may fail - document and continue
-    if let Err(e) = result {
-        println!(
-            "GAP: BtDownloadCommand construction failed in hook test: {:?}",
-            e
-        );
-        // Still verify hooks were registered (structural check)
-        assert!(
-            !move_executed.load(Ordering::SeqCst),
-            "Move hook should not fire before execution"
-        );
-        assert!(
-            !touch_executed.load(Ordering::SeqCst),
-            "Touch hook should not fire before execution"
-        );
-        return; // Exit test early - can't proceed without command
-    }
+    let _cmd = result.expect("valid torrent metadata should construct a BT command");
 
-    // GAP: Setting hook_manager on BtDownloadCommand requires public API access
+    // Setting hook_manager on BtDownloadCommand requires public API access
     // Currently hook_manager is pub(crate). Would need either:
     // 1. A setter method: cmd.set_hook_manager(hook_mgr)
     // 2. Or construction parameter in DownloadOptions
@@ -653,18 +611,14 @@ async fn engine_error_cleanup_on_failure() {
 }
 
 // ============================================================================
-// TIER B TESTS: Full DownloadEngine.run()
+// TIER B TESTS: Full DownloadEngine lifecycle
 // ============================================================================
 
 /// D5: BitTorrent download with tracker
+#[cfg(feature = "bittorrent")]
 ///
-/// Tests full BT download workflow through DownloadEngine:
-/// - Creates BtDownloadCommand with torrent
-/// - Adds to DownloadEngine
-/// - Spawns engine.run() with timeout
-/// - Verifies all pieces downloaded correctly
+/// Tests full BT download workflow through the v2 engine command path.
 /// GAP: Requires MockTrackerServer + MockBtSeeder infrastructure.
-/// Simplified version tests engine lifecycle with HTTP commands instead.
 #[tokio::test]
 async fn engine_bt_download_with_tracker() {
     use aria2_core::engine::bt_download_command::BtDownloadCommand;
@@ -705,9 +659,11 @@ async fn engine_bt_download_with_tracker() {
     }
     fn bencode_dict(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
         let mut result = b"d".to_vec();
-        for (k, v) in entries {
-            result.extend_from_slice(k);
-            result.extend_from_slice(v);
+        for (key, val) in entries {
+            result.extend_from_slice(key.len().to_string().as_bytes());
+            result.push(b':');
+            result.extend_from_slice(key);
+            result.extend_from_slice(val);
         }
         result.push(b'e');
         result
@@ -735,26 +691,22 @@ async fn engine_bt_download_with_tracker() {
         &opts,
         Some(temp_dir.path().to_str().unwrap()),
     );
-    // GAP: BT command construction may fail - document and continue if possible
-    match bt_result {
-        Ok(bt_cmd) => {
-            let engine = DownloadEngine::new(100);
-
-            let add_result = engine.add_command(Box::new(bt_cmd));
-            assert!(
-                add_result.is_ok(),
-                "Engine should accept BT command: {:?}",
-                add_result.err()
-            );
-        }
-        Err(e) => {
-            println!(
-                "GAP: BtDownloadCommand construction failed in tracker test: {:?}",
-                e
-            );
-            // Test can't proceed without valid BT command
-        }
-    }
+    let _bt_cmd = bt_result.expect("valid torrent metadata should construct a BT command");
+    let group_man = std::sync::Arc::new(tokio::sync::RwLock::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let gid = group_man
+        .read()
+        .await
+        .add_group(vec![tracker_url.to_string()], opts.clone())
+        .expect("group should be created");
+    let group = group_man
+        .read()
+        .await
+        .group_by_id(gid)
+        .expect("group should be registered");
+    let command = EngineCommand::AddDownload { group };
+    assert!(matches!(command, EngineCommand::AddDownload { .. }));
 
     // Note: We don't call engine.run() here because it would block waiting
     // for peers/tracker that don't exist. In a complete test environment:
@@ -795,7 +747,11 @@ async fn engine_multi_task_parallel() {
     server.register_range_response("/file_b.bin", &data_b);
     server.register_range_response("/file_c.bin", &data_c);
 
-    let engine = DownloadEngine::new(50);
+    let group_man = std::sync::Arc::new(tokio::sync::RwLock::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let mut engine = DownloadEngine::new(50);
+    engine.set_request_group_man(group_man.clone());
 
     let url_a = format!("{}/file_a.bin", server.base_url());
     let url_b = format!("{}/file_b.bin", server.base_url());
@@ -805,22 +761,28 @@ async fn engine_multi_task_parallel() {
     let path_b = temp_dir.path().join("file_b.bin");
     let path_c = temp_dir.path().join("file_c.bin");
 
-    let cmd_a = build_http_command(&url_a, &path_a).expect("Failed to build cmd A");
-    let cmd_b = build_http_command(&url_b, &path_b).expect("Failed to build cmd B");
-    let cmd_c = build_http_command(&url_c, &path_c).expect("Failed to build cmd C");
-
-    assert!(
-        engine.add_command(Box::new(cmd_a)).is_ok(),
-        "add_command A should succeed"
-    );
-    assert!(
-        engine.add_command(Box::new(cmd_b)).is_ok(),
-        "add_command B should succeed"
-    );
-    assert!(
-        engine.add_command(Box::new(cmd_c)).is_ok(),
-        "add_command C should succeed"
-    );
+    let gids = {
+        let man = group_man.read().await;
+        [
+            man.add_group(vec![url_a], test_download_options(temp_dir.path())),
+            man.add_group(vec![url_b], test_download_options(temp_dir.path())),
+            man.add_group(vec![url_c], test_download_options(temp_dir.path())),
+        ]
+    };
+    let engine_cmd_tx = engine.engine_cmd_tx();
+    for gid in gids
+        .into_iter()
+        .map(|result| result.expect("group should be created"))
+    {
+        let group = group_man
+            .read()
+            .await
+            .group_by_id(gid)
+            .expect("group should be registered");
+        engine_cmd_tx
+            .send(EngineCommand::AddDownload { group })
+            .expect("engine command channel should be open");
+    }
 
     let start = Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(30), engine.run()).await;
@@ -869,7 +831,8 @@ async fn engine_global_rate_limit() {
 
     // Create DownloadEngine with rate limiter
     let mut engine = DownloadEngine::new(50);
-    let rate_config = RateLimiterConfig::new(Some(rate_limit_bytes_per_sec), None);
+    let rate_config = RateLimiterConfig::new(Some(rate_limit_bytes_per_sec), None)
+        .with_burst(Some(rate_limit_bytes_per_sec), None);
     engine.set_global_rate_limiter(rate_config);
 
     // Build command with rate limit awareness
@@ -879,6 +842,12 @@ async fn engine_global_rate_limit() {
 
     let mut cmd = DownloadCommand::new(gid, &url, &opts, None, Some("large_file.bin"))
         .expect("Failed to build command with rate limit");
+    cmd.set_global_limiter(
+        engine
+            .global_rate_limiter()
+            .cloned()
+            .expect("global rate limiter should be configured"),
+    );
 
     // Measure download time
     let start = Instant::now();
@@ -908,25 +877,14 @@ async fn engine_global_rate_limit() {
         theoretical_min_secs
     );
 
-    // Note: This assertion may be flaky in CI due to variable conditions.
-    // Primary goal is to verify rate limiter doesn't crash and download completes.
-    // If rate limiting is working, elapsed should be noticeably > instant.
-    // GAP: Rate limiter may not be applied correctly in current implementation.
-    // If test fails here, it indicates rate limiting needs investigation.
-    if actual_secs >= theoretical_min_secs {
-        println!(
-            "✓ Rate limiting appears to be working ({}s >= {}s)",
-            actual_secs, theoretical_min_secs
-        );
-    } else {
-        println!(
-            "⚠ GAP: Download faster than expected ({}s < {}s). \
-             Rate limiter may not be applied or needs larger file size to observe effect.",
-            actual_secs, theoretical_min_secs
-        );
-        // Don't fail the test - just document the gap
-        // assert!(false, "Rate limit not working as expected");
-    }
+    assert!(
+        actual_secs >= theoretical_min_secs,
+        "global rate limit was not enforced: {} bytes at {} B/s took {:.2}s, expected at least {:.2}s",
+        large_data.len(),
+        rate_limit_bytes_per_sec,
+        actual_secs,
+        theoretical_min_secs
+    );
 
     server.shutdown().await;
 }
@@ -980,22 +938,27 @@ async fn engine_session_save_restore_roundtrip() {
     let path_1 = temp_dir.path().join("session_test_1.bin");
     let path_2 = temp_dir.path().join("session_test_2.bin");
 
-    let cmd_1 = build_http_command(&url_1, &path_1).expect("Failed to build cmd 1");
-    let cmd_2 = build_http_command(&url_2, &path_2).expect("Failed to build cmd 2");
+    for (gid, url) in [(GroupId::new(1), &url_1), (GroupId::new(2), &url_2)] {
+        group_man
+            .read()
+            .await
+            .add_group_with_gid(
+                gid,
+                vec![(*url).clone()],
+                test_download_options(temp_dir.path()),
+            )
+            .expect("session group should be created");
 
-    let add_result_1 = engine.add_command(Box::new(cmd_1));
-    let add_result_2 = engine.add_command(Box::new(cmd_2));
-
-    assert!(
-        add_result_1.is_ok(),
-        "Session add_command 1 should succeed: {:?}",
-        add_result_1.err()
-    );
-    assert!(
-        add_result_2.is_ok(),
-        "Session add_command 2 should succeed: {:?}",
-        add_result_2.err()
-    );
+        let group = group_man
+            .read()
+            .await
+            .group_by_id(gid)
+            .expect("session group should be registered");
+        engine
+            .engine_cmd_tx()
+            .send(EngineCommand::AddDownload { group })
+            .expect("engine command channel should be open");
+    }
 
     // Verify session path is set (this should still work)
     assert!(
@@ -1011,72 +974,45 @@ async fn engine_session_save_restore_roundtrip() {
     // Mark session dirty to trigger save
     engine.mark_session_dirty();
 
-    // Execute downloads first so RequestGroups have URIs to serialize
-    // (session saves active task metadata)
-    let mut cmd_1 = build_http_command(&url_1, &path_1).expect("Rebuild cmd 1");
-    let mut cmd_2 = build_http_command(&url_2, &path_2).expect("Rebuild cmd 2");
+    let shutdown_tx = engine
+        .take_shutdown_sender()
+        .expect("engine should provide a shutdown sender");
+    let engine_task = tokio::spawn(engine.run());
+    #[allow(clippy::let_unit_value)]
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let group_state = group_man.read().await;
+            let downloads_complete = [GroupId::new(1), GroupId::new(2)].iter().all(|gid| {
+                group_state.group_by_id(*gid).is_some_and(|group| {
+                    matches!(
+                        group.recover().status(),
+                        aria2_core::request::request_group::DownloadStatus::Complete
+                            | aria2_core::request::request_group::DownloadStatus::Error(_)
+                    )
+                })
+            });
+            drop(group_state);
+            if downloads_complete {
+                shutdown_tx
+                    .send(())
+                    .expect("shutdown channel should be open");
+                break engine_task.await.expect("engine task panicked");
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("engine run did not terminate within 15 seconds")
+    .expect("engine run failed");
+    assert_eq!((), ());
 
-    // Manually add groups to manager (simulating what engine does internally)
-    {
-        let _man = group_man.write().await;
-        // Groups are typically added during command dispatch
-        // For testing, we verify the session infrastructure is wired up
-    }
-
-    // Execute downloads to populate state
-    let r1: Result<(), _> = cmd_1.execute().await;
-    let r2: Result<(), _> = cmd_2.execute().await;
-
-    assert!(r1.is_ok(), "Cmd 1 should succeed: {:?}", r1.err());
-    assert!(r2.is_ok(), "Cmd 2 should succeed: {:?}", r2.err());
-
-    // Trigger manual session save via shutdown path
-    let shutdown_result: Result<(), _> = engine.shutdown_engine().await;
+    let session_content = std::fs::read_to_string(&session_path)
+        .expect("final engine save should create session file");
     assert!(
-        shutdown_result.is_ok(),
-        "Shutdown should succeed: {:?}",
-        shutdown_result.err()
+        session_content.is_empty(),
+        "Completed downloads should not remain in the session file"
     );
 
-    // Give async save time to complete
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // Verify session file was created
-    // GAP: Session file format and exact timing depend on auto-save implementation
-    // The file may or may not exist depending on whether auto-save fired
-    if session_path.exists() {
-        let session_content =
-            std::fs::read_to_string(&session_path).expect("Failed to read session file");
-
-        println!("Session file content:\n{}", session_content);
-
-        // Verify session contains task information
-        assert!(
-            session_content.contains("session_test_1") || !session_content.is_empty(),
-            "Session file should contain task info or be non-empty"
-        );
-
-        // GAP: Session restore would require:
-        // 1. Parse session file format
-        // 2. Reconstruct DownloadCommands from serialized state
-        // 3. Add restored commands to new engine
-        // 4. Verify recovered tasks can resume/complete
-        //
-        // Example:
-        // let mut engine2 = DownloadEngine::new(100);
-        // let restored = load_session_from_file(&session_path)?;
-        // for task in restored.tasks {
-        //     engine2.add_command(rebuild_command(task))?;
-        // }
-        // engine2.run().await?;
-    } else {
-        println!(
-            "Note: Session file not yet created (auto-save may not have fired). \
-             This is acceptable if manual save wasn't triggered."
-        );
-    }
-
-    // Verify original downloads completed successfully
     assert_file_contents(&path_1, &data_1);
     assert_file_contents(&path_2, &data_2);
 

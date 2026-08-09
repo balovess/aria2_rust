@@ -21,13 +21,22 @@ enum ParamPattern {
         step: u64,
         width: usize,
     },
-    /// [START-END[:STEP]] range syntax
+    /// Bracket `[START-END[:STEP]]` numeric range syntax.
     Bracket {
         start: u64,
         end: u64,
         step: u64,
         width: usize,
     },
+    /// [START-END[:STEP]] alphabetic range syntax.
+    AlphaBracket {
+        start: String,
+        end: String,
+        step: u64,
+        width: usize,
+    },
+    /// {CHOICE1,CHOICE2,...} choice expansion.
+    Choice { values: Vec<String> },
 }
 
 /// Parse a URI string to detect parameterized patterns.
@@ -62,22 +71,33 @@ fn find_param_patterns(uri: &str) -> Vec<(usize, ParamPattern)> {
         patterns.push((start, ParamPattern::Simple { value }));
     }
 
-    // Pattern 2: ${...} brace form
-    // Can be: ${N}, ${START-END}, or ${START-END:STEP}
+    // Pattern 2: {choice,choice} expansion.
+    let choice_re = Regex::new(r"\{([^{}]+,[^{}]+)\}").unwrap();
+    for cap in choice_re.captures_iter(uri) {
+        patterns.push((
+            cap.get(0).unwrap().start(),
+            ParamPattern::Choice {
+                values: cap[1].split(',').map(str::to_owned).collect(),
+            },
+        ));
+    }
+
+    // Pattern 3: ${...} numeric form.
     let braced_re = Regex::new(r"\$\{([^}]+)\}").unwrap();
     for cap in braced_re.captures_iter(uri) {
         let full_match = cap.get(0).unwrap();
         let inner = cap.get(1).unwrap().as_str();
 
-        if let Some(pattern) = parse_braced_pattern(inner) {
-            patterns.push((full_match.start(), pattern));
-        }
+        let pattern = match parse_braced_pattern(inner) {
+            Some(pattern) => pattern,
+            None => continue,
+        };
+        patterns.push((full_match.start(), pattern));
     }
 
-    // Pattern 3: [...] bracket form (range syntax)
-    // Must be [START-END] or [START-END:STEP]
-    // Need to be careful not to match IPv6 addresses or other bracket usages
-    let bracket_re = Regex::new(r"\[(\d+)-(\d+)(?::(\d+))?\]").unwrap();
+    // Pattern 4: [...] bracket form (numeric or alphabetic range syntax).
+    // Need to be careful not to match IPv6 addresses or other bracket usages.
+    let bracket_re = Regex::new(r"\[([A-Za-z0-9]+)-([A-Za-z0-9]+)(?::([0-9]+))?\]").unwrap();
     for cap in bracket_re.captures_iter(uri) {
         let full_match = cap.get(0).unwrap();
 
@@ -90,29 +110,35 @@ fn find_param_patterns(uri: &str) -> Vec<(usize, ParamPattern)> {
         let start_str = cap.get(1).unwrap().as_str();
         let end_str = cap.get(2).unwrap().as_str();
         let step_str = cap.get(3).map(|m| m.as_str());
+        let step = step_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
+        if step == 0 {
+            continue;
+        }
 
         if let (Ok(start), Ok(end)) = (start_str.parse::<u64>(), end_str.parse::<u64>()) {
-            let step = step_str.and_then(|s| s.parse::<u64>().ok()).unwrap_or(1);
-            if step == 0 {
-                continue; // Invalid step
-            }
-
-            // Determine width from the larger number's digit count
-            let width = max(start_str.len(), end_str.len());
-
             patterns.push((
                 full_match.start(),
                 ParamPattern::Bracket {
                     start,
                     end,
                     step,
-                    width,
+                    width: max(start_str.len(), end_str.len()),
+                },
+            ));
+        } else if is_alpha_range(start_str, end_str) {
+            patterns.push((
+                full_match.start(),
+                ParamPattern::AlphaBracket {
+                    start: start_str.to_string(),
+                    end: end_str.to_string(),
+                    step,
+                    width: start_str.len(),
                 },
             ));
         }
     }
 
-    // Sort by position to maintain left-to-right order
+    // Sort by position to maintain left-to-right order.
     patterns.sort_by_key(|(pos, _)| *pos);
     patterns
 }
@@ -174,6 +200,59 @@ fn parse_braced_pattern(inner: &str) -> Option<ParamPattern> {
     None
 }
 
+fn is_alpha_range(start: &str, end: &str) -> bool {
+    !start.is_empty()
+        && start.len() == end.len()
+        && ((start.bytes().all(|b| b.is_ascii_lowercase())
+            && end.bytes().all(|b| b.is_ascii_lowercase()))
+            || (start.bytes().all(|b| b.is_ascii_uppercase())
+                && end.bytes().all(|b| b.is_ascii_uppercase())))
+}
+
+fn alpha_value(value: &str) -> u32 {
+    value.bytes().fold(0, |acc, byte| {
+        acc * 26 + u32::from(byte.to_ascii_lowercase() - b'a' + 1)
+    })
+}
+
+fn alpha_string(mut value: u32, uppercase: bool, width: usize) -> String {
+    let mut bytes = Vec::new();
+    while value > 0 {
+        value -= 1;
+        bytes.push((b'a' + (value % 26) as u8) as char);
+        value /= 26;
+    }
+    while bytes.len() < width {
+        bytes.push('a');
+    }
+    bytes.reverse();
+    let result: String = bytes.into_iter().collect();
+    if uppercase {
+        result.to_ascii_uppercase()
+    } else {
+        result
+    }
+}
+
+fn generate_alpha_range(start: &str, end: &str, step: u64, width: usize) -> Vec<String> {
+    if step == 0 {
+        return Vec::new();
+    }
+    let start_value = alpha_value(start);
+    let end_value = alpha_value(end);
+    let uppercase = start.bytes().next().is_some_and(|b| b.is_ascii_uppercase());
+    let mut value = start_value;
+    let mut result = Vec::new();
+    while value <= end_value {
+        result.push(alpha_string(value, uppercase, width));
+        value = match value.checked_add(step as u32) {
+            Some(next) => next,
+            None => break,
+        };
+    }
+    result
+}
+
 /// Format a number with zero-padding to the specified width
 fn format_with_width(n: u64, width: usize) -> String {
     format!("{:0width$}", n, width = width)
@@ -199,6 +278,15 @@ fn expand_pattern(pattern: &ParamPattern) -> Vec<String> {
             step,
             width,
         } => generate_range(*start, *end, *step, *width),
+        ParamPattern::AlphaBracket {
+            start,
+            end,
+            step,
+            width,
+        } => generate_alpha_range(start, end, *step, *width),
+        ParamPattern::Choice { values } => {
+            values.iter().map(|value| value.trim().to_owned()).collect()
+        }
     }
 }
 
@@ -246,7 +334,8 @@ fn generate_range(start: u64, end: u64, step: u64, width: usize) -> Vec<String> 
 /// - **Simple `$num`**: Expands starting from 1, with the number of expansions determined
 ///   by the digit count (e.g., `$3` → 3 values: 1, 2, 3)
 /// - **Braced `${...}`**: Supports ranges and zero-padding
-/// - **Bracket `[...]`**: Range syntax with optional step
+/// - **Bracket `[...]`**: Numeric or alphabetic range with optional step
+/// - **Choice `{a,b}`**: Expands each choice, with Cartesian product across multiple patterns
 /// - **Multiple patterns**: Generates Cartesian product of all pattern combinations
 ///
 /// If no patterns are detected or if parsing fails, returns a vector containing only the original URI.
@@ -283,43 +372,47 @@ pub fn expand_parameterized_uri(uri: &str) -> Vec<String> {
         return vec![uri.to_string()];
     }
 
-    // Generate Cartesian product of all expansions
-    cartesian_product_replace(uri, &patterns, &all_expansions)
+    let mut template = uri.to_string();
+    for (index, (position, pattern)) in patterns.iter().enumerate().rev() {
+        let start = *position;
+        let end = start + pattern_source_len(&uri[start..], pattern);
+        template.replace_range(start..end, &format!("\u{1f}{index}\u{1f}"));
+    }
+    cartesian_product_replace(&template, &all_expansions)
 }
 
-/// Replace all patterns in URI with combinations from expansions (Cartesian product)
-fn cartesian_product_replace(
-    uri: &str,
-    _patterns: &[(usize, ParamPattern)],
-    expansions: &[Vec<String>],
-) -> Vec<String> {
-    if expansions.is_empty() {
-        return vec![uri.to_string()];
-    }
-
-    // Start with the base URI
+/// Replace marked pattern occurrences with the Cartesian product of expansions.
+fn cartesian_product_replace(uri: &str, expansions: &[Vec<String>]) -> Vec<String> {
     let mut results = vec![uri.to_string()];
-
-    // For each expansion set, replace the corresponding pattern
-    // We need to track which pattern we're replacing
-    for expansion_set in expansions {
-        let mut new_results = Vec::new();
-
+    for (index, expansion_set) in expansions.iter().enumerate() {
+        let marker = format!("\u{1f}{index}\u{1f}");
+        let mut next = Vec::with_capacity(results.len() * expansion_set.len());
         for result in &results {
             for value in expansion_set {
-                // Find and replace the next unresolved pattern
-                let replaced = replace_next_pattern(result, value);
-                new_results.push(replaced);
+                next.push(result.replacen(&marker, value, 1));
             }
         }
-
-        results = new_results;
+        results = next;
     }
-
     results
 }
 
-/// Replace the first (leftmost) unresolved parameterized pattern with the given value
+fn pattern_source_len(source: &str, pattern: &ParamPattern) -> usize {
+    match pattern {
+        ParamPattern::Simple { .. } => {
+            1 + source[1..].bytes().take_while(u8::is_ascii_digit).count()
+        }
+        ParamPattern::Braced { .. } | ParamPattern::Choice { .. } => {
+            source.find('}').map_or(0, |end| end + 1)
+        }
+        ParamPattern::Bracket { .. } | ParamPattern::AlphaBracket { .. } => {
+            source.find(']').map_or(0, |end| end + 1)
+        }
+    }
+}
+
+/// Replace the first (leftmost) unresolved parameterized pattern with the given value.
+#[allow(dead_code)]
 fn replace_next_pattern(uri: &str, replacement: &str) -> String {
     // Try to replace $N pattern first (simple)
     if let Some(pos) = find_simple_pattern_pos(uri) {
@@ -334,8 +427,8 @@ fn replace_next_pattern(uri: &str, replacement: &str) -> String {
         return format!("{}{}{}", before, replacement, after);
     }
 
-    // Try to replace ${...} pattern
-    if let Some(pos) = uri.find("${")
+    // Try to replace a `${...}` or `{...}` pattern.
+    if let Some(pos) = uri.find("${").or_else(|| uri.find('{'))
         && let Some(end) = uri[pos..].find('}')
     {
         let end_pos = pos + end + 1;
@@ -358,7 +451,8 @@ fn replace_next_pattern(uri: &str, replacement: &str) -> String {
     uri.to_string()
 }
 
-/// Find the position of a simple $N pattern (not preceded by {)
+/// Find the position of a simple $N pattern (not preceded by `{`).
+#[allow(dead_code)]
 fn find_simple_pattern_pos(uri: &str) -> Option<usize> {
     // Note: regex crate does not support lookbehind, so we use manual filtering
     let re = Regex::new(r"\$(\d+)").unwrap();
@@ -375,13 +469,14 @@ fn find_simple_pattern_pos(uri: &str) -> Option<usize> {
     None
 }
 
-/// Find the position of a bracket pattern [N-M] that is NOT part of an IPv6 address
+/// Find the position of a bracket pattern `[N-M]` that is NOT part of an IPv6 address.
+#[allow(dead_code)]
 fn find_bracket_pattern_pos(uri: &str) -> Option<usize> {
-    let re = Regex::new(r"\[(\d+-\d+(?::\d+)?)\]").unwrap();
+    let re = Regex::new(r"\[[A-Za-z0-9]+-[A-Za-z0-9]+(?::[0-9]+)?\]").unwrap();
 
     for m in re.find_iter(uri) {
         let before = &uri[..m.start()];
-        // Skip if this looks like it could be part of an IPv6 address
+        // Skip if this looks like it could be part of an IPv6 address.
         if !before.ends_with(':') || !before.contains("::") {
             return Some(m.start());
         }
@@ -394,566 +489,5 @@ fn find_bracket_pattern_pos(uri: &str) -> Option<usize> {
 mod tests {
     use super::*;
 
-    // ======================================================================
-    // Test Group 1: Simple $num expansion
-    // ======================================================================
-
-    #[test]
-    fn test_simple_dollar_num_basic() {
-        // $N where N is digits - $3 generates 10^3 = 1000 values
-        let uri = "http://example.com/file$3.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert!(!expanded.is_empty());
-        assert!(expanded.len() > 1, "Should produce multiple URIs");
-        assert!(
-            expanded[0].contains("file1"),
-            "First URI should contain file1"
-        );
-    }
-
-    #[test]
-    fn test_simple_dollar_num_with_3() {
-        let uri = "http://example.com/file$3.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 1000); // 10^3 = 1000 values
-        assert!(expanded[0].ends_with("file1.txt"));
-        assert!(expanded[1].ends_with("file2.txt"));
-        assert!(expanded.last().unwrap().ends_with("file1000.txt"));
-    }
-
-    #[test]
-    fn test_simple_dollar_num_single_digit() {
-        let uri = "http://example.com/file$1.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 10); // 10^1 = 10 values
-        assert!(expanded[0].contains("file1"));
-        assert!(expanded[9].contains("file10"));
-    }
-
-    // ======================================================================
-    // Test Group 2: Zero-padded ${num} expansion
-    // ======================================================================
-
-    #[test]
-    fn test_braced_zero_padded_single_number() {
-        let uri = "http://example.com/file${03}.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 3);
-        // Width = string length of "03" = 2, so output is "01", "02", "03"
-        assert_eq!(expanded[0], "http://example.com/file01.txt");
-        assert_eq!(expanded[1], "http://example.com/file02.txt");
-        assert_eq!(expanded[2], "http://example.com/file03.txt");
-    }
-
-    #[test]
-    fn test_braced_zero_padded_width_detection() {
-        let uri = "http://example.com/data${0005}.bin";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 5);
-        // Width = string length of "0005" = 4, so output is "0001", "0002", "0003", "0004", "0005"
-        assert!(expanded[0].ends_with("data0001.bin"));
-        assert!(expanded[4].ends_with("data0005.bin"));
-        for uri in &expanded {
-            assert!(
-                uri.contains("data000") || uri.contains("data005"),
-                "Should be zero-padded to width 4"
-            );
-        }
-    }
-
-    // ======================================================================
-    // Test Group 3: ${start-end} range forward
-    // ======================================================================
-
-    #[test]
-    fn test_braced_range_forward() {
-        let uri = "http://example.com/chapter${01-05}.html";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 5);
-        assert_eq!(expanded[0], "http://example.com/chapter01.html");
-        assert_eq!(expanded[1], "http://example.com/chapter02.html");
-        assert_eq!(expanded[2], "http://example.com/chapter03.html");
-        assert_eq!(expanded[3], "http://example.com/chapter04.html");
-        assert_eq!(expanded[4], "http://example.com/chapter05.html");
-    }
-
-    #[test]
-    fn test_braced_range_large_numbers() {
-        let uri = "http://example.com/archive${100-105}.zip";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 6);
-        assert_eq!(expanded[0], "http://example.com/archive100.zip");
-        assert_eq!(expanded[5], "http://example.com/archive105.zip");
-    }
-
-    // ======================================================================
-    // Test Group 4: ${start-end:step} range with step
-    // ======================================================================
-
-    #[test]
-    fn test_braced_range_with_step() {
-        let uri = "http://example.com/part${01-10:2}.dat";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 5);
-        assert_eq!(expanded[0], "http://example.com/part01.dat");
-        assert_eq!(expanded[1], "http://example.com/part03.dat");
-        assert_eq!(expanded[2], "http://example.com/part05.dat");
-        assert_eq!(expanded[3], "http://example.com/part07.dat");
-        assert_eq!(expanded[4], "http://example.com/part09.dat");
-    }
-
-    #[test]
-    fn test_braced_step_of_3() {
-        let uri = "http://example.com/img${001-009:3}.jpg";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 3);
-        assert_eq!(expanded[0], "http://example.com/img001.jpg");
-        assert_eq!(expanded[1], "http://example.com/img004.jpg");
-        assert_eq!(expanded[2], "http://example.com/img007.jpg");
-    }
-
-    // ======================================================================
-    // Test Group 5: [FROM-TO] bracket syntax
-    // ======================================================================
-
-    #[test]
-    fn test_bracket_range_basic() {
-        let uri = "http://example.com/file[01-05].zip";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 5);
-        assert_eq!(expanded[0], "http://example.com/file01.zip");
-        assert_eq!(expanded[1], "http://example.com/file02.zip");
-        assert_eq!(expanded[2], "http://example.com/file03.zip");
-        assert_eq!(expanded[3], "http://example.com/file04.zip");
-        assert_eq!(expanded[4], "http://example.com/file05.zip");
-    }
-
-    #[test]
-    fn test_bracket_range_different_widths() {
-        let uri = "http://example.com/data[1-10].bin";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 10);
-        // Width = max(len("1"), len("10")) = 2, so zero-padded to 2 digits
-        assert_eq!(expanded[0], "http://example.com/data01.bin");
-        assert_eq!(expanded[9], "http://example.com/data10.bin");
-    }
-
-    // ======================================================================
-    // Test Group 6: [FROM-TO:STEP] bracket with step
-    // ======================================================================
-
-    #[test]
-    fn test_bracket_range_with_step() {
-        let uri = "http://example.com/file[01-10:2].zip";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 5);
-        assert_eq!(expanded[0], "http://example.com/file01.zip");
-        assert_eq!(expanded[1], "http://example.com/file03.zip");
-        assert_eq!(expanded[2], "http://example.com/file05.zip");
-        assert_eq!(expanded[3], "http://example.com/file07.zip");
-        assert_eq!(expanded[4], "http://example.com/file09.zip");
-    }
-
-    #[test]
-    fn test_bracket_step_of_5() {
-        let uri = "http://example.com/vol[005-100:5].pdf";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 20);
-        assert_eq!(expanded[0], "http://example.com/vol005.pdf");
-        assert_eq!(expanded[1], "http://example.com/vol010.pdf");
-        assert_eq!(expanded.last().unwrap(), &"http://example.com/vol100.pdf");
-    }
-
-    // ======================================================================
-    // Test Group 7: Reverse ranges [10-01]
-    // ======================================================================
-
-    #[test]
-    fn test_reverse_bracket_range() {
-        let uri = "http://example.com/file[10-01].zip";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 10);
-        assert_eq!(expanded[0], "http://example.com/file10.zip");
-        assert_eq!(expanded[1], "http://example.com/file09.zip");
-        assert_eq!(expanded[8], "http://example.com/file02.zip");
-        assert_eq!(expanded[9], "http://example.com/file01.zip");
-    }
-
-    #[test]
-    fn test_reverse_braced_range() {
-        let uri = "http://example.com/ch${10-05}.html";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 6);
-        assert_eq!(expanded[0], "http://example.com/ch10.html");
-        assert_eq!(expanded[5], "http://example.com/ch05.html");
-    }
-
-    // ======================================================================
-    // Test Group 8: Multiple patterns Cartesian product
-    // ======================================================================
-
-    #[test]
-    fn test_multiple_patterns_cartesian_product() {
-        let _uri = "http://example.com/${chapter}-${page}.html";
-        // Note: This requires both chapter and page to have defined ranges
-        // Let's test with actual ranges
-        let uri_with_ranges = "http://example.com/${01-03}-${01-03}.html";
-        let expanded = expand_parameterized_uri(uri_with_ranges);
-
-        assert_eq!(expanded.len(), 9); // 3 x 3 = 9
-        assert_eq!(expanded[0], "http://example.com/01-01.html");
-        assert_eq!(expanded[1], "http://example.com/01-02.html");
-        assert_eq!(expanded[2], "http://example.com/01-03.html");
-        assert_eq!(expanded[3], "http://example.com/02-01.html");
-        assert_eq!(expanded[8], "http://example.com/03-03.html");
-    }
-
-    #[test]
-    fn test_three_patterns_cartesian() {
-        let uri = "http://example.com/[1-2]-[a-d]-${01-02}.txt";
-        // [a-d] is not a numeric range (letters), so it's treated as literal text.
-        // Only [1-2] (2 values) and ${01-02} (2 values) are expanded -> 2x2 = 4 results
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 4); // 2 x 1 x 2 = 4 ([a-d] is literal)
-        // Note: pattern replacement order depends on internal pattern detection order
-        assert!(expanded[0].contains("[a-d]")); // [a-d] preserved as literal
-    }
-
-    #[test]
-    fn test_mixed_brace_and_bracket() {
-        let uri = "http://example.com/${01-02}-[01-03].dat";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 6); // 2 x 3 = 6
-        assert_eq!(expanded[0], "http://example.com/01-01.dat");
-        assert_eq!(expanded[1], "http://example.com/01-02.dat");
-        assert_eq!(expanded[2], "http://example.com/01-03.dat");
-        assert_eq!(expanded[3], "http://example.com/02-01.dat");
-        assert_eq!(expanded[5], "http://example.com/02-03.dat");
-    }
-
-    // ======================================================================
-    // Test Group 9: No-pattern passthrough
-    // ======================================================================
-
-    #[test]
-    fn test_no_pattern_passthrough() {
-        let uris = vec![
-            "http://example.com/normal_file.txt",
-            "https://cdn.example.com/static/image.png",
-            "ftp://files.example.com/document.pdf",
-        ];
-
-        for uri in uris {
-            let expanded = expand_parameterized_uri(uri);
-            assert_eq!(expanded.len(), 1);
-            assert_eq!(expanded[0], uri);
-        }
-    }
-
-    #[test]
-    fn test_uri_with_query_params_no_pattern() {
-        let uri = "http://example.com/path?query=value&other=123";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], uri);
-    }
-
-    // ======================================================================
-    // Test Group 10: Edge cases
-    // ======================================================================
-
-    #[test]
-    fn test_single_value_range() {
-        let uri = "http://example.com/file[5-5].txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], "http://example.com/file5.txt");
-    }
-
-    #[test]
-    fn test_single_value_braced() {
-        let uri = "http://example.com/file${07-07}.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], "http://example.com/file07.txt");
-    }
-
-    #[test]
-    fn test_large_numbers() {
-        // Nested ${} inside [] - bracket regex won't match inner ${...},
-        // so this falls through to treating [${99999-100005}] as literal text.
-        // Use pure bracket syntax instead for large number ranges.
-        let uri = "http://example.com/big[099999-100005].bin";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 7);
-        assert_eq!(expanded[0], "http://example.com/big099999.bin");
-        assert_eq!(expanded[6], "http://example.com/big100005.bin");
-    }
-
-    #[test]
-    fn test_width_overflow_handling() {
-        // When numbers exceed the specified width, they should still display correctly
-        let uri = "http://example.com/f[1-100].txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 100);
-        // Width = max(len("1"), len("100")) = 3, zero-padded to 3 digits
-        assert_eq!(expanded[0], "http://example.com/f001.txt");
-        assert_eq!(expanded[99], "http://example.com/f100.txt");
-    }
-
-    #[test]
-    fn test_empty_uri() {
-        let expanded = expand_parameterized_uri("");
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], "");
-    }
-
-    // ======================================================================
-    // Test Group 11: Invalid patterns gracefully handled
-    // ======================================================================
-
-    #[test]
-    fn test_invalid_bracket_content() {
-        let uri = "http://example.com/[abc-def].txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        // Should return original URI unchanged
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], uri);
-    }
-
-    #[test]
-    fn test_invalid_braced_content() {
-        let uri = "http://example.com/${not-a-number}.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        // Should return original URI unchanged
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], uri);
-    }
-
-    #[test]
-    fn test_zero_step_invalid() {
-        let uri = "http://example.com/file[01-10:0].zip";
-        let expanded = expand_parameterized_uri(uri);
-
-        // Step of 0 is invalid, should return original
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], uri);
-    }
-
-    #[test]
-    fn test_unclosed_braces() {
-        let uri = "http://example.com/${unclosed.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        // Unclosed braces are not matched by our regex, so treated as normal URI
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], uri);
-    }
-
-    #[test]
-    fn test_malformed_range() {
-        let uri = "http://example.com/${10-}.txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        // Malformed range should return original
-        assert_eq!(expanded.len(), 1);
-        assert_eq!(expanded[0], uri);
-    }
-
-    // ======================================================================
-    // Test Group 12: Special characters preserved
-    // ======================================================================
-
-    #[test]
-    fn test_special_chars_in_uri_preserved() {
-        let uri = "http://example.com/path%20with%20spaces/${01-02}.html?query=test&special=%2F";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 2);
-        assert_eq!(
-            expanded[0],
-            "http://example.com/path%20with%20spaces/01.html?query=test&special=%2F"
-        );
-        assert_eq!(
-            expanded[1],
-            "http://example.com/path%20with%20spaces/02.html?query=test&special=%2F"
-        );
-    }
-
-    #[test]
-    fn test_uri_with_auth_and_port() {
-        let uri = "http://user:pass@example.com:8080/files/${01-03}.dat";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 3);
-        assert_eq!(
-            expanded[0],
-            "http://user:pass@example.com:8080/files/01.dat"
-        );
-        assert_eq!(
-            expanded[2],
-            "http://user:pass@example.com:8080/files/03.dat"
-        );
-    }
-
-    #[test]
-    fn test_ipv6_address_not_confused() {
-        // IPv6 address with brackets should not be confused with range syntax
-        // The [2001:db8::1] is part of the host, and [01-02] is the file pattern
-        let uri = "http://[2001:db8::1]:8080/file[01-02].txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        // Should still expand the file[01-02] part but preserve IPv6
-        assert_eq!(expanded.len(), 2);
-        // The bracket pattern [01-02] should be expanded correctly
-        assert!(expanded[0].ends_with("file01.txt"));
-        assert!(expanded[1].ends_with("file02.txt"));
-    }
-
-    #[test]
-    fn test_fragment_preserved() {
-        let uri = "http://example.com/doc${01-02}.pdf#section=1";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 2);
-        assert_eq!(expanded[0], "http://example.com/doc01.pdf#section=1");
-        assert_eq!(expanded[1], "http://example.com/doc02.pdf#section=1");
-    }
-
-    // ======================================================================
-    // Additional edge case tests
-    // ======================================================================
-
-    #[test]
-    fn test_format_with_width_basic() {
-        assert_eq!(format_with_width(1, 3), "001");
-        assert_eq!(format_with_width(42, 5), "00042");
-        assert_eq!(format_with_width(999, 2), "999"); // Exceeds width, no truncation
-        assert_eq!(format_with_width(0, 4), "0000");
-    }
-
-    #[test]
-    fn test_generate_range_forward() {
-        let result = generate_range(1, 5, 1, 2);
-        assert_eq!(result, vec!["01", "02", "03", "04", "05"]);
-    }
-
-    #[test]
-    fn test_generate_range_reverse() {
-        let result = generate_range(5, 1, 1, 2);
-        assert_eq!(result, vec!["05", "04", "03", "02", "01"]);
-    }
-
-    #[test]
-    fn test_generate_range_with_step() {
-        let result = generate_range(1, 10, 3, 1);
-        assert_eq!(result, vec!["1", "4", "7", "10"]);
-    }
-
-    #[test]
-    fn test_generate_range_single_value() {
-        let result = generate_range(5, 5, 1, 3);
-        assert_eq!(result, vec!["005"]);
-    }
-
-    #[test]
-    fn test_find_param_patterns_simple() {
-        let patterns = find_param_patterns("http://ex.com/$2/file.txt");
-        assert_eq!(patterns.len(), 1);
-        match &patterns[0].1 {
-            ParamPattern::Simple { value } => assert_eq!(*value, 2),
-            _ => panic!("Expected Simple pattern"),
-        }
-    }
-
-    #[test]
-    fn test_find_param_patterns_braced() {
-        let patterns = find_param_patterns("http://ex.com/${01-05}.txt");
-        assert_eq!(patterns.len(), 1);
-        match &patterns[0].1 {
-            ParamPattern::Braced { start, end, .. } => {
-                assert_eq!(*start, 1);
-                assert_eq!(*end, 5);
-            }
-            _ => panic!("Expected Braced pattern"),
-        }
-    }
-
-    #[test]
-    fn test_find_param_patterns_bracket() {
-        let patterns = find_param_patterns("http://ex.com/file[01-10].zip");
-        assert_eq!(patterns.len(), 1);
-        match &patterns[0].1 {
-            ParamPattern::Bracket { start, end, .. } => {
-                assert_eq!(*start, 1);
-                assert_eq!(*end, 10);
-            }
-            _ => panic!("Expected Bracket pattern"),
-        }
-    }
-
-    #[test]
-    fn test_complex_real_world_example() {
-        // Real-world example: downloading a series of images
-        let uri = "https://cdn.example.com/gallery/2024/photo${001-050}_hd.jpg";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 50);
-        assert_eq!(
-            expanded[0],
-            "https://cdn.example.com/gallery/2024/photo001_hd.jpg"
-        );
-        assert_eq!(
-            expanded[49],
-            "https://cdn.example.com/gallery/2024/photo050_hd.jpg"
-        );
-    }
-
-    #[test]
-    fn test_step_larger_than_range() {
-        // Step that skips most values
-        let uri = "http://example.com/f[01-05:10].txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 1); // Only first value fits
-        // Width = len("01") = 2, zero-padded
-        assert_eq!(expanded[0], "http://example.com/f01.txt");
-    }
-
-    #[test]
-    fn test_reverse_range_with_step() {
-        let uri = "http://example.com/f[10-01:2].txt";
-        let expanded = expand_parameterized_uri(uri);
-
-        assert_eq!(expanded.len(), 5);
-        assert_eq!(expanded[0], "http://example.com/f10.txt");
-        assert_eq!(expanded[1], "http://example.com/f08.txt");
-        assert_eq!(expanded[2], "http://example.com/f06.txt");
-        assert_eq!(expanded[3], "http://example.com/f04.txt");
-        assert_eq!(expanded[4], "http://example.com/f02.txt");
-    }
+    include!("param_expander_tests.rs");
 }

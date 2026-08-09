@@ -14,7 +14,7 @@ fn test_e2e_serialize_single_entry() {
     let entry = SessionEntry::new(0xd270c8a2, vec!["http://example.com/file.zip".to_string()]);
     let text = entry.serialize();
     assert!(text.contains("http://example.com/file.zip"));
-    assert!(text.contains("GID=d270c8a2"));
+    assert!(text.contains("GID=00000000d270c8a2"));
 
     let entries = deserialize(&text).unwrap();
     assert_eq!(entries.len(), 1);
@@ -126,13 +126,12 @@ async fn test_e2e_atomic_write() {
             vec!["http://example.com/atomic_test.bin".into()],
             DownloadOptions::default(),
         )
-        .await
         .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_atomic_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups().await;
+    let groups = man.read().await.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     assert!(path.exists());
@@ -187,13 +186,12 @@ async fn test_e2e_full_roundtrip_file_io() {
                 ..Default::default()
             },
         )
-        .await
         .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_roundtrip_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups().await;
+    let groups = man.read().await.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     let loaded = load_from_file(&path).await.unwrap();
@@ -268,13 +266,12 @@ async fn test_e2e_full_options_roundtrip_file_io() {
                 ..Default::default()
             },
         )
-        .await
         .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_full_opts_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups().await;
+    let groups = man.read().await.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     let loaded = load_from_file(&path).await.unwrap();

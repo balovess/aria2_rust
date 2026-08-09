@@ -2,10 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Compatibility and verification
+- Updated the active output collision resolver to use aria2-compatible `.1`, `.2`, ... filename suffixes.
+- Corrected compatibility documentation for RPC method and notification counts.
+- Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.4] - 2026-07-21
+
+### Changed - Performance Optimization & RPC Compatibility
+
+#### Performance Optimizations (15 items)
+- **Binary size**: 10.6MB → 8.0MB (full) / 7.0MB (HTTP-only) via feature gate transparency
+- **Lock-free progress**: AtomicProgress with AtomicU64 fields replacing Arc<RwLock<u64>>
+- **Lock contention**: tokio::sync::RwLock → std::sync::RwLock for RequestGroup/RequestGroupMan
+- **Poison safety**: RwLockRecover trait replacing all .unwrap() on std::sync::RwLock
+- **Streaming writes**: WriteChunk channel + tokio::select! for immediate disk writes
+- **Zero-copy BT**: bytes::Bytes::slice() replacing to_vec() for multi-file torrent writes
+- **Global allocator**: mimalloc for better multi-threaded throughput
+- **Link-time optimization**: LTO=fat, codegen-units=1, panic=abort, strip=true
+- **Memory caps**: BytesMut pre-allocation capped at min(256KB, length)
+- **Clone elimination**: data.clone() replaced with len: usize parameter passing
+- **Arc<DownloadOptions>**: O(1) Arc refcount bump replacing deep clone on hot paths
+- **I/O throughput**: PositionedDiskWriter.flush() no longer calls sync_all (deferred to close)
+- **Network latency**: TCP_NODELAY enabled on reqwest HTTP clients
+- **Connection pool**: HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST increased 16→64
+- **SHA1**: Hardware-accelerated via SHA-NI (x86-64) / ARMv8 Crypto Extensions
+
+#### RPC API Compatibility
+- Fixed test expectations for aria2.forcePause, aria2.forceRemove, aria2.remove to match C++ aria2 behavior (return GID string, not "OK")
+- Verified all 36 RPC methods match C++ aria2 return value conventions
+- StatusInfo fields use camelCase JSON serialization (browser extension compatible)
+- All C++ aria2 tellStatus fields present (infoHash, numSeeders, seeder, errorCode, errorMessage, verifiedLength, verifyIntegrityPending, etc.)
 
 ## [0.2.1] - 2026-06-19
 

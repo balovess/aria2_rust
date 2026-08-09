@@ -3,6 +3,8 @@
 //! Exercises BT progress persistence, post-download hooks, LPD peer discovery,
 //! MSE encrypted handshake, and tracker multi-peer distribution end-to-end.
 
+#![cfg(feature = "bittorrent")]
+mod e2e_helpers;
 mod fixtures;
 
 mod test_harness;
@@ -15,18 +17,126 @@ use fixtures::mock_bt_seeder::{MockBtSeeder, SeederConfig};
 use fixtures::mock_tracker::MockTrackerServer;
 use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 
-use aria2_core::engine::bt_mse_handshake::{CryptoMethod, MseCryptoContext, MseHandshakeManager};
-use aria2_core::engine::bt_post_download_handler::{
-    DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
-    HookManager, MoveHook, PostDownloadHook, TouchHook,
-};
 use aria2_core::engine::bt_progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
+};
+use aria2_core::engine::command::Command;
+use aria2_core::engine::hook_manager::{
+    DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
+    HookManager, MoveHook, PostDownloadHook, TouchHook,
 };
 use aria2_core::engine::lpd_manager::{
     LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
 };
+use aria2_core::engine::post_download_handler::{
+    build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
+};
 use aria2_core::request::request_group::GroupId;
+use aria2_core::request::request_group::{DownloadOptions, FollowMode};
+use aria2_core::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::bittorrent::extension::mse_crypto::{MseCryptoMethod, MseCryptoState};
+use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
+
+use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
+
+// ===========================================================================
+// Metadata follow E2E
+// ===========================================================================
+
+/// Download a torrent metainfo URL through the real HTTP command path using
+/// `follow-torrent=mem`, then run the production post-download chain.
+///
+/// This covers the behavior that unit tests cannot prove together: response
+/// content type propagation, memory-only source handling, bencode parsing, and
+/// child-group creation without a source `.torrent` file.
+#[tokio::test]
+async fn follow_torrent_mem_http_creates_child_without_source_file() {
+    let dir = setup_temp_dir();
+    let server = MockHttpServer::start()
+        .await
+        .expect("mock HTTP server should start");
+    let tracker_url = "http://tracker.invalid:6969/announce";
+    let torrent =
+        fixtures::test_torrent_builder::build_test_torrent("payload.bin", 1024, 512, tracker_url);
+    let torrent_for_server = torrent.clone();
+    server.on_get("/source.torrent", move |_| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/x-bittorrent")
+            .header("Content-Length", torrent_for_server.len())
+            .body(full_body(torrent_for_server.clone()))
+            .unwrap()
+    });
+
+    let url = format!("{}/source.torrent", server.base_url());
+    let mut options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        ..DownloadOptions::default()
+    };
+    options.dir = Some(dir.path().display().to_string());
+
+    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+        GroupId::new(0x700),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some("source.torrent"),
+    )
+    .expect("memory torrent command should construct");
+    command
+        .execute()
+        .await
+        .expect("memory torrent download should succeed");
+
+    let source_path = dir.path().join("source.torrent");
+    assert!(
+        !source_path.exists(),
+        "follow-torrent=mem must not create the source torrent file"
+    );
+
+    let group = command
+        .request_group()
+        .expect("HTTP command should expose its request group");
+    let info = {
+        let group = group.recover();
+        assert!(group.is_in_memory_download());
+        assert_eq!(group.in_memory_data(), Some(torrent));
+        assert_eq!(
+            group.content_type().as_deref(),
+            Some("application/x-bittorrent")
+        );
+        extract_download_info(&group)
+    };
+
+    let handlers = build_handler_chain(&info.options);
+    let handler_refs: Vec<&dyn aria2_core::engine::post_download_handler::PostDownloadHandler> =
+        handlers.iter().map(|handler| handler.as_ref()).collect();
+    let mut next_gid = 0x701u64;
+    let mut allocate_gid = || {
+        let gid = GroupId::new(next_gid);
+        next_gid += 1;
+        gid
+    };
+    let children =
+        run_post_download_processing_with_allocator(&info, &handler_refs, &mut allocate_gid);
+
+    assert_eq!(
+        children.len(),
+        1,
+        "torrent metadata should create one child"
+    );
+    {
+        let child = children[0].recover();
+        assert_eq!(child.uris(), &[tracker_url.to_string()]);
+        assert_eq!(child.get_bt_num_pieces(), 2);
+        assert_eq!(child.get_bt_piece_length(), 512);
+        assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));
+        assert!(child.belongs_to_gid().is_none());
+        assert_eq!(child.options().follow_torrent, Some(FollowMode::Disabled));
+    }
+
+    server.shutdown().await;
+}
 
 // ===========================================================================
 // Test 1: BT Progress save/load roundtrip
@@ -73,6 +183,9 @@ async fn bt_progress_save_load_roundtrip() {
         piece_length: 256,
         total_size: 1024,
         num_pieces: 4,
+        upload_length: 512,
+        in_flight_pieces: vec![],
+        is_torrent: true,
         save_time: std::time::SystemTime::now(),
         version: 1,
     };
@@ -121,17 +234,20 @@ async fn bt_progress_save_load_roundtrip() {
         ratio
     );
 
-    // Verify peers were persisted
-    assert_eq!(loaded.peers.len(), 2, "Should have 2 peers after roundtrip");
-
-    // Verify download statistics
+    // C++ binary format does NOT persist the peer list — peers are populated
+    // from PeerStorage after loading, not from the .aria2 file.
     assert_eq!(
-        loaded.stats.downloaded_bytes, 512,
-        "Downloaded bytes must match"
+        loaded.peers.len(),
+        0,
+        "Peers are NOT stored in binary format"
     );
+
+    // C++ binary format stores uploadLength but NOT downloaded_bytes separately.
+    // downloaded_bytes is derived from the bitfield, not persisted.
+    // uploaded_bytes is restored from the saved uploadLength field.
     assert_eq!(
         loaded.stats.uploaded_bytes, 512,
-        "Uploaded bytes must match"
+        "Uploaded bytes must match (restored from uploadLength)"
     );
 
     eprintln!("[TEST1] Progress save/load roundtrip PASSED");
@@ -700,7 +816,7 @@ async fn bt_lpd_register_announce_packet() {
 
     // Register a download using hex string info_hash
     let info_hex = "0102030405060708090a0b0c0d0e0f1011121415";
-    manager.register_torrent(info_hex).await.unwrap();
+    manager.register_torrent(info_hex, false).await.unwrap();
 
     // Verify the download appears in active hashes
     let active = manager.active_hashes.read().await;
@@ -727,24 +843,24 @@ async fn bt_lpd_register_announce_packet() {
 
     // Test BEP 14 text format parsing with valid announcement
     let valid_msg =
-        b"Hash: 0102030405060708090a0b0c0d0e0f1011121415\nPort: 6881\nToken: deadbeef\n";
+        b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 6881\r\nInfohash: 0102030405060708090a0b0c0d0e0f1011121415\r\n\r\n\r\n";
     let sender_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42));
     let parsed = parse_lpd_announcement(valid_msg, sender_ip);
-    assert!(parsed.is_some(), "Valid LPD message should parse");
+    assert!(parsed.is_some(), "Valid BEP 14 LPD message should parse");
     let peer = parsed.unwrap();
     assert_eq!(peer.info_hash, info_hex);
     assert_eq!(peer.port, 6881);
     assert_eq!(peer.addr, sender_ip);
-    assert_eq!(peer.token, Some(0xdeadbeef));
+    assert!(peer.is_local, "10.x.x.x should be local");
 
     // Test parsing rejects malformed messages
-    let short_hash = b"Hash: abc\nPort: 1234\nToken: 01020304\n";
+    let short_hash = b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nPort: 1234\r\nInfohash: abc\r\n\r\n\r\n";
     assert!(
         parse_lpd_announcement(short_hash, sender_ip).is_none(),
         "Short hash should be rejected"
     );
 
-    let missing_port = b"Hash: 0102030405060708090a0b0c0d0e0f1011121415\nToken: deadbeef\n";
+    let missing_port = b"BT-SEARCH * HTTP/1.1\r\nHost: 239.192.152.143:6771\r\nInfohash: 0102030405060708090a0b0c0d0e0f1011121415\r\n\r\n\r\n";
     assert!(
         parse_lpd_announcement(missing_port, sender_ip).is_none(),
         "Missing port should be rejected"
@@ -786,18 +902,17 @@ async fn bt_lpd_peer_discovery_roundtrip() {
     let info_hex = "a0b0c0d0e0f0102030405060708090a0b0c0d0e1011";
 
     // Register the torrent we want to discover peers for
-    manager.register_torrent(info_hex).await.unwrap();
+    manager.register_torrent(info_hex, false).await.unwrap();
 
     // Initially no peers for this hash
     let peers = manager.get_peers_for(info_hex).await;
     assert!(peers.is_empty(), "Should start with 0 peers");
 
     // Manually add discovered peers (simulating what parse_lpd_announcement + update_peers would do)
-    let peer1 = LpdPeer::with_token(
+    let peer1 = LpdPeer::new(
         info_hex,
         6881,
         std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 42)),
-        0xdeadbeef,
     );
     let peer2 = LpdPeer::new(
         info_hex,
@@ -826,10 +941,11 @@ async fn bt_lpd_peer_discovery_roundtrip() {
     assert!(ports.contains(&6881), "Should contain port 6881");
     assert!(ports.contains(&6991), "Should contain port 6991");
 
-    // Check token is preserved for the peer that had one
-    let with_token: Vec<_> = discovered.iter().filter(|p| p.token.is_some()).collect();
-    assert_eq!(with_token.len(), 1, "Exactly 1 peer should have token");
-    assert_eq!(with_token[0].token, Some(0xdeadbeef));
+    // Both peers from 10.x.x.x should be detected as local
+    assert!(
+        discovered.iter().all(|p| p.is_local),
+        "10.x.x.x peers should be local"
+    );
 
     // Adding same peer again should dedup (LpdPeer Hash uses info_hash + addr)
     manager.update_peers(info_hex, vec![peer1.clone()]).await;
@@ -866,322 +982,71 @@ async fn bt_lpd_peer_discovery_roundtrip() {
 // Test 10: MSE encrypted handshake + piece encrypt/decrypt
 // ===========================================================================
 
-/// MseHandshakeManager with RC4 crypto method, perform the 3-phase handshake
-/// protocol phases, exchange encrypted piece data, and verify decryption
-/// recovers original plaintext.
+/// Perform the wire-level MSE handshake and verify both encrypted directions.
 #[tokio::test]
 async fn bt_mse_encrypted_handshake_plus_piece() {
-    let info_hash: [u8; 20] = [
+    let info_hash = [
         0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0,
         0x00, 0x11, 0x22, 0x33, 0x44,
     ];
-
-    // Create two MSE managers simulating both sides of the handshake
-    let mut client_mgr = MseHandshakeManager::new(info_hash).expect("Client MSE init failed");
-    let mut server_mgr = MseHandshakeManager::new(info_hash).expect("Server MSE init failed");
-
-    // ---- Phase 1: Method Selection ----
-    let client_method_sel = client_mgr.build_method_selection();
-    let server_method_sel = server_mgr.build_method_selection();
-
-    // Both sides should send \x13MSegadd indicating support for encryption
+    let mut initiator = MseHandshake::new_initiator(info_hash);
+    let mut responder = MseHandshake::new_responder(info_hash);
+    let initiator_step1 = initiator.build_step1();
+    let responder_step1 = responder.build_step1();
+    initiator
+        .receive_step1(&responder_step1)
+        .expect("initiator step1");
+    responder
+        .receive_step1(&initiator_step1)
+        .expect("responder step1");
+    let initiator_step2 = initiator.build_initiator_step2().expect("initiator step2");
     assert_eq!(
-        client_method_sel, b"\x13MSegadd",
-        "Client method selection should be \\x13MSegadd"
+        responder
+            .receive_initiator_step2(&initiator_step2, &[info_hash])
+            .expect("responder step2"),
+        MseCryptoMethod::Rc4
     );
+    let responder_step2 = responder.build_receiver_step2().expect("responder step2");
     assert_eq!(
-        server_method_sel, b"\x13MSegadd",
-        "Server method selection should be \\x13MSegadd"
+        initiator
+            .receive_receiver_step2(&responder_step2)
+            .expect("initiator step2 response"),
+        MseCryptoMethod::Rc4
     );
 
-    // Parse each other's method selection
-    let client_parsed =
-        MseHandshakeManager::parse_remote_method_selection(&server_method_sel).unwrap();
-    let server_parsed =
-        MseHandshakeManager::parse_remote_method_selection(&client_method_sel).unwrap();
-    assert_eq!(
-        client_parsed,
-        CryptoMethod::Rc4,
-        "Client should see RC4 support"
-    );
-    assert_eq!(
-        server_parsed,
-        CryptoMethod::Rc4,
-        "Server should see RC4 support"
-    );
+    let mut initiator_crypto = initiator.finalize().expect("initiator finalize");
+    let mut responder_crypto = responder.finalize().expect("responder finalize");
+    assert_eq!(initiator_crypto.method(), MseCryptoMethod::Rc4);
+    assert_eq!(responder_crypto.method(), MseCryptoMethod::Rc4);
+    assert!(initiator_crypto.is_encrypted() && responder_crypto.is_encrypted());
 
-    // ---- Phase 2: Key Exchange ----
-    let client_ke_payload = client_mgr
-        .build_key_exchange_payload(&[CryptoMethod::Rc4])
-        .expect("Client KE payload failed");
-    let server_ke_payload = server_mgr
-        .build_key_exchange_payload(&[CryptoMethod::Rc4])
-        .expect("Server KE payload failed");
+    let mut initiator_message = b"initiator to responder".to_vec();
+    initiator_crypto.encrypt(&mut initiator_message);
+    assert_ne!(initiator_message, b"initiator to responder");
+    responder_crypto.decrypt(&mut initiator_message);
+    assert_eq!(initiator_message, b"initiator to responder");
 
-    // Both payloads should contain DH public keys (32 bytes X25519)
-    assert!(
-        client_ke_payload.len() >= 40,
-        "Client KE payload should be at least 40 bytes, got {}",
-        client_ke_payload.len()
-    );
-    assert!(
-        server_ke_payload.len() >= 40,
-        "Server KE payload should be at least 40 bytes, got {}",
-        server_ke_payload.len()
-    );
-
-    // Process each other's key exchange payloads (computes shared secret)
-    client_mgr
-        .process_remote_key_exchange(&server_ke_payload)
-        .expect("Client process_remote_key_exchange failed");
-    server_mgr
-        .process_remote_key_exchange(&client_ke_payload)
-        .expect("Server process_remote_key_exchange failed");
-
-    // Both sides now have shared secrets (should be identical due to DH)
-    assert!(
-        client_mgr.shared_secret().is_some(),
-        "Client should have computed shared secret"
-    );
-    assert!(
-        server_mgr.shared_secret().is_some(),
-        "Server should have computed shared secret"
-    );
-
-    // Note: shared secrets are identical in Diffie-Hellman
-    assert_eq!(
-        client_mgr.shared_secret().unwrap(),
-        server_mgr.shared_secret().unwrap(),
-        "Both sides must derive the same shared secret"
-    );
-
-    // ---- Phase 3: Verification (SKEY + VC + CryptoSelect) ----
-    let client_verify = client_mgr
-        .build_verification_payload(CryptoMethod::Rc4)
-        .expect("Client verification payload failed");
-    let server_verify = server_mgr
-        .build_verification_payload(CryptoMethod::Rc4)
-        .expect("Server verification payload failed");
-
-    // Verification payload should be 26 bytes: SKEY(20) + VC(2) + CryptoSelect(2) + len(I)(2)
-    assert_eq!(
-        client_verify.len(),
-        26,
-        "Client verification payload should be 26 bytes"
-    );
-    assert_eq!(
-        server_verify.len(),
-        26,
-        "Server verification payload should be 26 bytes"
-    );
-
-    // Process each other's verification (completes handshake, returns crypto context)
-    let mut client_ctx = client_mgr
-        .process_remote_verification(&server_verify)
-        .expect("Client verification should succeed");
-    let mut server_ctx = server_mgr
-        .process_remote_verification(&client_verify)
-        .expect("Server verification should succeed");
-
-    // Verify crypto contexts are established
-    assert_eq!(
-        client_ctx.crypto_method(),
-        CryptoMethod::Rc4,
-        "Client context should use RC4"
-    );
-    assert_eq!(
-        server_ctx.crypto_method(),
-        CryptoMethod::Rc4,
-        "Server context should use RC4"
-    );
-    assert!(
-        client_ctx.is_encrypted(),
-        "Client context should be encrypted"
-    );
-    assert!(
-        server_ctx.is_encrypted(),
-        "Server context should be encrypted"
-    );
-
-    // ---- Validate encrypted piece data pipeline ----
-    let original_piece_data: &[u8] = &[
-        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
-        0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D,
-        0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C,
-        0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3A, 0x3B,
-        0x3C, 0x3D, 0x3E, 0x3F,
-    ];
-
-    // Test 1: Encryption produces ciphertext distinct from plaintext
-    // In BEP 10 MSE, each direction uses an independent RC4 stream (keyA/keyB).
-    // A single MseCryptoContext holds both streams; encrypt() and decrypt()
-    // use DIFFERENT keys, so they are NOT mutual inverses within one context.
-    let encrypted = client_ctx
-        .encrypt(original_piece_data)
-        .expect("Encryption failed");
-
-    assert!(
-        encrypted != original_piece_data,
-        "Encrypted data must differ from plaintext (RC4 is a stream cipher)"
-    );
-    assert_eq!(
-        encrypted.len(),
-        original_piece_data.len(),
-        "Ciphertext length must match plaintext length"
-    );
-
-    // Test 2: Repeated encryption of same input yields different output
-    // (proves RC4 state advances between calls -- stream cipher property)
-    let encrypted_again = client_ctx.encrypt(original_piece_data).unwrap();
-    assert_ne!(
-        encrypted, encrypted_again,
-        "RC4 stream cipher must produce different ciphertext on repeated calls"
-    );
-
-    // Test 3: Decryption also produces output (the "receive" stream)
-    // We verify it doesn't panic and returns data of correct length.
-    // Note: decrypt() uses keyB while encrypt() uses keyA, so decrypted
-    // output will NOT equal original plaintext -- this is correct behavior.
-    let decrypted = client_ctx
-        .decrypt(&encrypted)
-        .expect("Decryption should succeed");
-    assert_eq!(
-        decrypted.len(),
-        original_piece_data.len(),
-        "Decrypted data length must match input length"
-    );
-    // Decrypted data should be non-trivial (not all zeros unless plaintext was)
-    // This proves the decryption RC4 stream is operational
-    assert!(
-        decrypted != vec![0u8; original_piece_data.len()],
-        "Decrypted output should be non-trivial (RC4 keystream applied)"
-    );
-
-    // Test 4: Server context also performs encryption/decryption without error
-    let server_encrypted = server_ctx.encrypt(original_piece_data).unwrap();
-    assert!(server_encrypted != original_piece_data);
-    let server_decrypted = server_ctx.decrypt(&server_encrypted).unwrap();
-    assert_eq!(server_decrypted.len(), original_piece_data.len());
-
-    // Test 5: Streaming mode -- sequential chunks produce unique ciphertexts
-    let chunk1 = b"CHUNK_ONE_DATA";
-    let chunk2 = b"CHUNK_TWO_DATA";
-    let chunk3 = b"CHUNK_THREE_DATA";
-    let enc1 = client_ctx.encrypt(chunk1).unwrap();
-    let enc2 = client_ctx.encrypt(chunk2).unwrap();
-    let enc3 = client_ctx.encrypt(chunk3).unwrap();
-    assert_ne!(enc1, enc2, "Sequential encryptions must differ");
-    assert_ne!(enc2, enc3, "Sequential encryptions must differ");
-    assert_ne!(enc1, enc3, "All encryptions must be unique");
-
-    // Verify state transitions on managers
-    assert_eq!(
-        client_mgr.state(),
-        aria2_core::engine::bt_mse_handshake::MseState::Idle,
-        "Client manager state should remain Idle after manual phase steps"
-    );
-
-    // Test CryptoMethod conversions
-    assert_eq!(CryptoMethod::Plain.to_u16(), 0x0001);
-    assert_eq!(CryptoMethod::Rc4.to_u16(), 0x0002);
-    assert_eq!(CryptoMethod::Aes128Cbc.to_u16(), 0x0003);
-    assert_eq!(CryptoMethod::from_u16(0x0001), Some(CryptoMethod::Plain));
-    assert_eq!(CryptoMethod::from_u16(0x0002), Some(CryptoMethod::Rc4));
-    assert_eq!(CryptoMethod::from_u16(0x9999), None);
-
-    eprintln!("[TEST10] MSE encrypted handshake + piece PASSED");
+    let mut responder_message = b"responder to initiator".to_vec();
+    responder_crypto.encrypt(&mut responder_message);
+    assert_ne!(responder_message, b"responder to initiator");
+    initiator_crypto.decrypt(&mut responder_message);
+    assert_eq!(responder_message, b"responder to initiator");
 }
 
 // ===========================================================================
 // Test 11: MSE plaintext fallback
 // ===========================================================================
 
-/// When the remote side does not support MSE extensions (sends \x00 instead
-/// of \x13MSegadd), the local side falls back to plaintext mode.
 #[tokio::test]
 async fn bt_mse_plaintext_fallback() {
-    let info_hash: [u8; 20] = [
-        0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67,
-        0x89, 0xDE, 0xAD, 0xBE, 0xEF,
-    ];
-
-    // Local side supports encryption
-    let _mgr = MseHandshakeManager::new(info_hash).expect("MSE init failed");
-
-    // Remote side sends plaintext indicator (\x00)
-    let remote_method_selection = b"\x00".to_vec();
-
-    // Parse remote method selection - should detect Plain mode
-    let detected_method =
-        MseHandshakeManager::parse_remote_method_selection(&remote_method_selection)
-            .expect("Should parse plaintext selection");
-    assert_eq!(
-        detected_method,
-        CryptoMethod::Plain,
-        "Remote sending \\x00 should be detected as Plain mode"
-    );
-
-    // Use plaintext fallback to create a default context
-    let mut fallback_ctx = MseHandshakeManager::plaintext_fallback();
-    assert_eq!(
-        fallback_ctx.crypto_method(),
-        CryptoMethod::Plain,
-        "Plaintext fallback context should use Plain method"
-    );
-    assert!(
-        !fallback_ctx.is_encrypted(),
-        "Plaintext context should not report as encrypted"
-    );
-
-    // In plaintext mode, encrypt/decrypt are no-ops (return data unchanged)
-    let test_data = b"unencrypted_piece_data_stream";
-    let encrypted = fallback_ctx
-        .encrypt(test_data)
-        .expect("Plaintext encrypt should work");
-    assert_eq!(
-        encrypted, test_data,
-        "Plaintext encryption should be a no-op (data unchanged)"
-    );
-
-    let decrypted = fallback_ctx
-        .decrypt(&encrypted)
-        .expect("Plaintext decrypt should work");
-    assert_eq!(
-        decrypted, test_data,
-        "Plaintext decryption should be a no-op (data unchanged)"
-    );
-
-    // Also verify that empty method selection is treated as plain
-    let empty_selection: Vec<u8> = vec![];
-    let empty_result = MseHandshakeManager::parse_remote_method_selection(&empty_selection);
-    // Empty might return error or plain depending on implementation
-    // Just ensure it doesn't panic
-    let _ = empty_result;
-
-    // Verify MseCryptoContext Default gives same result as plaintext_fallback
-    let mut default_ctx = MseCryptoContext::default();
-    assert_eq!(
-        default_ctx.crypto_method(),
-        CryptoMethod::Plain,
-        "Default context should be Plain"
-    );
-    let noop_encrypt = default_ctx.encrypt(b"test").unwrap();
-    assert_eq!(
-        noop_encrypt, b"test",
-        "Default context encrypt should be no-op"
-    );
-
-    // Verify MseCryptoContext equality and Debug
-    let ctx_a = MseCryptoContext::default();
-    let ctx_b = MseCryptoContext::default();
-    assert_eq!(ctx_a, ctx_b, "Two default contexts should be equal");
-    let debug_str = format!("{:?}", ctx_a);
-    assert!(
-        debug_str.contains("MseCryptoContext"),
-        "Debug output should contain type name"
-    );
-
-    eprintln!("[TEST11] MSE plaintext fallback PASSED");
+    let mut crypto = MseCryptoState::new_plain();
+    assert_eq!(crypto.method(), MseCryptoMethod::Plain);
+    assert!(!crypto.is_encrypted());
+    let mut data = b"unencrypted_piece_data_stream".to_vec();
+    crypto.encrypt(&mut data);
+    assert_eq!(data, b"unencrypted_piece_data_stream");
+    crypto.decrypt(&mut data);
+    assert_eq!(data, b"unencrypted_piece_data_stream");
 }
 
 // ===========================================================================

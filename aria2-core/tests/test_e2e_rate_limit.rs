@@ -4,9 +4,8 @@ use aria2_core::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter, 
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
-fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
+fn _create_test_group(uri: &str) -> Arc<std::sync::RwLock<RequestGroup>> {
     let options = DownloadOptions {
         split: None,
         max_connection_per_server: None,
@@ -44,7 +43,7 @@ fn _create_test_group(uri: &str) -> Arc<RwLock<RequestGroup>> {
         ..Default::default()
     };
     let group = RequestGroup::new(GroupId::new(1), vec![uri.to_string()], options);
-    Arc::new(RwLock::new(group))
+    Arc::new(std::sync::RwLock::new(group))
 }
 
 #[tokio::test]

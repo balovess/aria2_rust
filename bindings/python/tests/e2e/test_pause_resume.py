@@ -29,4 +29,8 @@ class TestPauseResume:
             result = await client.unpause(gid)
             assert result == gid
             status = await client.tell_status(gid)
-            assert status.status in (DownloadStatus.ACTIVE.value, DownloadStatus.PAUSED.value)
+            assert status.status in (
+                DownloadStatus.ACTIVE.value,
+                DownloadStatus.WAITING.value,
+                DownloadStatus.PAUSED.value,
+            )

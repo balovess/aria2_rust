@@ -3,12 +3,14 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::engine::command::ProgressUpdate;
-use crate::request::request_group::RequestGroup;
+use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::perf_monitor::{AtomicMetrics, PerformanceMonitor};
 
 pub struct ProgressUpdater {
     progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
-    group: Arc<tokio::sync::RwLock<RequestGroup>>,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    /// Direct access to progress counters — avoids `RwLock` on the hot path.
+    progress: Arc<AtomicProgress>,
     atomic_metrics: Arc<AtomicMetrics>,
     perf_monitor: Option<Arc<PerformanceMonitor>>,
     last_speed_update: Instant,
@@ -21,6 +23,7 @@ impl Clone for ProgressUpdater {
         Self {
             progress_sender: self.progress_sender.clone(),
             group: Arc::clone(&self.group),
+            progress: Arc::clone(&self.progress),
             atomic_metrics: Arc::clone(&self.atomic_metrics),
             perf_monitor: self.perf_monitor.clone(),
             last_speed_update: self.last_speed_update,
@@ -33,13 +36,15 @@ impl Clone for ProgressUpdater {
 impl ProgressUpdater {
     pub fn new(
         progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
-        group: Arc<tokio::sync::RwLock<RequestGroup>>,
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        progress: Arc<AtomicProgress>,
         atomic_metrics: Arc<AtomicMetrics>,
         perf_monitor: Option<Arc<PerformanceMonitor>>,
     ) -> Self {
         Self {
             progress_sender,
             group,
+            progress,
             atomic_metrics,
             perf_monitor,
             last_speed_update: Instant::now(),
@@ -82,12 +87,10 @@ impl ProgressUpdater {
                 upload_speed: 0,
             });
         } else {
-            let g = self.group.write().await;
-            g.update_progress(completed_bytes).await;
-            g.set_completed_length(completed_bytes);
+            self.progress.set_completed_length(completed_bytes);
             if speed > 0 {
-                g.update_speed(speed, 0).await;
-                g.set_download_speed_cached(speed);
+                self.progress.set_download_speed(speed);
+                self.progress.set_upload_speed(0);
             }
         }
 
