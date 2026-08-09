@@ -6,10 +6,12 @@
 
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
-use crate::ftp::connection::{self, FtpControlStream, FtpDataStream, FtpsConfig};
+use crate::ftp::connection::{
+    self, FtpControlStream, FtpDataStream, FtpsConfig, read_response_impl,
+};
 use crate::network::ConnectionContext;
 
 use crate::constants;
@@ -19,25 +21,10 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 // URL decoding
 // ---------------------------------------------------------------------------
 
-/// URL-encoded string decoder
-pub(crate) fn urlencoding_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                result.push(byte as char);
-            } else {
-                result.push(c);
-                result.push_str(&hex);
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
-}
+/// Keep the legacy local name while routing URI decoding through the
+/// canonical FTP path decoder. This preserves UTF-8 bytes across `%XX`
+/// sequences instead of converting each byte directly into a `char`.
+pub(crate) use crate::ftp::connection::percent_decode as urlencoding_decode;
 
 // ---------------------------------------------------------------------------
 // RawFtpControl
@@ -169,7 +156,7 @@ impl RawFtpControl {
         config: &FtpsConfig,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
-        let tls_stream = connection::upgrade_data_stream(stream, host, config)
+        let tls_stream = connection::perform_tls_handshake(stream, host, config)
             .await
             .map_err(|error| {
                 Aria2Error::Network(format!("FTPS TLS handshake failed: {}", error))
@@ -211,71 +198,7 @@ impl RawFtpControl {
 
     /// Read response from FTP server with timeout
     pub(super) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
-        let mut line = String::new();
-        let mut code: Option<u16> = None;
-        let mut message = String::new();
-        let mut is_multiline = false;
-
-        loop {
-            line.clear();
-            let bytes_read = tokio::time::timeout(timeout_dur, self.reader.read_line(&mut line))
-                .await
-                .map_err(|_| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("FTP response timeout after {:?}", timeout_dur),
-                    })
-                })?
-                .map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("FTP read response error: {}", e),
-                    })
-                })?;
-
-            if bytes_read == 0 {
-                break;
-            }
-            let trimmed = line.trim_end();
-            if trimmed.len() < 4 {
-                continue;
-            }
-
-            let response_code: u16 = trimmed[..3].parse().unwrap_or(0);
-            if code.is_none() {
-                code = Some(response_code);
-            }
-
-            let sep = trimmed.as_bytes()[3];
-            if sep == b'-' && !is_multiline {
-                is_multiline = true;
-                if trimmed.len() > 4 {
-                    message.push_str(&trimmed[4..]);
-                }
-                message.push('\n');
-                continue;
-            }
-            if is_multiline {
-                if trimmed.starts_with(&format!("{} ", code.unwrap_or(0))) {
-                    if trimmed.len() > 4 {
-                        message.push_str(&trimmed[4..]);
-                    }
-                    break;
-                }
-                if trimmed.len() > 4 {
-                    message.push_str(&trimmed[4..]);
-                }
-                message.push('\n');
-                continue;
-            }
-
-            if trimmed.len() > 4 {
-                message = trimmed[4..].to_string();
-            }
-            break;
-        }
-
-        let code_val = code.unwrap_or(0);
-        debug!("FTP RESP: {} {}", code_val, message.trim());
-        Ok((code_val, message))
+        read_response_impl(&mut self.reader, timeout_dur).await
     }
 
     pub(super) fn connection_context(&self) -> &ConnectionContext {
@@ -388,8 +311,14 @@ impl RawFtpControl {
         Ok(None)
     }
 
-    /// Enter passive mode (PASV/EPSV)
-    pub(super) async fn enter_passive_mode(&mut self) -> Result<(String, u16)> {
+    /// Enter passive mode (PASV/EPSV) and return the data port.
+    ///
+    /// aria2_original deliberately connects the data socket to the control
+    /// connection's peer address. The host advertised in a PASV response is
+    /// parsed for wire validation and diagnostics, but is not a connection
+    /// target because NATed and misconfigured servers commonly advertise an
+    /// unreachable address.
+    pub(super) async fn enter_passive_mode(&mut self) -> Result<u16> {
         // Try EPSV first (supports IPv6), fallback to PASV
         debug!("Attempting extended passive mode (EPSV)");
         let epsv_resp = self.command("EPSV").await;
@@ -399,7 +328,7 @@ impl RawFtpControl {
                 // Parse |||port| format
                 if let Some(port) = parse_epsv_response(&resp.1) {
                     debug!("EPSV successful, using port: {}", port);
-                    return Ok((self.host.clone(), port));
+                    return Ok(port);
                 }
                 warn!("Failed to parse EPSV response, falling back to PASV");
             }
@@ -420,9 +349,14 @@ impl RawFtpControl {
         }
 
         match parse_pasv_response(&pasv_resp.1) {
-            Some((host, port)) => {
-                debug!("PASV successful, data channel: {}:{}", host, port);
-                Ok((host, port))
+            Some((advertised_host, port)) => {
+                debug!(
+                    advertised_host,
+                    control_peer = %self.connection.peer_addr,
+                    port,
+                    "PASV successful; using control peer address for data channel"
+                );
+                Ok(port)
             }
             None => Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {

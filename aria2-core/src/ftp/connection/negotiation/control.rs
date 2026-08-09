@@ -3,7 +3,7 @@
 //! Contains `RawFtpControl` (public, used after negotiation), and internal
 //! `FreshControl` / `PooledControl` wrappers used during negotiation.
 
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufRead, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
@@ -263,10 +263,13 @@ const MAX_RECV_BUFFER: usize = 65536;
 ///
 /// The total accumulated response size is capped at [`MAX_RECV_BUFFER`] to
 /// prevent memory exhaustion from malicious or broken servers.
-async fn read_response_impl(
-    reader: &mut BufReader<TcpStream>,
+pub(crate) async fn read_response_impl<R>(
+    reader: &mut R,
     timeout_dur: Duration,
-) -> Result<(u16, String)> {
+) -> Result<(u16, String)>
+where
+    R: AsyncBufRead + Unpin,
+{
     use tokio::io::AsyncBufReadExt;
 
     let mut line = String::new();
@@ -330,9 +333,10 @@ async fn read_response_impl(
                 }
                 break;
             }
-            if trimmed.len() > 4 {
-                message.push_str(&trimmed[4..]);
-            }
+            // RFC 2389 continuation lines are usually prefixed by one space,
+            // not by a three-digit response code. Preserve that framing so
+            // FEAT consumers can distinguish feature lines from the header.
+            message.push_str(trimmed);
             message.push('\n');
             continue;
         }

@@ -14,8 +14,10 @@ struct FtpSession {
     passive_listener: Option<TcpListener>,
     data_host: Option<String>,
     data_port: Option<u16>,
+    pasv_advertised_host: [u8; 4],
     binary_mode: bool,
     rest_offset: u64,
+    transfer_complete: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
 pub struct MockFtpServer {
@@ -25,6 +27,10 @@ pub struct MockFtpServer {
 
 impl MockFtpServer {
     pub async fn start() -> Self {
+        Self::start_with_pasv_advertised_host([127, 0, 0, 1]).await
+    }
+
+    pub async fn start_with_pasv_advertised_host(advertised_host: [u8; 4]) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
@@ -38,7 +44,10 @@ impl MockFtpServer {
                     result = listener.accept() => {
                         match result {
                             Ok((mut stream, _)) => {
-                                let session = tokio::sync::Mutex::new(FtpSession::default());
+                                let session = tokio::sync::Mutex::new(FtpSession {
+                                    pasv_advertised_host: advertised_host,
+                                    ..FtpSession::default()
+                                });
                                 use tokio::io::AsyncWriteExt;
                                 stream.write_all(b"220 aria2-rust mock FTP ready\r\n").await.ok();
                                 stream.flush().await.ok();
@@ -100,6 +109,21 @@ impl MockFtpServer {
             } else {
                 break;
             }
+
+            let transfer_complete = {
+                let mut sess = session.lock().await;
+                sess.transfer_complete.take()
+            };
+            if let Some(done) = transfer_complete
+                && done.await.is_ok()
+            {
+                let write_stream = reader.get_mut();
+                write_stream
+                    .write_all(b"226 Transfer complete\r\n")
+                    .await
+                    .ok();
+                write_stream.flush().await.ok();
+            }
         }
     }
 
@@ -125,11 +149,12 @@ impl MockFtpServer {
             let p1 = port / 256;
             let p2 = port % 256;
             sess.passive_listener = Some(pasv_listener);
-            sess.data_host = Some("127.0.0.1".to_string());
+            let [h1, h2, h3, h4] = sess.pasv_advertised_host;
+            sess.data_host = Some(format!("{}.{}.{}.{}", h1, h2, h3, h4));
             sess.data_port = Some(port);
             return Some(format!(
-                "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
-                p1, p2
+                "227 Entering Passive Mode ({},{},{},{},{},{})\r\n",
+                h1, h2, h3, h4, p1, p2
             ));
         }
         if verb == "SIZE" {
@@ -174,12 +199,16 @@ impl MockFtpServer {
                 content
             };
 
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            sess.transfer_complete = Some(done_rx);
+
             tokio::spawn(async move {
                 if let Ok((mut data_stream, _addr)) = listener.accept().await {
                     data_stream.write_all(&actual_content).await.ok();
                     data_stream.flush().await.ok();
                     drop(data_stream);
                 }
+                let _ = done_tx.send(());
             });
 
             return Some("150 Opening data connection\r\n".into());

@@ -416,9 +416,8 @@ pub async fn upgrade_data_stream(
 /// dispatches I/O calls to the active variant at zero cost (no vtable).
 /// This is re-exported from `types.rs` as a public type.
 impl super::types::FtpControlStream {
-    /// Extract the inner `TcpStream` reference from a Plain variant.
-    /// Returns `None` for TLS-wrapped streams (the TCP stream is owned
-    /// internally by the TLS session).
+    /// Extract the underlying `TcpStream` reference from either variant.
+    /// The TLS session retains ownership while exposing the socket reference.
     pub fn get_ref(&self) -> Option<&TcpStream> {
         match self {
             super::types::FtpControlStream::Plain(s) => Some(s),

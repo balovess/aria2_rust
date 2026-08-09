@@ -338,6 +338,58 @@ async fn e2e_post_invalid_json() {
 }
 
 #[tokio::test]
+async fn e2e_jsonrpc_errors_close_the_http_connection_like_original() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+
+    let response = client
+        .post(format!("{base}/jsonrpc"))
+        .header("content-type", "application/json")
+        .body("not-json-at-all")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 500);
+    assert_eq!(
+        response
+            .headers()
+            .get(reqwest::header::CONNECTION)
+            .and_then(|value| value.to_str().ok()),
+        Some("close")
+    );
+}
+
+#[tokio::test]
+async fn e2e_jsonrpc_batch_errors_keep_the_http_connection_like_original() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+
+    let response = client
+        .post(format!("{base}/jsonrpc"))
+        .json(&json!([
+            rpc_body("aria2.getVersion", json!([])),
+            rpc_body("aria2.nonexistentMethod", json!([])),
+        ]))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_ne!(
+        response
+            .headers()
+            .get(reqwest::header::CONNECTION)
+            .and_then(|value| value.to_str().ok()),
+        Some("close")
+    );
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body.as_array().map(Vec::len), Some(2));
+    assert_result(&body[0]);
+    assert_error_code(&body[1], 1);
+}
+
+#[tokio::test]
 async fn e2e_xmlrpc_get_version() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();

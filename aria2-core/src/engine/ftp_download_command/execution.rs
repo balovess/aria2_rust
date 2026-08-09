@@ -341,7 +341,7 @@ impl FtpDownloadCommand {
         }
 
         // Step 7: Negotiate the data connection mode before RETR.
-        let passive_target = if self.passive_mode {
+        let passive_port = if self.passive_mode {
             Some(ctrl.enter_passive_mode().await?)
         } else {
             None
@@ -357,14 +357,9 @@ impl FtpDownloadCommand {
 
         // Step 8: Establish the data connection. In active mode the server
         // connects back after RETR; never attempt a client-side connect.
-        let data_stream = if let Some((data_host, data_port)) = passive_target {
-            let data_addr: std::net::SocketAddr = format!("{}:{}", data_host, data_port)
-                .parse()
-                .map_err(|_| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: "Invalid data address".into(),
-                    })
-                })?;
+        let data_stream = if let Some(data_port) = passive_port {
+            let data_addr =
+                std::net::SocketAddr::new(ctrl.connection_context().peer_addr.ip(), data_port);
             tokio::time::timeout(
                 Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
                 tokio::net::TcpStream::connect(data_addr),

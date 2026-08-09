@@ -472,6 +472,9 @@ fn test_download_options_to_map_all_fields() {
         header: vec!["X-Custom: foo".to_string(), "X-Other: bar".to_string()],
         user_agent: Some("aria2-rust/1.0".to_string()),
         referer: Some("http://example.com".to_string()),
+        check_certificate: false,
+        ca_certificate: Some("/tmp/ca.pem".to_string()),
+        min_tls_version: Some("TLSv1.3".to_string()),
         // Metalink
         metalink_version: None,
         metalink_language: None,
@@ -614,6 +617,9 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
     assert_eq!(map.get("user-agent").unwrap(), "aria2-rust/1.0");
     assert_eq!(map.get("referer").unwrap(), "http://example.com");
+    assert_eq!(map.get("check-certificate").unwrap(), "false");
+    assert_eq!(map.get("ca-certificate").unwrap(), "/tmp/ca.pem");
+    assert_eq!(map.get("min-tls-version").unwrap(), "TLSv1.3");
 
     // The same canonical string map is consumed by session restoration.
     let restored = DownloadOptions::from_option_strings(&map);

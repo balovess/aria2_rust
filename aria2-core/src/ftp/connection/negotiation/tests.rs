@@ -3,12 +3,42 @@
 use std::time::Duration;
 
 use super::capabilities::ServerCapabilities;
+use super::control::read_response_impl;
 use super::parsing::{
     days_from_civil, extract_directory_part, extract_file_part, parse_epsv_response,
     parse_mdtm_timestamp, parse_pasv_response, percent_decode,
 };
 use super::{FtpNegotiationConfig, FtpTransferType};
 use crate::ftp::connection::types::FtpMode;
+
+#[tokio::test]
+async fn test_read_response_preserves_multiline_response() {
+    let response = b"211-Features:\r\n UTF8\r\n211 End\r\n".to_vec();
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(response));
+
+    let (code, message) = read_response_impl(&mut reader, Duration::from_secs(1))
+        .await
+        .expect("multiline FTP response should parse");
+
+    assert_eq!(code, 211);
+    assert_eq!(message, "Features:\n UTF8\nEnd");
+
+    let mut capabilities = ServerCapabilities::new();
+    capabilities.parse_feat_response(&message);
+    assert!(capabilities.utf8);
+}
+
+#[tokio::test]
+async fn test_read_response_rejects_oversized_response() {
+    let response = format!("211-{}\r\n211 End\r\n", "x".repeat(65_536));
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(response.into_bytes()));
+
+    let error = read_response_impl(&mut reader, Duration::from_secs(1))
+        .await
+        .expect_err("oversized FTP response must be rejected");
+
+    assert!(error.to_string().contains("Max FTP recv buffer reached"));
+}
 
 #[test]
 fn test_percent_decode_basic() {

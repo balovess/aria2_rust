@@ -85,6 +85,31 @@ async fn test_e2e_ftp_download_small_file() {
 }
 
 #[tokio::test]
+async fn test_e2e_ftp_pasv_uses_control_peer_when_host_is_misadvertised() {
+    let server = MockFtpServer::start_with_pasv_advertised_host([127, 0, 0, 2]).await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(102),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("FTP command should construct");
+
+    cmd.execute()
+        .await
+        .expect("PASV data connection should use the control peer");
+    assert_eq!(
+        std::fs::read(dir.path().join("small.bin")).unwrap(),
+        small_content()
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_ftp_memory_download_keeps_source_out_of_filesystem() {
     let server = start_server().await;
     let dir = tmp_dir();

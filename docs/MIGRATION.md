@@ -476,7 +476,7 @@ tests, and the aria2 C++ performance baseline remain open in
   and real HTTP E2E checks for invalid `changeOption` and
   `changeGlobalOption` values.
 - `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1`:
-  **391 passed / 0 failed**. This proves the RPC test scope only; the
+  **393 passed / 0 failed**. This proves the RPC test scope only; the
   workspace aggregate and complete original browser-client interoperability
   matrix remain open.
 
@@ -521,7 +521,7 @@ tests, and the aria2 C++ performance baseline remain open in
   engine-owned value, while the old `rpc_helpers::generate_session_id` path is
   retained as a forwarding export rather than a second generator.
 - Verification: `cargo test -p aria2-rpc --all-features --tests
-  -- --test-threads=1` passed **391 tests / 0 failed**; RPC Clippy and format
+  -- --test-threads=1` passed **393 tests / 0 failed**; RPC Clippy and format
   checks also passed. Browser-extension and complete original-client
   interoperability remain open acceptance items.
 

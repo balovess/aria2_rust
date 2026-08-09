@@ -127,8 +127,7 @@ pub enum FtpDataStream {
 }
 
 impl FtpDataStream {
-    /// Set TCP_NODELAY when the underlying stream is a plain TCP socket.
-    /// TLS streams are already configured before they are wrapped.
+    /// Set TCP_NODELAY on the underlying TCP socket for either stream kind.
     pub fn set_nodelay(&self, enabled: bool) -> std::io::Result<()> {
         match self {
             Self::Plain(stream) => stream.set_nodelay(enabled),

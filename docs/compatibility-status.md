@@ -21,13 +21,30 @@ evidence, but their checklists do not establish behavioural compatibility.
 “Source file compared” is not the same claim as FULL. The 530 C++ source
 units catalogued in docs/MIGRATION.md measure audit coverage only.
 
+## Compatibility Policy
+
+The public behavior of `aria2_original` is a hard compatibility contract. This
+includes CLI and configuration names/defaults, JSON-RPC/XML-RPC/WebSocket wire
+shapes, authentication, error codes and HTTP status codes, session files,
+notifications, task states, and the behavior relied on by existing clients
+such as browser extensions. A Rust implementation is not compatible merely
+because it exposes a similarly named method.
+
+Internal modules may be redesigned around Rust ownership, typed errors,
+async I/O, and lower allocation or lock overhead, but those changes must stay
+behind the public seam. A Rust-only feature is an extension: it must be
+additive, explicitly documented, and must not change the result observed by an
+original client using an original request. Features absent from
+`aria2_original` (for example FTPS) are measured as extensions and are not
+substitutes for missing original behavior.
+
 ## Current Module Matrix
 
 | Area | Rust implementation | Status | Main evidence or remaining gap |
 | --- | --- | --- | --- |
 | Engine and scheduling | aria2-core/src/engine/ | PARTIAL | Typed command loop, generation-based completion accounting, `CancellationToken` shutdown, pause/unpause requeueing, runtime concurrency and global rate updates are covered. Full parity across retry, allocation, and all protocol commands is not yet proven. |
 | HTTP/HTTPS | aria2-core/src/http/, aria2-protocol/src/http/ | PARTIAL | Focused parser and download coverage exists, including existing-file naming, control-file cleanup, preallocation-safe resume recovery, multi-URI resume failover, and HTTP 200 responses that ignore a requested Range (`CannotResume` by default or fresh restart according to `always-resume`/`max-resume-failure-tries`). Core owns production orchestration; `aria2-protocol::http::client` remains a separate compatibility-layer client with no core production callers, and broader original-binary interoperability remains unverified. |
-| FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Active/passive/auth paths exist; platform and live-server coverage is incomplete. |
+| FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Original FTP active/passive/auth behavior has focused coverage, including a canonical multiline response parser with the C++ 64 KiB receive limit; live-server and client interoperability evidence is incomplete. FTPS is a Rust-only additive extension: explicit/implicit control and data TLS paths exist, the plaintext downgrade regression is covered, and positive TLS-server interoperability is still unverified. |
 | SFTP | aria2-protocol/src/sftp/, aria2-core/src/engine/sftp_download_command/ | UNVERIFIED | `ssh-host-key-md` fingerprint pinning and mismatch rejection are implemented and unit-tested; no live SFTP server E2E evidence on the current matrix. Known-hosts persistence is not part of aria2_original's `ssh-host-key-md` contract. |
 | BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. Incoming listener ownership, dependency graph, and full scheduler/seeding parity remain. |
 | DHT and trackers | aria2-protocol/src/bittorrent/dht/ | PARTIAL | Production paths and tests now use the protocol crate as the single canonical DHT implementation; the former `aria2-core/src/dht/` source tree is no longer exported. DHT port ranges now try the ordered list and fall back after an occupied first port; complete live-network evidence is still missing. |
@@ -51,7 +68,7 @@ cargo test -p aria2-core --test test_e2e_download --all-features -- --test-threa
 cargo clippy --workspace --all-targets --all-features -- -D warnings PASS (prior checkpoint; not rerun in this incremental checkpoint)
 cargo test -p aria2-core --all-features c_api --lib   PASS
 cargo test -p aria2-protocol --all-features -j 1        872 passed, 4 ignored
-cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 391 passed, 0 failed
+cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 393 passed, 0 failed
 cargo test -p aria2 --all-features --tests -j 1 -- --test-threads=1 279 passed, 3 ignored, 0 failed
 cargo build -p aria2 --all-features -j 1                PASS
 npm run typecheck                                        PASS
@@ -59,6 +76,23 @@ npm run build                                            PASS
 ARIA2_RUST_BIN=target/debug/aria2c.exe npm test          123 passed
 PYTHONPATH=.codex-python-deps python -m pytest -p no:cacheprovider 137 passed
 ~~~
+
+Latest FTP/FTPS checkpoint (2026-08-09):
+
+~~~text
+cargo check -p aria2-core --all-features --tests -j 1                         PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings        PASS
+cargo test -p aria2-core --test test_e2e_ftp_download --all-features -- --test-threads=1
+  23 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --lib ftp --all-features -- --test-threads=1
+  198 passed, 0 failed, 1 ignored
+~~~
+
+The FTPS negative regression proves that an `ftps://` request does not accept
+a plaintext FTP server. A positive explicit/implicit FTPS server exchange is
+still unverified because the current fixture set has no valid reusable server
+certificate/key pair. FTPS remains an additive Rust extension and is not an
+original-aria2 compatibility requirement.
 
 Focused HTTP resume regression evidence (2026-08-09):
 
@@ -133,9 +167,9 @@ JSON-RPC. `addUri`, `addTorrent`, and `addMetalink` use the same core parser as
 runtime option updates. Only registry-declared cumulative options accept RPC
 arrays; ordinary options cannot be silently converted from arrays. The
 checkpoint includes 221 library tests, 18 integration tests, 55 all-method
-HTTP tests, 40 HTTP/WebSocket/XML-RPC route tests, 5 server-config tests, 3
+HTTP tests, 42 HTTP/WebSocket/XML-RPC route tests, 5 server-config tests, 3
 HTTPS tests, 31 mock-server tests, 8 header/progress tests, and 10 stress
-tests in the 391-test command above. The
+tests in the 393-test command above. The
 active/reserved task changeability policy is centralized with the global
 policy in `aria2-core/src/config/runtime.rs`; `request_group` only preserves
 the historical re-export path. This is a RPC-scope result only; it does not
@@ -177,13 +211,19 @@ original endpoint. Explicitly empty `params=` is also omitted from the
 generated request object, matching the original string builder. Basic Auth
 follows the original empty-password rule: an empty `rpc-passwd` is treated as
 username-only authentication. The new GET/JSONP and Basic Auth regressions
-pass as part of the 40-route HTTP/WebSocket/XML-RPC target.
+pass as part of the 42-route HTTP/WebSocket/XML-RPC target.
+
+Single-response JSON-RPC errors also send `Connection: close`, matching
+`aria2_original/src/HttpServerBodyCommand.cc` after `disableKeepAlive()`;
+successful requests and batch responses retain the normal HTTP connection
+reuse path. This is covered by
+`e2e_jsonrpc_errors_close_the_http_connection_like_original`.
 
 The XML-RPC adapter now also has source-backed HTTP contract coverage against
 `aria2_original/src/HttpServerBodyCommand.cc`: parser or XML value conversion
 failures return HTTP 400 with an empty body and no `Content-Type`, while a
 successfully parsed method execution failure returns HTTP 200 with an XML
-fault whose `faultCode` is `1`. The all-features RPC suite is 391 passed and
+fault whose `faultCode` is `1`. The all-features RPC suite is 393 passed and
 0 failed after this regression was added.
 
 The `getSessionInfo` value was compared with
@@ -258,14 +298,19 @@ consolidation work explicitly:
 | Request-group identity lookup | `aria2-core/src/request/request_group_man/mod.rs` | Keep `active` and `reserved` as scheduling stores, but use one canonical GID index for all non-terminal groups. Active/reserved movement does not remove the index; terminal demotion/removal does. RPC, C API, session snapshots, and status lookup therefore share one stable identity seam without exposing the internal storage choice. Query snapshots preserve active-first and reserved FIFO order, then append canonical-only groups observed during a transfer window. |
 | Resume policy | `aria2-core/src/engine/download_command/execute.rs` and `request/request_group/control_ops.rs` | Keep HTTP response interpretation in `SequentialDownloader`; command-level URI selection, atomic resume-failure accumulation, and fresh-download fallback stay in `DownloadCommand`. Do not make RPC or protocol adapters reinterpret `always-resume` or `max-resume-failure-tries`. |
 | HTTP/FTP transport | core orchestration plus protocol transport | Existing layers are useful adapters but are not yet one canonical implementation; remove pass-through duplication only after behavior comparison and live interoperability coverage. |
+| FTP ownership | `aria2-core/src/engine/ftp_download_command/` is the only production FTP/FTPS path; `aria2-core/src/ftp/connection/negotiation/` and `aria2-protocol/src/ftp/` have no core production callers | Treat the engine path as the current behavioral reference. The target is one deep core FTP transport seam, but `FtpClient`, `FtpNegotiator`, and the standalone protocol client must not be deleted or merged until their public Rust API and behavior are covered by replacement tests. |
 | Integrity | core streaming/control-file paths plus Metalink verifier | Preserve separate algorithm-specific adapters for now; unify lifecycle callbacks after the remaining TODO/no-op paths have regression coverage. |
 
 ## Acceptance Gate
 
-The external compatibility boundary is strict: RPC/JSON-RPC/XML-RPC/WebSocket
-wire shapes, authentication, parameters, errors, HTTP status codes, and
-observable lifecycle behavior must match `aria2_original`. Internal Rust
-architecture and performance are free to improve only behind that boundary.
+The external compatibility boundary is strict: every public surface supported
+by `aria2_original` must match it, including CLI/configuration, RPC/JSON-RPC/
+XML-RPC/WebSocket wire shapes, authentication, parameters, errors, HTTP status
+codes, session files, notifications, and observable lifecycle behavior. This
+is the compatibility requirement for existing original clients and browser
+extensions. Internal Rust architecture and performance are free to improve
+only behind that boundary; extensions are evaluated separately and must be
+additive.
 
 The migration is not complete until the matrix is backed by reproducible
 tests for default, BitTorrent, Metalink, SFTP, RPC, CLI, session/resume, and

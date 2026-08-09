@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-04 (standard MSE API migration and BT dynamic-peer lifecycle validation)
+# Updated: 2026-08-09 (external-contract policy and FTPS status reconciliation)
 
 > This file is a historical deep-comparison audit, not the current completion
 > gate. The current external-compatibility status is maintained in
@@ -43,8 +43,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 - **StreamFilter** upgraded from ~58% to Complete: GZip, BZip2, Deflate, Chunked, NullSink all
   implemented with true streaming/incremental support.
-- **FTPS/TLS** upgraded from Missing to Complete: `tls.rs` implements AUTH TLS, PBSZ 0, PROT P
-  with `tokio_rustls`.
+- **FTPS/TLS** is a Rust-only extension, not an `aria2_original` compatibility requirement:
+  `tls.rs` implements AUTH TLS, PBSZ 0, PROT P with `tokio_rustls`; plaintext downgrade
+  rejection is covered, while positive TLS-server interoperability remains unverified.
 - **FTP-over-HTTP-proxy tunneling** upgraded from Missing to Complete: `proxy_tunnel.rs`
   implements CONNECT method tunneling with proxy auth support.
 - **FTP negotiation** upgraded from ~52% to Partial: MDTM, PWD/CWD, FEAT, SIZE, REST all
@@ -53,7 +54,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 - **DHT** upgraded from Partial to Near-Complete: Full `DhtEngine` with routing table, bootstrap,
   lookup/announce, token tracker, peer announce storage, task system, message codec,
   serialization, UDP transport.
-- **RPC** confirmed Complete: All 36 C++ RPC methods implemented across 5 handler modules.
+- **RPC** remains Partial for the migration gate: the wire adapters and focused source-backed
+  behavior exist, but full original-client interoperability, including browser extensions and
+  complete XML-RPC coverage, is still unverified.
 - **HTTP Tail Reclaim** confirmed Complete: `HttpTailReclaimState`, `is_http_tail_blocked()`,
   `should_reclaim_http_tail_segment()`, `updateTailReclaimProgress()`,
   `ConnectionStallTracker` all implemented.
@@ -213,7 +216,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 |------------|--------|----------|
 | FtpConnection | Complete | Commands, connector, FEAT, parser, transfer; passive data channels now pin to the control peer and strictly validate PASV byte fields |
 | FtpNegotiation | Complete | MDTM, PWD/CWD, FEAT, SIZE, REST supported; parsed SIZE values are validated and existing RequestGroup lengths reject mismatches |
-| FTPS/TLS | Complete | AUTH TLS, PBSZ 0, PROT P with `tokio_rustls` |
+| FTPS/TLS | Extension / unverified | Rust implements AUTH TLS, PBSZ 0, PROT P with `tokio_rustls`; plaintext downgrade rejection is covered, but positive TLS-server interoperability remains unverified |
 | FTP-over-HTTP-proxy | Complete | CONNECT method tunneling with 407 proxy auth |
 | FTP Connection Pool | Complete | Operations, stats, max connections |
 | FtpFinishDownload | Complete | 226 response + connection pooling |
@@ -304,7 +307,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 
 ### 7. RPC
 
-**Status:** Complete -- all 36 C++ RPC methods implemented
+**Status:** Method surface complete (36/36); external compatibility remains
+`PARTIAL` until the browser-extension, original-client, and full XML-RPC
+interoperability matrix is reproducibly green.
 **Rust files:** `aria2-rpc/src/` (16 files)
 
 #### RPC Method Coverage (36/36)
@@ -355,6 +360,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | 1 | Notification format differs from C++ | P1 | FIXED | `DownloadEvent` serializes the exact C++ shape: `jsonrpc`, event method, and `params: [{"gid": "..."}]`. |
 | 2 | Extra `onBtCacheChanged` event type | P2 | FIXED | Production `EventType` exposes exactly the six C++ events; non-standard cache/error/resume variants are excluded from `system.listNotifications` and event dispatch. |
 | 3 | WebSocket close handling | P2 | FIXED | The Axum session now distinguishes received close frames from EOF, logs the close state, echoes the close frame, and terminates the session cleanly. |
+| 4 | Original-client/browser-extension interoperability | P1 | OPEN | JSON-RPC, XML-RPC, WebSocket, GET/JSONP, authentication, error mapping, and method-level behavior have focused source-backed tests, but live interoperability with the complete original client matrix is not yet verified. |
 
 ### 8. Cookie / HTTP Auth
 

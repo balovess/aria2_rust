@@ -67,6 +67,11 @@ fn test_urlencoding_decode() {
 }
 
 #[test]
+fn test_urlencoding_decode_utf8() {
+    assert_eq!(urlencoding_decode("%E6%96%87%E4%BB%B6"), "文件");
+}
+
+#[test]
 fn test_parse_pasv_response_standard() {
     let resp = "227 Entering Passive Mode (192,168,1,100,200,10)";
     let result = parse_pasv_response(resp).unwrap();

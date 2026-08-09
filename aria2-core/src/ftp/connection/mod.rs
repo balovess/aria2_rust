@@ -25,13 +25,16 @@ pub use types::{
 };
 
 // Re-export FTPS TLS functions
-pub use tls::{build_tls_connector, upgrade_control_stream, upgrade_data_stream};
+pub use tls::{
+    build_tls_connector, perform_tls_handshake, upgrade_control_stream, upgrade_data_stream,
+};
 
 // Re-export negotiation types
 pub use negotiation::{
     FtpDataProxyConfig, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, FtpTransferType,
     RawFtpControl, ServerCapabilities,
 };
+pub(crate) use negotiation::{percent_decode, read_response_impl};
 
 // Re-export finish handler types
 pub use ftp_finish::{FtpFinishConfig, FtpFinishHandler, FtpFinishResult, PooledFtpControl};

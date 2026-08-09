@@ -532,6 +532,7 @@ fn decode_aria2_base64(input: &str) -> Vec<u8> {
 struct JsonRpcHttpResponse {
     status: axum::http::StatusCode,
     body: String,
+    close_connection: bool,
 }
 
 fn http_status_for_jsonrpc_error(code: i32) -> axum::http::StatusCode {
@@ -559,7 +560,14 @@ fn serialize_jsonrpc_response(response: crate::json_rpc::JsonRpcResponse) -> Jso
             serde_json::Value::String(error.to_string())
         )
     });
-    JsonRpcHttpResponse { status, body }
+    JsonRpcHttpResponse {
+        status,
+        body,
+        // `HttpServerBodyCommand::sendJsonRpcResponse` disables keep-alive
+        // for every single-response error. Batch responses use a separate
+        // original path and remain eligible for connection reuse.
+        close_connection: response.error.is_some(),
+    }
 }
 
 async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpResponse {
@@ -599,10 +607,33 @@ async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpRe
             JsonRpcHttpResponse {
                 status: axum::http::StatusCode::OK,
                 body,
+                close_connection: false,
             }
         }
         Err(error) => serialize_jsonrpc_response(error.into_response(None)),
     }
+}
+
+fn into_jsonrpc_http_response(
+    response: JsonRpcHttpResponse,
+    content_type: &'static str,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, header};
+    use axum::response::IntoResponse;
+
+    let close_connection = response.close_connection;
+    let mut http_response = (
+        response.status,
+        [(header::CONTENT_TYPE, content_type)],
+        response.body,
+    )
+        .into_response();
+    if close_connection {
+        http_response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
+    http_response
 }
 
 fn wrap_jsonp(body: String, callback: Option<&str>) -> String {
@@ -647,17 +678,8 @@ async fn handle_jsonrpc(
     axum::extract::State(state): axum::extract::State<RpcState>,
     body: axum::body::Bytes,
 ) -> impl axum::response::IntoResponse {
-    use axum::http::header;
-    use axum::response::IntoResponse;
-
     let response = dispatch_jsonrpc_body(&state.engine, &body).await;
-
-    (
-        response.status,
-        [(header::CONTENT_TYPE, "application/json-rpc")],
-        response.body,
-    )
-        .into_response()
+    into_jsonrpc_http_response(response, "application/json-rpc")
 }
 
 /// Handle the original aria2 XML-RPC endpoint at `/rpc`.
@@ -737,8 +759,6 @@ async fn handle_jsonrpc_or_ws(
     ws: Option<axum::extract::ws::WebSocketUpgrade>,
     query: axum::extract::RawQuery,
 ) -> impl axum::response::IntoResponse {
-    use axum::response::IntoResponse;
-
     match ws {
         Some(upgrade) => {
             // WebSocket upgrade request from Aria2 Explorer or other clients.
@@ -757,12 +777,8 @@ async fn handle_jsonrpc_or_ws(
             } else {
                 "application/json-rpc"
             };
-            (
-                response.status,
-                [(axum::http::header::CONTENT_TYPE, content_type)],
-                wrap_jsonp(response.body, parsed.callback.as_deref()),
-            )
-                .into_response()
+            let body = wrap_jsonp(response.body, parsed.callback.as_deref());
+            into_jsonrpc_http_response(JsonRpcHttpResponse { body, ..response }, content_type)
         }
     }
 }

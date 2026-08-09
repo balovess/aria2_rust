@@ -57,6 +57,8 @@ use crate::ftp::connection::types::FtpMode;
 // Re-export public types from submodules
 pub use capabilities::ServerCapabilities;
 pub use control::RawFtpControl;
+pub(crate) use control::read_response_impl;
+pub(crate) use parsing::percent_decode;
 
 /// FTP transfer type, matching C++ `PREF_FTP_TYPE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -237,6 +237,15 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.referer {
         map.insert("referer".to_string(), v.clone());
     }
+    if !opts.check_certificate {
+        map.insert("check-certificate".to_string(), "false".to_string());
+    }
+    if let Some(ref v) = opts.ca_certificate {
+        map.insert("ca-certificate".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.min_tls_version {
+        map.insert("min-tls-version".to_string(), v.clone());
+    }
 
     // --- Piece sizing and connection behaviour ---
     if let Some(v) = opts.piece_length {
