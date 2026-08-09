@@ -29,19 +29,9 @@ pub fn normalize_rpc_options(
         .collect()
 }
 
-/// Generate session ID based on current timestamp
-///
-/// Creates a unique session identifier using nanosecond precision.
-///
-/// # Returns
-/// * Session ID string (format: "session-<hex_timestamp>")
-pub fn generate_session_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| format!("session-{:x}", d.as_nanos()))
-        .unwrap_or_else(|_| "session-unknown".to_string())
-}
+// Preserve the existing helper path while keeping session identity creation
+// in the SessionInfo domain type, which is the owner of its wire contract.
+pub use crate::types::generate_session_id;
 
 /// Build version info response
 ///
@@ -181,13 +171,6 @@ pub fn format_session_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_generate_session_id_format() {
-        let id = generate_session_id();
-        assert!(id.starts_with("session-"));
-        assert!(id.len() > 8);
-    }
 
     #[test]
     fn test_build_version_info_structure() {

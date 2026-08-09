@@ -417,6 +417,7 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
         }
     }
 
+    let has_params = params.is_some_and(|encoded| !encoded.is_empty());
     let decoded_params = params.map(|encoded| {
         let decoded = aria2_core::util::uri::percent_decode(encoded);
         decode_aria2_base64(&decoded)
@@ -439,9 +440,12 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
                 body.extend_from_slice(id.as_bytes());
                 body.extend_from_slice(b"\"");
             }
-            if let Some(params) = decoded_params {
+            if has_params {
+                let params = decoded_params
+                    .as_deref()
+                    .expect("non-empty params must have a decoded value");
                 body.extend_from_slice(b",\"params\":");
-                body.extend_from_slice(&params);
+                body.extend_from_slice(params);
             }
             body.extend_from_slice(b"}");
             body
@@ -772,6 +776,15 @@ mod tests {
 
         let invalid_base64 = parse_json_get_query("method=aria2.getVersion&params=not-base64");
         assert!(!invalid_base64.body.is_empty());
+    }
+
+    #[test]
+    fn test_json_get_query_omits_empty_params_like_aria2() {
+        let parsed = parse_json_get_query("method=aria2.getVersion&id=empty&params=");
+        assert_eq!(
+            parsed.body,
+            br#"{"method":"aria2.getVersion","id":"empty"}"#
+        );
     }
 
     #[test]

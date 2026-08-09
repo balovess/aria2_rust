@@ -29,12 +29,12 @@ units catalogued in docs/MIGRATION.md measure audit coverage only.
 | HTTP/HTTPS | aria2-core/src/http/, aria2-protocol/src/http/ | PARTIAL | Focused parser and download coverage exists, including existing-file naming, control-file cleanup, preallocation-safe resume recovery, multi-URI resume failover, and HTTP 200 responses that ignore a requested Range (`CannotResume` by default or fresh restart according to `always-resume`/`max-resume-failure-tries`). Core owns production orchestration; `aria2-protocol::http::client` remains a separate compatibility-layer client with no core production callers, and broader original-binary interoperability remains unverified. |
 | FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Active/passive/auth paths exist; platform and live-server coverage is incomplete. |
 | SFTP | aria2-protocol/src/sftp/, aria2-core/src/engine/sftp_download_command/ | UNVERIFIED | `ssh-host-key-md` fingerprint pinning and mismatch rejection are implemented and unit-tested; no live SFTP server E2E evidence on the current matrix. Known-hosts persistence is not part of aria2_original's `ssh-host-key-md` contract. |
-| BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist; incoming listener ownership, dependency graph, and full scheduler/seeding parity remain. |
-| DHT and trackers | aria2-protocol/src/bittorrent/dht/ | PARTIAL | Production paths and tests now use the protocol crate as the single canonical DHT implementation; the former `aria2-core/src/dht/` source tree is no longer exported. Complete live-network evidence is still missing. |
+| BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. Incoming listener ownership, dependency graph, and full scheduler/seeding parity remain. |
+| DHT and trackers | aria2-protocol/src/bittorrent/dht/ | PARTIAL | Production paths and tests now use the protocol crate as the single canonical DHT implementation; the former `aria2-core/src/dht/` source tree is no longer exported. DHT port ranges now try the ordered list and fall back after an occupied first port; complete live-network evidence is still missing. |
 | Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Same-metaurl multi-file grouping, full `follow-torrent=mem` semantics, session graph restoration, and live protocol interoperability remain open. |
 | Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Concurrent control-file lifecycle, piece-level resume semantics, and integrity entry callbacks remain incomplete or unverified. |
-| RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, feature-specific method/notification discovery, feature-aware `getVersion`, and real HTTP E2E coverage exist. XML-RPC execution faults use HTTP 200 + `faultCode=1`; parser/value failures match the original HTTP 400 empty-body contract. `getServers` is active-only and reports only real in-flight requests; waiting, paused, stopped, or unknown GIDs return execution error code 1. The catalog is 33 core methods plus 2 BitTorrent and 1 Metalink method when enabled; notifications are 5 core plus 1 BitTorrent event when enabled. Task-creation and runtime option values share core validation. Full original-client interoperability, including the browser-extension matrix and complete XML-RPC client coverage, remains unverified. |
-| CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | Core parsing exists; the original short-option contract is now covered for registry mappings, including `-a`/`-p`/`-P`/`-R`/`-u`/`-Z`, and `-h`/`-v`/`-V` help/version/check-integrity actions. The original `file-allocation=prealloc` default is centralized across protocol constructors. Complete option inventory/default/changeability parity, optional-argument/getopt edge cases, version/help text parity, and generated comparison/E2E proof remain open. Rust's extra explicit negation aliases are documented extensions, not an original-parser gap. |
+| RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, feature-specific method/notification discovery, feature-aware `getVersion`, and real HTTP E2E coverage exist. XML-RPC execution faults use HTTP 200 + `faultCode=1`; parser/value failures match the original HTTP 400 empty-body contract. `getServers` is active-only and reports only real in-flight requests; waiting, paused, stopped, or unknown GIDs return execution error code 1. `getSessionInfo` now generates one 20-byte random session key per engine and exposes the original 40-character lowercase hexadecimal representation. The catalog is 33 core methods plus 2 BitTorrent and 1 Metalink method when enabled; notifications are 5 core plus 1 BitTorrent event when enabled. Task-creation and runtime option values share core validation. Full original-client interoperability, including the browser-extension matrix and complete XML-RPC client coverage, remains unverified. |
+| CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | `OptionDef::parse_value` remains the shared typed seam for CLI/config/RPC validation. `IntegerRange` preserves ordered range wire values, and `IndexOut` uses one cumulative `INDEX=PATH` parser for validation and BT execution. The original short-option contract is covered for registry mappings, including `-a`/`-p`/`-P`/`-R`/`-u`/`-Z`, and `-h`/`-v`/`-V` help/version/check-integrity actions. Complete option inventory/default/changeability parity, optional-argument/getopt edge cases, version/help text parity, and generated comparison/E2E proof remain open. Rust's extra explicit negation aliases are documented extensions, not an original-parser gap. |
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI. |
 
 ## Verification Evidence
@@ -45,11 +45,13 @@ Verified on 2026-08-09 with single-job builds where needed:
 cargo fmt --all -- --check                              PASS
 cargo check -p aria2-core --all-features --tests -j 1    PASS
 cargo clippy -p aria2-core --all-targets --all-features -- -D warnings PASS
+cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings PASS
+cargo clippy -p aria2-rpc --all-targets --all-features -- -D warnings PASS
 cargo test -p aria2-core --test test_e2e_download --all-features -- --test-threads=1 26 passed, 0 failed, 2 ignored
-cargo clippy --workspace --all-targets --all-features -- -D warnings PASS
+cargo clippy --workspace --all-targets --all-features -- -D warnings PASS (prior checkpoint; not rerun in this incremental checkpoint)
 cargo test -p aria2-core --all-features c_api --lib   PASS
 cargo test -p aria2-protocol --all-features -j 1        872 passed, 4 ignored
-cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 390 passed, 0 failed
+cargo test -p aria2-rpc --all-features --tests -- --test-threads=1 391 passed, 0 failed
 cargo test -p aria2 --all-features -j 1                 254 passed, 5 ignored
 cargo build -p aria2 --all-features -j 1                PASS
 npm run typecheck                                        PASS
@@ -65,16 +67,33 @@ cargo test -p aria2-core --test test_e2e_download resume_failure --all-features 
 cargo test -p aria2-core --lib request::request_group::options::tests::rpc_option_map_uses_aria2_wire_strings --all-features -- --exact  PASS
 ~~~
 
+Latest option/BitTorrent/port-range checkpoint (2026-08-09):
+
+~~~text
+cargo test -p aria2-core --lib config::option::tests --all-features -- --test-threads=1 34 passed, 0 failed
+cargo test -p aria2-core --lib engine::bt_download_command_tests --all-features -- --test-threads=1 34 passed, 0 failed
+cargo test -p aria2-core --lib engine::bt_peer_listener::tests --all-features -- --test-threads=1 4 passed, 0 failed
+cargo test -p aria2-protocol --lib bittorrent::dht::engine::tests --all-features -- --test-threads=1 6 passed, 0 failed
+cargo fmt --all -- --check PASS
+~~~
+
+This checkpoint verifies the shared `OptionDef`/RPC validation seam, cumulative
+`index-out` parsing and actual BitTorrent output-path application for single and
+multi-file torrents. It also verifies ordered TCP and UDP port-range fallback
+when the first candidate is occupied. These are focused compatibility results;
+they do not establish browser-extension interoperability or workspace-wide
+end-to-end completion.
+
 Latest RPC compatibility checkpoint (2026-08-09): unknown and
 non-changeable options are ignored as in `aria2_original`; a recognized option
 with an invalid value returns execution error `code=1` and HTTP 400 for
 JSON-RPC. `addUri`, `addTorrent`, and `addMetalink` use the same core parser as
 runtime option updates. Only registry-declared cumulative options accept RPC
 arrays; ordinary options cannot be silently converted from arrays. The
-checkpoint includes 220 library tests, 18 integration tests, 55 all-method
+checkpoint includes 221 library tests, 18 integration tests, 55 all-method
 HTTP tests, 40 HTTP/WebSocket/XML-RPC route tests, 5 server-config tests, 3
 HTTPS tests, 31 mock-server tests, 8 header/progress tests, and 10 stress
-tests in the 390-test command above. The
+tests in the 391-test command above. The
 active/reserved task changeability policy is centralized with the global
 policy in `aria2-core/src/config/runtime.rs`; `request_group` only preserves
 the historical re-export path. This is a RPC-scope result only; it does not
@@ -95,15 +114,27 @@ keeps `method`/`id`/`jsoncallback` text unnormalized, and returns the original
 parse error for a request without a query. JSONP callbacks are emitted using
 the original verbatim callback rule for strict wire compatibility; callers
 must therefore use the same authentication and deployment protections as the
-original endpoint. The new GET/JSONP regression cases pass as part of the
-40-route HTTP/WebSocket/XML-RPC target.
+original endpoint. Explicitly empty `params=` is also omitted from the
+generated request object, matching the original string builder. Basic Auth
+follows the original empty-password rule: an empty `rpc-passwd` is treated as
+username-only authentication. The new GET/JSONP and Basic Auth regressions
+pass as part of the 40-route HTTP/WebSocket/XML-RPC target.
 
 The XML-RPC adapter now also has source-backed HTTP contract coverage against
 `aria2_original/src/HttpServerBodyCommand.cc`: parser or XML value conversion
 failures return HTTP 400 with an empty body and no `Content-Type`, while a
 successfully parsed method execution failure returns HTTP 200 with an XML
-fault whose `faultCode` is `1`. The all-features RPC suite is 390 passed and
+fault whose `faultCode` is `1`. The all-features RPC suite is 391 passed and
 0 failed after this regression was added.
+
+The `getSessionInfo` value was compared with
+`aria2_original/src/DownloadEngine.cc` and
+`aria2_original/src/RpcMethodImpl.cc`. Rust generates the random key once when
+`RpcEngine` is constructed and emits the same 40-character lowercase hex value
+through JSON-RPC, XML-RPC, and WebSocket dispatch. The handler regression
+asserts the exact length and alphabet as well as per-engine stability; the
+legacy `rpc_helpers::generate_session_id` path now forwards to the canonical
+`SessionInfo` implementation.
 
 The `aria2.getServers` adapter now follows the original active-only contract:
 it emits one file-index entry per active file and includes only requests that
@@ -154,7 +185,7 @@ consolidation work explicitly:
 | Engine command creation | `aria2-core/src/engine/task_spawner.rs` | Keep protocol selection and construction behind this deep module; the engine loop only owns lifecycle accounting and admission. |
 | Global bandwidth limits | `RateLimiter` shared through `Arc` | One token-bucket state is shared by active and future commands; RPC updates also refresh `RequestGroupMan`'s reporting snapshot. |
 | DHT | `aria2-protocol/src/bittorrent/dht/` | Keep the protocol crate as the canonical implementation; do not revive the unexported duplicate core tree. |
-| RPC option parsing | `aria2-core/src/config/option/registry.rs`, `request/request_group/options.rs`, `config/runtime.rs`, and `request/request_group/options_ops.rs` | Keep original runtime changeability, enum choices, and typed string/size/integer/boolean parsing in core. `OptionRegistry::parse_rpc_value` validates transport values and `DownloadOptions::try_from_rpc_options` validates task creation; RPC handlers only normalize transport values and map parse failures to aria2 execution errors. Do not add another option whitelist or parser in the RPC crate. |
+| RPC/CLI option parsing | `aria2-core/src/config/option/registry.rs`, `config/option/types.rs`, `request/request_group/options.rs`, `config/runtime.rs`, and `request/request_group/options_ops.rs` | Keep original runtime changeability, enum choices, typed string/size/integer/boolean parsing, and cumulative `index-out` parsing in core. `OptionRegistry::parse_rpc_value` validates transport values and `DownloadOptions::try_from_rpc_options` validates task creation; RPC handlers only normalize transport values and map parse failures to aria2 execution errors. BT execution consumes the shared `parse_index_out` result and applies it to its output-path views. Do not add another option whitelist or parser in the RPC crate. |
 | Request-group identity lookup | `aria2-core/src/request/request_group_man/mod.rs` | Keep `active` and `reserved` as scheduling stores, but use one canonical GID index for all non-terminal groups. Active/reserved movement does not remove the index; terminal demotion/removal does. RPC, C API, session snapshots, and status lookup therefore share one stable identity seam without exposing the internal storage choice. Query snapshots preserve active-first and reserved FIFO order, then append canonical-only groups observed during a transfer window. |
 | Resume policy | `aria2-core/src/engine/download_command/execute.rs` and `request/request_group/control_ops.rs` | Keep HTTP response interpretation in `SequentialDownloader`; command-level URI selection, atomic resume-failure accumulation, and fresh-download fallback stay in `DownloadCommand`. Do not make RPC or protocol adapters reinterpret `always-resume` or `max-resume-failure-tries`. |
 | HTTP/FTP transport | core orchestration plus protocol transport | Existing layers are useful adapters but are not yet one canonical implementation; remove pass-through duplication only after behavior comparison and live interoperability coverage. |

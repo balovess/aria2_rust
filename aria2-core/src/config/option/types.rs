@@ -356,7 +356,7 @@ impl OptionDef {
                     Ok(OptionValue::Int(n))
                 })
                 .map_err(|e| format!("invalid integer '{}': {}", s, e))?,
-            OptionType::IndexOut => validate_index_out(s).map(|_| OptionValue::Str(s.to_string())),
+            OptionType::IndexOut => parse_index_out(s).map(|_| OptionValue::Str(s.to_string())),
             OptionType::Size => {
                 let value = OptionValue::parse_size_str_checked(s)?;
                 if value > i64::MAX as u64 {
@@ -440,20 +440,28 @@ pub fn parse_integer_segments(
     Ok(ranges)
 }
 
-fn validate_index_out(value: &str) -> Result<(), String> {
+/// Parse aria2's cumulative `INDEX=PATH` wire representation.
+///
+/// The option is stored as newline-delimited text so repeated CLI/config/RPC
+/// values preserve their original ordering. Execution code should use this
+/// parser rather than reimplementing the delimiter and validation rules.
+pub fn parse_index_out(value: &str) -> Result<Vec<(usize, String)>, String> {
+    let mut entries = Vec::new();
     for raw_line in value.split('\n') {
         let line = raw_line.trim_end_matches('\r');
         let (index, path) = line
             .split_once('=')
             .ok_or_else(|| format!("invalid index-out value '{}'", line))?;
-        index
+        let index = index
             .parse::<u32>()
-            .map_err(|_| format!("invalid index-out index '{}'", index))?;
+            .map_err(|_| format!("invalid index-out index '{}'", index))?
+            as usize;
         if path.is_empty() {
             return Err(format!("index-out path for {} must not be empty", index));
         }
+        entries.push((index, path.to_string()));
     }
-    Ok(())
+    Ok(entries)
 }
 
 fn validate_unsigned_bounds(

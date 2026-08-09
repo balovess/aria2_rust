@@ -62,26 +62,6 @@ impl BtDownloadCommand {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::parse_listen_ports;
-
-    #[test]
-    fn listen_port_parser_expands_original_segment_syntax() {
-        assert_eq!(
-            parse_listen_ports("6881-6883,6999").unwrap(),
-            vec![6881, 6882, 6883, 6999]
-        );
-    }
-
-    #[test]
-    fn listen_port_parser_rejects_values_outside_original_bounds() {
-        assert!(parse_listen_ports("1023").is_err());
-        assert!(parse_listen_ports("70000").is_err());
-        assert!(parse_listen_ports("6881-").is_err());
-    }
-}
-
 #[async_trait]
 impl Command for BtDownloadCommand {
     async fn shutdown(&mut self) {
@@ -626,5 +606,25 @@ impl BtDownloadCommand {
         let num_pieces = meta.num_pieces() as u32;
 
         Ok((meta, piece_length, total_size, num_pieces))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_listen_ports;
+
+    #[test]
+    fn listen_port_parser_expands_original_segment_syntax() {
+        assert_eq!(
+            parse_listen_ports("6881-6883,6999").unwrap(),
+            vec![6881, 6882, 6883, 6999]
+        );
+    }
+
+    #[test]
+    fn listen_port_parser_rejects_values_outside_original_bounds() {
+        assert!(parse_listen_ports("1023").is_err());
+        assert!(parse_listen_ports("70000").is_err());
+        assert!(parse_listen_ports("6881-").is_err());
     }
 }

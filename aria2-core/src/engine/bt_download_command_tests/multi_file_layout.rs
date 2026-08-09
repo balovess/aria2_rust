@@ -1,3 +1,4 @@
+use super::build_test_torrent;
 use super::*;
 use crate::request::request_group::{DownloadOptions, GroupId};
 
@@ -62,6 +63,70 @@ fn test_multi_file_layout_created_for_multi_torrent() {
     assert!(layout.is_multi_file());
     assert_eq!(layout.num_files(), 2);
     assert_eq!(layout.total_size(), 1024);
+}
+
+#[test]
+fn test_index_out_updates_context_and_writer_layout() {
+    let torrent_bytes = build_multi_file_torrent();
+    let options = DownloadOptions {
+        dir: Some("d:/tmp/multitest".to_string()),
+        index_out: Some("1=first.iso\n2=nested/second.dat".to_string()),
+        ..DownloadOptions::default()
+    };
+
+    let cmd = BtDownloadCommand::new(GroupId::new(102), &torrent_bytes, &options, None)
+        .expect("index-out should be applied while constructing a BT command");
+
+    let context = cmd
+        .group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("BT context");
+    let base_dir = std::path::Path::new("d:/tmp/multitest");
+    assert_eq!(
+        context.get_file_entries()[0].path(),
+        base_dir.join("first.iso").to_string_lossy()
+    );
+    assert_eq!(
+        context.get_file_entries()[1].path(),
+        base_dir.join("nested/second.dat").to_string_lossy()
+    );
+
+    let layout = cmd.multi_file_layout.as_ref().expect("multi-file layout");
+    assert_eq!(
+        layout.file_absolute_path(0).unwrap(),
+        &base_dir.join("first.iso")
+    );
+    assert_eq!(
+        layout.file_absolute_path(1).unwrap(),
+        &base_dir.join("nested/second.dat")
+    );
+}
+
+#[test]
+fn test_index_out_updates_single_file_output_path() {
+    let temp_dir = tempfile::tempdir().expect("temporary download directory");
+    let options = DownloadOptions {
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        index_out: Some("1=renamed.bin".to_string()),
+        ..DownloadOptions::default()
+    };
+
+    let cmd = BtDownloadCommand::new(GroupId::new(103), &build_test_torrent(), &options, None)
+        .expect("index-out should override a single-file BT output");
+
+    assert_eq!(cmd.output_path, temp_dir.path().join("renamed.bin"));
+    let context = cmd
+        .group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("BT context");
+    assert_eq!(
+        context.get_file_entries()[0].path(),
+        cmd.output_path.to_string_lossy()
+    );
 }
 
 #[test]

@@ -577,6 +577,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_dht_engine_tries_next_port_when_first_is_occupied() {
+        let occupied = tokio::net::UdpSocket::bind("0.0.0.0:0")
+            .await
+            .expect("occupied UDP socket");
+        let first_port = occupied.local_addr().unwrap().port();
+        let candidate = tokio::net::UdpSocket::bind("0.0.0.0:0")
+            .await
+            .expect("candidate UDP socket");
+        let second_port = candidate.local_addr().unwrap().port();
+        drop(candidate);
+
+        let config = DhtEngineConfig {
+            port: first_port,
+            port_range: Some(vec![first_port, second_port]),
+            dht_file_path: None,
+            ..DhtEngineConfig::local()
+        };
+        let engine = DhtEngine::start(config)
+            .await
+            .expect("DHT should fall back to the next available port");
+
+        assert_eq!(engine.socket.local_addr().port(), second_port);
+        drop(occupied);
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
     async fn test_dht_engine_stats() {
         let config = DhtEngineConfig {
             dht_file_path: None,

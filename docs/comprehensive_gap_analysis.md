@@ -2,6 +2,14 @@
 # Deep-comparison audit against C++ aria2_original and aria2-next
 # Updated: 2026-08-04 (standard MSE API migration and BT dynamic-peer lifecycle validation)
 
+> This file is a historical deep-comparison audit, not the current completion
+> gate. The current external-compatibility status is maintained in
+> `docs/compatibility-status.md`, which supersedes older summary counts and
+> module labels below. In particular, the historical RPC "Complete" statement
+> must not be read as browser-extension or full original-client compatibility;
+> the current RPC status remains `PARTIAL` until that interoperability matrix
+> is reproducibly green.
+
 ## Executive Summary
 
 This document consolidates findings from module-by-module deep-comparison audits of the

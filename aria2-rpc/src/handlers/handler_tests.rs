@@ -14,7 +14,6 @@ use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::download::download_context::DownloadContext;
 use aria2_core::download::file_entry::FileEntry;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-#[cfg(any(feature = "bittorrent", feature = "metalink"))]
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
 #[tokio::test]
@@ -1585,8 +1584,11 @@ async fn test_get_session_info_returns_session_id() {
 
     let session_id = result.get("sessionId").unwrap().as_str().unwrap();
     assert!(
-        session_id.starts_with("session-"),
-        "Session ID should start with 'session-' prefix, got: {}",
+        session_id.len() == 40
+            && session_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "Session ID should be 40 lowercase hexadecimal characters, got: {}",
         session_id
     );
     assert!(!session_id.is_empty(), "Session ID should not be empty");
@@ -1636,6 +1638,11 @@ async fn test_get_session_info_struct_fields() {
     assert!(
         !session_info.session_id.is_empty(),
         "session_id should not be empty"
+    );
+    assert_eq!(
+        session_info.session_id.len(),
+        40,
+        "session_id must encode the original 20-byte session key"
     );
     assert!(
         session_info.session_start_time > 0,

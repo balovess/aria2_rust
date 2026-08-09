@@ -705,7 +705,11 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    /// Create a new SessionInfo with current timestamp.
+    /// Create a new SessionInfo with an aria2-compatible session identifier.
+    ///
+    /// The original DownloadEngine generates 20 random bytes at construction
+    /// time and exposes their lowercase hexadecimal representation through
+    /// `getSessionInfo`.
     pub fn new() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let start_time = SystemTime::now()
@@ -713,7 +717,7 @@ impl SessionInfo {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         Self {
-            session_id: format!("session-{:x}", start_time),
+            session_id: generate_session_id(),
             session_start_time: start_time,
         }
     }
@@ -724,6 +728,28 @@ impl SessionInfo {
             "sessionId": self.session_id
         })
     }
+}
+
+/// Generate the session identifier exposed by `aria2.getSessionInfo`.
+///
+/// This matches the original aria2 wire shape: 20 random bytes encoded as 40
+/// lowercase hexadecimal characters. The identifier is generated once by
+/// [`SessionInfo::new`] when an RPC engine is constructed.
+pub fn generate_session_id() -> String {
+    use rand::RngCore;
+
+    const SESSION_ID_BYTES: usize = 20;
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut bytes = [0u8; SESSION_ID_BYTES];
+    rand::thread_rng().fill_bytes(&mut bytes);
+
+    let mut session_id = String::with_capacity(SESSION_ID_BYTES * 2);
+    for byte in bytes {
+        session_id.push(HEX[(byte >> 4) as usize] as char);
+        session_id.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    session_id
 }
 
 impl Default for SessionInfo {

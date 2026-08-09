@@ -884,6 +884,10 @@ mod tests {
         values.insert("max-retries".to_string(), serde_json::json!("7"));
         values.insert("follow-torrent".to_string(), serde_json::json!("mem"));
         values.insert(
+            "index-out".to_string(),
+            serde_json::json!(["1=first.iso", "2=second.iso"]),
+        );
+        values.insert(
             "header".to_string(),
             serde_json::json!(["X-One: 1", "X-Two: 2"]),
         );
@@ -893,6 +897,10 @@ mod tests {
         assert_eq!(options.max_download_limit, Some(100 * 1024));
         assert_eq!(options.max_retries, 7);
         assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
+        assert_eq!(
+            options.index_out.as_deref(),
+            Some("1=first.iso\n2=second.iso")
+        );
         assert_eq!(options.header, vec!["X-One: 1", "X-Two: 2"]);
     }
 

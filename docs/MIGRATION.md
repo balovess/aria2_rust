@@ -15,11 +15,35 @@
 | 2026-07-30 | 文档组织：模块级总览（comprehensive_gap_analysis.md）+ 文件级台账（docs/migration/） |
 | 2026-07-30 | 执行顺序：先补全 530 单元文件级对照（校正现有文档误差），再按 P0→P1→P2 修复 |
 | 2026-07-30 | 性能验证：仅 Rust 侧基准回归（benches/ + 回归测试），不与 C++ 实测对比 |
+| 2026-08-09 | 外部兼容优先：RPC/JSON-RPC/XML-RPC/WebSocket、CLI、配置、session、错误码和原版客户端可观察行为必须以 aria2_original 为契约；Rust 架构和性能优化只能发生在该契约之后 |
+| 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
 
 ## 对照范围
 
 - `aria2_original/src`：415 个 `.cc` + 115 个 header-only = **530 个对照单元**
-- 台账骨架由 `scripts/gen_migration_matrix.py` 生成（重新运行不会覆盖已填写的审计行）
+- 台账骨架历史上由 `scripts/gen_migration_matrix.py` 生成；当前 checkout 的 `scripts/` 目录不包含该脚本，不能把“可重新生成”当作当前工具能力
+
+## 2026-08-09 当前增量检查点
+
+本轮已闭合 BitTorrent `index-out` 的实际执行链：共享的
+`parse_index_out` 保留原版累积 `INDEX=PATH` wire 顺序，构造阶段将 1-based
+映射同时应用到 `DownloadContext`、`MultiFileLayout` 和单文件
+`output_path`。TCP `listen-port` 与 DHT `dht-listen-port` 的端口区间按原版
+顺序尝试，首端口被占用时回退到后续端口，并由真实 socket 回归测试覆盖。
+
+本轮验证通过：
+
+- `cargo fmt --all -- --check`
+- `cargo clippy -p aria2-core --all-targets --all-features -- -D warnings`
+- `cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings`
+- `cargo clippy -p aria2-rpc --all-targets --all-features -- -D warnings`
+- core option tests：34 passed / 0 failed
+- BT command tests：34 passed / 0 failed
+- TCP listener tests：4 passed / 0 failed
+- DHT engine tests：6 passed / 0 failed
+
+这些是增量证据，不代表 530 个 C++ 对照单元都已达到行为兼容，也不代表
+workspace、原版浏览器插件和完整端到端矩阵已经全部通过。
 
 ## 模块对照进度
 
@@ -99,7 +123,7 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
 
 ### 2026-07-30
 - 确认迁移决策（见上表）
-- 生成 530 单元 × 20 模块对照台账骨架（`scripts/gen_migration_matrix.py`）
+- 生成 530 单元 × 20 模块对照台账骨架（历史使用 `scripts/gen_migration_matrix.py`；该脚本当前不在 checkout 中）
 - 启动分模块并行逐文件审计
 - **530 / 530 单元逐项对照完成**，结果汇总入上方进度表；复核更正后为 5 项 `缺失`、63 项 `部分`
 - 阶段 2 消项后降至 **2 项 `缺失`**（均为 cookie 模块的 SQLite 解析器）、63 项 `部分`
@@ -452,7 +476,7 @@ tests, and the aria2 C++ performance baseline remain open in
   and real HTTP E2E checks for invalid `changeOption` and
   `changeGlobalOption` values.
 - `cargo test -p aria2-rpc --all-features --tests -- --test-threads=1`:
-  **390 passed / 0 failed**. This proves the RPC test scope only; the
+  **391 passed / 0 failed**. This proves the RPC test scope only; the
   workspace aggregate and complete original browser-client interoperability
   matrix remain open.
 
@@ -485,8 +509,19 @@ tests, and the aria2 C++ performance baseline remain open in
   reject missing `id` or object params before method dispatch, materialize
   object-level errors inside batches, skip non-object batch items, and preserve
   empty batches as `[]`.
+- The legacy GET/JSONP adapter also preserves the original empty-`params=`
+  omission rule. Basic Auth treats an empty `rpc-passwd` as unset, so any
+  password is accepted after the configured username, matching the original
+  `HttpServer::setUsernamePassword` behavior.
+- `getSessionInfo` was compared with
+  `aria2_original/src/DownloadEngine.cc` and
+  `aria2_original/src/RpcMethodImpl.cc`: Rust now generates one 20-byte random
+  session key per `RpcEngine` and returns its 40-character lowercase
+  hexadecimal form. JSON-RPC, XML-RPC, and WebSocket dispatch share that
+  engine-owned value, while the old `rpc_helpers::generate_session_id` path is
+  retained as a forwarding export rather than a second generator.
 - Verification: `cargo test -p aria2-rpc --all-features --tests
-  -- --test-threads=1` passed **390 tests / 0 failed**; RPC Clippy and format
+  -- --test-threads=1` passed **391 tests / 0 failed**; RPC Clippy and format
   checks also passed. Browser-extension and complete original-client
   interoperability remain open acceptance items.
 

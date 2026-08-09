@@ -182,6 +182,20 @@ fn test_option_def_parse_index_out_is_cumulative_wire_text() {
 }
 
 #[test]
+fn test_parse_index_out_preserves_order_and_paths() {
+    assert_eq!(
+        super::parse_index_out("1=first.iso\r\n2=dir/second.iso").unwrap(),
+        vec![
+            (1, "first.iso".to_string()),
+            (2, "dir/second.iso".to_string()),
+        ]
+    );
+    assert!(super::parse_index_out("0=first.iso").is_ok());
+    assert!(super::parse_index_out("part.iso").is_err());
+    assert!(super::parse_index_out("1=").is_err());
+}
+
+#[test]
 fn test_size_bounds_are_applied_by_the_definition() {
     let def = OptionDef {
         name: "piece-length".into(),

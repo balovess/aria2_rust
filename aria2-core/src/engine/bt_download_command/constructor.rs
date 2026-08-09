@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::config::parse_index_out;
 use crate::constants;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::http_tracker_client::TrackerState;
@@ -85,6 +86,26 @@ pub(crate) fn build_download_context_from_meta(
     Ok(ctx)
 }
 
+fn apply_index_out_paths(
+    context: &mut crate::download::DownloadContext,
+    index_out: Option<&str>,
+    dir: &str,
+) -> Result<()> {
+    let Some(index_out) = index_out else {
+        return Ok(());
+    };
+
+    for (index, suffix_path) in
+        parse_index_out(index_out).map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
+    {
+        let path = std::path::Path::new(dir).join(suffix_path);
+        context
+            .set_file_path_with_index(index, path.to_string_lossy().into_owned())
+            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+    }
+    Ok(())
+}
+
 impl BtDownloadCommand {
     /// Construct a BitTorrent command while retaining an externally managed
     /// RequestGroup owned by RequestGroupMan.
@@ -116,14 +137,14 @@ impl BtDownloadCommand {
         }
         command.group = group;
         command.progress = command.group.recover().progress.clone();
-        command.apply_external_context_paths()?;
+        command.apply_context_paths()?;
         Ok(command)
     }
 
     /// Apply paths from an externally prepared context, such as a Metalink
     /// torrent dependency. Torrent piece offsets stay unchanged while the
     /// destination files follow the Metalink mapping.
-    fn apply_external_context_paths(&mut self) -> Result<()> {
+    fn apply_context_paths(&mut self) -> Result<()> {
         let paths = self
             .group
             .recover()
@@ -199,7 +220,8 @@ impl BtDownloadCommand {
         // In C++ aria2, this is done by bittorrent_helper::processRootDictionary()
         // which calls ctx->setAttribute(CTX_ATTR_BT, torrent) with all torrent
         // metadata fields. We replicate this here.
-        let ctx = build_download_context_from_meta(&meta, path.to_string_lossy().to_string())?;
+        let mut ctx = build_download_context_from_meta(&meta, path.to_string_lossy().to_string())?;
+        apply_index_out_paths(&mut ctx, options.index_out.as_deref(), &dir)?;
         group.set_download_context(std::sync::Arc::new(ctx));
 
         let seed_time = options.seed_time.and_then(|t| {
@@ -286,7 +308,7 @@ impl BtDownloadCommand {
             };
 
         let progress = group.progress.clone();
-        Ok(Self {
+        let mut command = Self {
             local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id(),
             group: Arc::new(std::sync::RwLock::new(group)),
             progress,
@@ -371,6 +393,8 @@ impl BtDownloadCommand {
             )),
             incoming_peers: None,
             incoming_peer_listener_task: None,
-        })
+        };
+        command.apply_context_paths()?;
+        Ok(command)
     }
 }

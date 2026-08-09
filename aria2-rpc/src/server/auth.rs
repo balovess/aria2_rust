@@ -21,7 +21,10 @@ impl AuthConfig {
     }
     pub fn with_basic_auth(mut self, user: impl Into<String>, pass: impl Into<String>) -> Self {
         self.username = Some(user.into());
-        self.password = Some(pass.into());
+        let password = pass.into();
+        // aria2_original resets its password verifier when --rpc-passwd is
+        // empty, so an empty password means username-only authentication.
+        self.password = (!password.is_empty()).then_some(password);
         self
     }
 
@@ -52,10 +55,12 @@ impl AuthConfig {
             .as_deref()
             .is_some_and(|expected| constant_time_eq(expected, user));
         let password_matches = match self.password.as_deref() {
-            Some(expected) => constant_time_eq(expected, pass),
+            Some(expected) if !expected.is_empty() => constant_time_eq(expected, pass),
             // aria2 accepts username-only Basic Auth when --rpc-passwd is not
-            // configured.
+            // configured. An explicitly empty password has the same meaning
+            // because the original option handler treats it as unset.
             None => true,
+            Some(_) => true,
         };
         username_matches && password_matches
     }
@@ -304,6 +309,28 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"admin:anything");
         assert!(auth.has_basic());
         assert!(auth.verify_basic(&encoded));
+    }
+
+    #[test]
+    fn test_auth_config_empty_password_matches_username_only_behavior() {
+        let auth = AuthConfig::default().with_basic_auth("admin", "");
+        assert!(auth.has_basic());
+        assert!(auth.password.is_none());
+
+        for credentials in ["admin:anything", "admin:"] {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);
+            assert!(auth.verify_basic(&encoded), "credentials: {credentials}");
+        }
+
+        // Config structs can also be built directly; preserve the same
+        // original semantics for an explicitly empty password field.
+        let explicit_empty = AuthConfig {
+            username: Some("admin".into()),
+            password: Some(String::new()),
+            ..AuthConfig::default()
+        };
+        let encoded = base64::engine::general_purpose::STANDARD.encode("admin:anything");
+        assert!(explicit_empty.verify_basic(&encoded));
     }
 
     #[test]

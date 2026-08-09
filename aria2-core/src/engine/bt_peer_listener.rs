@@ -205,6 +205,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bind_ports_tries_next_port_when_first_is_occupied() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_port = occupied.local_addr().unwrap().port();
+        let candidate = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_port = candidate.local_addr().unwrap().port();
+        drop(candidate);
+
+        let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+        let listener = BtPeerListener::bind_ports(
+            "127.0.0.1".parse().unwrap(),
+            [first_port, second_port],
+            [1; 20],
+            [2; 20],
+            7,
+            4,
+            storage,
+        )
+        .await
+        .expect("listener should fall back to the next available port");
+
+        assert_eq!(listener.local_addr().unwrap().port(), second_port);
+        drop(occupied);
+    }
+
+    #[tokio::test]
     async fn spawn_task_can_be_aborted_without_an_incoming_connection() {
         let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
         let listener = BtPeerListener::bind(
