@@ -1721,9 +1721,12 @@ impl App {
     pub(super) fn print_banner(&self) {
         println!(
             "{}",
-            format!("aria2 version {}", aria2_protocol::identity::PRODUCT_VERSION)
-                .green()
-                .bold()
+            format!(
+                "aria2 version {}",
+                aria2_protocol::identity::PRODUCT_VERSION
+            )
+            .green()
+            .bold()
         );
         println!(
             "{} {}",

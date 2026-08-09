@@ -662,9 +662,10 @@ fn regression_v_triggers_version() {
     let error = result.expect_err("-v must trigger the CLI version action");
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
     assert!(
-        error
-            .to_string()
-            .starts_with(&format!("aria2c {}", aria2_protocol::identity::PRODUCT_VERSION)),
+        error.to_string().starts_with(&format!(
+            "aria2c {}",
+            aria2_protocol::identity::PRODUCT_VERSION
+        )),
         "--version must use the product version number"
     );
 }
