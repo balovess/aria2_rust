@@ -15,10 +15,12 @@
 
 ---
 
-**aria2-rust** is a Rust download engine in active compatibility migration
-against the [aria2](https://aria2.github.io/) implementation. It contains
-HTTP/HTTPS, FTP/SFTP, BitTorrent, Metalink, and JSON-RPC/XML-RPC/WebSocket
-paths; compatibility status and verification evidence are tracked in
+**aria2-rust** is an independent Rust download engine. It provides practical
+compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
+users and tools can migrate easily, while its architecture, safety,
+performance, and product direction are its own. It supports HTTP/HTTPS,
+FTP/SFTP, BitTorrent, Metalink, and JSON-RPC/XML-RPC/WebSocket paths;
+compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
 
 ## Implemented Capabilities

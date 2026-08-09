@@ -20,7 +20,7 @@
 //! ```text
 //! GET ftp://ftp.example.com/pub/file.tar.gz HTTP/1.1\r\n
 //! Host: ftp.example.com\r\n
-//! User-Agent: aria2/1.37.0\r\n
+//! User-Agent: aria2-rust/<release-version>\r\n
 //! Accept: */*\r\n
 //! Connection: Keep-Alive\r\n
 //! Proxy-Authorization: Basic <credentials>\r\n    (if proxy auth needed)

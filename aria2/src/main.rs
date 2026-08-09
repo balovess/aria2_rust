@@ -1,9 +1,9 @@
 //! aria2-rust CLI entry point.
 //!
-//! Uses clap derive API for argument parsing. The `--version` flag is handled
-//! by clap, while aria2's optional-argument `--help[=TAG|KEYWORD]` is rendered
-//! here before `App::run` so its selector can be preserved. The `completions`
-//! subcommand is also handled early and exits before the download engine starts.
+//! Uses clap derive API for argument parsing. aria2's optional
+//! `--help[=TAG|KEYWORD]` action is rendered here before `App::run` so its
+//! selector can be preserved. The `completions` subcommand is also handled
+//! early and exits before the download engine starts.
 
 use aria2::app::App;
 use aria2::app::cli::{CliArgs, Commands, render_help};

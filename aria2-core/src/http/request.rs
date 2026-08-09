@@ -338,7 +338,7 @@ impl HttpRequestBuilder {
     /// Automatically adds standard headers following C++ aria2's
     /// `HttpRequest::createRequest()` logic:
     /// - Host: extracted from URL (omits default ports 80/443)
-    /// - User-Agent: aria2/1.37.0
+    /// - User-Agent: aria2-rust/<release-version>
     /// - Accept: \*/\*
     /// - Accept-Encoding: when `accept_gzip` is enabled
     /// - Pragma/Cache-Control: when `no_cache` is enabled

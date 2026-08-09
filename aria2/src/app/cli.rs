@@ -100,13 +100,13 @@ impl FromStr for HelpRequest {
 
 /// Command-line arguments for the aria2-compatible binary.
 ///
-/// `name = "aria2"` and the explicit compatibility version preserve the
-/// upstream `aria2c --version` first-line contract. The binary itself remains
-/// `aria2c` via `[[bin]]` in `aria2/Cargo.toml`.
+/// `name = "aria2c"` and the explicit compatibility version preserve the
+/// upstream executable identity. The binary itself remains `aria2c` via
+/// `[[bin]]` in `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
-    name = "aria2",
-    version = aria2_protocol::identity::ARIA2_VERSION,
+    name = "aria2c",
+    version = aria2_protocol::identity::PRODUCT_VERSION,
     disable_help_flag = true,
     disable_version_flag = true,
     disable_help_subcommand = true,
@@ -1721,7 +1721,7 @@ impl App {
     pub(super) fn print_banner(&self) {
         println!(
             "{}",
-            format!("aria2 version {}", aria2_protocol::identity::ARIA2_VERSION)
+            format!("aria2 version {}", aria2_protocol::identity::PRODUCT_VERSION)
                 .green()
                 .bold()
         );

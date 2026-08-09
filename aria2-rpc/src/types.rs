@@ -652,7 +652,7 @@ impl GlobalStat {
 /// Contains the aria2 version string and list of enabled features.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionInfo {
-    /// Version string (e.g., "1.37.0-Rust")
+    /// Product version string.
     pub version: String,
     /// List of enabled feature names (serialized as "enabledFeatures" in JSON)
     #[serde(rename = "enabledFeatures")]
@@ -678,7 +678,7 @@ impl VersionInfo {
         features.push("SFTP");
 
         Self {
-            version: aria2_protocol::identity::ARIA2_VERSION.to_string(),
+            version: aria2_protocol::identity::PRODUCT_VERSION.to_string(),
             enabled_features: features.into_iter().map(|s| s.to_string()).collect(),
         }
     }

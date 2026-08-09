@@ -30,13 +30,13 @@ use crate::bittorrent::bencode::codec::BencodeValue;
 /// e
 /// ```
 ///
-/// Default values match the C++ `DefaultExtensionMessageFactory`:
-/// `ut_metadata = 1`, `ut_pex = 2`, `reqq = 500`, `v = "aria2/1.37.0"`.
+/// Default values use this implementation's peer agent with
+/// `ut_metadata = 1`, `ut_pex = 2`, and `reqq = 500`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionHandshake {
     /// The `m` sub-dictionary mapping extension names to their negotiated ext_id.
     m_dict: BTreeMap<Vec<u8>, BencodeValue>,
-    /// Client version string (BEP 10 `v` key). Defaults to "aria2/1.37.0".
+    /// Client version string (BEP 10 `v` key).
     v: Option<String>,
     /// Total metadata size in bytes for magnet links (BEP 9 `metadata_size` key).
     /// Only set when the sender has metadata to share.
@@ -60,7 +60,7 @@ const MAX_METADATA_SIZE: u32 = 8 * 1024 * 1024;
 
 impl ExtensionHandshake {
     /// Create a new handshake with default values:
-    /// ut_metadata=1, ut_pex=2, reqq=500, v="aria2/1.37.0".
+    /// ut_metadata=1, ut_pex=2, reqq=500, and the product peer agent.
     pub fn new() -> Self {
         let mut m_dict = BTreeMap::new();
         m_dict.insert(

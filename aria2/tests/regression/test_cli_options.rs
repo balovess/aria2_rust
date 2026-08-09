@@ -655,15 +655,17 @@ fn regression_no_color_default_false() {
     assert_eq!(cli.no_color, None);
 }
 
-/// Test: -v is the original aria2 version flag.
+/// Test: -v is handled by the CLI version action.
 #[test]
 fn regression_v_triggers_version() {
     let result = CliArgs::try_parse_from(["aria2c", "-v"]);
-    let error = result.expect_err("-v must trigger the original version action");
+    let error = result.expect_err("-v must trigger the CLI version action");
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
     assert!(
-        error.to_string().starts_with("aria2 1.37.0"),
-        "--version must start with the upstream aria2 identity"
+        error
+            .to_string()
+            .starts_with(&format!("aria2c {}", aria2_protocol::identity::PRODUCT_VERSION)),
+        "--version must use the product version number"
     );
 }
 

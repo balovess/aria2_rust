@@ -1513,7 +1513,7 @@ async fn test_get_version_returns_version_info() {
 }
 
 #[tokio::test]
-async fn test_get_version_uses_original_compatibility_version() {
+async fn test_get_version_uses_product_version() {
     let engine = RpcEngine::new();
     let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
@@ -1522,8 +1522,8 @@ async fn test_get_version_uses_original_compatibility_version() {
 
     assert_eq!(
         version_info.version,
-        aria2_protocol::identity::ARIA2_VERSION,
-        "aria2.getVersion must expose the upstream compatibility version"
+        aria2_protocol::identity::PRODUCT_VERSION,
+        "aria2.getVersion must expose the product version"
     );
 }
 
