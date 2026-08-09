@@ -187,44 +187,9 @@ jobs:
           npm run build
           npm publish --access public
 
-  docker:
-    name: Publish Docker image
-    needs: [prepare, build]
-    if: needs.prepare.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prepare.outputs.sha }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=raw,value=${{ needs.prepare.outputs.tag }}
-            type=raw,value=latest,enable=${{ !contains(needs.prepare.outputs.version, '-') }}
-      - uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64
-
   github-release:
     name: Create GitHub Release
-    needs: [prepare, build, publish-crates, publish-python, publish-nodejs, docker]
+    needs: [prepare, build, publish-crates, publish-python, publish-nodejs]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
