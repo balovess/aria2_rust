@@ -1,6 +1,10 @@
 name: CI
 
 on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 env:
@@ -22,14 +26,20 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
 
-  # ── Manual library and integration test verification ──────
+  # ── Library and integration test verification ─────────────
   test:
     name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - os: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - os: aarch64-apple-darwin
+            runner: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
