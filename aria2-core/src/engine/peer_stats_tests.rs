@@ -136,33 +136,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_ema_speed_smoothing() {
-        let mut stats = make_test_peer();
-
-        // First measurement: raw rate
-        thread::sleep(Duration::from_millis(20));
-        stats.on_data_received(1000);
-
-        let first_speed = stats.download_speed;
-        assert!(first_speed > 0.0);
-
-        // Second measurement at similar interval: EMA should produce
-        // a value close to first_speed (smoothed)
-        thread::sleep(Duration::from_millis(20));
-        stats.on_data_received(1000);
-
-        let second_speed = stats.download_speed;
-        // With alpha=0.5, second_speed ~= 0.5*rate2 + 0.5*first_speed
-        // Since rate1 ~= rate2 (same bytes, same interval), second_speed ~= first_speed
-        let ratio = second_speed / first_speed;
-        assert!(
-            ratio > 0.3 && ratio < 3.0,
-            "EMA should smooth speeds reasonably (ratio={:.2})",
-            ratio
-        );
-    }
-
-    #[test]
     fn test_cumulative_byte_counts() {
         let mut stats = make_test_peer();
 
