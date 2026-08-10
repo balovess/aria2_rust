@@ -27,7 +27,11 @@ fn test_sftp_uri_parsing_with_password() {
         None,
         None,
     );
-    assert!(result.is_ok(), "带密码的SFTP URI应解析成功");
+    assert!(
+        result.is_ok(),
+        "带密码的SFTP URI应解析成功: {:?}",
+        result.err()
+    );
 }
 
 #[test]
@@ -64,7 +68,11 @@ fn test_sftp_uri_parsing_bracketed_ipv6() {
         None,
         None,
     );
-    assert!(result.is_ok());
+    assert!(
+        result.is_ok(),
+        "SFTP bracketed IPv6 URI failed: {:?}",
+        result.err()
+    );
 }
 
 #[test]

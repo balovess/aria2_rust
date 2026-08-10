@@ -317,7 +317,7 @@ fn test_forward_build_request_no_auth() {
     assert!(req.starts_with("GET http://target.com:80/path HTTP/1.1\r\n"));
     assert!(req.contains("Host: target.com:80\r\n"));
     assert!(!req.contains("Proxy-Authorization"));
-    assert!(req.contains("User-Agent: aria2-rust/1.0\r\n"));
+    assert!(req.contains(&format!("User-Agent: {}\r\n", crate::constants::USER_AGENT)));
     assert!(req.ends_with("\r\n\r\n"));
 }
 

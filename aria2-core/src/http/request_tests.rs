@@ -38,7 +38,10 @@ fn test_request_auto_headers_generation() {
 
     // Host with explicit port
     assert_eq!(request.headers.get("Host").unwrap(), "example.com:8080");
-    assert_eq!(request.headers.get("User-Agent").unwrap(), "aria2-rust/1.0");
+    assert_eq!(
+        request.headers.get("User-Agent").unwrap(),
+        crate::constants::USER_AGENT
+    );
     assert_eq!(request.headers.get("Accept").unwrap(), "*/*");
     // Default: no Connection header (HTTP/1.1 keep-alive)
     assert!(!request.headers.contains_key("Connection"));

@@ -316,6 +316,7 @@ impl ServerStat {
     ///
     /// let snapshot = ServerStatSnapshot {
     ///     host: "restored.mirror.com".to_string(),
+    ///     protocol: "https".to_string(),
     ///     download_speed: 5000,
     ///     single_connection_avg_speed: 4500,
     ///     multi_connection_avg_speed: 8000,
