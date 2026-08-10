@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ['codex/*']
+    branches-ignore: [master]
   workflow_dispatch:
 
 env:
