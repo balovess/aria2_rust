@@ -566,7 +566,7 @@ async fn test_stress_memory_stability_sustained() {
     if samples.len() >= 2 {
         let first = samples.first().unwrap();
         let last = samples.last().unwrap();
-        let growth = *last - *first;
+        let growth = last.saturating_sub(*first);
 
         // Memory should not grow unboundedly (allow up to 120MB growth for
         // allocator hysteresis on CI VMs).  The test catches unbounded leaks
