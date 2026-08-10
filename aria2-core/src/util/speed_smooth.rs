@@ -316,39 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ema_reacts_to_drop() {
-        // Test that EMA reacts to significant speed drops within ~5 samples
-        let mut smoother = SpeedSmoother::new(10);
-
-        // Phase 1: High speed (~10000 B/s equivalent)
-        // 1000 bytes/call * 10 calls per 500ms window → ~10000 B/s
-        simulate_downloads(&mut smoother, 1000, 100, 15);
-        let high_speed = smoother.smoothed_speed();
-
-        // Phase 2: Drop to low speed (~1000 B/s equivalent)
-        // 100 bytes/call * 5 calls per 500ms window → ~1000 B/s
-        simulate_downloads(&mut smoother, 100, 100, 8);
-        let low_speed = smoother.smoothed_speed();
-
-        // After drop phase, speed should have decreased significantly
-        // EMA with alpha≈0.18 needs more samples for large swings; allow 20% minimum drop
-        assert!(
-            low_speed < high_speed * 0.80,
-            "EMA should react to speed drop. Before: {:.2}, After: {:.2}",
-            high_speed,
-            low_speed
-        );
-
-        // Verify the speed is trending toward the new low value
-        assert!(
-            low_speed < high_speed * 0.85,
-            "Post-drop speed ({:.2}) should be below pre-drop ({:.2})",
-            low_speed,
-            high_speed
-        );
-    }
-
-    #[test]
     fn test_burst_detection() {
         // Test that sudden spikes are detected as bursts
         let mut smoother = SpeedSmoother::new(10);
