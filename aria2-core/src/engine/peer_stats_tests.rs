@@ -311,5 +311,4 @@ pub(crate) mod tests {
             "Snub count should increment after reset+re-snub"
         );
     }
-
 }

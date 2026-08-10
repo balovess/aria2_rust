@@ -486,7 +486,11 @@ mod tests {
         assert!(report.metrics.contains_key("operation"));
         let metrics = report.metrics.get("operation").unwrap();
         assert!(!metrics.is_empty());
-        assert!(metrics[0].latency >= 10, "latency should be >= 10ms, got {}", metrics[0].latency);
+        assert!(
+            metrics[0].latency >= 10,
+            "latency should be >= 10ms, got {}",
+            metrics[0].latency
+        );
     }
 
     #[tokio::test]

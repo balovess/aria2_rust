@@ -289,7 +289,10 @@ mod tests {
 
         // Speed may or may not be set (depends on scheduler timing).
         // The important invariant: speed is non-negative.
-        assert!(smoother.smoothed_speed() >= 0.0, "Speed must be non-negative");
+        assert!(
+            smoother.smoothed_speed() >= 0.0,
+            "Speed must be non-negative"
+        );
     }
 
     #[test]
@@ -303,16 +306,31 @@ mod tests {
         smoother.reset();
 
         // Verify all state is cleared
-        assert_eq!(smoother.smoothed_speed(), 0.0, "Speed should be 0 after reset");
-        assert_eq!(smoother.samples_count(), 0, "Sample count should be 0 after reset");
-        assert_eq!(smoother.instant_speed(), 0.0, "Instant speed should be 0 after reset");
+        assert_eq!(
+            smoother.smoothed_speed(),
+            0.0,
+            "Speed should be 0 after reset"
+        );
+        assert_eq!(
+            smoother.samples_count(),
+            0,
+            "Sample count should be 0 after reset"
+        );
+        assert_eq!(
+            smoother.instant_speed(),
+            0.0,
+            "Instant speed should be 0 after reset"
+        );
 
         // Verify ETA cannot be calculated after reset
         let eta = smoother.eta_seconds(12345);
         assert!(eta.is_none(), "ETA should be None after reset (no speed)");
 
         // Verify not in burst state after reset
-        assert!(!smoother.is_burst(), "Should not be in burst state after reset");
+        assert!(
+            !smoother.is_burst(),
+            "Should not be in burst state after reset"
+        );
     }
 
     #[test]
@@ -321,7 +339,10 @@ mod tests {
 
         // Zero speed → ETA should be None
         let eta_no_speed = smoother.eta_seconds(99999);
-        assert!(eta_no_speed.is_none(), "ETA should be None when speed is zero");
+        assert!(
+            eta_no_speed.is_none(),
+            "ETA should be None when speed is zero"
+        );
     }
 
     #[test]
