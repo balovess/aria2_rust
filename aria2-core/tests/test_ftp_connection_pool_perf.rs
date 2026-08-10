@@ -87,7 +87,6 @@ fn test_connection_pool_performance_improvement() {
         "Expected at least 40% improvement, got {:.1}%",
         improvement
     );
-
 }
 
 #[test]
