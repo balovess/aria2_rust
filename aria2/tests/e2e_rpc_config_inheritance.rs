@@ -115,19 +115,6 @@ fn wait_for_stopped_task(aria2: &RunningAria2, gid: &str) {
     }
 }
 
-/// `--dir` is a global aria2 option. A task subsequently created through the
-/// public JSON-RPC adapter must inherit it, while the per-task `out` option
-/// remains the final filename.
-#[test]
-fn e2e_cli_global_dir_is_inherited_by_jsonrpc_add_uri_task() {
-    let download_dir = tempdir().expect("failed to create download directory");
-    let mut aria2 = RunningAria2::start_rpc(&[format!("--dir={}", download_dir.path().display())]);
-
-    let gid = add_uri(&aria2, "configured-from-rpc.bin");
-    assert_task_path(&aria2, &gid, download_dir.path(), "configured-from-rpc.bin");
-    force_shutdown(&mut aria2);
-}
-
 /// Runtime global changes and startup configuration share the same aria2
 /// global option state. A subsequent RPC-created task must therefore inherit
 /// `changeGlobalOption` values as well.

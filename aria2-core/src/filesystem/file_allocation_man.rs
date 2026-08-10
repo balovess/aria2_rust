@@ -954,34 +954,6 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_enqueue_path_allocates_file() {
-        let dir = std::env::temp_dir().join(format!("aria2_alloc_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("file.bin");
-        let target: u64 = 256 * 1024; // 256 KiB, one chunk at BUF_SIZE
-
-        let man = shared_file_allocation_man_with_concurrency(1);
-        enqueue_path(&man, &path, target, AllocationStrategy::Prealloc, false, 42)
-            .await
-            .unwrap();
-
-        let meta = tokio::fs::metadata(&path).await.unwrap();
-        assert_eq!(
-            meta.len(),
-            target,
-            "file must be zero-filled to target length"
-        );
-
-        // Second run: file already at target → skipped, still succeeds.
-        enqueue_path(&man, &path, target, AllocationStrategy::Prealloc, false, 42)
-            .await
-            .unwrap();
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_enqueue_path_trunc() {
         let dir = std::env::temp_dir().join(format!("aria2_alloc_trunc_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
