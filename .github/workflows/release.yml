@@ -1,10 +1,8 @@
 name: Release
 
 on:
-  workflow_run:
-    workflows: [CI]
+  push:
     branches: [master]
-    types: [completed]
 
 permissions:
   contents: write
@@ -16,17 +14,16 @@ concurrency:
 jobs:
   prepare:
     name: Prepare binary release
-    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ github.event.workflow_run.head_sha }}
+      sha: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - id: release
         shell: bash
