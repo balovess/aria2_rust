@@ -180,6 +180,8 @@ jobs:
           python -m build
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: bindings/python/dist
 
   publish-nodejs:
     name: Publish Node.js SDK
@@ -195,15 +197,12 @@ jobs:
           ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/setup-node@v5
         with:
-          node-version: '18'
+          node-version: '24'
           registry-url: https://registry.npmjs.org
       - name: Build and publish Node.js SDK
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "$NODE_AUTH_TOKEN" || { echo "NPM_TOKEN is not configured" >&2; exit 1; }
           cd bindings/nodejs
           npm ci
           npm run build

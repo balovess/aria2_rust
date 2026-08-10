@@ -9,9 +9,7 @@
 # ============================================
 # Stage 1: Build
 # ============================================
-# Rust 1.88+ is required because time@0.3.47 needs rustc 1.88.
-# edition = "2024" was stabilized in 1.85, but transitive deps now demand newer.
-FROM rust:1.88-alpine AS builder
+FROM rust:1.95-alpine AS builder
 
 # Install build dependencies
 # openssl-libs-static is required because Rust's musl target links statically
@@ -69,7 +67,6 @@ WORKDIR /downloads
 
 # Default configuration
 ENV RPC_LISTEN_PORT=6800
-ENV RPC_SECRET=""
 
 # Expose RPC port
 EXPOSE 6800
