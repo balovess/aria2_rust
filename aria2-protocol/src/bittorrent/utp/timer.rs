@@ -756,11 +756,11 @@ mod tests {
     fn test_timer_manager_get_expired_timers() {
         let mut manager = TimerManager::new();
 
-        // Set a very short timer
-        manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_millis(1));
+        // Set a short timer and wait long enough to avoid CI jitter
+        manager.set_timer(1, TimerType::ConnectTimeout, Duration::from_millis(50));
 
-        // Wait for it to expire
-        std::thread::sleep(Duration::from_millis(10));
+        // Wait well beyond the expiry to handle scheduler jitter
+        std::thread::sleep(Duration::from_millis(200));
 
         let expired = manager.get_expired_timers();
         assert_eq!(expired.len(), 1);
@@ -863,12 +863,13 @@ mod tests {
 
     #[test]
     fn test_idle_timeout_detector_is_timeout() {
-        let mut detector = IdleTimeoutDetector::with_timeout(Duration::from_millis(100));
+        let mut detector = IdleTimeoutDetector::with_timeout(Duration::from_millis(200));
 
         detector.record_activity();
         assert!(!detector.is_timeout());
 
-        std::thread::sleep(Duration::from_millis(150));
+        // Sleep well beyond the timeout to avoid scheduler jitter
+        std::thread::sleep(Duration::from_millis(500));
         assert!(detector.is_timeout());
     }
 }

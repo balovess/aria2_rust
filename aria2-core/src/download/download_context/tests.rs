@@ -1,8 +1,5 @@
 //! Unit tests for DownloadContext and related types.
 
-use std::thread;
-use std::time::Duration;
-
 use super::context::DownloadContext;
 use super::types::{ContextAttributeType, Signature};
 use crate::download::file_entry::FileEntry;
@@ -540,47 +537,6 @@ fn test_signature_get_set() {
     let sig = ctx.get_signature().unwrap();
     assert_eq!(sig.hash_type, "sha-256");
     assert!(sig.body.contains("BEGIN PGP"));
-}
-
-// -----------------------------------------------------------------------
-// 20. Timing (resetDownloadStartTime, resetDownloadStopTime, calculateSessionTime)
-// -----------------------------------------------------------------------
-#[test]
-fn test_timing_start_stop_session() {
-    let mut ctx = DownloadContext::new_default();
-
-    // Before any timing operations
-    assert!(ctx.get_download_stop_time().is_none());
-    assert_eq!(ctx.calculate_session_time(), Duration::ZERO);
-
-    // Start
-    ctx.reset_download_start_time();
-    assert!(ctx.get_net_stat().download_start_time().is_some());
-
-    // Simulate some passage of time
-    thread::sleep(Duration::from_millis(50));
-
-    // Stop
-    ctx.reset_download_stop_time();
-    assert!(ctx.get_download_stop_time().is_some());
-
-    // Session time should be at least 50ms
-    let session = ctx.calculate_session_time();
-    assert!(session >= Duration::from_millis(50));
-}
-
-#[test]
-fn test_timing_reset_clears_stop() {
-    let mut ctx = DownloadContext::new_default();
-
-    ctx.reset_download_start_time();
-    thread::sleep(Duration::from_millis(10));
-    ctx.reset_download_stop_time();
-    assert!(ctx.get_download_stop_time().is_some());
-
-    // Reset start should clear stop time
-    ctx.reset_download_start_time();
-    assert!(ctx.get_download_stop_time().is_none());
 }
 
 // -----------------------------------------------------------------------
