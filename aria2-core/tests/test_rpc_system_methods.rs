@@ -13,7 +13,12 @@ async fn test_list_methods_returns_all_methods() {
     assert!(resp.is_success());
 
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(methods.len(), 33);
+    let expected_count = 33
+        + ["aria2.addTorrent", "aria2.getPeers", "aria2.addMetalink"]
+            .into_iter()
+            .filter(|method| methods.iter().any(|actual| actual == method))
+            .count();
+    assert_eq!(methods.len(), expected_count);
 }
 
 #[tokio::test]
@@ -67,7 +72,12 @@ async fn test_list_notifications_returns_all_events() {
     assert!(resp.is_success());
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(notifications.len(), 5);
+    let expected_count = 5 + usize::from(
+        notifications
+            .iter()
+            .any(|event| event == "aria2.onBtDownloadComplete"),
+    );
+    assert_eq!(notifications.len(), expected_count);
 }
 
 #[tokio::test]

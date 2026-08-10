@@ -891,18 +891,16 @@ mod tests {
     fn test_timer_flush_emits_accumulated() {
         let mut batcher = NotificationBatcher::new()
             .with_max_batch_size(100)
-            .with_flush_interval_ms(10); // Very short interval for testing
+            .with_flush_interval_ms(50);
 
-        // Push some events
         for i in 0..5 {
             batcher.push(DownloadEvent::download_complete(format!("gid-timer-{}", i)));
         }
         assert_eq!(batcher.pending_count(), 5);
 
-        // Wait for flush interval to elapse
-        std::thread::sleep(std::time::Duration::from_millis(20));
+        // Wait well beyond the flush interval to handle CI jitter
+        std::thread::sleep(std::time::Duration::from_millis(200));
 
-        // Now maybe_flush should return the batch
         let batch = batcher.maybe_flush();
         assert!(
             batch.is_some(),

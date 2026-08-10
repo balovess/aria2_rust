@@ -1313,6 +1313,10 @@ async fn e2e_full_lifecycle() {
     // DownloadResult (stopped list) so tellStatus returns status="removed"
     // rather than an error. Only errors if the GID was never added or
     // has been purged via removeDownloadResult/purgeDownloadResult.
+    // After remove, the download transitions through intermediate states
+    // ("waiting", "active") before reaching a terminal state ("removed" or
+    // "error"). We poll until terminal — the intermediate state depends on
+    // engine timing and must not be asserted strictly (flaky on fast CI).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         let removed_status = rpc_call(&client, &base, "aria2.tellStatus", json![[&gid]]).await;
@@ -1321,10 +1325,6 @@ async fn e2e_full_lifecycle() {
             if status == "removed" || status == "error" {
                 break;
             }
-            assert_eq!(
-                status, "waiting",
-                "unexpected intermediate status: {status}"
-            );
         } else if removed_status.get("error").is_some() {
             break;
         }

@@ -287,6 +287,9 @@ impl SftpDownloadCommand {
     }
 
     fn parse_port(value: &str) -> Result<u16> {
+        if value.is_empty() {
+            return Ok(constants::SFTP_DEFAULT_PORT);
+        }
         let port = value
             .parse::<u16>()
             .map_err(|_| Self::invalid_uri("Invalid SFTP port"))?;
@@ -307,8 +310,13 @@ impl SftpDownloadCommand {
     ) -> Result<(String, Option<String>)> {
         let mut auth_url =
             url::Url::parse("sftp://localhost/").expect("static SFTP URL must be valid");
+        let auth_host = if parsed.host.contains(':') {
+            format!("[{}]", parsed.host)
+        } else {
+            parsed.host.clone()
+        };
         auth_url
-            .set_host(Some(&parsed.host))
+            .set_host(Some(&auth_host))
             .map_err(|_| Self::invalid_uri("Invalid SFTP host"))?;
         auth_url
             .set_port(Some(parsed.port))

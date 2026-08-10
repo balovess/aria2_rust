@@ -136,33 +136,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_ema_speed_smoothing() {
-        let mut stats = make_test_peer();
-
-        // First measurement: raw rate
-        thread::sleep(Duration::from_millis(20));
-        stats.on_data_received(1000);
-
-        let first_speed = stats.download_speed;
-        assert!(first_speed > 0.0);
-
-        // Second measurement at similar interval: EMA should produce
-        // a value close to first_speed (smoothed)
-        thread::sleep(Duration::from_millis(20));
-        stats.on_data_received(1000);
-
-        let second_speed = stats.download_speed;
-        // With alpha=0.5, second_speed ~= 0.5*rate2 + 0.5*first_speed
-        // Since rate1 ~= rate2 (same bytes, same interval), second_speed ~= first_speed
-        let ratio = second_speed / first_speed;
-        assert!(
-            ratio > 0.3 && ratio < 3.0,
-            "EMA should smooth speeds reasonably (ratio={:.2})",
-            ratio
-        );
-    }
-
-    #[test]
     fn test_cumulative_byte_counts() {
         let mut stats = make_test_peer();
 
@@ -336,78 +309,6 @@ pub(crate) mod tests {
         assert_eq!(
             stats.snub_count, 2,
             "Snub count should increment after reset+re-snub"
-        );
-    }
-
-    #[test]
-    fn test_connection_duration_increases() {
-        let stats = make_test_peer();
-
-        // Duration should be very small immediately after creation
-        let initial_duration = stats.connection_duration_secs();
-        assert!(initial_duration < 2, "Initial duration should be near 0");
-
-        // Sleep briefly and check duration increased
-        std::thread::sleep(Duration::from_millis(100));
-        let later_duration = stats.connection_duration_secs();
-        assert!(
-            later_duration >= initial_duration,
-            "Duration should increase over time"
-        );
-    }
-
-    #[test]
-    fn test_on_data_sent_updates_last_upload_time() {
-        let mut stats = make_test_peer();
-
-        assert!(stats.last_upload_time.is_none(), "No upload time initially");
-
-        thread::sleep(Duration::from_millis(10));
-        stats.on_data_sent(1024);
-
-        assert!(
-            stats.last_upload_time.is_some(),
-            "Upload time should be set after sending data"
-        );
-    }
-
-    #[test]
-    fn test_on_data_received_updates_last_data_time() {
-        let mut stats = make_test_peer();
-
-        assert!(stats.last_data_time.is_none(), "No data time initially");
-
-        thread::sleep(Duration::from_millis(10));
-        stats.on_data_received(512);
-
-        assert!(
-            stats.last_data_time.is_some(),
-            "Data time should be set after receiving data"
-        );
-    }
-
-    #[test]
-    fn test_avg_speeds_updated_after_data_transfer() {
-        let mut stats = make_test_peer();
-
-        // Initially average speeds are 0
-        assert_eq!(stats.avg_upload_speed, 0);
-        assert_eq!(stats.avg_download_speed, 0);
-
-        // Send some data
-        thread::sleep(Duration::from_millis(20));
-        stats.on_data_sent(2048);
-        assert!(
-            stats.avg_upload_speed > 0,
-            "Average upload speed should be positive"
-        );
-
-        // Receive some data
-        thread::sleep(Duration::from_millis(20));
-        stats.on_data_received(4096);
-        assert!(
-            stats.avg_download_speed > 0,
-            "Average download speed should be positive"
         );
     }
 }

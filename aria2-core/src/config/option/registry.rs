@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn global_rpc_projection_keeps_hidden_original_options_outside_help_and_extensions() {
         let registry = OptionRegistry::new();
+        #[allow(unused_mut)]
         let mut options = HashMap::from([
             ("dns-timeout".to_string(), serde_json::json!(30)),
             ("rpc-secret".to_string(), serde_json::json!("do-not-return")),

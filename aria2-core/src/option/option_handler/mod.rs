@@ -11,6 +11,7 @@
 //!
 //! ```rust,no_run
 //! use aria2_core::option::{OptionHandler, OptionValue};
+//! use aria2_core::option::option_handler::OptionHandlerApply;
 //! use std::path::Path;
 //!
 //! let mut handler = OptionHandler::new();

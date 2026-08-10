@@ -24,7 +24,7 @@ async fn test_shutdown_with_active_downloads() {
     // Add a download task
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/file.zip"]),
+        serde_json::json!([["http://example.com/file.zip"]]),
     )
     .with_id(1);
     let add_resp = engine.handle_request(&add_req).await;
@@ -60,7 +60,7 @@ async fn test_force_shutdown_with_active_downloads() {
     for i in 0..3 {
         let add_req = JsonRpcRequest::new(
             "aria2.addUri",
-            serde_json::json!([format!("http://example.com/file{}.zip", i)]),
+            serde_json::json!([[format!("http://example.com/file{}.zip", i)]]),
         )
         .with_id(i);
         let add_resp = engine.handle_request(&add_req).await;
@@ -91,10 +91,11 @@ async fn test_shutdown_vs_force_shutdown_difference() {
     // Add a task
     let add_req = JsonRpcRequest::new(
         "aria2.addUri",
-        serde_json::json!(["http://example.com/test.zip"]),
+        serde_json::json!([["http://example.com/test.zip"]]),
     )
     .with_id(1);
-    engine.handle_request(&add_req).await;
+    let add_resp = engine.handle_request(&add_req).await;
+    assert!(add_resp.is_success());
 
     // shutdown should keep tasks (graceful)
     let shutdown_req = JsonRpcRequest::new("aria2.shutdown", serde_json::json!([])).with_id(2);

@@ -478,14 +478,19 @@ mod tests {
         let monitor = Arc::new(PerformanceMonitor::new());
         {
             let _timer = ScopedTimer::new("operation", monitor.clone());
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // Sleep long enough to ensure measurable latency regardless of CI jitter
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
         let report = monitor.generate_report();
         assert!(report.metrics.contains_key("operation"));
         let metrics = report.metrics.get("operation").unwrap();
         assert!(!metrics.is_empty());
-        assert!(metrics[0].latency >= 10);
+        assert!(
+            metrics[0].latency >= 10,
+            "latency should be >= 10ms, got {}",
+            metrics[0].latency
+        );
     }
 
     #[tokio::test]

@@ -121,10 +121,48 @@ mod tests {
         assert!(resp.is_success());
 
         let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-        let expected: Vec<String> = RpcEngine::rpc_method_names()
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        // Keep this independent from `rpc_method_names` so discovery drift is
+        // caught against the public catalog in RpcMethodFactory.cc.
+        let mut expected = vec!["aria2.addUri"];
+        #[cfg(feature = "bittorrent")]
+        expected.extend(["aria2.addTorrent", "aria2.getPeers"]);
+        #[cfg(feature = "metalink")]
+        expected.push("aria2.addMetalink");
+        expected.extend([
+            "aria2.remove",
+            "aria2.pause",
+            "aria2.forcePause",
+            "aria2.pauseAll",
+            "aria2.forcePauseAll",
+            "aria2.unpause",
+            "aria2.unpauseAll",
+            "aria2.forceRemove",
+            "aria2.changePosition",
+            "aria2.tellStatus",
+            "aria2.getUris",
+            "aria2.getFiles",
+            "aria2.getServers",
+            "aria2.tellActive",
+            "aria2.tellWaiting",
+            "aria2.tellStopped",
+            "aria2.getOption",
+            "aria2.changeUri",
+            "aria2.changeOption",
+            "aria2.getGlobalOption",
+            "aria2.changeGlobalOption",
+            "aria2.purgeDownloadResult",
+            "aria2.removeDownloadResult",
+            "aria2.getVersion",
+            "aria2.getSessionInfo",
+            "aria2.shutdown",
+            "aria2.forceShutdown",
+            "aria2.getGlobalStat",
+            "aria2.saveSession",
+            "system.multicall",
+            "system.listMethods",
+            "system.listNotifications",
+        ]);
+        let expected: Vec<String> = expected.into_iter().map(str::to_owned).collect();
         assert_eq!(methods, expected);
         assert!(
             !methods.iter().any(|method| method == "aria2.forceUnpause"),
