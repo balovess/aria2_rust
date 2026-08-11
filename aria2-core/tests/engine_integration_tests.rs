@@ -54,7 +54,7 @@ fn test_download_options(output_dir: &std::path::Path) -> DownloadOptions {
         bt_max_upload_slots: None,
         bt_optimistic_unchoke_interval: None,
         bt_snubbed_timeout: None,
-        bt_prioritize_piece: "rarest".to_string(),
+        bt_prioritize_piece: String::new(),
         all_proxy: None,
         https_proxy: None,
         ftp_proxy: None,

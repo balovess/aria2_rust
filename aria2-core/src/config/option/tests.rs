@@ -17,6 +17,7 @@ use super::validator::{
 fn test_option_type_display() {
     assert_eq!(OptionType::String.to_string(), "string");
     assert_eq!(OptionType::Boolean.to_string(), "boolean");
+    assert_eq!(OptionType::PiecePriority.to_string(), "piece-priority");
     assert_eq!(OptionType::Size.to_string(), "size");
 }
 
@@ -179,6 +180,38 @@ fn test_option_def_parse_index_out_is_cumulative_wire_text() {
     );
     assert!(def.parse_value("part.iso").is_err());
     assert!(def.parse_value("1=").is_err());
+}
+
+#[test]
+fn test_option_def_parse_piece_priority_matches_original_syntax() {
+    let def = OptionDef {
+        name: "bt-prioritize-piece".into(),
+        opt_type: OptionType::PiecePriority,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        def.parse_value("head=512K,tail").unwrap().as_str(),
+        Some("head=512K,tail")
+    );
+    assert!(def.parse_value("rarest").is_err());
+    assert!(def.parse_value("head=").is_err());
+    assert!(def.parse_value("tail=1G").is_err());
+}
+
+#[test]
+fn test_parse_piece_priority_uses_original_default_size() {
+    assert_eq!(
+        super::parse_piece_priority("head,tail=2M").unwrap(),
+        vec![
+            super::PiecePriorityRule::Head { size: 1024 * 1024 },
+            super::PiecePriorityRule::Tail {
+                size: 2 * 1024 * 1024
+            },
+        ]
+    );
+    assert!(super::parse_piece_priority("head,,tail").is_ok());
+    assert!(super::parse_piece_priority("head=0").is_ok());
 }
 
 #[test]
@@ -414,6 +447,16 @@ fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {
             .unwrap()
             .as_str(),
         Some("6881-6999")
+    );
+    assert_eq!(
+        reg.parse_rpc_value("bt-prioritize-piece", &serde_json::json!("head=2M,tail"))
+            .unwrap()
+            .as_str(),
+        Some("head=2M,tail")
+    );
+    assert!(
+        reg.parse_rpc_value("bt-prioritize-piece", &serde_json::json!("rarest"))
+            .is_err()
     );
     assert!(
         reg.parse_rpc_value("select-file", &serde_json::json!("0"))

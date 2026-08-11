@@ -20,10 +20,72 @@
 
 use tracing::{debug, info, warn};
 
+use crate::config::PiecePriorityRule;
 use crate::constants;
+use crate::download::file_entry::FileEntry;
 
 /// Endgame mode threshold: enable when this many pieces remain
 pub const ENDGAME_THRESHOLD: u32 = constants::BT_ENDGAME_THRESHOLD as u32;
+
+/// Compute the piece indices selected by aria2's `bt-prioritize-piece` rules.
+///
+/// Each file contributes the pieces intersecting its first or last `SIZE`
+/// bytes. The result is sorted and deduplicated, matching
+/// `aria2_original::parsePrioritizePieceRange`; the protocol picker shuffles
+/// the final set when it installs it.
+pub fn prioritized_piece_indices(
+    rules: &[PiecePriorityRule],
+    file_entries: &[FileEntry],
+    piece_length: u64,
+) -> Result<Vec<u32>, String> {
+    if piece_length == 0 {
+        return Err("piece length must be greater than zero".to_string());
+    }
+
+    let mut indices = Vec::new();
+    for rule in rules {
+        for entry in file_entries {
+            let length = entry.length();
+            if length == 0 {
+                continue;
+            }
+            let end_offset = entry
+                .offset()
+                .checked_add(length)
+                .ok_or_else(|| "file offset exceeds u64::MAX".to_string())?;
+            let size = match rule {
+                PiecePriorityRule::Head { size } | PiecePriorityRule::Tail { size } => {
+                    (*size).min(length)
+                }
+            };
+            if size == 0 {
+                continue;
+            }
+
+            let (first_piece, last_piece) = match rule {
+                PiecePriorityRule::Head { .. } => (
+                    entry.offset() / piece_length,
+                    (entry.offset() + size - 1) / piece_length,
+                ),
+                PiecePriorityRule::Tail { .. } => (
+                    (end_offset - size) / piece_length,
+                    (end_offset - 1) / piece_length,
+                ),
+            };
+            indices.extend(first_piece..=last_piece);
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+        .into_iter()
+        .map(|index| {
+            u32::try_from(index)
+                .map_err(|_| format!("piece index {} exceeds the BitTorrent index range", index))
+        })
+        .collect()
+}
 
 /// Piece selector configuration
 #[derive(Debug, Clone)]
@@ -304,6 +366,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PiecePriorityRule;
+    use crate::download::file_entry::FileEntry;
 
     #[test]
     fn test_endgame_threshold_constant() {
@@ -378,5 +442,48 @@ mod tests {
         assert!(result.piece_index.is_none());
         assert!(!result.is_endgame);
         assert_eq!(result.remaining_count, 100);
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_match_head_and_tail_file_ranges() {
+        let entries = vec![FileEntry::new("a".into(), 4096, 0, Vec::new())];
+
+        assert_eq!(
+            prioritized_piece_indices(&[PiecePriorityRule::Head { size: 1025 }], &entries, 1024,)
+                .unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            prioritized_piece_indices(&[PiecePriorityRule::Tail { size: 1025 }], &entries, 1024,)
+                .unwrap(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_deduplicates_file_boundaries() {
+        let entries = vec![
+            FileEntry::new("a".into(), 1500, 0, Vec::new()),
+            FileEntry::new("b".into(), 1500, 1500, Vec::new()),
+        ];
+
+        assert_eq!(
+            prioritized_piece_indices(
+                &[
+                    PiecePriorityRule::Head { size: 1024 },
+                    PiecePriorityRule::Tail { size: 1024 },
+                ],
+                &entries,
+                1024,
+            )
+            .unwrap(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_rejects_zero_piece_length() {
+        let entries = vec![FileEntry::new("a".into(), 1, 0, Vec::new())];
+        assert!(prioritized_piece_indices(&[], &entries, 0).is_err());
     }
 }

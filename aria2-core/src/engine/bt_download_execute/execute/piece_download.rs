@@ -324,34 +324,33 @@ impl BtDownloadCommand {
 
         let mut piece_picker =
             aria2_protocol::bittorrent::piece::picker::PiecePicker::new(num_pieces);
+        // aria2_original uses RarestPieceSelector as the base BitTorrent
+        // selector. `bt-prioritize-piece` is an additive wrapper around it,
+        // not a replacement for the torrent-wide selection strategy.
         piece_picker.set_strategy(
-            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::Sequential,
+            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::RarestFirst,
         );
 
-        // G2: Set piece priority mode from config option (--bt-prioritize-piece)
-        let prioritize_piece_mode = {
-            let g = self.group.recover();
-            g.options().bt_prioritize_piece.clone()
+        let prioritized_pieces = {
+            let group = self.group.recover();
+            let rules = crate::config::parse_piece_priority(&group.options().bt_prioritize_piece)
+                .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+            match group.get_download_context() {
+                Some(context) => crate::engine::bt_piece_selector::prioritized_piece_indices(
+                    &rules,
+                    context.get_file_entries(),
+                    piece_length as u64,
+                )
+                .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?,
+                None => Vec::new(),
+            }
         };
-        match prioritize_piece_mode.as_str() {
-            "head" => {
-                piece_picker.set_priority_mode(
-                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialHead,
-                );
-                info!("[BT] Piece priority mode: SequentialHead (from start)");
-            }
-            "tail" => {
-                piece_picker.set_priority_mode(
-                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialTail,
-                );
-                info!("[BT] Piece priority mode: SequentialTail (from end)");
-            }
-            _ => {
-                piece_picker.set_priority_mode(
-                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::RarestFirst,
-                );
-                info!("[BT] Piece priority mode: RarestFirst (default)");
-            }
+        if !prioritized_pieces.is_empty() {
+            info!(
+                "[BT] Prioritizing {} file-boundary pieces from bt-prioritize-piece",
+                prioritized_pieces.len()
+            );
+            piece_picker.set_priority_pieces(prioritized_pieces);
         }
 
         let mut peer_tracker =

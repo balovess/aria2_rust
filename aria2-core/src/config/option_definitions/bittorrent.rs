@@ -216,9 +216,10 @@ impl crate::config::OptionRegistry {
         // --- Piece Selection Priority (G2) ---
         self.register(OptionDef {
             name: "bt-prioritize-piece".into(),
-            opt_type: OptionType::String,
-            default_value: OptionValue::Str("rarest".into()),
-            description: "Piece selection priority mode: 'rarest' (default), 'head' (sequential from start), 'tail' (sequential from end)".into(),
+            opt_type: OptionType::PiecePriority,
+            description:
+                "Prioritize pieces at the head or tail of each file (head[=SIZE],tail[=SIZE])"
+                    .into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

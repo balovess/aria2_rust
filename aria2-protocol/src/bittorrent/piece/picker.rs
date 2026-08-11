@@ -75,8 +75,9 @@ pub const DEFAULT_ENDGAME_THRESHOLD: usize = 20;
 
 /// Scan order resolved from the (`strategy`, `priority_mode`) pair.
 ///
-/// `priority_mode` wins when it requests an explicit head/tail bias
-/// (`--bt-prioritize-piece=head|tail`); otherwise the base strategy decides.
+/// The legacy `priority_mode` API can still request a global head/tail scan;
+/// the aria2-compatible file-boundary option is handled separately by
+/// `set_priority_pieces` before this order is consulted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScanOrder {
     /// Lowest index first (streaming / sequential writes)
@@ -123,6 +124,9 @@ pub struct PiecePicker {
     in_progress: Vec<bool>,
     /// Per-piece priority (0 = default, higher = more important)
     priorities: Vec<u8>,
+    /// Explicitly prioritized pieces, in the order in which they are tried.
+    /// This models aria2's `PriorityPieceSelector` wrapper.
+    priority_pieces: Vec<u32>,
     /// Indices of pieces that are candidates for end-game mode
     endgame_candidates: Vec<usize>,
     /// Number of pieces marked completed — keeps `remaining_count` O(1)
@@ -151,6 +155,7 @@ impl PiecePicker {
             completed: vec![false; n],
             in_progress: vec![false; n],
             priorities: vec![0; n],
+            priority_pieces: Vec::new(),
             endgame_candidates: Vec::new(),
             completed_count: 0,
             head_cursor: 0,
@@ -188,6 +193,23 @@ impl PiecePicker {
     /// Set the piece priority mode.
     pub fn set_priority_mode(&mut self, mode: PiecePriorityMode) {
         self.priority_mode = mode;
+    }
+
+    /// Install a prioritized piece sequence used before the normal selector.
+    pub fn set_priority_pieces(&mut self, mut pieces: Vec<u32>) {
+        pieces.retain(|&piece| piece < self.num_pieces);
+        pieces.sort_unstable();
+        pieces.dedup();
+        for index in (1..pieces.len()).rev() {
+            let swap = (self.next_rand() % (index as u64 + 1)) as usize;
+            pieces.swap(index, swap);
+        }
+        self.priority_pieces = pieces;
+    }
+
+    /// Return the currently installed explicit priority sequence.
+    pub fn priority_pieces(&self) -> &[u32] {
+        &self.priority_pieces
     }
 
     /// Override the remaining-piece count at which end-game mode activates.
@@ -289,6 +311,19 @@ impl PiecePicker {
         if n == 0 {
             return None;
         }
+        // `PriorityPieceSelector` in aria2_original tries its explicit list
+        // first, but still respects the peer bitfield and completion state.
+        for &piece in &self.priority_pieces {
+            let index = piece as usize;
+            if index < n
+                && !self.completed[index]
+                && (allow_in_progress || !self.in_progress[index])
+                && Self::peer_has(bitfield, index)
+            {
+                return Some(piece);
+            }
+        }
+
         let order = self.scan_order();
 
         // Cursor fast paths — only valid when in-progress pieces are excluded,
@@ -660,6 +695,38 @@ mod tests {
         let mut picker = PiecePicker::new(100);
         picker.set_priority_mode(PiecePriorityMode::SequentialHead);
         assert_eq!(picker.priority_mode(), PiecePriorityMode::SequentialHead);
+    }
+
+    #[test]
+    fn test_explicit_priority_pieces_precede_base_selector() {
+        let mut picker = PiecePicker::new(5);
+        picker.set_strategy(PieceSelectionStrategy::RarestFirst);
+        picker.set_frequencies_from_peers(&[0, 0, 0, 9, 0]);
+        picker.set_priority_pieces(vec![3, 1, 3]);
+
+        assert_eq!(picker.priority_pieces().len(), 2);
+        assert!(picker.priority_pieces().contains(&1));
+        assert!(picker.priority_pieces().contains(&3));
+
+        let first = picker
+            .pick_next()
+            .expect("priority piece should be selected");
+        assert!(first == 1 || first == 3);
+        picker.mark_completed(first);
+        let second = picker
+            .pick_next()
+            .expect("second priority piece should follow");
+        assert!(second == 1 || second == 3);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_explicit_priority_pieces_respect_peer_bitfield() {
+        let mut picker = PiecePicker::new(4);
+        picker.set_priority_pieces(vec![2, 1]);
+
+        // The peer has piece 1 but not piece 2 (MSB-first bitfield).
+        assert_eq!(picker.select(&[0b0100_0000], 4), Some(1));
     }
 
     #[test]

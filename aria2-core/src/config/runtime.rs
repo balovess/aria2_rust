@@ -450,10 +450,11 @@ pub enum ChangeableKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeableKind, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
-        is_global_option_changeable, is_initial_option, is_option_changeable,
-        project_initial_options,
+        ChangeableKind, INITIAL_REQUEST_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+        RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_global_option_changeable,
+        is_initial_option, is_option_changeable, project_initial_options,
     };
+    use crate::config::OptionRegistry;
 
     #[test]
     fn policy_matches_original_wire_names() {
@@ -513,5 +514,25 @@ mod tests {
             is_option_changeable("bt-detach-seed-only", false),
             ChangeableKind::NotChangeable
         );
+    }
+
+    #[test]
+    fn runtime_policy_names_are_registered_without_duplicates() {
+        let registry = OptionRegistry::new();
+        for (policy, names) in [
+            ("global", RUNTIME_GLOBAL_CHANGEABLE_OPTIONS),
+            ("initial", INITIAL_REQUEST_OPTIONS),
+            ("immediate", RUNTIME_CHANGEABLE_OPTIONS),
+            ("reserved", RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS),
+        ] {
+            let mut unique = std::collections::HashSet::new();
+            for name in names {
+                assert!(
+                    registry.contains(name),
+                    "{policy} policy has unknown option {name}"
+                );
+                assert!(unique.insert(name), "{policy} policy repeats option {name}");
+            }
+        }
     }
 }

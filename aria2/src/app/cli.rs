@@ -1716,23 +1716,40 @@ pub struct AdvancedArgs {
 // Banner display (kept here for colored output integration)
 // =========================================================================
 
+pub(crate) fn product_banner_title() -> String {
+    format!(
+        "{} version {}",
+        aria2_protocol::identity::PRODUCT_NAME,
+        aria2_protocol::identity::PRODUCT_VERSION
+    )
+}
+
 impl App {
-    /// Print the application banner using the upstream-compatible identity.
+    /// Print the application banner using the product identity.
     pub(super) fn print_banner(&self) {
-        println!(
-            "{}",
-            format!(
-                "aria2 version {}",
-                aria2_protocol::identity::PRODUCT_VERSION
-            )
-            .green()
-            .bold()
-        );
+        println!("{}", product_banner_title().green().bold());
         println!(
             "{} {}",
             "Copyright:".blue(),
-            "(C) 2006, 2019 Tatsuhiro Tsujikawa".white()
+            "(C) aria2-rust contributors".white()
         );
         println!();
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::product_banner_title;
+
+    #[test]
+    fn banner_uses_product_identity() {
+        assert_eq!(
+            product_banner_title(),
+            format!(
+                "{} version {}",
+                aria2_protocol::identity::PRODUCT_NAME,
+                aria2_protocol::identity::PRODUCT_VERSION
+            )
+        );
     }
 }

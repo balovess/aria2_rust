@@ -57,7 +57,6 @@ pub const BT_SNUBBED_TIMEOUT_SECS: u64 = 60;
 pub const BT_ENDGAME_THRESHOLD: usize = 20;
 pub const DEFAULT_BT_ENDGAME_THRESHOLD: usize = BT_ENDGAME_THRESHOLD;
 pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";
-pub const DEFAULT_PIECE_PRIORITY: &str = "rarest";
 pub const BT_PEER_CONNECTION_DELAY_MS: u64 = 100;
 pub const BT_MAX_UNCHOKE_WAIT_ATTEMPTS: usize = 50;
 pub const BT_PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;

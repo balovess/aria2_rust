@@ -453,7 +453,7 @@ fn test_download_options_to_map_all_fields() {
         bt_max_upload_slots: Some(4),
         bt_optimistic_unchoke_interval: Some(30),
         bt_snubbed_timeout: Some(60),
-        bt_prioritize_piece: "head".to_string(),
+        bt_prioritize_piece: "head=512K".to_string(),
         bt_detach_seed_only: true,
         enable_utp: true,
         utp_listen_port: Some(6882),
@@ -570,7 +570,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("bt-max-upload-slots").unwrap(), "4");
     assert_eq!(map.get("bt-optimistic-unchoke-interval").unwrap(), "30");
     assert_eq!(map.get("bt-snubbed-timeout").unwrap(), "60");
-    assert_eq!(map.get("bt-prioritize-piece").unwrap(), "head");
+    assert_eq!(map.get("bt-prioritize-piece").unwrap(), "head=512K");
     assert_eq!(map.get("enable-utp").unwrap(), "true");
     assert_eq!(map.get("utp-listen-port").unwrap(), "6882");
 

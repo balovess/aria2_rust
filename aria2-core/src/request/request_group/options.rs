@@ -145,10 +145,10 @@ pub struct DownloadOptions {
     pub bt_snubbed_timeout: Option<u64>,
 
     // ------------------------------------------------------------------
-    // Piece selection priority mode (G2)
+    // aria2-compatible file-boundary piece priority (G2)
     // ------------------------------------------------------------------
-    /// Piece selection priority: "rarest" (default), "head" (sequential from start),
-    /// "tail" (sequential from end).
+    /// Original `head[=SIZE],tail[=SIZE]` syntax. Empty means unset; the
+    /// normal BitTorrent selector remains rarest-first when it is absent.
     pub bt_prioritize_piece: String,
     /// Detach completed BitTorrent seeders from the active-download budget.
     pub bt_detach_seed_only: bool,
@@ -716,7 +716,7 @@ impl DownloadOptions {
             bt_prioritize_piece: options
                 .get("bt-prioritize-piece")
                 .cloned()
-                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
+                .unwrap_or_default(),
             bt_detach_seed_only: options
                 .get("bt-detach-seed-only")
                 .map(|v| v == "true")

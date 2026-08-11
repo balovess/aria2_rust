@@ -11,8 +11,9 @@ use std::sync::Arc;
 pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
     ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
-    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, RangeValidator,
-    RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
+    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, PiecePriorityRule,
+    RangeValidator, RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
+    parse_piece_priority,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use runtime::{
