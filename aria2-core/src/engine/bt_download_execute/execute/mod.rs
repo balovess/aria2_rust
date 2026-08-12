@@ -133,6 +133,17 @@ impl Command for BtDownloadCommand {
             .recover()
             .set_control_file_path(ControlFile::control_path_for(&self.output_path));
 
+        // A zero-length torrent has no pieces or peers to acquire. Complete
+        // it after metadata preparation, matching the normal download
+        // lifecycle without entering tracker/peer discovery.
+        if total_size == 0 {
+            self.completed_bytes = 0;
+            self.progress.set_completed_length(0);
+            self.group.recover_mut().complete()?;
+            info!("BT zero-length download completed without peer discovery");
+            return Ok(());
+        }
+
         // --check-integrity: verify existing data against the torrent's piece
         // hashes before allocating/downloading (mirrors C++
         // CheckIntegrityMan + CheckIntegrityCommand).
@@ -527,7 +538,10 @@ impl Command for BtDownloadCommand {
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 {
+        if self.group.recover().status() == crate::request::request_group::DownloadStatus::Complete
+        {
+            CommandStatus::Completed
+        } else if self.completed_bytes > 0 {
             CommandStatus::Running
         } else {
             CommandStatus::Pending

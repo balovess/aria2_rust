@@ -10,7 +10,7 @@ use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::BtDownloadCommand;
@@ -86,6 +86,52 @@ pub(crate) fn build_download_context_from_meta(
     Ok(ctx)
 }
 
+/// Apply Metalink-selected paths and mirrors to a parsed torrent context.
+///
+/// The torrent parser owns the canonical file order and byte offsets. This
+/// helper only changes the selected entries' destination and URI metadata, so
+/// both dependency resolution and command fallback use the same mapping rule.
+pub(crate) fn apply_file_mappings(
+    context: &mut crate::download::DownloadContext,
+    mappings: &[BtFileMapping],
+) -> Result<()> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let entries = context.get_file_entries_mut();
+    if entries.len() == 1 && mappings.len() == 1 && mappings[0].original_name.is_empty() {
+        apply_file_mapping(&mut entries[0], &mappings[0]);
+        return Ok(());
+    }
+
+    for entry in entries.iter_mut() {
+        entry.set_requested(false);
+    }
+
+    for mapping in mappings {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.original_name() == mapping.original_name)
+            .ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "No entry '{}' in torrent metadata",
+                    mapping.original_name
+                )))
+            })?;
+        apply_file_mapping(entry, mapping);
+    }
+    Ok(())
+}
+
+fn apply_file_mapping(entry: &mut crate::download::file_entry::FileEntry, mapping: &BtFileMapping) {
+    entry.set_requested(true);
+    entry.set_path(mapping.path.clone());
+    entry.set_uris(&mapping.uris);
+    entry.set_max_connection_per_server(mapping.max_connection_per_server);
+    entry.set_unique_protocol(mapping.unique_protocol);
+}
+
 fn apply_index_out_paths(
     context: &mut crate::download::DownloadContext,
     index_out: Option<&str>,
@@ -115,9 +161,47 @@ impl BtDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
+        Self::new_with_group_and_mappings(group, torrent_bytes, options, output_dir, &[])
+    }
+
+    /// Construct a command for an externally owned group and remap selected
+    /// torrent entries to Metalink output paths and mirrors.
+    pub(crate) fn new_with_group_and_mappings(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+    ) -> Result<Self> {
         let gid = group.recover().gid();
         let mut command = Self::new(gid, torrent_bytes, options, output_dir)?;
-        let parsed_context = command.group.recover().get_download_context();
+        let parsed_context = if file_mappings.is_empty() {
+            command.group.recover().get_download_context()
+        } else {
+            let meta =
+                aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+                    .map_err(|error| {
+                        Aria2Error::Fatal(FatalError::Config(format!(
+                            "Torrent parse failed: {error}"
+                        )))
+                    })?;
+            let dir = output_dir
+                .map(str::to_owned)
+                .or_else(|| options.dir.clone())
+                .unwrap_or_else(|| ".".to_string());
+            let context_path = if meta.is_single_file() {
+                command.output_path.to_string_lossy().into_owned()
+            } else {
+                std::path::Path::new(&dir)
+                    .join(&meta.info.name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let mut context = build_download_context_from_meta(&meta, context_path)?;
+            apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
+            apply_file_mappings(&mut context, file_mappings)?;
+            Some(std::sync::Arc::new(context))
+        };
         let (piece_count, piece_length, info_hash) = {
             let temporary = command.group.recover();
             (

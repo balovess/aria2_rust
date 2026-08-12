@@ -4,6 +4,7 @@ use aria2_protocol::metalink::parser::{MetaUrlEntry, UrlEntry};
 
 /// Parsed file information used by per-file command instances
 /// created by `create_multi_file()`.
+#[derive(Clone)]
 pub(crate) struct FileDownloadInfo {
     /// Sorted URL entries for this file.
     pub(crate) sorted_urls: Vec<UrlEntry>,

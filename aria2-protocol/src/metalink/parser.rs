@@ -991,7 +991,7 @@ mod tests {
     fn make_v4_metalink() -> Vec<u8> {
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <metalink xmlns="urn:ietf:params:xml:ns:metalink">
-  <generator>aria2/1.37.0</generator>
+  <generator>test-generator/1.0</generator>
   <origin>Dynamic</origin>
   <published>2024-01-01T00:00:00Z</published>
   <file name="example.bin">

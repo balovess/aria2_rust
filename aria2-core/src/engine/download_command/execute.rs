@@ -61,15 +61,20 @@ impl DownloadCommand {
         } else {
             String::new()
         };
-        let mut head_req = self.client.head(uri);
-        if !cookie_hdr_head.is_empty() {
-            head_req = head_req.header("Cookie", &cookie_hdr_head);
-        }
-        for (name, value) in &self.headers {
-            head_req = head_req.header(name, value);
-        }
-        let head_resp = head_req.send().await.ok();
-        let (total_length, head_supports_range) = if let Some(ref resp) = head_resp {
+        let options = self.group.recover().options_arc();
+        let known_total_length = self.group.recover().total_length();
+        let should_head = options.dry_run || (options.use_head && known_total_length == 0);
+        let head_resp = if should_head {
+            let head_req = self.request_policy.apply(
+                self.client.head(uri),
+                (!cookie_hdr_head.is_empty()).then_some(cookie_hdr_head.as_str()),
+                &[],
+            );
+            head_req.send().await.ok()
+        } else {
+            None
+        };
+        let (mut total_length, mut head_supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp
                 .headers()
                 .get(reqwest::header::CONTENT_LENGTH)
@@ -83,13 +88,33 @@ impl DownloadCommand {
                 .is_some_and(|v| v.to_lowercase().contains("bytes"));
             (tl, sr)
         } else {
-            (0, false)
+            (known_total_length, false)
         };
+
+        if head_resp.is_none()
+            && total_length == 0
+            && options.split.unwrap_or(constants::DEFAULT_SPLIT) > 1
+        {
+            let probe = RangeProber::new(Arc::clone(&self.client), self.request_policy.clone())
+                .with_cookie_header(
+                    url_for_head
+                        .as_ref()
+                        .map(|url| {
+                            self.create_cookie_helper()
+                                .build_cookie_header_from_url(url)
+                        })
+                        .filter(|header| !header.is_empty()),
+                );
+            if let Some((length, supports_range)) = probe.probe_entity_length(uri).await {
+                total_length = length;
+                head_supports_range = supports_range;
+            }
+        }
 
         let supports_range = if head_supports_range {
             true
         } else if total_length > constants::CONCURRENT_MIN_FILE_SIZE as u64 {
-            let prober = RangeProber::new(Arc::clone(&self.client), self.headers.clone())
+            let prober = RangeProber::new(Arc::clone(&self.client), self.request_policy.clone())
                 .with_cookie_header(
                     url_for_head
                         .as_ref()
@@ -104,7 +129,6 @@ impl DownloadCommand {
             false
         };
 
-        let options = self.group.recover().options_arc();
         let original_path = self.output_path.clone();
         if options.remove_control_file {
             let control_path =
@@ -296,7 +320,9 @@ impl DownloadCommand {
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();
 
-            if self.should_use_concurrent(total_length, supports_range, split) {
+            if self.should_use_concurrent(total_length, supports_range, split)
+                && !options.http_accept_gzip
+            {
                 if resume_state.should_resume {
                     info!(
                         "Concurrent mode + resume: existing {} bytes, continuing from offset {}",
@@ -308,7 +334,7 @@ impl DownloadCommand {
                 let mut concurrent_downloader = ConcurrentDownloader::new(
                     Arc::clone(&self.client),
                     self.output_path.clone(),
-                    self.headers.clone(),
+                    self.request_policy.clone(),
                     cookie_helper.clone(),
                     progress_updater.clone(),
                     Arc::clone(&self.group),
@@ -333,7 +359,7 @@ impl DownloadCommand {
                         let mut sequential_downloader = SequentialDownloader::new(
                             Arc::clone(&self.client),
                             self.output_path.clone(),
-                            self.headers.clone(),
+                            self.request_policy.clone(),
                             cookie_helper,
                             progress_updater,
                             Arc::clone(&self.group),
@@ -355,7 +381,7 @@ impl DownloadCommand {
             let mut sequential_downloader = SequentialDownloader::new(
                 Arc::clone(&self.client),
                 self.output_path.clone(),
-                self.headers.clone(),
+                self.request_policy.clone(),
                 cookie_helper,
                 progress_updater,
                 Arc::clone(&self.group),
@@ -644,13 +670,9 @@ impl DownloadCommand {
             })
             .filter(|header| !header.is_empty());
 
-        let mut request = self.client.get(uri);
-        if let Some(cookie_header) = cookie_header {
-            request = request.header("Cookie", cookie_header);
-        }
-        for (name, value) in &self.headers {
-            request = request.header(name, value);
-        }
+        let request =
+            self.request_policy
+                .apply(self.client.get(uri), cookie_header.as_deref(), &[]);
 
         let response = request.send().await.map_err(|error| {
             Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {

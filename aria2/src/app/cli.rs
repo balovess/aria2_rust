@@ -106,7 +106,7 @@ impl FromStr for HelpRequest {
 /// `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
-    name = "aria2c",
+    name = aria2_protocol::identity::PRODUCT_NAME,
     version = aria2_protocol::identity::PRODUCT_VERSION,
     disable_help_flag = true,
     disable_version_flag = true,
@@ -236,7 +236,9 @@ where
 /// filtering uses the CLI's explicit option headings and the original tag
 /// names that have a direct Rust representation.
 pub fn render_help(request: &HelpRequest) -> String {
-    let mut command = CliArgs::command();
+    // Keep the compatibility executable name in help usage while the version
+    // action itself is rendered with the independent product identity.
+    let mut command = CliArgs::command().name("aria2c");
 
     let filter = match request {
         HelpRequest::Basic => "#basic",

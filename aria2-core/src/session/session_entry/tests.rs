@@ -470,8 +470,14 @@ fn test_download_options_to_map_all_fields() {
         no_proxy: Some("localhost,127.0.0.1".to_string()),
         // HTTP headers
         header: vec!["X-Custom: foo".to_string(), "X-Other: bar".to_string()],
-        user_agent: Some("aria2-rust/1.0".to_string()),
+        user_agent: Some("test-client/1.0".to_string()),
         referer: Some("http://example.com".to_string()),
+        enable_http_keep_alive: false,
+        enable_http_pipelining: true,
+        http_accept_gzip: true,
+        http_no_cache: true,
+        use_head: true,
+        no_want_digest_header: true,
         check_certificate: false,
         ca_certificate: Some("/tmp/ca.pem".to_string()),
         min_tls_version: Some("TLSv1.3".to_string()),
@@ -615,8 +621,14 @@ fn test_download_options_to_map_all_fields() {
 
     // HTTP headers
     assert_eq!(map.get("header").unwrap(), "X-Custom: foo,X-Other: bar");
-    assert_eq!(map.get("user-agent").unwrap(), "aria2-rust/1.0");
+    assert_eq!(map.get("user-agent").unwrap(), "test-client/1.0");
     assert_eq!(map.get("referer").unwrap(), "http://example.com");
+    assert_eq!(map.get("enable-http-keep-alive").unwrap(), "false");
+    assert_eq!(map.get("enable-http-pipelining").unwrap(), "true");
+    assert_eq!(map.get("http-accept-gzip").unwrap(), "true");
+    assert_eq!(map.get("http-no-cache").unwrap(), "true");
+    assert_eq!(map.get("use-head").unwrap(), "true");
+    assert_eq!(map.get("no-want-digest-header").unwrap(), "true");
     assert_eq!(map.get("check-certificate").unwrap(), "false");
     assert_eq!(map.get("ca-certificate").unwrap(), "/tmp/ca.pem");
     assert_eq!(map.get("min-tls-version").unwrap(), "TLSv1.3");

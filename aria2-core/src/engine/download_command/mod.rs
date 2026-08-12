@@ -13,6 +13,7 @@ use crate::engine::command::ProgressUpdate;
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::error::{Aria2Error, Result};
+use crate::http::HttpRequestPolicy;
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
@@ -60,7 +61,7 @@ pub struct DownloadCommand {
     pub(super) global_limiter: Option<RateLimiter>,
     pub(super) perf_monitor: Option<Arc<PerformanceMonitor>>,
     pub(super) atomic_metrics: Arc<AtomicMetrics>,
-    pub(super) headers: Vec<(String, String)>,
+    pub(super) request_policy: HttpRequestPolicy,
     pub(super) progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
     pub(super) progress_receiver: Option<mpsc::UnboundedReceiver<ProgressUpdate>>,
     pub(super) progress_aggregator_handle: Option<tokio::task::JoinHandle<()>>,
@@ -160,7 +161,7 @@ impl DownloadCommand {
             .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
-        let headers = options.parsed_headers();
+        let request_policy = options.http_request_policy();
 
         // Every client construction path below must use the same rustls
         // provider. The DNS-cache and proxy branches build custom clients
@@ -184,6 +185,7 @@ impl DownloadCommand {
                         .timeout(Duration::from_secs(
                             constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
                         ))
+                        .gzip(options.http_accept_gzip)
                         .user_agent(constants::USER_AGENT)
                         .redirect(reqwest::redirect::Policy::none())
                         .resolve_to_addrs(&host, addresses)
@@ -191,6 +193,32 @@ impl DownloadCommand {
                         .map_err(|e| {
                             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                                 "Failed to build HTTP client with DNS cache: {e}"
+                            )))
+                        })?,
+                )
+            } else if options.http_accept_gzip {
+                Arc::new(
+                    reqwest::Client::builder()
+                        .connect_timeout(Duration::from_secs(
+                            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                        ))
+                        .timeout(Duration::from_secs(
+                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                        ))
+                        .gzip(true)
+                        .user_agent(constants::USER_AGENT)
+                        .redirect(reqwest::redirect::Policy::none())
+                        .pool_max_idle_per_host(constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
+                        .pool_idle_timeout(Some(Duration::from_secs(
+                            constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+                        )))
+                        .tcp_keepalive(Some(Duration::from_secs(
+                            constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+                        )))
+                        .build()
+                        .map_err(|error| {
+                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                                "Failed to build gzip-enabled HTTP client: {error}"
                             )))
                         })?,
                 )
@@ -205,6 +233,7 @@ impl DownloadCommand {
                 .timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
                 ))
+                .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::limited(
                     constants::HTTP_DEFAULT_MAX_REDIRECTS,
@@ -293,7 +322,7 @@ impl DownloadCommand {
             global_limiter: None,
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
-            headers,
+            request_policy,
             progress_sender: Some(progress_tx),
             progress_receiver: Some(progress_rx),
             progress_aggregator_handle: None,
@@ -382,7 +411,7 @@ impl DownloadCommand {
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let headers = options.parsed_headers();
+        let request_policy = options.http_request_policy();
         info!(
             "DownloadCommand created (shared client): {} -> {}",
             uri,
@@ -422,7 +451,7 @@ impl DownloadCommand {
             global_limiter: None,
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
-            headers,
+            request_policy,
             progress_sender: Some(progress_tx),
             progress_receiver: Some(progress_rx),
             progress_aggregator_handle: None,

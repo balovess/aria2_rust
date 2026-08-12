@@ -9,6 +9,7 @@ use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::error::Result;
 use crate::filesystem::resume_helper::ResumeState;
+use crate::http::HttpRequestPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -33,7 +34,7 @@ pub enum ConcurrentDownloadResult {
 pub struct ConcurrentDownloader {
     pub(crate) client: Arc<reqwest::Client>,
     pub(crate) output_path: std::path::PathBuf,
-    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) request_policy: HttpRequestPolicy,
     pub(crate) cookie_helper: CookieHelper,
     pub(crate) progress_updater: ProgressUpdater,
     pub(crate) group: Arc<std::sync::RwLock<RequestGroup>>,
@@ -52,7 +53,7 @@ impl ConcurrentDownloader {
     pub fn new(
         client: Arc<reqwest::Client>,
         output_path: std::path::PathBuf,
-        headers: Vec<(String, String)>,
+        request_policy: HttpRequestPolicy,
         cookie_helper: CookieHelper,
         progress_updater: ProgressUpdater,
         group: Arc<std::sync::RwLock<RequestGroup>>,
@@ -64,7 +65,7 @@ impl ConcurrentDownloader {
         Self {
             client,
             output_path,
-            headers,
+            request_policy,
             cookie_helper,
             progress_updater,
             group,

@@ -14,6 +14,7 @@ pub mod ns_cookie_parser;
 pub mod proxy;
 pub mod proxy_tunnel;
 pub mod request;
+pub mod request_policy;
 pub mod request_response;
 pub mod response;
 pub mod response_processor;
@@ -66,6 +67,8 @@ pub use auth::{
 
 // Re-export netrc parser types for direct access
 pub use auth::netrc::{NetrcEntry as NetrcParserEntry, NetrcError, NetrcParser, find_netrc_file};
+
+pub use request_policy::HttpRequestPolicy;
 
 // Re-export response processor types for convenient access
 pub use response_processor::{

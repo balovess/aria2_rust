@@ -11,6 +11,7 @@ use std::time::Duration;
 use aria2_protocol::metalink::parser::UrlEntry;
 use tracing::info;
 
+use crate::download::{DownloadContext, file_entry::FileEntry};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
@@ -43,6 +44,9 @@ pub struct MetalinkDownloadCommand {
     /// Parsed file info for per-file mode (set by create_multi_file).
     /// When present, execute() uses this instead of re-parsing metalink_data.
     pub(crate) file_info: Option<FileDownloadInfo>,
+    /// Parsed files for a grouped Metalink payload. A single command owns
+    /// the group so the request context can schedule all selected files.
+    pub(crate) grouped_file_infos: Vec<(std::path::PathBuf, FileDownloadInfo)>,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for mirror downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
@@ -141,6 +145,7 @@ impl MetalinkDownloadCommand {
             completed_bytes: 0,
             metalink_data: metalink_bytes.to_vec(),
             file_info: None,
+            grouped_file_infos: Vec::new(),
             global_limiter: None,
         })
     }
@@ -275,6 +280,7 @@ impl MetalinkDownloadCommand {
                     completed_bytes: 0,
                     metalink_data: Vec::new(),
                     file_info: Some(file_info),
+                    grouped_file_infos: Vec::new(),
                     global_limiter: None,
                 },
                 file_index: i,
@@ -377,10 +383,116 @@ impl MetalinkDownloadCommand {
                 completed_bytes: 0,
                 metalink_data: Vec::new(),
                 file_info: Some(file_info),
+                grouped_file_infos: Vec::new(),
                 global_limiter: None,
             },
             file_index: 0,
         }])
+    }
+
+    /// Create one command for a Metalink metaurl group.
+    ///
+    /// The request context contains one `FileEntry` per selected Metalink
+    /// file. This preserves aria2's multi-file group semantics while keeping
+    /// execution in the Rust command model instead of duplicating a command
+    /// per file.
+    pub(crate) fn create_multi_file_group(
+        files: &[aria2_protocol::metalink::parser::MetalinkFile],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        gid: u64,
+    ) -> Result<Self> {
+        if files.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Metalink group contains no files".to_string(),
+            )));
+        }
+
+        let dir = output_dir
+            .map(str::to_owned)
+            .or_else(|| options.dir.clone())
+            .unwrap_or_else(|| ".".to_string());
+        let client = build_http_client()?;
+        let mut entries = Vec::with_capacity(files.len());
+        let mut grouped_file_infos = Vec::with_capacity(files.len());
+        let mut offset = 0u64;
+
+        for file in files {
+            let sorted_urls: Vec<UrlEntry> = file.get_sorted_urls().into_iter().cloned().collect();
+            let urls: Vec<String> = sorted_urls
+                .iter()
+                .filter(|url| url.is_non_p2p())
+                .map(|url| url.url.clone())
+                .collect();
+            let torrent_metaurls = file
+                .meta_urls
+                .iter()
+                .filter(|metaurl| {
+                    metaurl.mediatype == aria2_protocol::metalink::parser::MediaType::Torrent
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if urls.is_empty() && torrent_metaurls.is_empty() {
+                continue;
+            }
+
+            let path = std::path::PathBuf::from(&dir).join(&file.name);
+            let mut entry = FileEntry::new(
+                path.to_string_lossy().into_owned(),
+                file.size.unwrap_or(0),
+                offset,
+                urls.clone(),
+            );
+            if let Some(original_name) = torrent_metaurls
+                .first()
+                .and_then(|metaurl| metaurl.name.clone())
+            {
+                entry.set_original_name(original_name);
+            }
+            entry.set_suffix_path(file.name.clone());
+            entry.set_max_connection_per_server(
+                options.max_connection_per_server.unwrap_or(1).max(1) as usize,
+            );
+            entry.set_unique_protocol(options.metalink_enable_unique_protocol);
+            offset = offset.saturating_add(file.size.unwrap_or(0));
+            entries.push(entry);
+            grouped_file_infos.push((
+                path,
+                FileDownloadInfo {
+                    expected_size: file.size,
+                    hash_entry: file.strongest_hash().cloned(),
+                    sorted_urls,
+                    pieces: file.pieces.clone(),
+                    torrent_metaurls,
+                },
+            ));
+        }
+
+        if grouped_file_infos.is_empty() {
+            return Err(Aria2Error::Fatal(FatalError::Config(
+                "Metalink group contains no downloadable files".to_string(),
+            )));
+        }
+
+        let group = RequestGroup::new(GroupId::new(gid), Vec::new(), options.clone());
+        let mut context = DownloadContext::new_default();
+        context.set_file_entries(entries);
+        group.set_download_context(Arc::new(context));
+        group.set_output_name(files[0].name.clone());
+        let output_path = grouped_file_infos[0].0.clone();
+
+        Ok(Self {
+            group: Arc::new(std::sync::RwLock::new(group)),
+            client,
+            output_path,
+            started: false,
+            completed: false,
+            completed_bytes: 0,
+            metalink_data: Vec::new(),
+            file_info: None,
+            grouped_file_infos,
+            global_limiter: None,
+        })
     }
 
     /// Create a manager-owned Metalink command for one parsed file entry.
@@ -436,6 +548,7 @@ impl MetalinkDownloadCommand {
             completed_bytes: 0,
             metalink_data: Vec::new(),
             file_info: Some(file_info),
+            grouped_file_infos: Vec::new(),
             global_limiter: None,
         })
     }

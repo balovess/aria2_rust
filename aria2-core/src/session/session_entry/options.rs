@@ -237,6 +237,24 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.referer {
         map.insert("referer".to_string(), v.clone());
     }
+    if !opts.enable_http_keep_alive {
+        map.insert("enable-http-keep-alive".to_string(), "false".to_string());
+    }
+    if opts.enable_http_pipelining {
+        map.insert("enable-http-pipelining".to_string(), "true".to_string());
+    }
+    if opts.http_accept_gzip {
+        map.insert("http-accept-gzip".to_string(), "true".to_string());
+    }
+    if opts.http_no_cache {
+        map.insert("http-no-cache".to_string(), "true".to_string());
+    }
+    if opts.use_head {
+        map.insert("use-head".to_string(), "true".to_string());
+    }
+    if opts.no_want_digest_header {
+        map.insert("no-want-digest-header".to_string(), "true".to_string());
+    }
     if !opts.check_certificate {
         map.insert("check-certificate".to_string(), "false".to_string());
     }

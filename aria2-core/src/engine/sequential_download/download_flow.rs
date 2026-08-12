@@ -46,7 +46,7 @@ impl SequentialDownloader {
                 && total_length > 0
                 && no_proxy
                 && !uri.starts_with("https://")
-                && self.headers.is_empty()
+                && !self.request_policy.has_custom_headers()
                 && self.cookie_helper.build_cookie_header(uri).is_none()
             {
                 match self.try_splice_sequential(uri, total_length).await {
@@ -73,7 +73,7 @@ impl SequentialDownloader {
 
         loop {
             let url_parsed = reqwest::Url::parse(&current_uri).ok();
-            let mut request = if let Some(range_header) =
+            let base_request = if let Some(range_header) =
                 ResumeHelper::build_range_header(&effective_resume_state)
             {
                 tracing::debug!("Resume download: {}", range_header);
@@ -82,22 +82,12 @@ impl SequentialDownloader {
                 self.client.get(&current_uri)
             };
 
-            if let Some(ref url) = url_parsed {
-                let cookie_hdr = self.cookie_helper.build_cookie_header_from_url(url);
-                if !cookie_hdr.is_empty() {
-                    request = request.header("Cookie", &cookie_hdr);
-                }
-            }
-
-            for (name, value) in &self.headers {
-                request = request.header(name, value);
-            }
-
             // --- Conditional GET: If-Modified-Since header ---
             // Matches C++ HttpRequestCommand L141-171:
             // When `conditional_get` is enabled, protocol is HTTP/HTTPS,
             // the control file does NOT exist, and the output file DOES exist,
             // send the file's mtime as `If-Modified-Since`.
+            let mut extra_headers = Vec::new();
             {
                 let g = self.group.recover();
                 let opts = g.options();
@@ -120,10 +110,19 @@ impl SequentialDownloader {
                             "Conditional GET: sending If-Modified-Since: {}",
                             http_date
                         );
-                        request = request.header("If-Modified-Since", &http_date);
+                        extra_headers.push(("If-Modified-Since".to_string(), http_date));
                     }
                 }
             }
+
+            let cookie_header = url_parsed
+                .as_ref()
+                .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
+            let request = self.request_policy.apply(
+                base_request,
+                cookie_header.as_deref().filter(|value| !value.is_empty()),
+                &extra_headers,
+            );
 
             let response = tokio::select! {
                 result = request.send() => result.map_err(|e| {

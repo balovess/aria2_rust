@@ -25,7 +25,7 @@ pub use crate::engine::bt_peer_interaction::{
 pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 
 // Re-export sub-module public items
-pub(crate) use constructor::build_download_context_from_meta;
+pub(crate) use constructor::{apply_file_mappings, build_download_context_from_meta};
 pub use seed_api::SeedStats;
 
 pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;

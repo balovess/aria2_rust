@@ -177,6 +177,18 @@ pub struct DownloadOptions {
     /// Override `Referer` header. Also injected into the `header` list by
     /// [`DownloadOptions::parsed_headers`] when set.
     pub referer: Option<String>,
+    /// Keep HTTP connections alive. C++ default: `true`.
+    pub enable_http_keep_alive: bool,
+    /// Enable the HTTP/1.1 pipelining hint. C++ default: `false`.
+    pub enable_http_pipelining: bool,
+    /// Advertise gzip/deflate response support. C++ default: `false`.
+    pub http_accept_gzip: bool,
+    /// Add `Pragma` and `Cache-Control: no-cache` to HTTP requests.
+    pub http_no_cache: bool,
+    /// Use HEAD when the remote length is unknown. C++ default: `false`.
+    pub use_head: bool,
+    /// Omit the HTTP `Want-Digest` request header. C++ default: `false`.
+    pub no_want_digest_header: bool,
     /// Verify TLS certificates for HTTPS and the FTPS extension.
     pub check_certificate: bool,
     /// Custom CA certificate bundle used by HTTPS/FTPS TLS adapters.
@@ -401,6 +413,12 @@ impl Default for DownloadOptions {
             header: Vec::new(),
             user_agent: None,
             referer: None,
+            enable_http_keep_alive: true,
+            enable_http_pipelining: false,
+            http_accept_gzip: false,
+            http_no_cache: false,
+            use_head: false,
+            no_want_digest_header: false,
             check_certificate: true,
             ca_certificate: None,
             min_tls_version: None,
@@ -738,6 +756,30 @@ impl DownloadOptions {
                 .unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
+            enable_http_keep_alive: options
+                .get("enable-http-keep-alive")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            enable_http_pipelining: options
+                .get("enable-http-pipelining")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            http_accept_gzip: options
+                .get("http-accept-gzip")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            http_no_cache: options
+                .get("http-no-cache")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            use_head: options
+                .get("use-head")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            no_want_digest_header: options
+                .get("no-want-digest-header")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             check_certificate: options
                 .get("check-certificate")
                 .map(|v| v != "false")
@@ -855,6 +897,20 @@ impl DownloadOptions {
             result.push(("Referer".to_string(), ref_.clone()));
         }
         result
+    }
+
+    /// Build the internal HTTP request policy shared by every HTTP request
+    /// path. The option names and defaults remain exposed through the aria2
+    /// compatible configuration/RPC surfaces.
+    pub fn http_request_policy(&self) -> crate::http::HttpRequestPolicy {
+        crate::http::HttpRequestPolicy::new(
+            self.parsed_headers(),
+            self.http_accept_gzip,
+            self.http_no_cache,
+            !self.no_want_digest_header,
+            self.enable_http_keep_alive,
+            self.enable_http_pipelining,
+        )
     }
 }
 

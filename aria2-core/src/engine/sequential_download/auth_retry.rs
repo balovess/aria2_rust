@@ -146,7 +146,7 @@ impl SequentialDownloader {
             } => {
                 // Build the retry request with Authorization header
                 // Re-apply the same Range header if we had a resume
-                let mut retry_request = if let Some(range_header) =
+                let retry_request = if let Some(range_header) =
                     crate::filesystem::resume_helper::ResumeHelper::build_range_header(resume_state)
                 {
                     tracing::debug!("Auth retry: re-applying Range header: {}", range_header);
@@ -154,15 +154,6 @@ impl SequentialDownloader {
                 } else {
                     self.client.get(uri)
                 };
-                if let Some(url) = url_parsed {
-                    let cookie_hdr = self.cookie_helper.build_cookie_header_from_url(url);
-                    if !cookie_hdr.is_empty() {
-                        retry_request = retry_request.header("Cookie", &cookie_hdr);
-                    }
-                }
-                for (name, value) in &self.headers {
-                    retry_request = retry_request.header(name, value);
-                }
 
                 // Add the Authorization or Proxy-Authorization header
                 let header_name = if is_proxy {
@@ -170,7 +161,14 @@ impl SequentialDownloader {
                 } else {
                     "Authorization"
                 };
-                retry_request = retry_request.header(header_name, &authorization_header);
+                let cookie_header = url_parsed
+                    .as_ref()
+                    .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
+                let retry_request = self.request_policy.apply(
+                    retry_request,
+                    cookie_header.as_deref().filter(|value| !value.is_empty()),
+                    &[(header_name.to_string(), authorization_header.clone())],
+                );
 
                 tracing::info!(
                     status_code,

@@ -77,13 +77,11 @@ impl SequentialDownloader {
             let range_header = format!("bytes={}-{}", gap_start, gap_end);
             tracing::debug!("Sequential Range request for gap: {}", range_header);
 
-            let mut request = self.client.get(uri).header("Range", &range_header);
-            if let Some(ref hdr) = cookie_hdr {
-                request = request.header("Cookie", hdr);
-            }
-            for (name, value) in &self.headers {
-                request = request.header(name, value);
-            }
+            let request = self.request_policy.apply(
+                self.client.get(uri).header("Range", &range_header),
+                cookie_hdr.as_deref(),
+                &[],
+            );
 
             let response = match request.send().await {
                 Ok(r) => r,

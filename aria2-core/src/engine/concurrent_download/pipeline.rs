@@ -111,7 +111,8 @@ pub async fn execute_with_coordinator(
                 length
             );
 
-            let downloader = HttpSegmentDownloader::new(&dl.client);
+            let downloader =
+                HttpSegmentDownloader::new_with_policy(&dl.client, dl.request_policy.clone());
             let seg_start = Instant::now();
 
             let cookie_hdr = dl.cookie_helper.build_cookie_header(&mirror_url);
@@ -136,7 +137,7 @@ pub async fn execute_with_coordinator(
                     offset,
                     length,
                     cookie_hdr.as_deref(),
-                    &dl.headers,
+                    &[],
                     Some(&seg_progress_tx),
                     &write_tx,
                     total_length,

@@ -255,7 +255,7 @@ fn regression_config_file_url_values() {
 #[test]
 fn regression_config_file_special_characters() {
     let mut parser = ConfigParser::new();
-    let content = "dir=/path with spaces\nuser-agent=aria2/1.0 (Linux)\n";
+    let content = "dir=/path with spaces\nuser-agent=test-client/1.0 (Linux)\n";
 
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("aria2.conf");
@@ -264,7 +264,10 @@ fn regression_config_file_special_characters() {
     parser.parse_file(config_path.to_str().unwrap());
 
     assert_eq!(parser.get_str("dir").unwrap(), "/path with spaces");
-    assert_eq!(parser.get_str("user-agent").unwrap(), "aria2/1.0 (Linux)");
+    assert_eq!(
+        parser.get_str("user-agent").unwrap(),
+        "test-client/1.0 (Linux)"
+    );
 }
 
 /// Test: Config file with unicode characters.

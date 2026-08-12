@@ -191,4 +191,37 @@ mod tests {
         let cs = Checksum::new(HashType::Md5, "d41d8cd98f00b204e9800998ecf8427e").unwrap();
         assert!(!cs.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_verify_file_streams_and_accepts_matching_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        tokio::fs::write(&path, b"aria2-rust").await.unwrap();
+        let checksum = Checksum::new(
+            HashType::Sha256,
+            "b467a8c596e15709e4805cb631a2d7cc8a2cf287869eb2f994cb8100d8ae809c",
+        )
+        .unwrap();
+
+        assert!(verify_file(&path, &checksum).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_rejects_mismatch_and_reports_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        tokio::fs::write(&path, b"payload").await.unwrap();
+        let checksum = Checksum::new(
+            HashType::Sha256,
+            "239f59ed55e737c77147cf55ad0c1b030f1f5f7f5e5b6e7c7b5d8a1a3f2a4a6b",
+        )
+        .unwrap();
+
+        assert!(!verify_file(&path, &checksum).await.unwrap());
+        assert!(
+            verify_file(&dir.path().join("missing.bin"), &checksum)
+                .await
+                .is_err()
+        );
+    }
 }

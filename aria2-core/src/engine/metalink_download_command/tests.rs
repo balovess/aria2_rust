@@ -1,4 +1,5 @@
 use super::*;
+use crate::engine::command::Command;
 use crate::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::metalink::parser::UrlEntry;
 
@@ -366,4 +367,140 @@ fn test_output_path_accessor() {
             .to_string_lossy()
             .contains("first.bin")
     );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn shared_metaurl_fallback_downloads_one_torrent_for_all_files() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+    use aria2_protocol::metalink::parser::MetalinkDocument;
+    use std::collections::BTreeMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let torrent_bytes = {
+        let mut torrent_files = Vec::new();
+        for path in [["dir1", "file1.txt"], ["dir2", "file2.dat"]] {
+            let mut file = BTreeMap::new();
+            file.insert(b"length".to_vec(), BencodeValue::Int(0));
+            file.insert(
+                b"path".to_vec(),
+                BencodeValue::List(
+                    path.iter()
+                        .map(|part| BencodeValue::Bytes(part.as_bytes().to_vec()))
+                        .collect(),
+                ),
+            );
+            torrent_files.push(BencodeValue::Dict(file));
+        }
+        let mut info = BTreeMap::new();
+        info.insert(b"files".to_vec(), BencodeValue::List(torrent_files));
+        info.insert(b"name".to_vec(), BencodeValue::Bytes(b"bundle".to_vec()));
+        info.insert(b"piece length".to_vec(), BencodeValue::Int(16_384));
+        info.insert(b"pieces".to_vec(), BencodeValue::Bytes(Vec::new()));
+        let mut root = BTreeMap::new();
+        root.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://tracker.test/announce".to_vec()),
+        );
+        root.insert(b"info".to_vec(), BencodeValue::Dict(info));
+        BencodeValue::Dict(root).encode()
+    };
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("fallback server should bind");
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let torrent_count = Arc::new(AtomicUsize::new(0));
+    let server_request_count = Arc::clone(&request_count);
+    let server_torrent_count = Arc::clone(&torrent_count);
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.expect("fallback request");
+            let mut request = [0u8; 2048];
+            let length = stream.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..length]);
+            let is_torrent = request.contains("GET /shared.torrent ");
+            server_request_count.fetch_add(1, Ordering::SeqCst);
+            if is_torrent {
+                server_torrent_count.fetch_add(1, Ordering::SeqCst);
+            }
+            let (status, body) = if is_torrent {
+                ("200 OK", torrent_bytes.clone())
+            } else {
+                ("500 Internal Server Error", Vec::new())
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response header");
+            stream.write_all(&body).await.expect("write response body");
+            if server_request_count.load(Ordering::SeqCst) >= 3 {
+                break;
+            }
+        }
+    });
+
+    let output_dir = tempfile::tempdir().expect("temporary output directory");
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <files>
+    <file name="first.bin">
+      <size>0</size>
+      <url>{base_url}/first.bin</url>
+      <metaurl mediatype="application/x-bittorrent" name="dir1/file1.txt">{base_url}/shared.torrent</metaurl>
+    </file>
+    <file name="second.bin">
+      <size>0</size>
+      <url>{base_url}/second.bin</url>
+      <metaurl mediatype="application/x-bittorrent" name="dir2/file2.dat">{base_url}/shared.torrent</metaurl>
+    </file>
+  </files>
+</metalink>"#
+    );
+    let document = MetalinkDocument::parse(xml.as_bytes(), None).expect("Metalink parses");
+    let options = DownloadOptions {
+        dir: Some(output_dir.path().to_string_lossy().into_owned()),
+        ..DownloadOptions::default()
+    };
+    let mut command = MetalinkDownloadCommand::create_multi_file_group(
+        &document.files,
+        &options,
+        options.dir.as_deref(),
+        105,
+    )
+    .expect("shared command constructs");
+
+    command.execute().await.expect("shared fallback completes");
+    server.await.expect("fallback server completes");
+
+    assert_eq!(request_count.load(Ordering::SeqCst), 3);
+    assert_eq!(torrent_count.load(Ordering::SeqCst), 1);
+    let context = command
+        .group()
+        .get_download_context()
+        .expect("torrent fallback context");
+    let entries = context.get_file_entries();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].original_name(), "dir1/file1.txt");
+    assert_eq!(entries[1].original_name(), "dir2/file2.dat");
+    assert_eq!(
+        entries[0].path(),
+        output_dir.path().join("first.bin").to_string_lossy()
+    );
+    assert_eq!(
+        entries[1].path(),
+        output_dir.path().join("second.bin").to_string_lossy()
+    );
+    assert!(entries.iter().all(|entry| entry.is_requested()));
 }

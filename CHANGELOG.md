@@ -10,6 +10,11 @@ All notable changes to this project will be documented in this file.
 - Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.
 - Unified active Rust crate metadata, path dependency constraints, installer fallback, examples, and benchmarks on the `aria2-rust` 0.2.9 product version.
 - Synchronized Homebrew, Scoop, Python, and Node.js release metadata and test fixtures with the `aria2-rust` product version.
+- Removed upstream aria2 product-version literals from compatibility fixtures; external peer and generator inputs now use neutral test identities.
+- Removed the obsolete upstream C++ version-report text; all emitted product version values now identify `aria2-rust`.
+- CLI version output now identifies the product as `aria2-rust 0.2.9`; `aria2c` remains the compatible executable entry point.
+- CLI help and completion usage retain `aria2c` while version output remains product-owned.
+- Added shared streaming whole-file checksum verification to HTTP and FTP, including FTP existing-file revalidation and `SIZE`/`RETR` length checks.
 - Corrected `bt-prioritize-piece` to the original `head[=SIZE],tail[=SIZE]` grammar while keeping the implementation and product identity Rust-native.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),

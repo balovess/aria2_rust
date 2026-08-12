@@ -468,13 +468,13 @@ mod tests {
         let proxy_config = FtpProxyConfig {
             proxy_host: "proxy.example.com".to_string(),
             proxy_port: 8080,
-            user_agent: "aria2-rust/1.0".to_string(),
+            user_agent: "test-client/1.0".to_string(),
             ..Default::default()
         };
         let s = build_request_string(ftp_url, proxy_config);
         assert!(s.starts_with("GET ftp://ftp.example.com/pub/file.tar.gz HTTP/1.1\r\n"));
         assert!(s.contains("Host: ftp.example.com\r\n"));
-        assert!(s.contains("User-Agent: aria2-rust/1.0\r\n"));
+        assert!(s.contains("User-Agent: test-client/1.0\r\n"));
         assert!(s.contains("Connection: Keep-Alive\r\n"));
         assert!(!s.contains("Proxy-Authorization"));
         assert!(!s.contains("Range:"));
@@ -566,7 +566,7 @@ mod tests {
             proxy_username: "puser".to_string(),
             proxy_password: "ppass".to_string(),
             ftp_username: "anonymous".to_string(),
-            user_agent: "aria2-rust/2.0".to_string(),
+            user_agent: "test-client/2.0".to_string(),
             ..Default::default()
         };
 
@@ -581,7 +581,7 @@ mod tests {
             s.contains("GET ftp://anonymous@ftp.example.com/pub/linux/file.tar.gz HTTP/1.1\r\n")
         );
         assert!(s.contains("Host: ftp.example.com\r\n"));
-        assert!(s.contains("User-Agent: aria2-rust/2.0\r\n"));
+        assert!(s.contains("User-Agent: test-client/2.0\r\n"));
         assert!(s.contains("Pragma: no-cache\r\n"));
         assert!(s.contains("Connection: Keep-Alive\r\n"));
         assert!(s.contains("Range: bytes=4096-\r\n"));

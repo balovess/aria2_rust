@@ -214,7 +214,8 @@ Verification snapshot (2026-08-12): the current focused evidence includes
 RPC all-feature run, plus one additional targeted RPC default-visibility
 regression. The full RPC run preceded the concurrent workspace version update;
 under the current `0.2.9`, the version entry point, app tests, Clippy, and the
-targeted parser/RPC regressions pass. `aria2c --version` reports `aria2c 0.2.9`,
+targeted parser/RPC regressions pass. `aria2c --version` reports
+`aria2-rust 0.2.9`,
 and the four Rust workspace members, SDK packages, Homebrew formula, and Scoop
 manifest resolve to product version `0.2.9`. The single workspace
 aggregate command is still a build-time timeout on this host, and the complete

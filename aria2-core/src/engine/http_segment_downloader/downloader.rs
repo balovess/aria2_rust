@@ -13,6 +13,7 @@ use tracing::debug;
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::HttpRequestPolicy;
 use crate::http::client_pool::ensure_rustls_provider;
 use crate::http::response_processor::range::parse_content_range_value;
 
@@ -24,6 +25,7 @@ pub struct WriteChunk {
 
 pub struct HttpSegmentDownloader {
     pub client: reqwest::Client,
+    request_policy: HttpRequestPolicy,
     last_peer_addr: std::sync::Mutex<Option<std::net::SocketAddr>>,
 }
 
@@ -57,9 +59,15 @@ impl HttpSegmentDownloader {
     /// Create a new `HttpSegmentDownloader`.
     #[must_use]
     pub fn new(client: &reqwest::Client) -> Self {
+        Self::new_with_policy(client, HttpRequestPolicy::default())
+    }
+
+    #[must_use]
+    pub fn new_with_policy(client: &reqwest::Client, request_policy: HttpRequestPolicy) -> Self {
         ensure_rustls_provider();
         Self {
             client: client.clone(),
+            request_policy,
             last_peer_addr: std::sync::Mutex::new(None),
         }
     }
@@ -71,13 +79,9 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
     ) -> Result<bool> {
-        let mut req = self.client.head(url);
-        if let Some(ch) = cookie_header {
-            req = req.header("Cookie", ch);
-        }
-        for (name, value) in headers {
-            req = req.header(name, value);
-        }
+        let req = self
+            .request_policy
+            .apply(self.client.head(url), cookie_header, headers);
         let resp = req.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("HEAD request failed: {}", e),
@@ -137,19 +141,16 @@ impl HttpSegmentDownloader {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
         debug!("HTTP Range request: {} ({})", range_header, url);
 
-        let mut req =
+        let req = self.request_policy.apply(
             self.client
                 .get(url)
                 .header("Range", &range_header)
                 .timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                ));
-        if let Some(ch) = cookie_header {
-            req = req.header("Cookie", ch);
-        }
-        for (name, value) in headers {
-            req = req.header(name, value);
-        }
+                )),
+            cookie_header,
+            headers,
+        );
         let response = req.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("HTTP Range request failed: {}", e),
@@ -277,19 +278,16 @@ impl HttpSegmentDownloader {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
         debug!("HTTP Range request (streaming): {} ({})", range_header, url);
 
-        let mut req =
+        let req = self.request_policy.apply(
             self.client
                 .get(url)
                 .header("Range", &range_header)
                 .timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                ));
-        if let Some(ch) = cookie_header {
-            req = req.header("Cookie", ch);
-        }
-        for (name, value) in headers {
-            req = req.header(name, value);
-        }
+                )),
+            cookie_header,
+            headers,
+        );
         let response = req.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("HTTP Range request failed: {}", e),

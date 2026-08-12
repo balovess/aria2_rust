@@ -1,6 +1,7 @@
 use super::build_test_torrent;
 use super::*;
-use crate::request::request_group::{DownloadOptions, GroupId};
+use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
+use std::sync::{Arc, RwLock};
 
 fn build_multi_file_torrent() -> Vec<u8> {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
@@ -127,6 +128,74 @@ fn test_index_out_updates_single_file_output_path() {
         context.get_file_entries()[0].path(),
         cmd.output_path.to_string_lossy()
     );
+}
+
+#[test]
+fn test_external_group_mapping_preserves_shared_torrent_file_identity() {
+    let temp_dir = tempfile::tempdir().expect("temporary download directory");
+    let output_dir = temp_dir.path();
+    let torrent_bytes = build_multi_file_torrent();
+    let options = DownloadOptions {
+        dir: Some(output_dir.to_string_lossy().into_owned()),
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(RwLock::new(RequestGroup::new(
+        GroupId::new(104),
+        Vec::new(),
+        options.clone(),
+    )));
+    let mappings = vec![
+        BtFileMapping {
+            original_name: "dir1/file1.txt".to_string(),
+            path: output_dir.join("first.bin").to_string_lossy().into_owned(),
+            uris: vec!["http://mirror.test/first.bin".to_string()],
+            max_connection_per_server: 2,
+            unique_protocol: true,
+        },
+        BtFileMapping {
+            original_name: "dir2/file2.dat".to_string(),
+            path: output_dir.join("second.bin").to_string_lossy().into_owned(),
+            uris: vec!["http://mirror.test/second.bin".to_string()],
+            max_connection_per_server: 3,
+            unique_protocol: false,
+        },
+    ];
+
+    let command = BtDownloadCommand::new_with_group_and_mappings(
+        Arc::clone(&group),
+        &torrent_bytes,
+        &options,
+        Some(output_dir.to_string_lossy().as_ref()),
+        &mappings,
+    )
+    .expect("shared torrent mapping should construct");
+    let context = group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("mapped torrent context");
+    let entries = context.get_file_entries();
+
+    assert_eq!(entries.len(), 2);
+    assert!(entries.iter().all(|entry| entry.is_requested()));
+    assert_eq!(entries[0].original_name(), "dir1/file1.txt");
+    assert_eq!(entries[1].original_name(), "dir2/file2.dat");
+    assert_eq!(entries[0].path(), mappings[0].path);
+    assert_eq!(entries[1].path(), mappings[1].path);
+    assert_eq!(
+        entries[0].remaining_uris().front(),
+        Some(&mappings[0].uris[0])
+    );
+    assert_eq!(
+        entries[1].remaining_uris().front(),
+        Some(&mappings[1].uris[0])
+    );
+    assert_eq!(entries[0].max_connection_per_server(), 2);
+    assert_eq!(entries[1].max_connection_per_server(), 3);
+    assert!(entries[0].is_unique_protocol());
+    assert!(!entries[1].is_unique_protocol());
+
+    drop(command);
 }
 
 #[test]

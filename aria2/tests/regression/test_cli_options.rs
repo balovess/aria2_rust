@@ -122,8 +122,8 @@ fn regression_short_option_max_concurrent() {
 /// Test: -U maps to "user-agent" option.
 #[test]
 fn regression_short_option_user_agent() {
-    let cli = parse(&["-U", "aria2/1.0"]);
-    assert_eq!(cli.http_ftp.user_agent.as_deref(), Some("aria2/1.0"));
+    let cli = parse(&["-U", "test-client/1.0"]);
+    assert_eq!(cli.http_ftp.user_agent.as_deref(), Some("test-client/1.0"));
 }
 
 /// Test: --header maps to "header" option (list, can be repeated).
@@ -573,6 +573,7 @@ fn regression_help_selector() {
 #[test]
 fn regression_help_rendering_filters_options() {
     let timeout_help = render_help(&HelpRequest::Filter("timeout".to_string()));
+    assert!(timeout_help.contains("Usage: aria2c"));
     assert!(timeout_help.contains("--timeout"));
     assert!(!timeout_help.contains("--dir"));
 
@@ -663,7 +664,8 @@ fn regression_v_triggers_version() {
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
     assert!(
         error.to_string().starts_with(&format!(
-            "aria2c {}",
+            "{} {}",
+            aria2_protocol::identity::PRODUCT_NAME,
             aria2_protocol::identity::PRODUCT_VERSION
         )),
         "--version must use the product version number"

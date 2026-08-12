@@ -185,9 +185,11 @@ pub async fn execute(
             match manager.next_pending_segment_for_mirror(0) {
                 Some((seg_idx, offset, length)) => {
                     let url = uri.to_string();
-                    let seg_dl = HttpSegmentDownloader::new(&dl.client);
+                    let seg_dl = HttpSegmentDownloader::new_with_policy(
+                        &dl.client,
+                        dl.request_policy.clone(),
+                    );
                     let ch = cookie_hdr.clone();
-                    let headers = dl.headers.clone();
                     let seg_write_tx = write_tx.clone();
                     active_segs.insert(seg_idx, offset);
 
@@ -242,7 +244,7 @@ pub async fn execute(
                                 offset,
                                 length,
                                 ch.as_deref(),
-                                &headers,
+                                &[],
                                 Some(&seg_progress_tx),
                                 &seg_write_tx,
                                 total_length,
