@@ -13,6 +13,25 @@ use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use e2e_helpers::mock_http_server::{MockHttpServer, RequestLog, full_body};
 use tempfile::TempDir;
 
+async fn read_proxy_headers(stream: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+
+    let mut request = Vec::with_capacity(1024);
+    let mut buffer = [0u8; 512];
+    loop {
+        let bytes = stream.read(&mut buffer).await.expect("read proxy request");
+        assert!(bytes > 0, "proxy closed before sending request headers");
+        request.extend_from_slice(&buffer[..bytes]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            return String::from_utf8(request).expect("proxy request must be HTTP text");
+        }
+        assert!(
+            request.len() < 16 * 1024,
+            "proxy request headers are too large"
+        );
+    }
+}
+
 fn header<'a>(request: &'a RequestLog, name: &str) -> Option<&'a str> {
     request
         .headers
@@ -202,7 +221,7 @@ async fn unknown_length_download_does_not_probe_with_range() {
 async fn explicit_split_unknown_length_starts_with_one_ordinary_get() {
     let server = MockHttpServer::start().await.expect("start server");
     let body = vec![b's'; 2 * 1024 * 1024 + 17];
-    server.register_range_response("/split-unknown", &body);
+    server.register_chunked_response("/split-unknown", vec![body.clone()]);
 
     let dir = tempfile::tempdir().expect("create output directory");
     let url = format!("{}/split-unknown", server.base_url());
@@ -238,4 +257,75 @@ async fn explicit_split_unknown_length_starts_with_one_ordinary_get() {
     assert!(header(&log[0], "Range").is_none());
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn configured_http_proxy_auth_downloads_through_real_proxy() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy fixture");
+    let proxy_addr = listener.local_addr().expect("read proxy address");
+    let body = b"proxy-authenticated-download".to_vec();
+    let expected_body = body.clone();
+    let proxy = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept proxy request");
+        let request = read_proxy_headers(&mut stream).await;
+        assert!(
+            request.starts_with("GET http://origin.example/proxy-auth.bin HTTP/1.1\r\n"),
+            "HTTP proxies receive the absolute target URI: {request}"
+        );
+        let proxy_auth = request
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+            .map(|(_, value)| value.trim());
+        assert_eq!(
+            proxy_auth,
+            Some("Basic dXNlcjpwYXNz"),
+            "configured proxy credentials must reach the proxy: {request}"
+        );
+
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .expect("write proxy response headers");
+        stream
+            .write_all(&body)
+            .await
+            .expect("write proxy response body");
+    });
+
+    let directory = tempfile::tempdir().expect("create output directory");
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://{proxy_addr}")),
+        http_proxy_user: Some("user".to_string()),
+        http_proxy_passwd: Some("pass".to_string()),
+        ..DownloadOptions::default()
+    };
+    let url = "http://origin.example/proxy-auth.bin";
+    let mut command = DownloadCommand::new(
+        GroupId::new(704),
+        url,
+        &options,
+        directory.path().to_str(),
+        Some("proxy-auth.bin"),
+    )
+    .expect("create proxied download command");
+    command
+        .execute()
+        .await
+        .expect("download through authenticated proxy should succeed");
+
+    assert_eq!(
+        std::fs::read(directory.path().join("proxy-auth.bin")).expect("read downloaded file"),
+        expected_body
+    );
+    proxy.await.expect("proxy fixture should finish");
 }

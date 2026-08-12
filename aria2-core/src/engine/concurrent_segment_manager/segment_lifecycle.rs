@@ -2,6 +2,26 @@ use super::ConcurrentSegmentManager;
 use super::types::SegmentStatus;
 
 impl ConcurrentSegmentManager {
+    /// Return a capacity-limited segment to the pending queue without
+    /// consuming its ordinary retry budget.
+    pub fn requeue_segment(&mut self, index: u32) -> bool {
+        let Some(seg) = self.segments.get_mut(index as usize) else {
+            return false;
+        };
+        if !matches!(seg.status, SegmentStatus::Downloading) {
+            return false;
+        }
+
+        if let Some(mirror_idx) = seg.assigned_mirror
+            && let Some(mirror) = self.mirrors.get_mut(mirror_idx)
+        {
+            mirror.active_segments = mirror.active_segments.saturating_sub(1);
+        }
+        seg.status = SegmentStatus::Pending;
+        seg.assigned_mirror = None;
+        true
+    }
+
     /// Mark a segment as successfully downloaded.
     ///
     /// Returns `true` if the segment existed, `false` otherwise.

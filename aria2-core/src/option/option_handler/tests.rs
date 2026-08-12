@@ -17,9 +17,9 @@ mod tests {
 
         // Verify specific known defaults
         assert_eq!(handler.get("dir").as_str().unwrap_or(""), ".");
-        assert_eq!(handler.get("split").as_usize(), 5);
+        assert_eq!(handler.get("split").as_usize(), 16);
         assert_eq!(handler.get("max-concurrent-downloads").as_usize(), 5);
-        assert_eq!(handler.get("max-connection-per-server").as_usize(), 1);
+        assert_eq!(handler.get("max-connection-per-server").as_usize(), 16);
         assert_eq!(handler.get("min-split-size").as_usize(), 1_048_576);
         assert!(handler.get("continue").as_bool().unwrap_or(false));
         assert!(!handler.get("quiet").as_bool().unwrap_or(false));
@@ -213,14 +213,14 @@ quiet=false
         // Default values (non-zero) should be preserved in DownloadOptions
         let handler2 = OptionHandler::new();
         let opts2 = handler2.to_download_options();
-        assert_eq!(opts2.split, Some(5)); // default split=5 which is > 0
-        assert_eq!(opts2.max_connection_per_server, Some(1)); // default is 1 (aria2-next)
+        assert_eq!(opts2.split, Some(16)); // adaptive HTTP default
+        assert_eq!(opts2.max_connection_per_server, Some(16));
         assert_eq!(opts2.dir, Some(".".to_string())); // default dir is "."
         assert_eq!(opts2.out, None); // "out" has no default -> None
 
         // Verify reset_to_default works
         handler.reset_to_default("split");
-        assert_eq!(handler.get("split").as_usize(), 5); // back to default
+        assert_eq!(handler.get("split").as_usize(), 16); // back to default
         assert!(!handler.is_explicitly_set("split"));
     }
 

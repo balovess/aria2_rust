@@ -138,7 +138,7 @@ async fn test_e2e_ftp_rejects_short_retr_after_size() {
 }
 
 #[tokio::test]
-async fn test_e2e_ftp_max_tries_counts_total_control_attempts() {
+async fn test_e2e_ftp_protocol_failure_does_not_retry() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let accepted = Arc::new(AtomicU32::new(0));
@@ -196,8 +196,8 @@ async fn test_e2e_ftp_max_tries_counts_total_control_attempts() {
     assert!(result.is_err(), "persistent FTP 421 should fail");
     assert_eq!(
         accepted.load(Ordering::Relaxed),
-        2,
-        "max-tries=2 means two total FTP control attempts"
+        1,
+        "FTP protocol failures must not be retried"
     );
 
     server_task.abort();

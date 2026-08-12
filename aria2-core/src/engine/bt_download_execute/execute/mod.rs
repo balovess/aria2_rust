@@ -8,6 +8,20 @@ mod web_seed;
 
 pub use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
 
+pub(crate) fn deduplicate_tracker_tiers(tiers: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    let mut seen = HashSet::new();
+    tiers
+        .into_iter()
+        .filter_map(|tier| {
+            let unique = tier
+                .into_iter()
+                .filter(|url| seen.insert(url.clone()))
+                .collect::<Vec<_>>();
+            (!unique.is_empty()).then_some(unique)
+        })
+        .collect()
+}
+
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -35,10 +49,20 @@ impl BtDownloadCommand {
         };
         while let Ok(incoming) = receiver.try_recv() {
             let endpoint = incoming.endpoint;
-            let mut conn = crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
-                incoming.connection,
-                endpoint,
-            );
+            let mut conn = match incoming.connection {
+                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(
+                    connection,
+                ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
+                    connection,
+                    endpoint,
+                ),
+                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
+                    connection,
+                ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_encrypted(
+                    connection,
+                    endpoint,
+                ),
+            };
             let remote_peer_id = conn.remote_peer_id();
             if remote_peer_id == Some(self.local_peer_id)
                 || remote_peer_id.is_some_and(|peer_id| {
@@ -286,11 +310,16 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        // BtSetup/PeerListenCommand counterpart: create the session-scoped
-        // listener before discovery so a torrent with no initial peers can
-        // still accept an incoming connection.
+        // BtSetup/PeerListenCommand counterpart: register this torrent on the
+        // engine-owned listener before discovery so one socket can serve all
+        // active torrents and route by info-hash.
         if self.incoming_peers.is_none() {
-            let (listen_ports, max_peers, caretaker_id, disable_ipv6) = {
+            let listener_manager = self.bt_listener.clone().ok_or_else(|| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                    message: "BitTorrent listener manager is not configured".to_string(),
+                })
+            })?;
+            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy) = {
                 let group = self.group.recover();
                 let ports = group
                     .options()
@@ -305,10 +334,25 @@ impl Command for BtDownloadCommand {
                     group.options().bt_max_peers,
                     group.gid().value(),
                     group.options().disable_ipv6,
+                    aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy {
+                        reject_plain: group.options().bt_force_encrypt
+                            || group.options().bt_require_crypto,
+                        force_encryption: group.options().bt_force_encrypt
+                            || group.options().bt_require_crypto,
+                        prefer_encryption: group
+                            .effective_option_snapshot()
+                            .and_then(|snapshot| {
+                                snapshot
+                                    .get("bt-min-crypto-level")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .is_some_and(|level| level.eq_ignore_ascii_case("arc4")),
+                    },
                 )
             };
-            let bind_listener = |bind_ip: std::net::IpAddr| {
-                crate::engine::bt_peer_listener::BtPeerListener::bind_ports(
+            let register = |bind_ip: std::net::IpAddr| {
+                listener_manager.register_with_policy(
                     bind_ip,
                     listen_ports.clone(),
                     meta.info_hash.bytes,
@@ -316,19 +360,20 @@ impl Command for BtDownloadCommand {
                     caretaker_id,
                     max_peers,
                     std::sync::Arc::clone(&self.peer_storage),
+                    crypto_policy,
                 )
             };
-            let listener = if disable_ipv6 {
-                bind_listener(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+            let route = if disable_ipv6 {
+                register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
             } else {
-                match bind_listener(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
-                    Ok(listener) => Ok(listener),
+                match register(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
+                    Ok(route) => Ok(route),
                     Err(ipv6_error) => {
                         warn!(
                             error = %ipv6_error,
                             "IPv6 BitTorrent listener unavailable; falling back to IPv4"
                         );
-                        bind_listener(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+                        register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
                     }
                 }
             }
@@ -337,21 +382,16 @@ impl Command for BtDownloadCommand {
                     message: format!("failed to bind BitTorrent peer listener: {error}"),
                 })
             })?;
-            let actual_addr = listener.local_addr().map_err(|error| {
-                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
-                    message: format!("failed to query BitTorrent listener address: {error}"),
-                })
-            })?;
-            self.listen_port = actual_addr.port();
+            let (listen_port, incoming_peers, route_handle) = route;
+            self.listen_port = listen_port;
             if let Some(registry) = &self.bt_registry
                 && let Ok(mut registry) = registry.write()
             {
                 registry.set_tcp_port(self.listen_port);
             }
-            let (incoming_peers, listener_task) = listener.spawn(max_peers.max(1));
             self.incoming_peers = Some(incoming_peers);
-            self.incoming_peer_listener_task = Some(listener_task);
-            info!("[BT] Incoming peer listener bound at {}", actual_addr);
+            self.bt_peer_route = Some(route_handle);
+            info!("[BT] Incoming peer route registered on TCP port {}", listen_port);
         }
 
         let peer_addrs = self

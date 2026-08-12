@@ -17,6 +17,8 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
+#[cfg(feature = "bittorrent")]
+use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerCatalogConfig};
 
 pub struct DownloadEngine {
     /// Sender for structured engine communication commands.
@@ -48,6 +50,12 @@ pub struct DownloadEngine {
     /// coordination across all active downloads.
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_registry: Arc<std::sync::RwLock<BtRegistry>>,
+    /// Process-wide public tracker catalog shared by all BT downloads.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) public_tracker_catalog: Arc<PublicTrackerList>,
+    /// Process-wide BitTorrent TCP listener and info-hash router.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -88,6 +96,10 @@ impl DownloadEngine {
             keep_alive: false,
             #[cfg(feature = "bittorrent")]
             bt_registry: Arc::new(std::sync::RwLock::new(BtRegistry::new())),
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: Arc::new(PublicTrackerList::new()),
+            #[cfg(feature = "bittorrent")]
+            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
@@ -195,6 +207,18 @@ impl DownloadEngine {
     #[cfg(feature = "bittorrent")]
     pub fn bt_registry(&self) -> &Arc<std::sync::RwLock<BtRegistry>> {
         &self.bt_registry
+    }
+
+    /// Configure the process-wide public tracker catalog before `run()`.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_public_tracker_config(&mut self, config: TrackerCatalogConfig) {
+        self.public_tracker_catalog.set_config_now(config);
+    }
+
+    /// Get the shared public tracker catalog.
+    #[cfg(feature = "bittorrent")]
+    pub fn public_tracker_catalog(&self) -> &Arc<PublicTrackerList> {
+        &self.public_tracker_catalog
     }
 
     /// Enable/disable keep-alive mode. When true, the engine stays alive even

@@ -91,6 +91,11 @@ impl SequentialDownloader {
         let auth_opts = {
             let g = self.group.recover();
             let opts = g.options();
+            let scheme = url_parsed
+                .as_ref()
+                .map(|url| url.scheme())
+                .unwrap_or("http");
+            let (proxy_user, proxy_passwd) = opts.proxy_credentials_for_scheme(scheme);
             AuthResolveOptions {
                 http_auth_challenge: opts.http_auth_challenge,
                 no_netrc: opts.no_netrc,
@@ -98,11 +103,14 @@ impl SequentialDownloader {
                 http_passwd: opts.http_passwd.clone(),
                 ftp_user: opts.ftp_user.clone(),
                 ftp_passwd: opts.ftp_passwd.clone(),
+                proxy_user,
+                proxy_passwd,
             }
         };
 
-        // Only attempt auth if http_auth_challenge is enabled (matches C++ behavior)
-        if !auth_opts.http_auth_challenge && scheme != AuthScheme::Digest {
+        // Origin 401 retries are opt-in. Proxy credentials are an explicit
+        // proxy contract and must work independently of that origin option.
+        if !is_proxy && !auth_opts.http_auth_challenge && scheme != AuthScheme::Digest {
             tracing::debug!(
                 status_code,
                 "Auth challenge received but http_auth_challenge not enabled"
@@ -218,9 +226,11 @@ impl SequentialDownloader {
                         status_code = retry_status.as_u16(),
                         "Auth retry still failed — credentials may be incorrect"
                     );
-                    return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                        "Authentication failed".to_string(),
-                    ))));
+                    return Some(Err(Aria2Error::Recoverable(
+                        RecoverableError::HttpAuthFailed {
+                            message: format!("Authentication failed: HTTP {}", retry_status),
+                        },
+                    )));
                 }
 
                 Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(

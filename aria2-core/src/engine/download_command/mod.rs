@@ -99,6 +99,77 @@ fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
 }
 
+#[derive(Clone, Copy, Debug)]
+enum ProxyTarget {
+    Http,
+    Https,
+    All,
+}
+
+fn build_reqwest_proxy(
+    target: ProxyTarget,
+    proxy_url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+    no_proxy: Option<&str>,
+) -> std::result::Result<reqwest::Proxy, reqwest::Error> {
+    let mut proxy = match target {
+        ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
+        ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
+        ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+    };
+
+    // Preserve credentials embedded in the proxy URL unless an option
+    // explicitly overrides them, matching AbstractCommand::makeProxyUri().
+    if username.is_some() || password.is_some() {
+        let embedded = proxy_url.parse::<reqwest::Url>().ok();
+        let embedded_user = embedded
+            .as_ref()
+            .filter(|url| !url.username().is_empty())
+            .map(|url| url.username().to_string());
+        let embedded_password = embedded
+            .as_ref()
+            .and_then(|url| url.password().map(str::to_string));
+        let effective_user = username.map(str::to_owned).or(embedded_user);
+        let effective_password = password
+            .map(str::to_owned)
+            .or(embedded_password)
+            .unwrap_or_default();
+
+        if let Some(user) = effective_user {
+            proxy = proxy.basic_auth(&user, &effective_password);
+        }
+    }
+
+    if let Some(no_proxy) = no_proxy {
+        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+    }
+
+    Ok(proxy)
+}
+
+fn add_reqwest_proxy(
+    builder: reqwest::ClientBuilder,
+    target: ProxyTarget,
+    proxy_url: &str,
+    credentials: (Option<String>, Option<String>),
+    no_proxy: Option<&str>,
+) -> reqwest::ClientBuilder {
+    match build_reqwest_proxy(
+        target,
+        proxy_url,
+        credentials.0.as_deref(),
+        credentials.1.as_deref(),
+        no_proxy,
+    ) {
+        Ok(proxy) => builder.proxy(proxy),
+        Err(error) => {
+            warn!(%proxy_url, ?target, %error, "Ignoring invalid HTTP proxy configuration");
+            builder
+        }
+    }
+}
+
 impl DownloadCommand {
     pub fn new(
         gid: GroupId,
@@ -167,7 +238,14 @@ impl DownloadCommand {
         // provider. The DNS-cache and proxy branches build custom clients
         // instead of reusing the global pool client.
         crate::http::client_pool::ensure_rustls_provider();
-        let no_proxy = options.http_proxy.is_none() && options.all_proxy.is_none();
+        let no_proxy = ![
+            options.http_proxy.as_deref(),
+            options.https_proxy.as_deref(),
+            options.all_proxy.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|proxy| !proxy.is_empty());
         let client = if no_proxy {
             if let Some(addresses) = resolved_addresses.as_deref()
                 && !addresses.is_empty()
@@ -235,9 +313,9 @@ impl DownloadCommand {
                 ))
                 .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
-                .redirect(reqwest::redirect::Policy::limited(
-                    constants::HTTP_DEFAULT_MAX_REDIRECTS,
-                ))
+                // Redirects are handled by SequentialDownloader so direct,
+                // DNS-pinned, and proxied clients share one URI/retry seam.
+                .redirect(reqwest::redirect::Policy::none())
                 .pool_max_idle_per_host(constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
                 .pool_idle_timeout(Some(std::time::Duration::from_secs(
                     constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS,
@@ -246,23 +324,52 @@ impl DownloadCommand {
                     constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
                 )));
 
-            if let Some(ref proxy) = options.http_proxy
-                && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
-                && let Ok(p) = reqwest::Proxy::all(proxy_url.to_string())
+            let no_proxy = options.no_proxy.as_deref();
+
+            if let Some(proxy) = options
+                .http_proxy
+                .as_deref()
+                .filter(|proxy| !proxy.is_empty())
             {
-                builder = builder.proxy(p);
+                builder = add_reqwest_proxy(
+                    builder,
+                    ProxyTarget::Http,
+                    proxy,
+                    options.proxy_credentials_for_scheme("http"),
+                    no_proxy,
+                );
             }
 
-            if options.http_proxy.is_none()
-                && let Some(ref all_proxy) = options.all_proxy
+            if let Some(proxy) = options
+                .https_proxy
+                .as_deref()
+                .filter(|proxy| !proxy.is_empty())
+            {
+                builder = add_reqwest_proxy(
+                    builder,
+                    ProxyTarget::Https,
+                    proxy,
+                    options.proxy_credentials_for_scheme("https"),
+                    no_proxy,
+                );
+            }
+
+            if let Some(all_proxy) = options
+                .all_proxy
+                .as_deref()
+                .filter(|proxy| !proxy.is_empty())
             {
                 match ProxyUrl::parse(all_proxy) {
                     Ok(parsed) => match parsed.protocol {
                         crate::http::socks_connector::ProxyProtocol::Http
                         | crate::http::socks_connector::ProxyProtocol::Https => {
-                            if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
-                                builder = builder.proxy(p);
-                            }
+                            builder = add_reqwest_proxy(
+                                builder,
+                                ProxyTarget::All,
+                                all_proxy,
+                                options.proxy_credentials_for_scheme("all"),
+                                no_proxy,
+                            );
                         }
                         _ => {
                             tracing::info!(

@@ -5,6 +5,7 @@ use std::path::Path;
 use tracing::debug;
 
 use super::error::NetrcError;
+use super::no_proxy_domain_match;
 use super::types::{NetrcEntry, ParseState};
 
 // ---------------------------------------------------------------------------
@@ -194,10 +195,15 @@ impl NetrcParser {
 
     /// Find credentials for a specific machine hostname.
     ///
-    /// Returns the first entry whose machine name exactly matches `machine`.
+    /// Returns the first entry whose machine name matches `machine`.
+    ///
+    /// A machine name beginning with `.` matches a subdomain suffix, following
+    /// aria2's `noProxyDomainMatch` semantics.
     /// Does not fall back to the default entry.
     pub fn find(&self, machine: &str) -> Option<&NetrcEntry> {
-        self.entries.iter().find(|e| e.machine == machine)
+        self.entries
+            .iter()
+            .find(|e| no_proxy_domain_match(machine, &e.machine))
     }
 
     /// Get the default entry, if any.

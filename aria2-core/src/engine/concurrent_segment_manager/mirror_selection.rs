@@ -15,6 +15,15 @@ impl ConcurrentSegmentManager {
     /// * `Some((mirror_idx, segment_info))` - Mirror index and segment info (index, offset, length)
     /// * `None` - No pending segments or no available mirrors
     pub fn select_mirror_for_next_segment(&mut self) -> Option<(usize, (u32, u64, u64))> {
+        self.select_mirror_for_next_segment_excluding(&[])
+    }
+
+    /// Select the next segment while skipping mirrors whose server is
+    /// temporarily unavailable to the HTTP admission controller.
+    pub fn select_mirror_for_next_segment_excluding(
+        &mut self,
+        excluded_mirrors: &[usize],
+    ) -> Option<(usize, (u32, u64, u64))> {
         // Find a pending segment first
         let pending_seg = self
             .segments
@@ -42,7 +51,9 @@ impl ConcurrentSegmentManager {
                 .collect();
 
             // Select mirror using UriSelector
-            if let Some(mirror_idx) = selector.select(&self.mirror_urls, &used_hosts) {
+            if let Some(mirror_idx) = selector.select(&self.mirror_urls, &used_hosts)
+                && !excluded_mirrors.contains(&mirror_idx)
+            {
                 // Check if mirror can accept more
                 if self
                     .mirrors
@@ -64,7 +75,8 @@ impl ConcurrentSegmentManager {
 
         // Fallback: find first available mirror
         for mirror_idx in 0..self.mirrors.len() {
-            if self.mirrors[mirror_idx].can_accept_more()
+            if !excluded_mirrors.contains(&mirror_idx)
+                && self.mirrors[mirror_idx].can_accept_more()
                 && let Some(seg) = self.segments.get_mut(seg_index as usize)
             {
                 seg.status = SegmentStatus::Downloading;

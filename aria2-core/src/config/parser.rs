@@ -416,7 +416,7 @@ mod tests {
         let mut p = ConfigParser::new();
         p.apply_defaults();
         assert_eq!(p.get_str("dir").unwrap(), ".");
-        assert_eq!(p.get_i64("split").unwrap(), 5);
+        assert_eq!(p.get_i64("split").unwrap(), 16);
         assert!(p.get_bool("enable-color").unwrap());
     }
 
@@ -534,7 +534,7 @@ mod tests {
         let mut p = ConfigParser::new();
         p.apply_defaults();
         assert_eq!(p.get_str("dir").unwrap(), ".");
-        assert_eq!(p.get_i64("split").unwrap(), 5);
+        assert_eq!(p.get_i64("split").unwrap(), 16);
         assert_eq!(p.get_i64("timeout").unwrap(), 60);
         assert!(!p.get_bool("quiet").unwrap());
     }

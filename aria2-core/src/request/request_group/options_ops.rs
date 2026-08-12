@@ -136,8 +136,10 @@ fn apply_rpc_option(
             Ok(true)
         }
         "user-agent" | "referer" | "dir" | "out" | "file-allocation" | "cookie-file"
-        | "cookies" | "dht-file-path" | "http-proxy" | "all-proxy" | "https-proxy"
-        | "ftp-proxy" | "no-proxy" => {
+        | "cookies" | "dht-file-path" | "http-proxy" | "http-proxy-user" | "http-proxy-passwd"
+        | "all-proxy" | "all-proxy-user" | "all-proxy-passwd" | "https-proxy"
+        | "https-proxy-user" | "https-proxy-passwd" | "ftp-proxy" | "ftp-proxy-user"
+        | "ftp-proxy-passwd" | "no-proxy" => {
             let value = rpc_option_string(value, key)?;
             match key {
                 "user-agent" => opts.user_agent = Some(value),
@@ -149,9 +151,17 @@ fn apply_rpc_option(
                 "cookies" => opts.cookies = Some(value),
                 "dht-file-path" => opts.dht_file_path = Some(value),
                 "http-proxy" => opts.http_proxy = Some(value),
+                "http-proxy-user" => opts.http_proxy_user = Some(value),
+                "http-proxy-passwd" => opts.http_proxy_passwd = Some(value),
                 "all-proxy" => opts.all_proxy = Some(value),
+                "all-proxy-user" => opts.all_proxy_user = Some(value),
+                "all-proxy-passwd" => opts.all_proxy_passwd = Some(value),
                 "https-proxy" => opts.https_proxy = Some(value),
+                "https-proxy-user" => opts.https_proxy_user = Some(value),
+                "https-proxy-passwd" => opts.https_proxy_passwd = Some(value),
                 "ftp-proxy" => opts.ftp_proxy = Some(value),
+                "ftp-proxy-user" => opts.ftp_proxy_user = Some(value),
+                "ftp-proxy-passwd" => opts.ftp_proxy_passwd = Some(value),
                 "no-proxy" => opts.no_proxy = Some(value),
                 _ => unreachable!("string option handled above"),
             }

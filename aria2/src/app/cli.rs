@@ -973,7 +973,7 @@ pub struct HttpFtpArgs {
     #[arg(short = 'k', long = "min-split-size")]
     pub min_split_size: Option<String>,
 
-    /// Max connections per server
+    /// HTTP max connections per server; adaptive download may lower it
     #[arg(short = 'x', long = "max-connection-per-server")]
     pub max_connection_per_server: Option<u64>,
 
@@ -1460,6 +1460,24 @@ pub struct BitTorrentArgs {
     /// Comma-separated list of tracker announce URIs
     #[arg(long = "bt-tracker")]
     pub bt_tracker: Option<String>,
+
+    /// Enable public trackers
+    #[arg(
+        long = "enable-public-trackers",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_public_trackers: Option<bool>,
+
+    /// Remote public tracker list sources, comma or newline separated
+    #[arg(long = "bt-tracker-source")]
+    pub bt_tracker_source: Option<String>,
+
+    /// Public tracker list refresh interval in seconds
+    #[arg(long = "bt-tracker-update-interval")]
+    pub bt_tracker_update_interval: Option<u64>,
 
     /// Connect timeout for tracker in seconds
     #[arg(long = "bt-tracker-connect-timeout")]

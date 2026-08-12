@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-09 (external-contract policy, FTPS status, retry, and CORS reconciliation)
+# Updated: 2026-08-12 (external-contract policy, product identity, FTP protocol errors, and CORS reconciliation)
 
 > This file is a historical deep-comparison audit, not the current completion
 > gate. The current external-compatibility status is maintained in
@@ -9,6 +9,14 @@
 > must not be read as browser-extension or full original-client compatibility;
 > the current RPC status remains `PARTIAL` until that interoperability matrix
 > is reproducibly green.
+
+The product identity is `aria2-rust 0.2.9` throughout active Rust crates and
+user-visible version surfaces. Compatibility with `aria2_original` applies to
+the external CLI/RPC/protocol contract; internal implementation and version
+report text are autonomous Rust design choices. The FTP checkpoint on
+2026-08-12 covers local protocol and mock-server behavior but does not close
+third-party FTP/FTPS or original-client interoperability, so FTP remains
+`PARTIAL`.
 
 ## Executive Summary
 
@@ -205,7 +213,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | HttpConnection | Architectural difference | No `HttpRequestEntry` queue (reqwest handles); no `eraseConfidentialInfo()` |
 | HttpDownloadCommand | Complete | Tail reclaim, stream filters, cookie management, proxy, checksum all working |
 | StreamFilter | Complete | GZipDecoder, BZip2Decoder, DeflateDecoder, ChunkedDecoder, NullSinkFilter with streaming |
-| AuthConfig/Auth | Partial | Has Basic, Digest, Netrc auth; missing centralized `AuthConfigFactory` |
+| AuthConfig/Auth | Fixed | `AuthConfigFactory` centralizes URL, CLI, `.netrc`, Basic challenge, Digest, FTP/SFTP, and proxy credential resolution. HTTP excludes `.netrc` default entries; FTP/SFTP retain default fallback. Domain-suffix machine matching follows aria2's `.netrc` rules. |
 | CookieStorage | Partial | Rust now uses domain buckets plus a monotonic LRU tracker, SQLite/Netscape loading, per-domain/global eviction, and RFC matching; storage is process-shared across HTTP commands. Remaining difference is the C++ label tree and engine-level cookie lifecycle integration. |
 | Content-Disposition | Complete | RFC 6266 state-machine parser; accepts trailing `;` (diverges from C++ bug #1118); 110 tests |
 | Conditional GET | Complete | `conditional_get.rs` with If-Modified-Since / ETag |

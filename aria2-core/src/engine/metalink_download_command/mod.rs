@@ -50,6 +50,9 @@ pub struct MetalinkDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for mirror downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) public_tracker_catalog:
+        Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
 }
 
 impl MetalinkDownloadCommand {
@@ -147,6 +150,8 @@ impl MetalinkDownloadCommand {
             file_info: None,
             grouped_file_infos: Vec::new(),
             global_limiter: None,
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: None,
         })
     }
 
@@ -282,6 +287,8 @@ impl MetalinkDownloadCommand {
                     file_info: Some(file_info),
                     grouped_file_infos: Vec::new(),
                     global_limiter: None,
+                    #[cfg(feature = "bittorrent")]
+                    public_tracker_catalog: None,
                 },
                 file_index: i,
             });
@@ -385,6 +392,8 @@ impl MetalinkDownloadCommand {
                 file_info: Some(file_info),
                 grouped_file_infos: Vec::new(),
                 global_limiter: None,
+                #[cfg(feature = "bittorrent")]
+                public_tracker_catalog: None,
             },
             file_index: 0,
         }])
@@ -492,6 +501,8 @@ impl MetalinkDownloadCommand {
             file_info: None,
             grouped_file_infos,
             global_limiter: None,
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: None,
         })
     }
 
@@ -550,6 +561,8 @@ impl MetalinkDownloadCommand {
             file_info: Some(file_info),
             grouped_file_infos: Vec::new(),
             global_limiter: None,
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: None,
         })
     }
 
@@ -564,6 +577,14 @@ impl MetalinkDownloadCommand {
     /// to the per-download limiter.
     pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
         self.global_limiter = Some(limiter);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_public_tracker_catalog(
+        &mut self,
+        catalog: Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
+    ) {
+        self.public_tracker_catalog = Some(catalog);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {

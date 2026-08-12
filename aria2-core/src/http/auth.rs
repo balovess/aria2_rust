@@ -185,7 +185,7 @@ pub struct AuthConfigFactory {
 ///
 /// Built from the full [`netrc::NetrcParser`] via conversion. Machine entries
 /// are stored in `entries`; the `default` entry (which matches any host) is
-/// stored separately so that [`find_with_fallback`] can first try an exact
+/// stored separately so that [`find_with_fallback`] can first try a machine
 /// match then fall back to the default, matching C++ `findAuthenticator()`.
 #[derive(Debug, Clone)]
 pub struct NetrcStore {
@@ -229,9 +229,14 @@ impl NetrcStore {
         }
     }
 
-    /// Look up credentials for a hostname (exact match only, no default fallback).
+    /// Look up credentials for a hostname (without default fallback).
+    ///
+    /// Machine names beginning with `.` match subdomains, but not the bare
+    /// domain or a numeric host, as in aria2's `.netrc` implementation.
     pub fn find(&self, host: &str) -> Option<&NetrcEntry> {
-        self.entries.iter().find(|e| e.host == host)
+        self.entries
+            .iter()
+            .find(|e| netrc::no_proxy_domain_match(host, &e.host))
     }
 
     /// Look up credentials for a hostname, falling back to the default entry.
@@ -318,6 +323,9 @@ pub struct AuthResolveOptions {
     pub ftp_user: Option<String>,
     /// CLI-specified FTP password (C++ `PREF_FTP_PASSWD`).
     pub ftp_passwd: Option<String>,
+    /// Credentials for an HTTP proxy protection space.
+    pub proxy_user: Option<String>,
+    pub proxy_passwd: Option<String>,
 }
 
 impl AuthConfigFactory {
@@ -352,6 +360,12 @@ impl AuthConfigFactory {
         let parser = netrc::NetrcParser::parse(content)?;
         self.netrc = Some(NetrcStore::from(parser));
         Ok(())
+    }
+
+    /// Resolve proxy credentials without consulting origin credentials.
+    pub fn resolve_proxy(&self, opts: &AuthResolveOptions) -> Option<AuthConfig> {
+        let user = opts.proxy_user.clone()?;
+        AuthConfig::new(user, opts.proxy_passwd.clone().unwrap_or_default())
     }
 
     /// Resolve the [`AuthConfig`] for the given request URL.

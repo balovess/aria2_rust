@@ -172,8 +172,8 @@ aria2c -o output.dat -d /downloads -s 4 -x 8 http://example.com/large.bin
 |--------|-------------|---------|
 | `-d, --dir` | Save directory | `.` |
 | `-o, --out` | Output filename | auto |
-| `-s, --split` | Connections per server | `1` |
-| `-x, --max-connection-per-server` | Max connections per server | `1` |
+| `-s, --split` | Connections per download | `16` |
+| `-x, --max-connection-per-server` | HTTP max connections per server; adaptive download may lower it | `16` |
 | `--max-download-limit` | Max download speed | unlimited |
 | `--timeout` | Timeout in seconds | `60` |
 | `-q, --quiet` | Quiet mode | false |

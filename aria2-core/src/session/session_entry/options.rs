@@ -209,14 +209,38 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.http_proxy {
         map.insert("http-proxy".to_string(), v.clone());
     }
+    if let Some(ref v) = opts.http_proxy_user {
+        map.insert("http-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.http_proxy_passwd {
+        map.insert("http-proxy-passwd".to_string(), v.clone());
+    }
     if let Some(ref v) = opts.all_proxy {
         map.insert("all-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.all_proxy_user {
+        map.insert("all-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.all_proxy_passwd {
+        map.insert("all-proxy-passwd".to_string(), v.clone());
     }
     if let Some(ref v) = opts.https_proxy {
         map.insert("https-proxy".to_string(), v.clone());
     }
+    if let Some(ref v) = opts.https_proxy_user {
+        map.insert("https-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.https_proxy_passwd {
+        map.insert("https-proxy-passwd".to_string(), v.clone());
+    }
     if let Some(ref v) = opts.ftp_proxy {
         map.insert("ftp-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_proxy_user {
+        map.insert("ftp-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_proxy_passwd {
+        map.insert("ftp-proxy-passwd".to_string(), v.clone());
     }
     if let Some(ref v) = opts.no_proxy {
         map.insert("no-proxy".to_string(), v.clone());

@@ -197,7 +197,7 @@ impl crate::config::OptionRegistry {
             name: "split".into(),
             opt_type: OptionType::Integer,
             short_name: Some('s'),
-            default_value: OptionValue::Int(5),
+            default_value: OptionValue::Int(16),
             min: Some(1),
             max: Some(16),
             description: "Connections per download".into(),
@@ -219,10 +219,10 @@ impl crate::config::OptionRegistry {
             name: "max-connection-per-server".into(),
             opt_type: OptionType::Integer,
             short_name: Some('x'),
-            default_value: OptionValue::Int(1),
+            default_value: OptionValue::Int(16),
             min: Some(1),
             max: Some(16),
-            description: "Max connections per server".into(),
+            description: "HTTP max connections per server (adaptive hard limit)".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

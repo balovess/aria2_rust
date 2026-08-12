@@ -31,6 +31,10 @@ const INITIATOR_SYNC_LIMIT: usize = 616;
 /// Synchronization limit for the receiver: 628 bytes max before finding req1 marker.
 const RECEIVER_SYNC_LIMIT: usize = 628;
 
+/// Public wire limits used by the asynchronous incoming-peer adapter.
+pub const MSE_PUBLIC_KEY_LENGTH: usize = KEY_LENGTH;
+pub const MSE_MAX_BUFFER_LENGTH: usize = 636;
+
 /// Handshake phase tracking.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MseHandshakePhase {
@@ -75,6 +79,9 @@ pub struct MseHandshake {
     /// Decryptor RC4 state for the initiator role (keyB-based).
     /// Used during handshake for VC marker computation.
     initiator_decryptor: Option<Rc4State>,
+    /// Receiver-side stream states, transferred to the post-handshake peer.
+    receiver_encryptor: Option<Rc4State>,
+    receiver_decryptor: Option<Rc4State>,
 }
 
 impl MseHandshake {
@@ -93,6 +100,8 @@ impl MseHandshake {
             initiator_vc_marker: None,
             initiator_encryptor: None,
             initiator_decryptor: None,
+            receiver_encryptor: None,
+            receiver_decryptor: None,
         }
     }
 
@@ -111,6 +120,8 @@ impl MseHandshake {
             initiator_vc_marker: None,
             initiator_encryptor: None,
             initiator_decryptor: None,
+            receiver_encryptor: None,
+            receiver_decryptor: None,
         }
     }
 
@@ -238,7 +249,7 @@ impl MseHandshake {
 
         // crypto_provide = 4-byte big-endian bitmask
         let mut crypto_provide: u32 = 0;
-        if !self.force_encryption && self.prefer_encryption {
+        if !self.force_encryption && !self.prefer_encryption {
             crypto_provide |= MseCryptoMethod::Plain.as_u32();
         }
         crypto_provide |= MseCryptoMethod::Rc4.as_u32();
@@ -360,6 +371,7 @@ impl MseHandshake {
         // Decrypt the entire encrypted portion
         let mut decrypted = encrypted_data.to_vec();
         decryptor.process(&mut decrypted);
+        self.receiver_decryptor = Some(decryptor);
 
         // Step 4: Verify VC (should be 8 zero bytes after decryption)
         let vc = &decrypted[..VC_LENGTH];
@@ -375,13 +387,13 @@ impl MseHandshake {
             u32::from_be_bytes([decrypted[8], decrypted[9], decrypted[10], decrypted[11]]);
 
         // Determine negotiated method
-        if (crypto_provide & MseCryptoMethod::Rc4.as_u32()) != 0 {
-            self.negotiated_method = MseCryptoMethod::Rc4;
-        } else if (crypto_provide & MseCryptoMethod::Plain.as_u32()) != 0
+        if !self.prefer_encryption
             && !self.force_encryption
-            && !self.prefer_encryption
+            && (crypto_provide & MseCryptoMethod::Plain.as_u32()) != 0
         {
             self.negotiated_method = MseCryptoMethod::Plain;
+        } else if (crypto_provide & MseCryptoMethod::Rc4.as_u32()) != 0 {
+            self.negotiated_method = MseCryptoMethod::Rc4;
         } else {
             return Err(format!(
                 "No supported crypto method in provide: {:#010X}",
@@ -391,6 +403,94 @@ impl MseHandshake {
 
         self.phase = MseHandshakePhase::Completed(self.negotiated_method);
         Ok(self.negotiated_method)
+    }
+
+    /// Return the complete receiver-side step-2 length once PadC and IA
+    /// lengths are available, or `None` while more bytes are needed.
+    ///
+    /// The shared process listener uses this incremental seam before routing
+    /// an encrypted connection. MSE deliberately hides the torrent identity
+    /// until `req2 ^ req3` is verified against the active route catalog.
+    pub fn receiver_step2_required_len(&self, data: &[u8]) -> Result<Option<usize>, String> {
+        if self.initiator {
+            return Err("Only receiver can inspect initiator step 2".to_string());
+        }
+        let keys = self.keys.as_ref().ok_or("Keys not derived yet")?;
+        let Some(req1_match) = find_marker_if_present(data, &keys.req1) else {
+            if data.len() >= RECEIVER_SYNC_LIMIT {
+                return Err("Failed to find req1 hash marker within sync limit".to_string());
+            }
+            return Ok(None);
+        };
+        let encrypted_start = req1_match + SHA1_LENGTH + SHA1_LENGTH;
+        let header_len = VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2;
+        if data.len() < encrypted_start + header_len {
+            return Ok(None);
+        }
+
+        let mut header = data[encrypted_start..encrypted_start + header_len].to_vec();
+        let mut decryptor = init_rc4(&keys.key_a);
+        decryptor.process(&mut header);
+        if header[..VC_LENGTH] != [0u8; VC_LENGTH] {
+            return Err("VC verification failed".to_string());
+        }
+        let pad_c_length = u16::from_be_bytes([
+            header[VC_LENGTH + CRYPTO_BITFIELD_LENGTH],
+            header[VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 1],
+        ]) as usize;
+        let ia_length_offset = encrypted_start + header_len + pad_c_length;
+        if data.len() < ia_length_offset + 2 {
+            return Ok(None);
+        }
+
+        let mut ia_length = [0u8; 2];
+        let mut length_prefix = data[encrypted_start..ia_length_offset + 2].to_vec();
+        let mut decryptor = init_rc4(&keys.key_a);
+        decryptor.process(&mut length_prefix);
+        ia_length.copy_from_slice(
+            &length_prefix[ia_length_offset - encrypted_start
+                ..ia_length_offset - encrypted_start + 2],
+        );
+        let ia_length = u16::from_be_bytes(ia_length) as usize;
+        Ok(Some(ia_length_offset + 2 + ia_length))
+    }
+
+    /// Identify the concealed torrent identity in a receiver-side MSE
+    /// buffer. The caller can use this before the encrypted payload is fully
+    /// received, then call [`Self::set_info_hash`] to derive the final keys.
+    pub fn receiver_info_hash(
+        &self,
+        data: &[u8],
+        known_info_hashes: &[[u8; INFO_HASH_LENGTH]],
+    ) -> Result<Option<[u8; INFO_HASH_LENGTH]>, String> {
+        if self.initiator {
+            return Err("Only receiver can identify an incoming info hash".to_string());
+        }
+        let keys = self.keys.as_ref().ok_or("Keys not derived yet")?;
+        let Some(req1_match) = find_marker_if_present(data, &keys.req1) else {
+            return Ok(None);
+        };
+        let xor_start = req1_match + SHA1_LENGTH;
+        if data.len() < xor_start + SHA1_LENGTH {
+            return Ok(None);
+        }
+        Ok(verify_req2_xor_req3(
+            &data[xor_start..xor_start + SHA1_LENGTH],
+            known_info_hashes,
+            &keys.req3,
+        ))
+    }
+
+    /// Select the torrent identity discovered from `req2 ^ req3` and derive
+    /// the receiver-side MSE keys for the remainder of the handshake.
+    pub fn set_info_hash(&mut self, info_hash: [u8; INFO_HASH_LENGTH]) -> Result<(), String> {
+        if self.initiator {
+            return Err("Only receiver can set an incoming info hash".to_string());
+        }
+        let shared = self.shared_secret.ok_or("Shared secret not computed")?;
+        self.info_hash = info_hash;
+        self.keys = Some(MseDerivedKeys::derive(&shared, &info_hash));
+        Ok(())
     }
 
     // ── Step 4 (receiver): Send response ─────────────────────────────
@@ -431,7 +531,9 @@ impl MseHandshake {
         encrypted.extend_from_slice(&pad_d);
 
         // Encrypt with the receiver's encryptor (keyB for receiver)
-        let mut cipher = init_rc4(&keys.key_b);
+        let cipher = self
+            .receiver_encryptor
+            .get_or_insert_with(|| init_rc4(&keys.key_b));
         cipher.process(&mut encrypted);
 
         Ok(encrypted)
@@ -475,10 +577,10 @@ impl MseHandshake {
             u32::from_be_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
 
         // Determine negotiated method
-        if (crypto_select & MseCryptoMethod::Rc4.as_u32()) != 0 {
-            self.negotiated_method = MseCryptoMethod::Rc4;
-        } else if (crypto_select & MseCryptoMethod::Plain.as_u32()) != 0 && !self.force_encryption {
+        if (crypto_select & MseCryptoMethod::Plain.as_u32()) != 0 && !self.force_encryption {
             self.negotiated_method = MseCryptoMethod::Plain;
+        } else if (crypto_select & MseCryptoMethod::Rc4.as_u32()) != 0 {
+            self.negotiated_method = MseCryptoMethod::Rc4;
         } else {
             return Err(format!(
                 "No supported crypto method in select: {:#010X}",
@@ -499,20 +601,81 @@ impl MseHandshake {
         Ok(self.negotiated_method)
     }
 
+    /// Return the exact receiver response length once PadD is available.
+    ///
+    /// The response can be preceded by responder padding, so callers must
+    /// synchronize on the encrypted VC marker before decoding the encrypted
+    /// PadD length. This keeps the following BitTorrent handshake on the
+    /// stream for the next protocol phase.
+    pub fn initiator_step2_required_len(&self, data: &[u8]) -> Result<Option<usize>, String> {
+        if !self.initiator {
+            return Err("Only initiator can inspect receiver step 2".to_string());
+        }
+        let vc_marker = self.initiator_vc_marker.ok_or("VC marker not computed")?;
+        let Some(vc_pos) = find_marker_if_present(data, &vc_marker) else {
+            if data.len() >= INITIATOR_SYNC_LIMIT {
+                return Err("Failed to find VC marker within sync limit".to_string());
+            }
+            return Ok(None);
+        };
+        let header_start = vc_pos + VC_LENGTH;
+        if data.len() < header_start + CRYPTO_BITFIELD_LENGTH + 2 {
+            return Ok(None);
+        }
+
+        let keys = self.keys.as_ref().ok_or("Keys not derived yet")?;
+        let mut decryptor = init_rc4(&keys.key_b);
+        let mut vc = [0u8; VC_LENGTH];
+        decryptor.process(&mut vc);
+        let mut header = data[header_start..header_start + CRYPTO_BITFIELD_LENGTH + 2].to_vec();
+        decryptor.process(&mut header);
+        let pad_d_length = u16::from_be_bytes([
+            header[CRYPTO_BITFIELD_LENGTH],
+            header[CRYPTO_BITFIELD_LENGTH + 1],
+        ]) as usize;
+        Ok(Some(header_start + CRYPTO_BITFIELD_LENGTH + 2 + pad_d_length))
+    }
+
     // ── Finalize: Extract crypto state ───────────────────────────────
 
     /// Finalize the handshake and return the ongoing crypto state.
     ///
     /// The returned `MseCryptoState` can be used for encrypting/decrypting
     /// all subsequent BT protocol messages.
-    pub fn finalize(self) -> Result<MseCryptoState, String> {
+    pub fn finalize(mut self) -> Result<MseCryptoState, String> {
         match self.phase {
             MseHandshakePhase::Completed(method) => {
-                let keys = self.keys.ok_or("Keys not derived")?;
                 match method {
                     MseCryptoMethod::Plain => Ok(MseCryptoState::new_plain()),
+                    MseCryptoMethod::Rc4 if self.initiator => {
+                        let send = self
+                            .initiator_encryptor
+                            .take()
+                            .ok_or("Initiator encryptor not initialized")?;
+                        let recv = self
+                            .initiator_decryptor
+                            .take()
+                            .ok_or("Initiator decryptor not initialized")?;
+                        Ok(MseCryptoState::from_rc4_states(
+                            send,
+                            recv,
+                            MseCryptoMethod::Rc4,
+                        ))
+                    }
                     MseCryptoMethod::Rc4 => {
-                        Ok(MseCryptoState::new_encrypted(&keys, self.initiator))
+                        let send = self
+                            .receiver_encryptor
+                            .take()
+                            .ok_or("Receiver encryptor not initialized")?;
+                        let recv = self
+                            .receiver_decryptor
+                            .take()
+                            .ok_or("Receiver decryptor not initialized")?;
+                        Ok(MseCryptoState::from_rc4_states(
+                            send,
+                            recv,
+                            MseCryptoMethod::Rc4,
+                        ))
                     }
                 }
             }
@@ -581,6 +744,10 @@ fn find_req1_marker(
     }
 
     Err("Failed to find req1 hash marker".to_string())
+}
+
+fn find_marker_if_present(data: &[u8], marker: &[u8]) -> Option<usize> {
+    data.windows(marker.len()).position(|window| window == marker)
 }
 
 /// Find the VC marker in the receiver's response data.

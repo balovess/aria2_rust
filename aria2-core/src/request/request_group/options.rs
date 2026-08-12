@@ -123,9 +123,17 @@ pub struct DownloadOptions {
     pub max_retries: u32,
     pub retry_wait: u64,
     pub http_proxy: Option<String>,
+    pub http_proxy_user: Option<String>,
+    pub http_proxy_passwd: Option<String>,
     pub all_proxy: Option<String>,
+    pub all_proxy_user: Option<String>,
+    pub all_proxy_passwd: Option<String>,
     pub https_proxy: Option<String>,
+    pub https_proxy_user: Option<String>,
+    pub https_proxy_passwd: Option<String>,
     pub ftp_proxy: Option<String>,
+    pub ftp_proxy_user: Option<String>,
+    pub ftp_proxy_passwd: Option<String>,
     pub no_proxy: Option<String>,
     pub dht_file_path: Option<String>,
 
@@ -397,9 +405,17 @@ impl Default for DownloadOptions {
             max_retries: crate::constants::DEFAULT_MAX_RETRIES,
             retry_wait: 0,
             http_proxy: None,
+            http_proxy_user: None,
+            http_proxy_passwd: None,
             all_proxy: None,
+            all_proxy_user: None,
+            all_proxy_passwd: None,
             https_proxy: None,
+            https_proxy_user: None,
+            https_proxy_passwd: None,
             ftp_proxy: None,
+            ftp_proxy_user: None,
+            ftp_proxy_passwd: None,
             no_proxy: None,
             dht_file_path: None,
             bt_max_peers: 55,
@@ -717,9 +733,17 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
             http_proxy: options.get("http-proxy").cloned(),
+            http_proxy_user: options.get("http-proxy-user").cloned(),
+            http_proxy_passwd: options.get("http-proxy-passwd").cloned(),
             all_proxy: options.get("all-proxy").cloned(),
+            all_proxy_user: options.get("all-proxy-user").cloned(),
+            all_proxy_passwd: options.get("all-proxy-passwd").cloned(),
             https_proxy: options.get("https-proxy").cloned(),
+            https_proxy_user: options.get("https-proxy-user").cloned(),
+            https_proxy_passwd: options.get("https-proxy-passwd").cloned(),
             ftp_proxy: options.get("ftp-proxy").cloned(),
+            ftp_proxy_user: options.get("ftp-proxy-user").cloned(),
+            ftp_proxy_passwd: options.get("ftp-proxy-passwd").cloned(),
             no_proxy: options.get("no-proxy").cloned(),
             dht_file_path: options.get("dht-file-path").cloned(),
             bt_max_upload_slots: options
@@ -912,6 +936,27 @@ impl DownloadOptions {
             self.enable_http_pipelining,
         )
     }
+
+    /// Resolve proxy credentials using aria2's protocol-specific precedence.
+    ///
+    /// A protocol-specific credential overrides the corresponding
+    /// `all-proxy-*` value. The `all` selector is used when constructing the
+    /// fallback proxy matcher itself.
+    pub(crate) fn proxy_credentials_for_scheme(
+        &self,
+        scheme: &str,
+    ) -> (Option<String>, Option<String>) {
+        let (user, passwd) = match scheme {
+            "https" => (&self.https_proxy_user, &self.https_proxy_passwd),
+            "http" => (&self.http_proxy_user, &self.http_proxy_passwd),
+            _ => (&self.all_proxy_user, &self.all_proxy_passwd),
+        };
+
+        (
+            user.clone().or_else(|| self.all_proxy_user.clone()),
+            passwd.clone().or_else(|| self.all_proxy_passwd.clone()),
+        )
+    }
 }
 
 /// Case-insensitive check whether a `(name, value)` header list already contains
@@ -946,6 +991,31 @@ mod tests {
         assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
         assert_eq!(options.follow_metalink, Some(FollowMode::Disabled));
         assert!(options.uses_memory_download());
+    }
+
+    #[test]
+    fn proxy_credentials_prefer_protocol_specific_values() {
+        let options = DownloadOptions {
+            http_proxy_user: Some("http-user".to_string()),
+            http_proxy_passwd: Some("http-pass".to_string()),
+            https_proxy_user: Some("https-user".to_string()),
+            all_proxy_user: Some("all-user".to_string()),
+            all_proxy_passwd: Some("all-pass".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (Some("http-user".to_string()), Some("http-pass".to_string()))
+        );
+        assert_eq!(
+            options.proxy_credentials_for_scheme("https"),
+            (Some("https-user".to_string()), Some("all-pass".to_string()))
+        );
+        assert_eq!(
+            options.proxy_credentials_for_scheme("all"),
+            (Some("all-user".to_string()), Some("all-pass".to_string()))
+        );
     }
 
     #[cfg(feature = "bittorrent")]

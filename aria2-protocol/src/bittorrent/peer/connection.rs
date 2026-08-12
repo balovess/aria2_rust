@@ -127,7 +127,46 @@ impl PeerConnection {
         info_hash: &[u8; 20],
         local_peer_id: &[u8; 20],
     ) -> Result<Self, String> {
-        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash).await?;
+        let mut response = [0u8; 68];
+        read_exact_with_timeout(&mut stream, &mut response).await?;
+        Self::from_incoming_handshake(stream, response, info_hash, local_peer_id).await
+    }
+
+    /// Complete a plain incoming handshake when the first 20 bytes were
+    /// already consumed by a shared listener for route selection.
+    pub async fn from_incoming_stream_with_prefix(
+        mut stream: tokio::net::TcpStream,
+        prefix: [u8; 20],
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        let mut response = [0u8; 68];
+        response[..20].copy_from_slice(&prefix);
+        read_exact_with_timeout(&mut stream, &mut response[20..]).await?;
+        Self::from_incoming_handshake(stream, response, info_hash, local_peer_id).await
+    }
+
+    /// Complete a plain incoming handshake after a shared listener consumed
+    /// the complete handshake for routing.
+    pub async fn from_incoming_handshake_bytes(
+        stream: tokio::net::TcpStream,
+        response: [u8; 68],
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        Self::from_incoming_handshake(stream, response, info_hash, local_peer_id).await
+    }
+
+    async fn from_incoming_handshake(
+        mut stream: tokio::net::TcpStream,
+        response: [u8; 68],
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        let remote_hs = Handshake::parse(&response)?;
+        if remote_hs.info_hash != *info_hash {
+            return Err("info_hash mismatch".to_string());
+        }
         let handshake = Handshake::new(info_hash, local_peer_id);
         stream
             .write_all(&handshake.to_bytes())
@@ -305,6 +344,22 @@ impl PeerConnection {
             .await
             .map(|_| ())
             .map_err(|e| format!("Stream read failed: {}", e))
+    }
+}
+
+async fn read_exact_with_timeout(
+    stream: &mut tokio::net::TcpStream,
+    buffer: &mut [u8],
+) -> Result<(), String> {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        stream.read_exact(buffer),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(format!("Failed to read handshake: {error}")),
+        Err(_) => Err("Handshake response timeout".to_string()),
     }
 }
 

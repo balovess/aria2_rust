@@ -295,6 +295,8 @@ impl MetalinkDownloadCommand {
                 file_info: Some(info.clone()),
                 grouped_file_infos: Vec::new(),
                 global_limiter: self.global_limiter.clone(),
+                #[cfg(feature = "bittorrent")]
+                public_tracker_catalog: self.public_tracker_catalog.clone(),
             };
             match command.execute_file(false, false).await {
                 Ok(()) => {
@@ -381,6 +383,10 @@ impl MetalinkDownloadCommand {
                         )?;
                     if let Some(gl) = self.global_limiter.clone() {
                         bt_cmd.set_global_limiter(gl);
+                    }
+                    #[cfg(feature = "bittorrent")]
+                    if let Some(catalog) = self.public_tracker_catalog.clone() {
+                        bt_cmd.set_public_tracker_catalog(catalog);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
@@ -502,6 +508,10 @@ impl MetalinkDownloadCommand {
                     )?;
                     if let Some(global_limiter) = self.global_limiter.clone() {
                         bt_cmd.set_global_limiter(global_limiter);
+                    }
+                    #[cfg(feature = "bittorrent")]
+                    if let Some(catalog) = self.public_tracker_catalog.clone() {
+                        bt_cmd.set_public_tracker_catalog(catalog);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().completed_length();

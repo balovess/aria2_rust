@@ -119,6 +119,12 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-save-metadata",
     "bt-stop-timeout",
     "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "enable-public-trackers",
+    #[cfg(feature = "bittorrent")]
+    "bt-tracker-source",
+    #[cfg(feature = "bittorrent")]
+    "bt-tracker-update-interval",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
@@ -171,6 +177,8 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-seed-unverified",
     "bt-stop-timeout",
     "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "enable-public-trackers",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
@@ -410,6 +418,8 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-save-metadata",
     "bt-stop-timeout",
     "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "enable-public-trackers",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",

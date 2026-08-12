@@ -48,7 +48,7 @@ pub struct HttpClient {
 /// Note: `install_default()` returns Err if a provider is already installed
 /// (e.g., by test helpers' `ensure_crypto_provider()`). That is fine — we
 /// only need to ensure a provider is present, not that we installed it.
-fn ensure_ring_provider() {
+pub(crate) fn ensure_ring_provider() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();

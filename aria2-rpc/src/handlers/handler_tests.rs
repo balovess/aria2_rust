@@ -6,6 +6,8 @@
 use base64::Engine;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "bittorrent")]
+use tokio::sync::mpsc;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
@@ -15,6 +17,9 @@ use aria2_core::download::download_context::DownloadContext;
 use aria2_core::download::file_entry::FileEntry;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
+
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::engine_command::EngineCommand;
 
 #[tokio::test]
 #[cfg(feature = "bittorrent")]
@@ -558,6 +563,107 @@ async fn test_change_global_option_matches_original_changeability_policy() {
     assert_eq!(
         options.get("no-conf").and_then(|v| v.as_str()),
         Some("false")
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_change_global_tracker_options_updates_global_state_and_engine() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let engine = RpcEngine::new().with_engine_cmd_tx(tx);
+    let req = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{
+            "bt-tracker-source": ["https://one.example/list.txt", "https://two.example/list.txt"],
+            "bt-tracker-update-interval": "900",
+            "enable-public-trackers": "false"
+        }]),
+    )
+    .with_id(1);
+
+    assert!(engine.handle_request(&req).await.is_success());
+
+    let get = JsonRpcRequest::new("aria2.getGlobalOption", serde_json::json!([])).with_id(2);
+    let options = engine
+        .handle_request(&get)
+        .await
+        .result
+        .expect("global options response");
+    assert_eq!(
+        options.get("bt-tracker-source"),
+        Some(&serde_json::json!(
+            "https://one.example/list.txt\nhttps://two.example/list.txt"
+        ))
+    );
+    assert_eq!(
+        options.get("bt-tracker-update-interval"),
+        Some(&serde_json::json!("900"))
+    );
+    assert_eq!(
+        options.get("enable-public-trackers"),
+        Some(&serde_json::json!("false"))
+    );
+
+    let mut commands = Vec::new();
+    for _ in 0..3 {
+        commands.push(rx.recv().await.expect("engine command"));
+    }
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        EngineCommand::SetPublicTrackerSources { sources }
+            if sources == "https://one.example/list.txt\nhttps://two.example/list.txt"
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        EngineCommand::SetPublicTrackerUpdateInterval { seconds } if *seconds == 900
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        EngineCommand::SetPublicTrackersEnabled { enabled } if !enabled
+    )));
+}
+
+#[tokio::test]
+async fn test_http_connection_limit_is_configurable_through_rpc() {
+    let engine = RpcEngine::new();
+
+    let global_change = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{ "max-connection-per-server": "7" }]),
+    )
+    .with_id(1);
+    assert!(engine.handle_request(&global_change).await.is_success());
+
+    let global_get = JsonRpcRequest::new("aria2.getGlobalOption", serde_json::json!([])).with_id(2);
+    let global_response = engine.handle_request(&global_get).await;
+    let global_options = global_response.result.expect("global options response");
+    assert_eq!(
+        global_options
+            .get("max-connection-per-server")
+            .and_then(|value| value.as_str()),
+        Some("7")
+    );
+
+    let add_request =
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/file"]])).with_id(3);
+    let add_response = engine.handle_request(&add_request).await;
+    let gid: String = serde_json::from_value(add_response.result.unwrap()).unwrap();
+
+    let task_change = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid, { "max-connection-per-server": "5" }]),
+    )
+    .with_id(4);
+    assert!(engine.handle_request(&task_change).await.is_success());
+
+    let task_get = JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid])).with_id(5);
+    let task_response = engine.handle_request(&task_get).await;
+    let task_options = task_response.result.expect("task options response");
+    assert_eq!(
+        task_options
+            .get("max-connection-per-server")
+            .and_then(|value| value.as_str()),
+        Some("5")
     );
 }
 

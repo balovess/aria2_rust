@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -416,6 +417,7 @@ impl BtDownloadCommand {
             ),
             dht_engine: None,
             public_trackers: None,
+            public_tracker_urls: HashSet::new(),
             choking_algo,
             multi_file_layout,
             file_allocation: options
@@ -476,7 +478,8 @@ impl BtDownloadCommand {
                 crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
             )),
             incoming_peers: None,
-            incoming_peer_listener_task: None,
+            bt_listener: None,
+            bt_peer_route: None,
         };
         command.apply_context_paths()?;
         Ok(command)

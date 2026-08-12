@@ -49,9 +49,9 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
     vec![
         ("dir", OptionValue::Str(String::from("."))),
         ("max-concurrent-downloads", OptionValue::Usize(5)),
-        ("max-connection-per-server", OptionValue::Usize(1)),
+        ("max-connection-per-server", OptionValue::Usize(16)),
         ("min-split-size", OptionValue::Usize(1_048_576)), // 1 MiB
-        ("split", OptionValue::Usize(5)),
+        ("split", OptionValue::Usize(16)),
         ("max-overall-download-limit", OptionValue::Usize(0)), // unlimited
         ("max-download-limit", OptionValue::Usize(0)),
         ("max-upload-limit", OptionValue::Usize(0)),
@@ -106,7 +106,7 @@ pub(super) fn built_in_defaults() -> Vec<(&'static str, OptionValue)> {
 /// use aria2_core::option::{OptionHandler, OptionValue};
 ///
 /// let mut h = OptionHandler::new();
-/// assert_eq!(h.get("split").as_usize(), 5); // default
+/// assert_eq!(h.get("split").as_usize(), 16); // default
 ///
 /// h.set("split", OptionValue::Usize(10));
 /// assert_eq!(h.get("split").as_usize(), 10);

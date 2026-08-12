@@ -2,7 +2,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 use crate::bittorrent::extension::mse_crypto::MseCryptoState;
-use crate::bittorrent::extension::mse_handshake::MseHandshake;
+use crate::bittorrent::extension::mse_handshake::{
+    MSE_PUBLIC_KEY_LENGTH, MseHandshake,
+};
 use crate::bittorrent::message::handshake::Handshake;
 use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 use crate::bittorrent::peer::connection::{PeerAddr, PeerConnection};
@@ -15,6 +17,20 @@ pub struct EncryptedConnection {
 }
 
 impl EncryptedConnection {
+    /// Wrap a TCP stream after the receiver-side MSE and BitTorrent
+    /// handshakes have completed.
+    pub fn from_incoming_parts(
+        stream: tokio::net::TcpStream,
+        crypto: MseCryptoState,
+        peer_id: [u8; 20],
+    ) -> Self {
+        Self {
+            inner: PeerConnection::from_stream_with_peer(stream, peer_id),
+            crypto,
+            mse_negotiated: true,
+        }
+    }
+
     pub async fn connect_with_mse(
         addr: &PeerAddr,
         info_hash: &[u8; 20],
@@ -23,7 +39,7 @@ impl EncryptedConnection {
         let socket_addr = addr.to_socket_addr();
         debug!("MSE connecting to peer: {}", socket_addr);
 
-        let mut stream = tokio::time::timeout(
+        let stream = tokio::time::timeout(
             std::time::Duration::from_secs(15),
             tokio::net::TcpStream::connect(&socket_addr),
         )
@@ -31,53 +47,21 @@ impl EncryptedConnection {
         .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
         .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
-        let my_peer_id = crate::bittorrent::peer::id::generate_peer_id();
-        let handshake = Handshake::new(info_hash, &my_peer_id).with_dht(true);
-        let handshake_bytes = handshake.to_bytes();
-
-        stream
-            .write_all(&handshake_bytes)
-            .await
-            .map_err(|e| format!("Failed to send handshake: {}", e))?;
-
-        let mut response = [0u8; 68];
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            stream.read_exact(&mut response),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(format!("Failed to read handshake response: {}", e)),
-            Err(_) => return Err("Handshake response read timeout".to_string()),
-        }
-
-        let remote_hs = Handshake::parse(&response)?;
-        if remote_hs.info_hash != *info_hash {
-            return Err("info_hash mismatch".to_string());
-        }
-
-        let local_supports_mse = true;
-
-        if MseHandshake::should_negotiate(local_supports_mse, &remote_hs.reserved) {
-            Self::complete_mse_handshake(stream, info_hash, &remote_hs, require_encryption).await
-        } else if require_encryption {
-            Err(format!(
-                "Peer {} does not support encryption, but encryption is required",
-                socket_addr
-            ))
-        } else {
-            Ok(Self::from_plain_connection(stream, remote_hs.peer_id))
-        }
+        // aria2's MSE path starts with DH. The 68-byte BitTorrent handshake
+        // is exchanged only after MSE has selected the stream cipher.
+        Self::complete_mse_handshake(stream, info_hash, require_encryption).await
     }
 
     async fn complete_mse_handshake(
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
-        remote_hs: &Handshake,
-        _require_encryption: bool,
+        require_encryption: bool,
     ) -> Result<Self, String> {
         let mut initiator = MseHandshake::new_initiator(*info_hash);
+        // The aria2 default is `bt-min-crypto-level=plain`: offer both
+        // methods and let the responder select plaintext. Required crypto
+        // offers RC4 only.
+        initiator.set_crypto_preferences(require_encryption, require_encryption);
 
         // Step 1: Exchange DH public keys
         let step1_i = initiator.build_step1();
@@ -90,18 +74,10 @@ impl EncryptedConnection {
             .await
             .map_err(|e| format!("MSE Step1 flush failed: {}", e))?;
 
-        // Read responder's public key (minimum KEY_LENGTH bytes, up to KEY_LENGTH + MAX_PAD_LENGTH)
-        let mut step1_r_buf = vec![0u8; step1_i.len()];
-        match stream.read_exact(&mut step1_r_buf).await {
-            Ok(_) => {}
-            Err(e)
-                if e.kind() == std::io::ErrorKind::UnexpectedEof
-                    || e.to_string().contains("eof") =>
-            {
-                return Err("MSE Step1: peer closed connection".to_string());
-            }
-            Err(e) => return Err(format!("MSE Step1 read failed: {}", e)),
-        }
+        // PadB has no explicit length. The later VC marker synchronizes the
+        // response, just as MSEHandshake::findInitiatorVCMarker does upstream.
+        let mut step1_r_buf = vec![0u8; MSE_PUBLIC_KEY_LENGTH];
+        Self::read_exact_with_timeout(&mut stream, &mut step1_r_buf, "MSE public key").await?;
 
         initiator.receive_step1(&step1_r_buf)?;
 
@@ -116,34 +92,72 @@ impl EncryptedConnection {
             .await
             .map_err(|e| format!("MSE Step3 flush failed: {}", e))?;
 
-        // Step 4: Receive receiver's response (VC + crypto_select + len(PadD) + PadD)
-        // The encrypted payload is at most VC_LENGTH + CRYPTO_BITFIELD_LENGTH + 2 + MAX_PAD_LENGTH = 526 bytes
-        let max_step4_len = 8 + 4 + 2 + 512;
-        let mut step4_r_buf = vec![0u8; max_step4_len];
-        match stream.read_exact(&mut step4_r_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err("MSE Step4: peer closed connection".to_string());
+        let mut step4_r_buf = Vec::with_capacity(1_152);
+        let response_len = loop {
+            let mut chunk = [0u8; 64];
+            let read_len = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                stream.read(&mut chunk),
+            )
+            .await
+            .map_err(|_| "MSE response read timeout".to_string())?
+            .map_err(|error| format!("MSE response read failed: {error}"))?;
+            if read_len == 0 {
+                return Err("MSE response: peer closed connection".to_string());
             }
-            Err(e) => return Err(format!("MSE Step4 read failed: {}", e)),
-        }
-
-        let _method = initiator.receive_receiver_step2(&step4_r_buf)?;
-        let crypto = initiator.finalize()?;
+            step4_r_buf.extend_from_slice(&chunk[..read_len]);
+            if let Some(length) = initiator.initiator_step2_required_len(&step4_r_buf)? {
+                break length;
+            }
+            if step4_r_buf.len() >= 1_152 {
+                return Err("MSE response exceeded handshake buffer limit".to_string());
+            }
+        };
+        step4_r_buf.truncate(response_len);
+        initiator.receive_receiver_step2(&step4_r_buf)?;
+        let mut crypto = initiator.finalize()?;
 
         info!(
             "MSE handshake complete: encrypted={}",
             crypto.is_encrypted()
         );
 
-        let peer_id = remote_hs.peer_id;
-        let conn = PeerConnection::from_stream_with_peer(stream, peer_id);
+        let local_peer_id = crate::bittorrent::peer::id::generate_peer_id();
+        let mut local_handshake = Handshake::new(info_hash, &local_peer_id)
+            .with_dht(true)
+            .to_bytes();
+        crypto.encrypt(&mut local_handshake);
+        stream
+            .write_all(&local_handshake)
+            .await
+            .map_err(|error| format!("Failed to send encrypted handshake: {error}"))?;
+
+        let mut remote_handshake = [0u8; 68];
+        Self::read_exact_with_timeout(&mut stream, &mut remote_handshake, "MSE handshake").await?;
+        crypto.decrypt(&mut remote_handshake);
+        let remote_hs = Handshake::parse(&remote_handshake)?;
+        if remote_hs.info_hash != *info_hash {
+            return Err("info_hash mismatch".to_string());
+        }
+        let conn = PeerConnection::from_stream_with_peer(stream, remote_hs.peer_id);
 
         Ok(Self {
             inner: conn,
             crypto,
             mse_negotiated: true,
         })
+    }
+
+    async fn read_exact_with_timeout(
+        stream: &mut tokio::net::TcpStream,
+        buffer: &mut [u8],
+        label: &str,
+    ) -> Result<(), String> {
+        tokio::time::timeout(std::time::Duration::from_secs(30), stream.read_exact(buffer))
+            .await
+            .map_err(|_| format!("{label} read timeout"))?
+            .map(|_| ())
+            .map_err(|error| format!("{label} read failed: {error}"))
     }
 
     fn from_plain_connection(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {

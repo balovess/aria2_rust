@@ -155,3 +155,77 @@ async fn test_check_cancelled_returns_err_after_remove() {
         err
     );
 }
+
+#[tokio::test]
+async fn proxy_client_leaves_redirects_for_the_download_flow() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind local proxy fixture");
+    let proxy_addr = listener.local_addr().expect("read proxy address");
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let requests_for_server = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        for request_number in 1..=2 {
+            let accepted = if request_number == 1 {
+                Some(
+                    listener
+                        .accept()
+                        .await
+                        .expect("accept initial proxy request"),
+                )
+            } else {
+                tokio::time::timeout(std::time::Duration::from_millis(250), listener.accept())
+                    .await
+                    .ok()
+                    .map(|result| result.expect("accept redirected proxy request"))
+            };
+            let Some((mut stream, _)) = accepted else {
+                break;
+            };
+            requests_for_server.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut request = vec![0; 4096];
+            let bytes = stream.read(&mut request).await.expect("read proxy request");
+            assert!(bytes > 0, "proxy request should not be empty");
+            let response = if request_number == 1 {
+                b"HTTP/1.1 302 Found\r\nLocation: http://origin.example/redirect-target\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".as_slice()
+            };
+            stream
+                .write_all(response)
+                .await
+                .expect("write proxy response");
+        }
+    });
+
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://{proxy_addr}")),
+        ..DownloadOptions::default()
+    };
+    let command = DownloadCommand::new(
+        GroupId::new(12),
+        "http://origin.example/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .expect("create proxied download command");
+
+    let response = command
+        .client
+        .get("http://origin.example/file.bin")
+        .send()
+        .await
+        .expect("proxy should return the redirect response");
+    assert_eq!(response.status().as_u16(), 302);
+    assert_eq!(
+        requests.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "proxy redirects must be handled by SequentialDownloader so URI and retry state stay canonical"
+    );
+
+    server.await.expect("proxy fixture should finish");
+}

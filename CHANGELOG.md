@@ -10,8 +10,16 @@ All notable changes to this project will be documented in this file.
   unknown-length chunked downloads.
 - Made gzip negotiation explicit across production HTTP clients: disabled by
   default and enabled only by the http-accept-gzip option. Unknown-length
-  default downloads no longer issue a synthetic Range probe; explicit
-  segmented scheduling remains documented as an interim path.
+  downloads, including explicit split requests, now start with one ordinary
+  GET instead of a synthetic Range probe; they remain on the original
+  single-connection unknown-length path.
+- Unified proxied HTTP clients with the direct and DNS-pinned clients by
+  disabling reqwest auto-redirects; redirects now always pass through the
+  download flow's canonical URI, cookie, retry, and error handling seam.
+- Unified concurrent HTTP Range requests with the same bounded manual
+  redirect seam. Buffered and streaming range downloads now preserve Range
+  validation after redirects, propagate redirect `Set-Cookie` values, and
+  classify 401/407 responses as HTTP authentication failures.
 - Updated the active output collision resolver to use aria2-compatible `.1`, `.2`, ... filename suffixes.
 - Corrected compatibility documentation for RPC method and notification counts.
 - Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.

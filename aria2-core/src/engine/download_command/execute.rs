@@ -310,11 +310,30 @@ impl DownloadCommand {
                     );
                 }
                 let max_retries = options.max_retries;
+                let target_scheme = reqwest::Url::parse(uri)
+                    .ok()
+                    .map(|url| url.scheme().to_owned())
+                    .unwrap_or_else(|| "http".to_string());
+                let (proxy_user, proxy_passwd) = options.proxy_credentials_for_scheme(
+                    &target_scheme,
+                );
+                let auth_options = crate::http::AuthResolveOptions {
+                    http_auth_challenge: options.http_auth_challenge,
+                    no_netrc: options.no_netrc,
+                    http_user: options.http_user.clone(),
+                    http_passwd: options.http_passwd.clone(),
+                    ftp_user: options.ftp_user.clone(),
+                    ftp_passwd: options.ftp_passwd.clone(),
+                    proxy_user,
+                    proxy_passwd,
+                };
                 let progress_arc = Arc::clone(&self.progress);
                 let mut concurrent_downloader = ConcurrentDownloader::new(
                     Arc::clone(&self.client),
                     self.output_path.clone(),
                     self.request_policy.clone(),
+                    auth_options,
+                    options.netrc_path.clone(),
                     cookie_helper.clone(),
                     progress_updater.clone(),
                     Arc::clone(&self.group),

@@ -79,6 +79,19 @@ pub struct EngineLoopContext {
     /// `ThrottledWriter` and segment download loops enforce a global
     /// bandwidth ceiling in addition to per-download limits.
     pub global_limiter: Option<RateLimiter>,
+
+    /// Process-wide public tracker catalog shared by BT commands.
+    #[cfg(feature = "bittorrent")]
+    pub public_tracker_catalog:
+        Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
+
+    /// Engine-owned registry shared by all BitTorrent commands.
+    #[cfg(feature = "bittorrent")]
+    pub bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+
+    /// Process-level BitTorrent TCP listener and info-hash router.
+    #[cfg(feature = "bittorrent")]
+    pub bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.
@@ -181,6 +194,12 @@ pub async fn run_engine_loop(
                 Arc::clone(&ctx.ftp_pool),
                 Arc::clone(&ctx.dns_cache),
                 ctx.global_limiter.clone(),
+                #[cfg(feature = "bittorrent")]
+                Arc::clone(&ctx.public_tracker_catalog),
+                #[cfg(feature = "bittorrent")]
+                Arc::clone(&ctx.bt_registry),
+                #[cfg(feature = "bittorrent")]
+                Arc::clone(&ctx.bt_listener),
                 generation,
                 completion_tx.clone(),
             ) {
@@ -499,6 +518,38 @@ async fn process_engine_commands(
                     download_limit = ?download_limit,
                     upload_limit = ?upload_limit,
                     "Global speed limits updated"
+                );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackerSources { sources } => {
+                let mut config = ctx.public_tracker_catalog.config().await;
+                config.sources = sources
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|source| !source.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                ctx.public_tracker_catalog.set_config(config).await;
+                info!("Public tracker sources updated at runtime");
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackerUpdateInterval { seconds } => {
+                let mut config = ctx.public_tracker_catalog.config().await;
+                config.update_interval = Duration::from_secs(seconds.max(1));
+                ctx.public_tracker_catalog.set_config(config).await;
+                info!(seconds, "Public tracker update interval changed at runtime");
+            }
+
+            #[cfg(feature = "bittorrent")]
+            EngineCommand::SetPublicTrackersEnabled { enabled } => {
+                let mut config = ctx.public_tracker_catalog.config().await;
+                config.enabled = enabled;
+                ctx.public_tracker_catalog.set_config(config).await;
+                info!(
+                    enabled,
+                    "Public tracker catalog enabled state changed at runtime"
                 );
             }
         }
@@ -925,6 +976,16 @@ mod tests {
             keep_alive,
             server_stat_man: ServerStatMan::shared().clone(),
             global_limiter: None,
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: Arc::new(
+                aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
+            ),
+            #[cfg(feature = "bittorrent")]
+            bt_registry: Arc::new(std::sync::RwLock::new(
+                crate::engine::bt_registry::BtRegistry::new(),
+            )),
+            #[cfg(feature = "bittorrent")]
+            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
         }
     }
 
@@ -1041,6 +1102,16 @@ mod tests {
             keep_alive: false,
             server_stat_man: Arc::new(ServerStatMan::new()),
             global_limiter: None,
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: Arc::new(
+                aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
+            ),
+            #[cfg(feature = "bittorrent")]
+            bt_registry: Arc::new(std::sync::RwLock::new(
+                crate::engine::bt_registry::BtRegistry::new(),
+            )),
+            #[cfg(feature = "bittorrent")]
+            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
         };
 
         // Send an AddDownload command through the engine-command channel.

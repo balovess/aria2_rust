@@ -180,6 +180,37 @@ impl Aria2RustSession {
 
         let request_man = Arc::new(RwLock::new(RequestGroupMan::new()));
         let mut engine = DownloadEngine::new(100);
+        #[cfg(feature = "bittorrent")]
+        {
+            let sources = runtime.block_on(config.get_global_option("bt-tracker-source"));
+            let sources = match sources {
+                Some(OptionValue::List(values)) => values,
+                Some(OptionValue::Str(value)) => value
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let update_interval = runtime
+                .block_on(config.get_global_i64("bt-tracker-update-interval"))
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| Duration::from_secs(seconds as u64))
+                .unwrap_or(
+                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL,
+                );
+            let enabled = runtime
+                .block_on(config.get_global_bool("enable-public-trackers"))
+                .unwrap_or(true);
+            engine.set_public_tracker_config(
+                aria2_protocol::bittorrent::tracker::public_list::TrackerCatalogConfig {
+                    enabled,
+                    sources,
+                    update_interval,
+                },
+            );
+        }
         engine.set_request_group_man(Arc::clone(&request_man));
         // The C API keeps the event loop alive between synchronous `run` calls,
         // matching the original library's RUN_ONCE mode.
@@ -332,6 +363,12 @@ impl Aria2RustSession {
         let mut download_limit_changed = false;
         let mut upload_limit_changed = false;
         let mut max_concurrent = None;
+        #[cfg(feature = "bittorrent")]
+        let mut public_tracker_sources = None;
+        #[cfg(feature = "bittorrent")]
+        let mut public_tracker_update_interval = None;
+        #[cfg(feature = "bittorrent")]
+        let mut public_trackers_enabled = None;
         for (name, value) in options {
             if name == "keep-running" {
                 match parse_bool(&value) {
@@ -366,6 +403,12 @@ impl Aria2RustSession {
                 "max-concurrent-downloads" => max_concurrent = parsed.as_i64(),
                 "max-overall-download-limit" => download_limit_changed = true,
                 "max-overall-upload-limit" => upload_limit_changed = true,
+                #[cfg(feature = "bittorrent")]
+                "bt-tracker-source" => public_tracker_sources = Some(value),
+                #[cfg(feature = "bittorrent")]
+                "bt-tracker-update-interval" => public_tracker_update_interval = parsed.as_i64(),
+                #[cfg(feature = "bittorrent")]
+                "enable-public-trackers" => public_trackers_enabled = parsed.as_bool(),
                 _ => {}
             }
         }
@@ -388,6 +431,26 @@ impl Aria2RustSession {
                 download_limit,
                 upload_limit,
             });
+        }
+        #[cfg(feature = "bittorrent")]
+        {
+            if let Some(sources) = public_tracker_sources {
+                let _ = self
+                    .command_tx
+                    .send(EngineCommand::SetPublicTrackerSources { sources });
+            }
+            if let Some(seconds) = public_tracker_update_interval.filter(|seconds| *seconds > 0) {
+                let _ = self
+                    .command_tx
+                    .send(EngineCommand::SetPublicTrackerUpdateInterval {
+                        seconds: seconds as u64,
+                    });
+            }
+            if let Some(enabled) = public_trackers_enabled {
+                let _ = self
+                    .command_tx
+                    .send(EngineCommand::SetPublicTrackersEnabled { enabled });
+            }
         }
         0
     }

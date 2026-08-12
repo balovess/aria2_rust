@@ -464,9 +464,17 @@ fn test_download_options_to_map_all_fields() {
         dht_file_path: Some("/tmp/dht.dat".to_string()),
         // Proxy
         http_proxy: Some("http://proxy:8080".to_string()),
+        http_proxy_user: Some("http-user".to_string()),
+        http_proxy_passwd: Some("http-pass".to_string()),
         all_proxy: Some("socks5://proxy:1080".to_string()),
+        all_proxy_user: Some("all-user".to_string()),
+        all_proxy_passwd: Some("all-pass".to_string()),
         https_proxy: Some("http://proxy:8443".to_string()),
+        https_proxy_user: Some("https-user".to_string()),
+        https_proxy_passwd: Some("https-pass".to_string()),
         ftp_proxy: Some("http://proxy:8021".to_string()),
+        ftp_proxy_user: Some("ftp-user".to_string()),
+        ftp_proxy_passwd: Some("ftp-pass".to_string()),
         no_proxy: Some("localhost,127.0.0.1".to_string()),
         // HTTP headers
         header: vec!["X-Custom: foo".to_string(), "X-Other: bar".to_string()],

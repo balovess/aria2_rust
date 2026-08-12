@@ -1,20 +1,20 @@
 //! Single-mirror concurrent download loop.
 //!
-//! Contains the execute function that runs the FuturesUnordered-based
-//! segment download pipeline for a single URI.
+//! Contains the execute function that runs the pooled segment download
+//! pipeline for a single URI.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use tokio::sync::mpsc;
 
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use crate::engine::http_segment_downloader::{HttpSegmentDownloader, WriteChunk};
+use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
+use crate::engine::http_connection_pool::{HttpConnectionPool, HttpSegmentJob, server_key};
+use crate::engine::http_segment_downloader::WriteChunk;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -24,23 +24,10 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{ConcurrentDownloadResult, ConcurrentDownloader};
 
-type SegmentFetchFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = (
-                    u32,
-                    std::result::Result<u64, crate::error::Aria2Error>,
-                    Option<std::net::SocketAddr>,
-                ),
-            > + Send,
-    >,
->;
-
 /// Run the single-mirror concurrent download pipeline.
 ///
-/// Spawns up to max_conn segment fetches concurrently using a
-/// FuturesUnordered, drains write chunks via tokio::select!, and
-/// handles 416-based fallback detection.
+/// Schedules segments onto a long-lived HTTP connection pool, drains write
+/// chunks via tokio::select!, and handles 416-based fallback detection.
 pub async fn execute(
     dl: &mut ConcurrentDownloader,
     uri: &str,
@@ -56,7 +43,11 @@ pub async fn execute(
     let split = options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize;
     let max_conn = options
         .max_connection_per_server
-        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16) as usize;
+        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        .clamp(1, 16) as usize;
+    let server_key = server_key(uri).unwrap_or_else(|| uri.to_string());
+    let per_server_limit = max_conn.min(split);
+    let mut adaptive = HttpAdaptiveConcurrency::new(per_server_limit, options.retry_wait);
     let seg_size = total_length / split as u64;
 
     tracing::info!(
@@ -140,7 +131,6 @@ pub async fn execute(
     let ctrl_save_interval = total_length / num_pieces.max(1) as u64;
     let mut ctrl_bytes_since_save: u64 = 0;
 
-    let mut active: FuturesUnordered<SegmentFetchFuture> = FuturesUnordered::new();
     let mut active_segs: HashMap<u32, u64> = HashMap::new();
     let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
     // Per-segment tracker: stores the number of bytes the listener has
@@ -157,6 +147,16 @@ pub async fn execute(
     // Write channel: segment futures send chunks as they arrive,
     // the main loop drains them to disk via tokio::select!
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
+    let mut pool = HttpConnectionPool::new(
+        &dl.client,
+        dl.request_policy.clone(),
+        dl.cookie_helper.clone(),
+        dl.auth_options.clone(),
+        dl.netrc_path.clone(),
+        per_server_limit,
+        std::slice::from_ref(&server_key),
+        per_server_limit,
+    );
 
     // Pause/remove check interval — allows the download loop to detect
     // aria2.pause / aria2.remove within ~200ms even when segment
@@ -181,18 +181,9 @@ pub async fn execute(
             return Err(e);
         }
 
-        while active.len() < max_conn {
+        while adaptive.can_start(pool.in_flight_for(&server_key)) {
             match manager.next_pending_segment_for_mirror(0) {
                 Some((seg_idx, offset, length)) => {
-                    let url = uri.to_string();
-                    let seg_dl = HttpSegmentDownloader::new_with_policy(
-                        &dl.client,
-                        dl.request_policy.clone(),
-                    );
-                    let ch = cookie_hdr.clone();
-                    let seg_write_tx = write_tx.clone();
-                    active_segs.insert(seg_idx, offset);
-
                     // Create per-segment progress channel for real-time updates
                     let (seg_progress_tx, mut seg_progress_rx) =
                         mpsc::unbounded_channel::<ProgressUpdate>();
@@ -236,37 +227,41 @@ pub async fn execute(
                     });
                     progress_handles.insert(seg_idx, ph);
                     seg_reported.insert(seg_idx, seg_reported_arc);
+                    active_segs.insert(seg_idx, offset);
 
-                    let fut = Box::pin(async move {
-                        let result: std::result::Result<u64, Aria2Error> = seg_dl
-                            .download_range_streaming(
-                                &url,
-                                offset,
-                                length,
-                                ch.as_deref(),
-                                &[],
-                                Some(&seg_progress_tx),
-                                &seg_write_tx,
-                                total_length,
-                            )
-                            .await;
-                        // Drop sender to signal progress listener to stop
-                        drop(seg_progress_tx);
-                        (seg_idx, result, seg_dl.last_peer_addr())
+                    let submitted = pool.try_submit(HttpSegmentJob {
+                        mirror_index: 0,
+                        segment_index: seg_idx,
+                        server_key: server_key.clone(),
+                        url: uri.to_string(),
+                        offset,
+                        length,
+                        cookie_header: cookie_hdr.clone(),
+                        progress_tx: seg_progress_tx,
+                        write_tx: write_tx.clone(),
+                        expected_entity_length: total_length,
                     });
-                    active.push(fut);
+                    if !submitted {
+                        active_segs.remove(&seg_idx);
+                        if let Some(ph) = progress_handles.remove(&seg_idx) {
+                            ph.abort();
+                        }
+                        seg_reported.remove(&seg_idx);
+                        manager.requeue_segment(seg_idx);
+                        break;
+                    }
                     tracing::debug!(
                         seg_idx = seg_idx,
                         offset = offset,
                         length = length,
-                        "Spawned segment fetch with progress channel"
+                        "Submitted segment to HTTP connection pool"
                     );
                 }
                 None => break,
             }
         }
 
-        if active.is_empty() {
+        if pool.in_flight() == 0 {
             // Drain any remaining write chunks before checking completion
             while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
                 if let Some(ref lim) = limiter {
@@ -287,6 +282,18 @@ pub async fn execute(
             if manager.is_complete() {
                 tracing::debug!("All segments complete");
                 break;
+            }
+            if let Some(new_target) = adaptive.finish_round() {
+                pool.set_target(&server_key, new_target);
+                tracing::info!(
+                    old_target = adaptive.hard_limit().min(max_conn),
+                    new_target,
+                    "HTTP adaptive concurrency reduced after 429/503"
+                );
+            }
+            if let Some(wait) = adaptive.cooldown_remaining() {
+                tokio::time::sleep(wait).await;
+                continue;
             }
             if manager.has_failed_segments() && !manager.has_pending_segments() {
                 return Err(Aria2Error::Recoverable(
@@ -324,7 +331,10 @@ pub async fn execute(
         // channel while other segments are still downloading.
         tokio::select! {
             // A segment completed
-            Some((seg_idx, result, peer_addr)) = active.next() => {
+            Some(pool_result) = pool.next_result() => {
+                let seg_idx = pool_result.segment_index;
+                let result = pool_result.result;
+                let peer_addr = pool_result.peer_addr;
                 if let Some(peer_addr) = peer_addr
                     && let Ok(url) = reqwest::Url::parse(uri)
                         && let Some(host) = url.host_str()
@@ -364,6 +374,7 @@ pub async fn execute(
 
                 match result {
                     Ok(total_written) => {
+                        adaptive.record(AdaptiveOutcome::Success);
                         manager.complete_segment(seg_idx, total_written as usize);
                         completed_bytes += total_written;
 
@@ -406,6 +417,16 @@ pub async fn execute(
                     }
                     Err(e) => {
                         tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                        let is_capacity_limited = matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                                if matches!(*code, 429 | 503)
+                        );
+                        adaptive.record(if is_capacity_limited {
+                            AdaptiveOutcome::CapacityLimited
+                        } else {
+                            AdaptiveOutcome::OtherFailure
+                        });
                         let is_416 = matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. })
@@ -444,7 +465,11 @@ pub async fn execute(
                                 total_inflight_bytes.fetch_sub(rollback, Ordering::Relaxed);
                             }
                         }
-                        manager.fail_segment(seg_idx);
+                        if is_capacity_limited && adaptive.preserve_retry_budget() {
+                            manager.requeue_segment(seg_idx);
+                        } else {
+                            manager.fail_segment(seg_idx);
+                        }
                     }
                 }
             }
@@ -495,6 +520,14 @@ pub async fn execute(
                 }
             }
         }
+    }
+
+    // Stop workers before the final drain. This is immediate on Range
+    // fallback so cancelled requests cannot enqueue more chunks afterward.
+    if should_fallback {
+        pool.cancel().await;
+    } else {
+        pool.shutdown().await;
     }
 
     // Final drain: ensure all pending write chunks are flushed to disk

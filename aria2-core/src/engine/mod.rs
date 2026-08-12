@@ -13,6 +13,8 @@ pub mod download_progress;
 pub mod engine_command;
 pub mod engine_loop;
 pub mod halt_watchers;
+pub mod http_adaptive_concurrency;
+pub mod http_connection_pool;
 pub mod http_segment_downloader;
 pub mod http_tail_reclaim;
 pub mod http_tracker_client;

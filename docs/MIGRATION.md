@@ -17,6 +17,8 @@
 | 2026-07-30 | 性能验证：仅 Rust 侧基准回归（benches/ + 回归测试），不与 C++ 实测对比 |
 | 2026-08-09 | 外部兼容优先：RPC/JSON-RPC/XML-RPC/WebSocket、CLI、配置、session、错误码和原版客户端可观察行为必须以 aria2_original 为契约；Rust 架构和性能优化只能发生在该契约之后 |
 | 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
+| 2026-08-12 | 产品身份统一为 `aria2-rust 0.2.9`；只兼容 aria2_original 的外部 CLI/RPC/协议行为，不复用原版版本报告文本或内部 C++ 结构 |
+| 2026-08-12 | FTP 生产路径补齐协议错误边界、`550` 文件不存在映射和 `REST 0` 行为；本地 FTP E2E 通过，真实第三方 FTP/FTPS 和原版客户端互操作仍为 PARTIAL |
 
 ## 对照范围
 
@@ -77,7 +79,7 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
 
 | 模块 | 矩阵文件 | 单元数 | 完整 | 部分 | 缺失 | 不适用 |
 |---|---|---|---|---|---|---|
-| auth | migration/auth.md | 7 | 2 | 2 | 0 | 3 |
+| auth | migration/auth.md | 7 | 4 | 0 | 0 | 3 |
 | bt_core | migration/bt_core.md | 115 | 61 | 5 | 0 | 49 |
 | checksum | migration/checksum.md | 7 | 2 | 4 | 0 | 1 |
 | command_engine | migration/command_engine.md | 29 | 7 | 7 | 0 | 15 |
@@ -617,6 +619,35 @@ tests, and the aria2 C++ performance baseline remain open in
   version/help text parity, and complete original-client interoperability
   remain open. The original parser does not dynamically generate arbitrary
   `--no-*` aliases; Rust's extra explicit aliases are documented extensions.
+
+#### Rust-only public tracker catalog checkpoint (2026-08-12)
+
+The public tracker catalog remains an explicitly additive `aria2-rust`
+extension. It is connected to the BitTorrent announce path without changing
+the original CLI/RPC wire contract: private torrents never receive catalog
+entries, disabled catalogs expose no available trackers, and enabled catalogs
+preserve the current snapshot across configuration changes. Source snapshots
+are merged with URL de-duplication; HTTP/HTTPS/UDP entries are dispatched
+through their respective announce paths, while unsupported WSS entries are
+retained for parsing but are not injected into the current BT engine path.
+
+The catalog now uses one shared crate-local rustls provider initializer with the
+standalone HTTP adapter. Tracker health is kept separately from the catalog
+snapshot: failed announces use exponential backoff capped at one hour, while a
+successful announce clears the failure state and makes the tracker available
+again. Focused verification:
+
+~~~text
+cargo test -p aria2-protocol --lib bittorrent::tracker::public_list --all-features -- --test-threads=1
+15 passed, 0 failed
+cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings
+PASS
+cargo fmt --all -- --check
+PASS
+~~~
+
+This checkpoint does not claim live public-tracker availability or complete
+BitTorrent/original-client interoperability. Those remain acceptance work.
 
 #### Application RPC CORS default checkpoint (2026-08-09)
 

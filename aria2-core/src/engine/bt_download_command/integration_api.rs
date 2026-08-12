@@ -84,6 +84,22 @@ impl BtDownloadCommand {
         info!("BtRegistry reference set for BT download self-registration");
         self.bt_registry = Some(registry);
     }
+
+    /// Attach the engine-owned process listener used for info-hash routing.
+    pub fn set_bt_listener(
+        &mut self,
+        listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    ) {
+        self.bt_listener = Some(listener);
+    }
+
+    /// Set the process-wide public tracker catalog shared by all BT commands.
+    pub fn set_public_tracker_catalog(
+        &mut self,
+        catalog: Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
+    ) {
+        self.public_trackers = Some(catalog);
+    }
 }
 
 // ==================== PEX (BEP 11) Integration API ====================

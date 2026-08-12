@@ -28,7 +28,6 @@ pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 pub(crate) use constructor::{apply_file_mappings, build_download_context_from_meta};
 pub use seed_api::SeedStats;
 
-pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
 #[derive(Debug)]
@@ -83,9 +82,7 @@ impl BtRuntimeState {
 
 impl Drop for BtDownloadCommand {
     fn drop(&mut self) {
-        if let Some(listener_task) = self.incoming_peer_listener_task.take() {
-            listener_task.abort();
-        }
+        self.bt_peer_route.take();
 
         let mut storage = self
             .peer_storage
@@ -126,6 +123,8 @@ pub struct BtDownloadCommand {
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    /// Public catalog entries actually appended to this command's announce list.
+    pub(crate) public_tracker_urls: HashSet<String>,
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
     pub(crate) multi_file_layout: Option<MultiFileLayout>,
 
@@ -228,11 +227,14 @@ pub struct BtDownloadCommand {
     pub(crate) peer_storage:
         std::sync::Arc<std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>>,
 
-    /// Receiver for incoming peers accepted by the session-scoped listener.
+    /// Receiver for incoming peers routed by the engine-owned listener.
     pub(crate) incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
-    /// Owned listener task; aborting it closes the listener socket with the command.
-    pub(crate) incoming_peer_listener_task: Option<tokio::task::JoinHandle<()>>,
+    /// Process-level listener shared by all BitTorrent downloads.
+    pub(crate) bt_listener:
+        Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
+    /// RAII registration for this torrent's info-hash route.
+    pub(crate) bt_peer_route: Option<crate::engine::bt_peer_listener::BtPeerRouteHandle>,
 }
 
 impl BtDownloadCommand {
@@ -266,9 +268,7 @@ impl BtDownloadCommand {
                 )
                 .await;
         }
-        if let Some(listener_task) = self.incoming_peer_listener_task.take() {
-            listener_task.abort();
-        }
+        self.bt_peer_route.take();
     }
 
     /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).

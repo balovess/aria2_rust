@@ -3,9 +3,7 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 
 use crate::config::parse_integer_segments;
-use crate::engine::bt_download_command::{
-    BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY, PUBLIC_TRACKER_PEER_THRESHOLD,
-};
+use crate::engine::bt_download_command::{BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY};
 use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bt_peer_connection::BtPeerConn;
@@ -91,17 +89,53 @@ impl BtDownloadCommand {
             let g = self.group.recover();
             g.options().bt_tracker.clone()
         };
-        let mut announcer = match tracker_override {
+        let mut tracker_tiers = match tracker_override {
             Some(list) if !list.is_empty() => {
                 info!(
                     count = list.len(),
                     "Using user-specified trackers from --bt-tracker"
                 );
-                let tiers: Vec<Vec<String>> = list.into_iter().map(|u| vec![u]).collect();
-                TrackerAnnouncer::new(&tiers, &None)
+                list.into_iter().map(|u| vec![u]).collect()
             }
-            _ => TrackerAnnouncer::new(&meta.announce_list, &Some(meta.announce.clone())),
+            _ => {
+                let mut tiers = meta.announce_list.clone();
+                if tiers.is_empty() && !meta.announce.is_empty() {
+                    tiers.push(vec![meta.announce.clone()]);
+                }
+                tiers
+            }
         };
+
+        let enable_public_trackers =
+            { self.group.recover().options().enable_public_trackers } && !self.is_private;
+        let public_tracker_catalog = self.public_trackers.clone();
+        if enable_public_trackers && let Some(catalog) = public_tracker_catalog.as_ref() {
+            let public_entries = catalog.available_snapshot().await;
+            let existing_urls: HashSet<String> = tracker_tiers
+                .iter()
+                .flat_map(|tier| tier.iter().cloned())
+                .collect();
+            let public_urls: Vec<String> = public_entries
+                .iter()
+                .filter(|entry| {
+                    entry.protocol
+                        != aria2_protocol::bittorrent::tracker::public_list::TrackerProtocol::Wss
+                })
+                .map(|entry| entry.url.clone())
+                .filter(|url| !existing_urls.contains(url))
+                .take(MAX_PUBLIC_TRACKERS_TO_TRY)
+                .collect();
+            for url in public_urls {
+                self.public_tracker_urls.insert(url.clone());
+                tracker_tiers.push(vec![url]);
+            }
+        }
+
+        tracker_tiers = super::deduplicate_tracker_tiers(tracker_tiers);
+        let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &Some(meta.announce.clone()));
+        if let Some(catalog) = public_tracker_catalog {
+            announcer.set_public_tracker_catalog(catalog, self.public_tracker_urls.clone());
+        }
 
         // Set up UDP client for UDP tracker support
         if let Ok(udp) = UdpTrackerClient::new(0).await {
@@ -118,7 +152,7 @@ impl BtDownloadCommand {
 
         // Try tracker announces through the state machine (handles both HTTP and UDP)
         let mut announce_attempts = 0;
-        const MAX_ANNOUNCE_ATTEMPTS: usize = 5;
+        const MAX_ANNOUNCE_ATTEMPTS: usize = MAX_PUBLIC_TRACKERS_TO_TRY;
 
         while announcer.is_announce_ready() && announce_attempts < MAX_ANNOUNCE_ATTEMPTS {
             if let Some(result) = announcer
@@ -266,73 +300,9 @@ impl BtDownloadCommand {
         // BEP 0027 (Private Torrent): public tracker announcement is forbidden
         // for private torrents because it would leak the info_hash to trackers
         // not explicitly listed in the torrent's announce list.
-        let enable_public_trackers =
-            { self.group.recover().options().enable_public_trackers } && !self.is_private;
         if self.is_private {
             info!("[BT] Private torrent: public trackers disabled (BEP 0027)");
         }
-        if enable_public_trackers
-            && self.public_trackers.is_none()
-            && peer_addrs.len() < PUBLIC_TRACKER_PEER_THRESHOLD
-        {
-            let ptl = std::sync::Arc::new(
-                aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
-            );
-            ptl.start_auto_update(
-                "https://cf.trackerslist.com/best.txt".to_string(),
-                std::time::Duration::from_secs(86400),
-            );
-            self.public_trackers = Some(ptl);
-        }
-
-        if let Some(ref pt) = self.public_trackers {
-            let http_urls = pt.get_http_trackers().await;
-            let mut extra_peers: Vec<(String, u16)> = Vec::new();
-            let mut announced = 0usize;
-
-            for url in http_urls.iter().take(MAX_PUBLIC_TRACKERS_TO_TRY) {
-                match crate::engine::bt_tracker_comm::announce_to_public_tracker(
-                    url,
-                    info_hash_raw,
-                    &my_peer_id,
-                    total_size,
-                )
-                .await
-                {
-                    Ok(peers) => {
-                        announced += 1;
-                        extra_peers.extend(peers);
-                    }
-                    Err(e) => {
-                        debug!("[BT] Public tracker {} failed: {}", url, e);
-                    }
-                }
-            }
-
-            if !extra_peers.is_empty() {
-                let before = peer_addrs.len();
-                for (ip, port) in extra_peers {
-                    let paddr =
-                        aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port);
-                    if !self.is_peer_temporarily_rejected(&paddr.ip)
-                        && !peer_addrs
-                            .iter()
-                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                    {
-                        peer_addrs.push(paddr);
-                    }
-                }
-                tracing::info!(
-                    "[BT] Public trackers discovered {} extra peers (announced to {} of {})",
-                    peer_addrs.len() - before,
-                    announced,
-                    http_urls.len()
-                );
-            } else if announced > 0 {
-                debug!("[BT] Public trackers responded but no peers found");
-            }
-        }
-
         // P2: Integrate LPD-discovered LAN peers
         // BEP 0027 (Private Torrent): LPD (Local Peer Discovery) uses UDP
         // multicast which would leak the info_hash to the local network, so it

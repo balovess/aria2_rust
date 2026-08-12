@@ -37,6 +37,13 @@ pub fn spawn_download_task(
     _ftp_pool: Arc<FtpConnectionPool>,
     _dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
     global_limiter: Option<RateLimiter>,
+    #[cfg(feature = "bittorrent")] public_tracker_catalog: Arc<
+        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList,
+    >,
+    #[cfg(feature = "bittorrent")] bt_registry: Arc<
+        std::sync::RwLock<crate::engine::bt_registry::BtRegistry>,
+    >,
+    #[cfg(feature = "bittorrent")] bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
     generation: u64,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
 ) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)> {
@@ -73,6 +80,12 @@ pub fn spawn_download_task(
                 first_uri,
                 options,
                 global_limiter,
+                #[cfg(feature = "bittorrent")]
+                public_tracker_catalog,
+                #[cfg(feature = "bittorrent")]
+                bt_registry,
+                #[cfg(feature = "bittorrent")]
+                bt_listener,
                 dns_cache,
             ) => {
                 match command_result {
@@ -144,6 +157,13 @@ async fn create_command_for_group(
     first_uri: String,
     options: Arc<DownloadOptions>,
     global_limiter: Option<RateLimiter>,
+    #[cfg(feature = "bittorrent")] public_tracker_catalog: Arc<
+        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList,
+    >,
+    #[cfg(feature = "bittorrent")] bt_registry: Arc<
+        std::sync::RwLock<crate::engine::bt_registry::BtRegistry>,
+    >,
+    #[cfg(feature = "bittorrent")] bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
     dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
 ) -> crate::error::Result<Box<dyn Command>> {
     #[cfg(feature = "metalink")]
@@ -159,10 +179,29 @@ async fn create_command_for_group(
         if let Some(limiter) = global_limiter {
             command.set_global_limiter(limiter);
         }
+        #[cfg(feature = "bittorrent")]
+        command.set_public_tracker_catalog(public_tracker_catalog);
+        #[cfg(feature = "bittorrent")]
+        command.set_bt_registry(Arc::clone(&bt_registry));
+        #[cfg(feature = "bittorrent")]
+        command.set_bt_listener(Arc::clone(&bt_listener));
         return Ok(Box::new(command));
     }
 
-    create_command_for_uri(&first_uri, group, &options, global_limiter, &dns_cache).await
+    create_command_for_uri(
+        &first_uri,
+        group,
+        &options,
+        global_limiter,
+        #[cfg(feature = "bittorrent")]
+        public_tracker_catalog,
+        #[cfg(feature = "bittorrent")]
+        bt_registry,
+        #[cfg(feature = "bittorrent")]
+        bt_listener,
+        &dns_cache,
+    )
+    .await
 }
 
 /// Create the appropriate `Command` implementation for a URI.
@@ -175,6 +214,13 @@ async fn create_command_for_uri(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     options: &DownloadOptions,
     global_limiter: Option<RateLimiter>,
+    #[cfg(feature = "bittorrent")] public_tracker_catalog: Arc<
+        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList,
+    >,
+    #[cfg(feature = "bittorrent")] bt_registry: Arc<
+        std::sync::RwLock<crate::engine::bt_registry::BtRegistry>,
+    >,
+    #[cfg(feature = "bittorrent")] bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
     dns_cache: &Arc<tokio::sync::Mutex<DnsCache>>,
 ) -> crate::error::Result<Box<dyn Command>> {
     let uri_lower = uri.to_lowercase();
@@ -221,9 +267,12 @@ async fn create_command_for_uri(
             options,
             output_dir,
         )?;
+        cmd.set_bt_listener(bt_listener);
+        cmd.set_bt_registry(bt_registry);
         if let Some(limiter) = global_limiter {
             cmd.set_global_limiter(limiter);
         }
+        cmd.set_public_tracker_catalog(public_tracker_catalog);
         return Ok(Box::new(cmd));
     }
 
@@ -235,9 +284,12 @@ async fn create_command_for_uri(
             crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
                 group, output_dir,
             )?;
+        cmd.set_bt_listener(bt_listener);
+        cmd.set_bt_registry(bt_registry);
         if let Some(limiter) = global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
+        cmd.set_public_tracker_catalog(public_tracker_catalog);
         return Ok(Box::new(cmd));
     }
 

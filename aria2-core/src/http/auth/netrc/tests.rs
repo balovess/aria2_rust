@@ -102,6 +102,34 @@ fn test_find_unknown_returns_none() {
 }
 
 #[test]
+fn test_leading_dot_machine_matches_subdomains_only() {
+    let content = "machine .example.com\nlogin user\npassword pass\n";
+    let parser = NetrcParser::parse(content).expect("parse should succeed");
+
+    assert_eq!(
+        parser
+            .find("ftp.example.com")
+            .and_then(|entry| entry.login.as_deref()),
+        Some("user")
+    );
+    assert!(parser.find("example.com").is_none());
+}
+
+#[test]
+fn test_leading_dot_machine_does_not_match_numeric_host() {
+    let content = "machine .example.com\nlogin suffix-user\npassword suffix-pass\n\
+        machine 192.0.0.1\nlogin exact-user\npassword exact-pass\n";
+    let parser = NetrcParser::parse(content).expect("parse should succeed");
+
+    assert!(parser.find("192.0.0.1").is_some());
+    assert_eq!(
+        parser.find("192.0.0.1").map(|entry| entry.login.as_deref()),
+        Some(Some("exact-user"))
+    );
+    assert!(parser.find("10.0.0.1").is_none());
+}
+
+#[test]
 fn test_comments_and_blank_lines() {
     let content = "\
         # This is a comment\n\

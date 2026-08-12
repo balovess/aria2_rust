@@ -290,7 +290,7 @@ async fn test_no_conf_skips_explicit_config_file() {
         .await
         .expect("--no-conf should not attempt to read the file");
 
-    assert_eq!(app.get_opt_i64("split").await, Some(5));
+    assert_eq!(app.get_opt_i64("split").await, Some(16));
 }
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]

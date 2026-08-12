@@ -13,8 +13,14 @@ mod e2e_helpers;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use bytes::Bytes;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::Frame;
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::e2e_helpers::mock_http_server::MockHttpServer;
+use crate::e2e_helpers::mock_http_server::{Body, MockHttpServer, Request, Response, StatusCode};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,6 +51,10 @@ fn make_options(
     DownloadOptions {
         split,
         max_connection_per_server: max_conn,
+        // The concurrent path needs entity metadata before it can allocate
+        // ranges. Keep this fixture explicit; unknown-length downloads are
+        // covered separately and must begin with one ordinary GET.
+        use_head: true,
         max_download_limit: None,
         max_upload_limit: None,
         dir: Some(dir.to_string()),
@@ -243,6 +253,109 @@ async fn test_concurrent_download_multiple_range_requests() {
     );
 
     // Cleanup
+    let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: Capacity feedback lowers concurrency and requeues 429 segments
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_adaptive_pool_requeues_rate_limited_ranges() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 99);
+    let active = Arc::new(AtomicUsize::new(0));
+    let max_active = Arc::new(AtomicUsize::new(0));
+    let rate_limited = Arc::new(AtomicUsize::new(0));
+    let body = data.clone();
+    let active_for_handler = Arc::clone(&active);
+    let max_active_for_handler = Arc::clone(&max_active);
+    let rate_limited_for_handler = Arc::clone(&rate_limited);
+
+    server.on_get("/limited", move |req: &Request<_>| -> Response<Body> {
+        if req.method() == hyper::Method::HEAD {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", body.len())
+                .body(crate::e2e_helpers::mock_http_server::empty_body())
+                .unwrap();
+        }
+
+        let current = active_for_handler.fetch_add(1, Ordering::AcqRel) + 1;
+        max_active_for_handler.fetch_max(current, Ordering::AcqRel);
+        if current > 2 {
+            active_for_handler.fetch_sub(1, Ordering::AcqRel);
+            rate_limited_for_handler.fetch_add(1, Ordering::AcqRel);
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(crate::e2e_helpers::mock_http_server::empty_body())
+                .unwrap();
+        }
+
+        let Some(range) = req
+            .headers()
+            .get("Range")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("bytes="))
+            .and_then(|value| value.split_once('-'))
+        else {
+            active_for_handler.fetch_sub(1, Ordering::AcqRel);
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(crate::e2e_helpers::mock_http_server::empty_body())
+                .unwrap();
+        };
+        let start: usize = range.0.parse().unwrap();
+        let end: usize = range.1.parse().unwrap();
+        let chunk = body[start..=end].to_vec();
+        let active_for_body = Arc::clone(&active_for_handler);
+        let stream = futures::stream::once(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            active_for_body.fetch_sub(1, Ordering::AcqRel);
+            Ok::<_, Infallible>(Frame::data(Bytes::from(chunk)))
+        });
+        Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header("Accept-Ranges", "bytes")
+            .header(
+                "Content-Range",
+                format!("bytes={}-{}/{}", start, end, body.len()),
+            )
+            .body(StreamBody::new(stream).boxed())
+            .unwrap()
+    });
+
+    let url = make_url(&server.base_url(), "/limited");
+    let tmp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+    let out_name = format!("test_adaptive_pool_{}.bin", std::process::id());
+    let out_path = format!("{}/{}", tmp_dir, out_name);
+    let _ = std::fs::remove_file(&out_path);
+
+    let mut options = make_options(Some(4), Some(4), &tmp_dir, &out_name);
+    options.retry_wait = 0;
+    let mut cmd = DownloadCommand::new(
+        GroupId::new(5),
+        &url,
+        &options,
+        Some(&tmp_dir),
+        Some(&out_name),
+    )
+    .expect("Failed to create DownloadCommand");
+    cmd.execute()
+        .await
+        .expect("Rate-limited download should converge and succeed");
+
+    assert_eq!(std::fs::read(&out_path).unwrap(), data);
+    assert!(rate_limited.load(Ordering::Acquire) > 0);
+    assert!(max_active.load(Ordering::Acquire) >= 3);
+    assert!(max_active.load(Ordering::Acquire) <= 4);
+
     let _ = std::fs::remove_file(&out_path);
     server.shutdown().await;
 }

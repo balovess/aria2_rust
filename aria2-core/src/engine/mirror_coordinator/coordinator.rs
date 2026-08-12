@@ -126,7 +126,16 @@ impl MirrorCoordinator {
     /// * `Some((mirror_idx, mirror_url, segment_info))` - Selected mirror and segment info
     /// * `None` - No pending segments or no available mirrors
     pub fn select_mirror_for_segment(&mut self) -> Option<(usize, String, (u32, u64, u64))> {
-        let result = self.segment_manager.select_mirror_for_next_segment()?;
+        self.select_mirror_for_segment_excluding(&[])
+    }
+
+    pub fn select_mirror_for_segment_excluding(
+        &mut self,
+        excluded_mirrors: &[usize],
+    ) -> Option<(usize, String, (u32, u64, u64))> {
+        let result = self
+            .segment_manager
+            .select_mirror_for_next_segment_excluding(excluded_mirrors)?;
 
         let (mirror_idx, seg_info) = result;
         let mirror_url = self.urls.get(mirror_idx).cloned()?;
@@ -189,6 +198,12 @@ impl MirrorCoordinator {
     ) -> Option<usize> {
         self.segment_manager
             .report_segment_failed(seg_idx, error_code)
+    }
+
+    /// Return a capacity-limited segment to the pending queue without using
+    /// the ordinary retry budget.
+    pub fn requeue_segment(&mut self, seg_idx: u32) -> bool {
+        self.segment_manager.requeue_segment(seg_idx)
     }
 
     /// Get the maximum download speed across all mirrors.

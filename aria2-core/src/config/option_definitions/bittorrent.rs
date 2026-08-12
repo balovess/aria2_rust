@@ -319,6 +319,35 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-tracker-source".into(),
+            opt_type: OptionType::List,
+            default_value: OptionValue::List(vec![
+                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE
+                    .to_string(),
+            ]),
+            cumulative_delimiter: Some("\n"),
+            description: "Remote public tracker list sources".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-tracker-update-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(86_400),
+            min: Some(1),
+            description: "Public tracker list refresh interval in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "enable-public-trackers".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Use public trackers in addition to torrent trackers".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "bt-tracker-connect-timeout".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(60),

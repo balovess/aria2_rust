@@ -75,6 +75,18 @@ pub enum EngineCommand {
         download_limit: Option<u64>,
         upload_limit: Option<u64>,
     },
+
+    /// Replace the process-wide remote public tracker list sources.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackerSources { sources: String },
+
+    /// Change the process-wide public tracker refresh interval.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackerUpdateInterval { seconds: u64 },
+
+    /// Enable or disable the process-wide public tracker catalog.
+    #[cfg(feature = "bittorrent")]
+    SetPublicTrackersEnabled { enabled: bool },
 }
 
 /// Result of a completed download task, sent back to the engine loop.

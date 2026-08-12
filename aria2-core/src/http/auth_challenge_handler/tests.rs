@@ -207,8 +207,8 @@ mod tests {
         };
         let opts = AuthResolveOptions {
             http_auth_challenge: true,
-            http_user: Some("proxyuser".to_string()),
-            http_passwd: Some("proxypass".to_string()),
+            proxy_user: Some("proxyuser".to_string()),
+            proxy_passwd: Some("proxypass".to_string()),
             ..AuthResolveOptions::default()
         };
 

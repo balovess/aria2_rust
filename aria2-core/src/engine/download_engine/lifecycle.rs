@@ -42,7 +42,16 @@ impl DownloadEngine {
                     .take()
                     .unwrap_or_else(crate::rate_limiter::RateLimiter::unlimited),
             ),
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: Arc::clone(&self.public_tracker_catalog),
+            #[cfg(feature = "bittorrent")]
+            bt_registry: Arc::clone(&self.bt_registry),
+            #[cfg(feature = "bittorrent")]
+            bt_listener: Arc::clone(&self.bt_listener),
         };
+
+        #[cfg(feature = "bittorrent")]
+        self.public_tracker_catalog.start_catalog_update();
 
         super::super::engine_loop::run_engine_loop(
             ctx,
@@ -51,6 +60,12 @@ impl DownloadEngine {
             self.tick_interval,
         )
         .await;
+
+        #[cfg(feature = "bittorrent")]
+        self.bt_listener.shutdown().await;
+
+        #[cfg(feature = "bittorrent")]
+        self.public_tracker_catalog.shutdown();
 
         Ok(())
     }

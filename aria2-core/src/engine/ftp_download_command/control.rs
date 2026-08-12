@@ -89,11 +89,12 @@ impl RawFtpControl {
             .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
             .await?;
 
-        if !(200..300).contains(&welcome.0) && !(100..200).contains(&welcome.0) {
-            return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                "FTP server rejected connection: {} {}",
-                welcome.0, welcome.1
-            ))));
+        if welcome.0 != 220 {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("FTP greeting rejected: {} {}", welcome.0, welcome.1),
+                },
+            ));
         }
 
         Ok(())
@@ -244,16 +245,20 @@ impl RawFtpControl {
                 debug!("Password required, sending PASS command");
                 let pass_resp = self.command(&format!("PASS {}", password)).await?;
                 if !(200..300).contains(&pass_resp.0) {
-                    return Err(Aria2Error::Fatal(FatalError::PermissionDenied {
-                        path: format!("Login failed: {} {}", pass_resp.0, pass_resp.1),
-                    }));
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::FtpProtocolError {
+                            message: format!("Login failed: {} {}", pass_resp.0, pass_resp.1),
+                        },
+                    ));
                 }
                 info!("FTP login successful");
                 Ok(())
             }
-            _ => Err(Aria2Error::Fatal(FatalError::PermissionDenied {
-                path: format!("Unexpected USER response: {} {}", user_resp.0, user_resp.1),
-            })),
+            _ => Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("Unexpected USER response: {} {}", user_resp.0, user_resp.1),
+                },
+            )),
         }
     }
 
@@ -261,9 +266,9 @@ impl RawFtpControl {
     pub(super) async fn set_binary_mode(&mut self) -> Result<()> {
         debug!("Setting transfer mode to binary (TYPE I)");
         let resp = self.command("TYPE I").await?;
-        if !(200..300).contains(&resp.0) {
+        if resp.0 != 200 {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("TYPE I failed: {} {}", resp.0, resp.1),
                 },
             ));
@@ -273,9 +278,6 @@ impl RawFtpControl {
 
     /// Set resume offset (REST command)
     pub(super) async fn set_resume_offset(&mut self, offset: u64) -> Result<bool> {
-        if offset == 0 {
-            return Ok(true);
-        }
         debug!("Setting resume offset: {} bytes", offset);
         let resp = self.command(&format!("REST {}", offset)).await?;
         if resp.0 != 350 {
@@ -283,7 +285,7 @@ impl RawFtpControl {
             // Some servers do not support REST. Report this to the caller so
             // it can restart from byte zero instead of appending at a stale
             // local offset while the server sends the complete object.
-            return Ok(false);
+            return Ok(offset == 0);
         }
         Ok(true)
     }
@@ -342,7 +344,7 @@ impl RawFtpControl {
         let pasv_resp = self.command("PASV").await?;
         if pasv_resp.0 != 227 {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("PASV failed: {} {}", pasv_resp.0, pasv_resp.1),
                 },
             ));
@@ -359,7 +361,7 @@ impl RawFtpControl {
                 Ok(port)
             }
             None => Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: "Cannot parse PASV response".into(),
                 },
             )),
@@ -410,7 +412,7 @@ impl RawFtpControl {
                 let port_response = self.command(&port_cmd).await?;
                 if !(200..300).contains(&port_response.0) {
                     return Err(Aria2Error::Recoverable(
-                        RecoverableError::TemporaryNetworkFailure {
+                        RecoverableError::FtpProtocolError {
                             message: format!(
                                 "PORT failed: {} {}",
                                 port_response.0, port_response.1
@@ -420,7 +422,7 @@ impl RawFtpControl {
                 }
             } else {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
+                    RecoverableError::FtpProtocolError {
                         message: format!("EPRT failed for IPv6: {} {}", response.0, response.1),
                     },
                 ));
@@ -434,8 +436,13 @@ impl RawFtpControl {
         debug!("Initiating file retrieval: {}", remote_path);
         let resp = self.command(&format!("RETR {}", remote_path)).await?;
         if resp.0 != 150 && resp.0 != 125 {
+            if resp.0 == 550 {
+                return Err(Aria2Error::Fatal(FatalError::FileNotFound {
+                    path: remote_path.to_string(),
+                }));
+            }
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("RETR unexpected response: {} {}", resp.0, resp.1),
                 },
             ));
