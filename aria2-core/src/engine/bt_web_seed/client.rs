@@ -42,12 +42,7 @@ impl WebSeedClient {
         crate::http::client_pool::ensure_rustls_provider();
 
         // Build client with sensible defaults for large file downloads
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(4)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_client();
 
         Self {
             base_url: base_url.to_string(),
@@ -62,12 +57,7 @@ impl WebSeedClient {
         debug!(url = base_url, "Creating WebSeedClient with shared stats");
         crate::http::client_pool::ensure_rustls_provider();
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(4)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_client();
 
         Self {
             base_url: base_url.to_string(),
@@ -255,4 +245,14 @@ impl WebSeedClient {
     pub fn url(&self) -> &str {
         &self.base_url
     }
+}
+
+fn build_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(4)
+        .gzip(false)
+        .build()
+        .expect("web-seed HTTP client configuration must be valid")
 }

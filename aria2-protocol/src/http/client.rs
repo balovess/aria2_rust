@@ -25,7 +25,10 @@ impl Default for HttpClientOptions {
             timeout: Duration::from_secs(300),
             max_redirects: 5,
             user_agent: crate::identity::DEFAULT_USER_AGENT.to_string(),
-            accept_gzip: true,
+            // aria2_original advertises compressed HTTP responses only when
+            // --http-accept-gzip is enabled. Keep the protocol client safe
+            // by default; callers can opt in explicitly.
+            accept_gzip: false,
             verify_tls: true,
             ca_cert_path: None,
         }
@@ -63,9 +66,7 @@ impl HttpClient {
             .user_agent(&options.user_agent)
             .redirect(redirect::Policy::limited(options.max_redirects));
 
-        if options.accept_gzip {
-            builder = builder.gzip(true);
-        }
+        builder = builder.gzip(options.accept_gzip);
 
         if !options.verify_tls {
             builder = builder.danger_accept_invalid_certs(true);
@@ -331,6 +332,11 @@ pub enum RedirectAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_options_do_not_advertise_gzip() {
+        assert!(!HttpClientOptions::default().accept_gzip);
+    }
 
     #[test]
     fn test_should_follow_301() {

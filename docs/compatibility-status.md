@@ -49,7 +49,7 @@ substitutes for missing original behavior.
 | Area | Rust implementation | Status | Main evidence or remaining gap |
 | --- | --- | --- | --- |
 | Engine and scheduling | aria2-core/src/engine/ | PARTIAL | Typed command loop, generation-based completion accounting, `CancellationToken` shutdown, pause/unpause requeueing, runtime concurrency and global rate updates are covered. Shared retry policy now has source-backed `max-tries` semantics across sequential HTTP, concurrent segments, and FTP; full parity across allocation and all protocol commands is not yet proven. |
-| HTTP/HTTPS | aria2-core/src/http/, aria2-protocol/src/http/ | PARTIAL | Focused parser and download coverage exists, including existing-file naming, control-file cleanup, preallocation-safe resume recovery, multi-URI resume failover, HTTP 200 responses that ignore a requested Range (`CannotResume` by default or fresh restart according to `always-resume`/`max-resume-failure-tries`), and an E2E check that `max-tries` counts total GET attempts with `0` meaning unlimited. Core owns production orchestration; `aria2-protocol::http::client` remains a separate compatibility-layer client with no core production callers, and broader original-binary interoperability remains unverified. |
+| HTTP/HTTPS | aria2-core/src/http/, aria2-protocol/src/http/ | PARTIAL | Focused parser and download coverage exists, including existing-file naming, control-file cleanup, preallocation-safe resume recovery, unknown-remote-length resume, multi-URI resume failover, HTTP 200 responses that ignore a requested Range (CannotResume by default or fresh restart according to always-resume/max-resume-failure-tries), request-level GET/HEAD, cache, digest, keep-alive, explicit-header, gzip, and chunked coverage, and an E2E check that max-tries counts total GET attempts with 0 meaning unlimited. Default production clients explicitly disable gzip negotiation and opt in only through http-accept-gzip; every unknown-length path, including explicit split > 1, starts with one ordinary GET and does not issue a synthetic Range probe. Dynamic promotion of that first response into segmented storage remains open. Core owns production orchestration; aria2-protocol::http::client is the standalone adapter used by tracker code, and broader original-binary interoperability remains unverified. |
 | FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Original FTP active/passive/auth behavior has focused coverage, including a canonical multiline response parser with the C++ 64 KiB receive limit, the original PASV control-peer target rule, `max-tries` total-attempt semantics, remote `SIZE` versus `RETR` length validation, and whole-file checksum verification for both fresh downloads and same-length local-file short-circuiting. Live-server and client interoperability evidence is incomplete. FTPS is a Rust-only additive extension: explicit/implicit control and data TLS paths exist, the plaintext downgrade regression is covered, and positive TLS-server interoperability is still unverified. |
 | SFTP | aria2-protocol/src/sftp/, aria2-core/src/engine/sftp_download_command/ | PARTIAL | A local `russh` SFTP server E2E now verifies password acceptance and rejection, aria2_original's `sha-1=<hex>` host-key pin acceptance and mismatch rejection, missing-file mapping, complete output, and resume from an existing local prefix (`test_e2e_sftp_download`: 6 passed). Focused protocol and core command suites also pass (137 and 16 tests). Interoperability with third-party SFTP servers, public-key authentication, and the complete original error/extension matrix remain unverified. Known-hosts persistence is not part of aria2_original's `ssh-host-key-md` contract. |
 | BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. `bt-prioritize-piece` now uses the original typed `head[=SIZE],tail[=SIZE]` parser and a file-boundary priority wrapper over rarest-first, with focused parser/picker/index tests. Incoming listener ownership, dependency graph, and full scheduler/seeding parity remain. |
@@ -63,6 +63,19 @@ substitutes for missing original behavior.
 ## Verification Evidence
 
 ### Current Compatibility Slice (2026-08-12)
+
+The HTTP request-policy slice now has production E2E evidence for default GET,
+use-head, http-no-cache, no-want-digest-header, enable-http-keep-alive,
+explicit header precedence, http-accept-gzip, and unknown-length chunked
+responses. Every unknown-length path, including explicit split > 1, sends one
+ordinary GET without a synthetic Range: bytes=0-0 probe. The current Rust
+orchestrator then completes that response sequentially; promoting its already
+received body into segmented storage, as aria2_original does, remains open.
+
+All production HTTP client construction paths audited in this slice make gzip
+negotiation explicit: disabled by default and enabled only for the configured
+download option. This includes the standalone protocol HTTP client used by
+tracker code, Metalink, concurrent downloads, web seeds, and tracker clients.
 
 The project emits one product identity. The Cargo package version
 (`aria2-rust` 0.2.9 on this checkout), CLI version action and startup banner,

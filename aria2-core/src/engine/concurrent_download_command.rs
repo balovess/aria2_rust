@@ -77,6 +77,7 @@ impl ConcurrentDownloadCommand {
             reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(30))
                 .timeout(Duration::from_secs(300))
+                .gzip(options.http_accept_gzip)
                 .user_agent(crate::constants::USER_AGENT)
                 .redirect(reqwest::redirect::Policy::limited(5))
                 .build()

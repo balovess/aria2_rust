@@ -67,36 +67,6 @@ impl RangeProber {
         probe_stage_2
     }
 
-    /// Fetch the entity length without using HEAD.
-    ///
-    /// A `bytes=0-0` GET is still a normal GET from the server's point of
-    /// view, but a compliant range response exposes the complete entity size
-    /// in `Content-Range`. This keeps the default download method compatible
-    /// with aria2 while giving the Rust scheduler enough information to pick
-    /// segmented downloading before it opens the full body.
-    pub async fn probe_entity_length(&self, uri: &str) -> Option<(u64, bool)> {
-        let req = self.request_policy.apply(
-            self.client
-                .get(uri)
-                .header("Range", "bytes=0-0")
-                .timeout(Duration::from_secs(
-                    constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                )),
-            self.cookie_header.as_deref(),
-            &[],
-        );
-        let response = req.send().await.ok()?;
-        let supports_range = response.status().as_u16() == 206;
-        let total_length = response
-            .headers()
-            .get("Content-Range")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.rsplit_once('/'))
-            .and_then(|(_, total)| total.parse::<u64>().ok())
-            .or_else(|| response.content_length())?;
-        Some((total_length, supports_range))
-    }
-
     pub async fn probe_single_range(&self, uri: &str, range_header: &str) -> bool {
         let req = self.request_policy.apply(
             self.client

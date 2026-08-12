@@ -218,12 +218,15 @@ impl ActiveOutputRegistry {
 }
 
 fn compatible_existing_length(path: &Path, total_length: Option<u64>) -> bool {
-    let Some(total_length) = total_length else {
-        return false;
-    };
-    std::fs::metadata(path)
-        .map(|metadata| metadata.len() <= total_length)
-        .unwrap_or(false)
+    match total_length {
+        Some(total_length) => std::fs::metadata(path)
+            .map(|metadata| metadata.len() <= total_length)
+            .unwrap_or(false),
+        // A normal HTTP GET learns the entity length from its response. An
+        // explicit --continue still makes an existing local prefix reusable
+        // before that response arrives; the Range request validates it.
+        None => path.exists(),
+    }
 }
 
 /// Split a path using the same extension rules as aria2's

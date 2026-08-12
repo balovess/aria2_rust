@@ -214,6 +214,9 @@ pub fn build_tracker_client(timeout_secs: u64) -> Result<reqwest::Client, String
     crate::http::client_pool::ensure_rustls_provider();
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
+        // aria2 does not advertise compressed tracker responses by default.
+        // Keep this independent client aligned with the download clients.
+        .gzip(false)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }

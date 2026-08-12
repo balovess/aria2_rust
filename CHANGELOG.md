@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Compatibility and verification
+- Added production HTTP request-policy E2E coverage for GET/HEAD selection,
+  cache and digest headers, keep-alive, explicit header precedence, gzip, and
+  unknown-length chunked downloads.
+- Made gzip negotiation explicit across production HTTP clients: disabled by
+  default and enabled only by the http-accept-gzip option. Unknown-length
+  default downloads no longer issue a synthetic Range probe; explicit
+  segmented scheduling remains documented as an interim path.
 - Updated the active output collision resolver to use aria2-compatible `.1`, `.2`, ... filename suffixes.
 - Corrected compatibility documentation for RPC method and notification counts.
 - Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.

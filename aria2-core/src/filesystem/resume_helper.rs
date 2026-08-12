@@ -48,7 +48,7 @@ impl ResumeHelper {
                 })?;
         }
 
-        if !self.continue_opt || total_length == 0 {
+        if !self.continue_opt {
             return Ok(ResumeState {
                 existing_length: 0,
                 control_file: None,
@@ -57,6 +57,12 @@ impl ResumeHelper {
                 is_complete: false,
             });
         }
+
+        // The remote length is not known yet for a normal HTTP GET. A
+        // resumable local file is still enough to issue the initial Range
+        // request; the response then provides the authoritative entity
+        // length. This matches aria2's request-first flow and avoids a
+        // synthetic bytes=0-0 probe for ordinary downloads.
 
         let existing_length = if file_exists {
             tokio::fs::metadata(&self.output_path)
@@ -158,6 +164,24 @@ mod tests {
         assert!(state.should_resume);
         assert_eq!(state.start_offset, 500);
         assert_eq!(state.existing_length, 500);
+        assert!(!state.is_complete);
+    }
+
+    #[tokio::test]
+    async fn test_detect_partial_file_when_remote_length_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unknown-length.bin");
+        tokio::fs::write(&path, vec![0xAB; 500]).await.unwrap();
+
+        let helper = ResumeHelper::new(&path, true);
+        let state = helper.detect(0).await.unwrap();
+
+        assert!(state.should_resume);
+        assert_eq!(state.start_offset, 500);
+        assert_eq!(
+            ResumeHelper::build_range_header(&state).as_deref(),
+            Some("bytes=500-")
+        );
         assert!(!state.is_complete);
     }
 

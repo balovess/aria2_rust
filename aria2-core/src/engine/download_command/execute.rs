@@ -74,7 +74,7 @@ impl DownloadCommand {
         } else {
             None
         };
-        let (mut total_length, mut head_supports_range) = if let Some(ref resp) = head_resp {
+        let (total_length, head_supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp
                 .headers()
                 .get(reqwest::header::CONTENT_LENGTH)
@@ -90,26 +90,6 @@ impl DownloadCommand {
         } else {
             (known_total_length, false)
         };
-
-        if head_resp.is_none()
-            && total_length == 0
-            && options.split.unwrap_or(constants::DEFAULT_SPLIT) > 1
-        {
-            let probe = RangeProber::new(Arc::clone(&self.client), self.request_policy.clone())
-                .with_cookie_header(
-                    url_for_head
-                        .as_ref()
-                        .map(|url| {
-                            self.create_cookie_helper()
-                                .build_cookie_header_from_url(url)
-                        })
-                        .filter(|header| !header.is_empty()),
-                );
-            if let Some((length, supports_range)) = probe.probe_entity_length(uri).await {
-                total_length = length;
-                head_supports_range = supports_range;
-            }
-        }
 
         let supports_range = if head_supports_range {
             true
