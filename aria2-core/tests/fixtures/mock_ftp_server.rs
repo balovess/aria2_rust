@@ -234,6 +234,7 @@ impl MockFtpServer {
     fn file_size(path: &str) -> u64 {
         match path {
             p if p.contains("small.bin") => SMALL_CONTENT.len() as u64,
+            p if p.contains("short.bin") => 4,
             p if p.contains("medium.bin") => 1024 * 1024,
             p if p.contains("large.bin") => 10 * 1024 * 1024,
             _ => 0,
@@ -243,6 +244,7 @@ impl MockFtpServer {
     fn get_file_content(path: &str) -> Vec<u8> {
         match path {
             p if p.contains("small.bin") => SMALL_CONTENT.to_vec(),
+            p if p.contains("short.bin") => vec![0x01, 0x02],
             p if p.contains("medium.bin") => vec![MEDIUM_PATTERN; 1024 * 1024],
             p if p.contains("large.bin") => vec![LARGE_PATTERN; 10 * 1024 * 1024],
             _ => vec![],

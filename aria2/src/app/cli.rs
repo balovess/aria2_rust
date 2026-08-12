@@ -100,9 +100,10 @@ impl FromStr for HelpRequest {
 
 /// Command-line arguments for the aria2-compatible binary.
 ///
-/// `name = "aria2c"` and the explicit compatibility version preserve the
-/// upstream executable identity. The binary itself remains `aria2c` via
-/// `[[bin]]` in `aria2/Cargo.toml`.
+/// `name = "aria2c"` preserves the established executable entry point for
+/// existing clients. The displayed version still comes from this product's
+/// package metadata, and the binary remains `aria2c` via `[[bin]]` in
+/// `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
     name = "aria2c",
@@ -134,7 +135,7 @@ pub struct CliArgs {
     #[command(flatten)]
     pub advanced: AdvancedArgs,
 
-    /// Original aria2 version action (`-v`, `--version`).
+    /// aria2-compatible version action using the aria2-rust product version.
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
     pub version: Option<bool>,
 

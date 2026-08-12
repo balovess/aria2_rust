@@ -2,8 +2,8 @@
 
 Last verified: 2026-08-12
 Reference implementation: aria2_original/  
-Rust workspace version: 0.2.8
-Public product identity: aria2-rust 0.2.8
+Rust workspace version: 0.2.9
+Public product identity: aria2-rust 0.2.9
 
 This is the current status source for the migration. The file-level records
 under docs/migration/ and the historical plans under .trae/ are useful
@@ -62,15 +62,27 @@ substitutes for missing original behavior.
 
 ## Verification Evidence
 
-### Current Compatibility Slice (2026-08-10)
+### Current Compatibility Slice (2026-08-12)
 
 The project emits one product identity. The Cargo package version
-(`aria2-rust` 0.2.8 on this checkout), CLI version action and startup banner,
+(`aria2-rust` 0.2.9 on this checkout), CLI version action and startup banner,
 RPC `getVersion`,
 default HTTP/tracker User-Agent, BitTorrent peer agent, and BitTorrent
 extension handshake use the same release source.
 
-- `user-agent` and `peer-agent` registry defaults use `aria2-rust/0.2.8`.
+The executable name `aria2c` and the RPC method/field names remain only as
+compatibility entry points. They do not change the product identity or cause
+the implementation to report an upstream aria2 version.
+
+The workspace is also version-consistent: all four Rust member crates use the
+workspace package version, all internal path dependency constraints target
+0.2.9, distribution manifests and SDK package metadata use 0.2.9, and active
+installer fallbacks, examples, and benchmarks use `aria2-rust/0.2.9`.
+Historical release notes, generic parser tests, and original-protocol fixtures
+may retain older or upstream version literals when they are input data rather
+than emitted product identity.
+
+- `user-agent` and `peer-agent` registry defaults use `aria2-rust/0.2.9`.
   The peer-ID prefix is `A2-RUST-`; the default peer ID is generated once per
   process and remains exactly 20 bytes.
 - RPC message shapes, method names, authentication, errors, notifications,
@@ -87,7 +99,7 @@ This slice was checked with `cargo fmt --all -- --check`, the focused
 `handlers::handler_tests::test_get_version_uses_product_version` regressions,
 the complete `test_cli_options` target (105 passed),
 `cargo build -p aria2 --all-features -j 1` with an observed
-`aria2c --version` value of `aria2c 0.2.8`, and
+`aria2c --version` value of `aria2c 0.2.9`, and
 `cargo clippy -p aria2 --all-targets --all-features -- -D warnings`.
 The RPC catalog additionally passed the independent
 `handlers::system::tests::test_list_methods` regression and the real HTTP
@@ -123,6 +135,22 @@ npm run typecheck                                        PASS
 npm run build                                            PASS
 ARIA2_RUST_BIN=target/debug/aria2c.exe npm test          123 passed
 PYTHONPATH=.codex-python-deps python -m pytest -p no:cacheprovider 137 passed
+~~~
+
+Latest focused verification on 2026-08-12:
+
+~~~text
+cargo test -p aria2-core --lib session::session_entry --all-features -j 1          19 passed
+cargo test -p aria2-core --lib request::request_group::options --all-features -j 1  5 passed
+cargo test -p aria2 --test test_cli_options --all-features -j 1                  105 passed
+cargo test -p aria2 --lib app::tests --all-features -j 1                         20 passed
+aria2-rpc all-feature targets (9 individual targets), before version update     402 passed
+cargo test -p aria2-rpc --lib handlers::handler_tests::test_get_global_option_uses_original_wire_visibility_not_help_visibility --all-features -- --exact  1 passed
+cargo test -p aria2-rpc --test test_e2e_all_rpc_methods --all-features -j 1       55 passed
+cargo test -p aria2-rpc --test test_e2e_http_server --all-features -j 1           46 passed
+cargo test -p aria2-rpc --test test_https_rpc --all-features -j 1                  4 passed
+cargo metadata --no-deps --format-version 1                                      0.2.9 for all Rust members
+cargo fmt --all -- --check                                                       PASS
 ~~~
 
 Latest FTP/FTPS checkpoint (2026-08-09):
@@ -224,7 +252,7 @@ cargo check -p aria2-core --all-features -j 1                         PASS
 cargo test -p aria2-protocol --lib bittorrent::piece::picker --all-features -- --test-threads=1
   37 passed, 0 failed
 cargo test -p aria2-core --lib config::option --all-features -- --test-threads=1
-  39 passed, 0 failed
+  40 passed, 0 failed
 cargo test -p aria2-core --lib engine::bt_piece_selector --all-features -- --test-threads=1
   13 passed, 0 failed
 ~~~
@@ -369,8 +397,9 @@ The XML-RPC adapter now also has source-backed HTTP contract coverage against
 `aria2_original/src/HttpServerBodyCommand.cc`: parser or XML value conversion
 failures return HTTP 400 with an empty body and no `Content-Type`, while a
 successfully parsed method execution failure returns HTTP 200 with an XML
-fault whose `faultCode` is `1`. The current all-features RPC target set is 402
-passed and 0 failed after this and later wire regressions were added.
+fault whose `faultCode` is `1`. The completed all-features RPC target set is
+402 passed and 0 failed; the later default-visibility regression also passes
+as a separate targeted test.
 
 The XML-RPC value adapter was compared with
 `aria2_original/src/XmlRpcRequestParserStateImpl.cc` and
@@ -499,8 +528,9 @@ target uses the repository Rustls certificate fixture to make a real TLS
 connection and complete `aria2.getVersion`; it is not only configuration
 coverage.
 
-All `aria2-rpc` all-feature test targets completed in the aggregate command,
-for 402 passed and 0 failed: 224 library, 18 integration, 55 all-method E2E, 46 HTTP/WebSocket/XML-RPC
+All `aria2-rpc` all-feature test targets completed in the aggregate command
+before the concurrent workspace version update, for 402 passed and 0 failed:
+224 library, 18 integration, 55 all-method E2E, 46 HTTP/WebSocket/XML-RPC
 route E2E, 5 server, 4 HTTPS, 31 mock-server, 9 header/progress, and 10 stress
 tests. `cargo fmt --all -- --check` and
 `cargo clippy -p aria2-rpc --all-targets --all-features -- -D warnings` also

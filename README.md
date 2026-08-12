@@ -208,13 +208,18 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-08): the protocol, RPC, and CLI crates pass
-their all-feature package test suites; the core all-feature targets executed
-3,411 passing tests with 11 ignored and 0 failures before a Windows build
-timeout while the final target was starting. Node.js binding tests pass 123/123
-and Python binding tests pass 137/137 with a real `aria2c` binary. The single
-workspace aggregate command is still a build-time timeout on this host, so
-these results do not mean the migration is complete.
+Verification snapshot (2026-08-12): the current focused evidence includes
+40 option-parser tests, 13 BitTorrent selector tests, 37 protocol picker tests,
+20 CLI/app tests, 105 CLI regression tests, and a previously completed 402-test
+RPC all-feature run, plus one additional targeted RPC default-visibility
+regression. The full RPC run preceded the concurrent workspace version update;
+under the current `0.2.9`, the version entry point, app tests, Clippy, and the
+targeted parser/RPC regressions pass. `aria2c --version` reports `aria2c 0.2.9`,
+and the four Rust workspace members, SDK packages, Homebrew formula, and Scoop
+manifest resolve to product version `0.2.9`. The single workspace
+aggregate command is still a build-time timeout on this host, and the complete
+original-client and cross-protocol E2E matrix remains open; these results do
+not mean the migration is complete.
 
 The project is organized as a Cargo workspace with 4 crates:
 

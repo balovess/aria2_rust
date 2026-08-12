@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
 - Updated the active output collision resolver to use aria2-compatible `.1`, `.2`, ... filename suffixes.
 - Corrected compatibility documentation for RPC method and notification counts.
 - Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.
+- Unified active Rust crate metadata, path dependency constraints, installer fallback, examples, and benchmarks on the `aria2-rust` 0.2.9 product version.
+- Synchronized Homebrew, Scoop, Python, and Node.js release metadata and test fixtures with the `aria2-rust` product version.
+- Corrected `bt-prioritize-piece` to the original `head[=SIZE],tail[=SIZE]` grammar while keeping the implementation and product identity Rust-native.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

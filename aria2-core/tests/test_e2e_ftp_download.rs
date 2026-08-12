@@ -91,6 +91,53 @@ async fn test_e2e_ftp_download_small_file() {
 }
 
 #[tokio::test]
+async fn test_e2e_ftp_checksum_mismatch_restarts_complete_local_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let output = dir.path().join("small.bin");
+    std::fs::write(&output, [0u8; 4]).unwrap();
+
+    let options = DownloadOptions {
+        checksum: Some((
+            "md5".to_string(),
+            "2f249230a8e7c2bf6005ccd2679259ec".to_string(),
+        )),
+        ..DownloadOptions::default()
+    };
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let mut cmd =
+        FtpDownloadCommand::new(GroupId::new(105), &url, &options, dir.path().to_str(), None)
+            .unwrap();
+
+    cmd.execute().await.unwrap();
+    assert_eq!(std::fs::read(output).unwrap(), small_content());
+    assert!(cmd.group().status().is_completed());
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_rejects_short_retr_after_size() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/short.bin", addr.port());
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(106),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .unwrap();
+
+    let error = cmd.execute().await.expect_err("short RETR must fail");
+    assert!(
+        error.to_string().contains("transfer length mismatch"),
+        "unexpected FTP short-read error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_ftp_max_tries_counts_total_control_attempts() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

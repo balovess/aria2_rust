@@ -105,6 +105,37 @@ async fn test_load_cli_args_rejects_invalid_file_allocation() {
 }
 
 #[tokio::test]
+async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
+    let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=head=512K,tail"])
+        .expect("clap should parse the original piece-priority syntax");
+    let mut app = App::new();
+
+    app.load_cli_args(cli)
+        .await
+        .expect("the registry should accept the original piece-priority syntax");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.bt_prioritize_piece, "head=512K,tail");
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_legacy_piece_priority_mode() {
+    let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=rarest"])
+        .expect("clap should parse the value before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the registry must reject the old synthetic piece-priority mode");
+
+    assert!(
+        error.contains("--bt-prioritize-piece"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn application_rpc_does_not_enable_cors_by_default() {
     let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

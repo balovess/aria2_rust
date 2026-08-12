@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use tokio::io::AsyncReadExt;
+
 use super::message_digest::{HashType, MessageDigest};
 use crate::error::{Aria2Error, Result};
 
@@ -68,6 +72,28 @@ impl Checksum {
             digest: MessageDigest::new(self.hash_type),
         }
     }
+}
+
+/// Verify a file incrementally without loading it into memory.
+pub async fn verify_file(path: &Path, checksum: &Checksum) -> Result<bool> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| Aria2Error::Io(format!("Failed to open {}: {}", path.display(), error)))?;
+    let mut reader = tokio::io::BufReader::with_capacity(65536, file);
+    let mut validator = checksum.create_validator();
+    let mut buffer = vec![0u8; 65536];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await.map_err(|error| {
+            Aria2Error::Io(format!("Failed to read {}: {}", path.display(), error))
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        validator.update(&buffer[..bytes_read]);
+    }
+
+    validator.finalize()
 }
 
 pub struct ChecksumValidator<'a> {

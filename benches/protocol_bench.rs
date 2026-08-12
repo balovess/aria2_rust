@@ -91,7 +91,7 @@ fn bench_http_request_build(c: &mut Criterion) {
         b.iter(|| {
             let uri = "http://example.com/large-file.iso";
             let headers = vec![
-                ("User-Agent".to_string(), "aria2-rust/0.1.0".to_string()),
+                ("User-Agent".to_string(), "aria2-rust/0.2.9".to_string()),
                 ("Range".to_string(), "bytes=0-1048575".to_string()),
                 ("Accept-Encoding".to_string(), "gzip, deflate".to_string()),
             ];

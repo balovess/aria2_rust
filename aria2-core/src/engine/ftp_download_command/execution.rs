@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
+use crate::checksum::checksum::{Checksum, verify_file};
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -255,6 +256,7 @@ impl FtpDownloadCommand {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0)
         };
+        let mut restart_from_zero = false;
         if let Some(actual_size) = file_size {
             {
                 let g = self.group.recover();
@@ -264,20 +266,62 @@ impl FtpDownloadCommand {
             }
 
             if !in_memory_download && local_size == actual_size {
-                self.resume_offset = actual_size;
-                self.completed_bytes = actual_size;
-                {
-                    let g = self.group.recover();
-                    g.update_progress(actual_size);
+                let checksum_valid = {
+                    let checksum_config = self.group.recover().options().checksum.clone();
+                    match checksum_config {
+                        Some((algorithm, expected)) => {
+                            let hash_type =
+                                crate::checksum::message_digest::HashType::from_str(&algorithm)
+                                    .ok_or_else(|| {
+                                        Aria2Error::Parse(format!(
+                                            "unknown checksum algorithm: {}",
+                                            algorithm
+                                        ))
+                                    })?;
+                            let checksum = Checksum::new(hash_type, &expected)?;
+                            verify_file(&self.output_path, &checksum).await?
+                        }
+                        None => true,
+                    }
+                };
+
+                if checksum_valid {
+                    self.resume_offset = actual_size;
+                    self.completed_bytes = actual_size;
+                    {
+                        let g = self.group.recover();
+                        g.update_progress(actual_size);
+                    }
+                    if self.group.recover().options().checksum.is_some() {
+                        self.group.recover().set_checksum_verified(true);
+                    }
+                    self.group.recover_mut().complete()?;
+                    info!(
+                        path = %self.output_path.display(),
+                        size = actual_size,
+                        "FTP target already matches remote SIZE and checksum"
+                    );
+                    ctrl.quit().await.ok();
+                    return Ok(());
                 }
-                self.group.recover_mut().complete()?;
-                info!(
+
+                warn!(
                     path = %self.output_path.display(),
-                    size = actual_size,
-                    "FTP target already matches remote SIZE"
+                    "FTP target checksum mismatch; restarting from byte zero"
                 );
-                ctrl.quit().await.ok();
-                return Ok(());
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&self.output_path)
+                    .and_then(|file| file.set_len(0))
+                    .map_err(|error| {
+                        FtpAttemptError::from(Aria2Error::FileIo(format!(
+                            "truncate checksum-mismatched FTP target {}: {}",
+                            self.output_path.display(),
+                            error
+                        )))
+                    })?;
+                self.resume_offset = 0;
+                restart_from_zero = true;
             }
 
             if in_memory_download {
@@ -295,7 +339,7 @@ impl FtpDownloadCommand {
                         )))
                     })?;
                 self.resume_offset = 0;
-            } else {
+            } else if !restart_from_zero {
                 self.resume_offset = local_size;
             }
         }
@@ -534,6 +578,15 @@ impl FtpDownloadCommand {
             }
         }
 
+        if let Some(expected_size) = file_size
+            && self.completed_bytes != expected_size
+        {
+            return Err(FtpAttemptError::from(Aria2Error::FtpProtocol(format!(
+                "FTP transfer length mismatch: expected {}, got {}",
+                expected_size, self.completed_bytes
+            ))));
+        }
+
         // Step 11: Cleanup and finalize
         drop(data_stream); // Close data connection
 
@@ -541,6 +594,28 @@ impl FtpDownloadCommand {
         let finalized_data = writer.finalize().await.map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!("Finalize writer failed: {}", e)))
         })?;
+
+        let checksum_config = self.group.recover().options().checksum.clone();
+        if let Some((algorithm, expected)) = checksum_config {
+            let hash_type = crate::checksum::message_digest::HashType::from_str(&algorithm)
+                .ok_or_else(|| {
+                    Aria2Error::Parse(format!("unknown checksum algorithm: {}", algorithm))
+                })?;
+            let checksum = Checksum::new(hash_type, &expected)?;
+            let verified = if in_memory_download {
+                checksum.verify(&finalized_data)
+            } else {
+                verify_file(&self.output_path, &checksum).await?
+            };
+            if !verified {
+                return Err(FtpAttemptError::from(Aria2Error::Checksum(format!(
+                    "{} checksum mismatch for {}",
+                    algorithm,
+                    self.output_path.display()
+                ))));
+            }
+            self.group.recover().set_checksum_verified(true);
+        }
 
         if in_memory_download {
             let group = self.group.recover();

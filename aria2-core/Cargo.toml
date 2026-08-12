@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version = "0.2.8"
+version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true

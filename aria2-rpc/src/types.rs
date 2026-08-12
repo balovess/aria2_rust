@@ -649,7 +649,7 @@ impl GlobalStat {
 
 /// Version information returned by `aria2.getVersion`.
 ///
-/// Contains the aria2 version string and list of enabled features.
+/// Contains this product's version and the aria2-compatible feature list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionInfo {
     /// Product version string.
@@ -660,7 +660,7 @@ pub struct VersionInfo {
 }
 
 impl VersionInfo {
-    /// Create VersionInfo for the aria2-compatible public interface.
+    /// Create our product version in the aria2-compatible public shape.
     ///
     /// Enabled features are dynamically generated based on compile-time
     /// protocol support available in the current build. The list reflects
@@ -869,7 +869,10 @@ mod tests {
                 ben_str("Aria2 Rust mock torrent for testing"),
             ),
             (ben_str("creation date"), ben_int(1700000000)),
-            (ben_str("created by"), ben_str("aria2-rust-test/0.2.4")),
+            (
+                ben_str("created by"),
+                ben_str(concat!("aria2-rust-test/", env!("CARGO_PKG_VERSION"))),
+            ),
             (ben_str("info"), info_dict),
         ])
     }

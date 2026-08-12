@@ -582,6 +582,10 @@ async fn test_get_global_option_uses_original_wire_visibility_not_help_visibilit
         .expect("global options must be an object");
 
     assert_eq!(options.get("dns-timeout"), Some(&serde_json::json!("30")));
+    assert!(
+        !options.contains_key("bt-prioritize-piece"),
+        "piece-priority has no original default and must stay absent until configured"
+    );
     assert_eq!(
         options.get("enable-async-dns6"),
         Some(&serde_json::json!("true")),

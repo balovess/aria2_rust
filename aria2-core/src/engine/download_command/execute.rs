@@ -2,10 +2,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::Checksum;
+use crate::checksum::checksum::{Checksum, verify_file};
 use crate::checksum::message_digest::HashType;
 use crate::constants;
 use crate::engine::active_output_registry::{OutputPathPolicy, global_registry};
@@ -389,27 +388,7 @@ impl DownloadCommand {
                 && let Some(ht) = HashType::from_str(algo)
             {
                 let cs = Checksum::new(ht, expected)?;
-                let file = tokio::fs::File::open(&self.output_path)
-                    .await
-                    .map_err(|e| {
-                        Aria2Error::Io(format!(
-                            "Failed to open file for checksum verification: {}",
-                            e
-                        ))
-                    })?;
-                let mut reader = tokio::io::BufReader::with_capacity(65536, file);
-                let mut validator = cs.create_validator();
-                let mut buf = vec![0u8; 65536];
-                loop {
-                    let n = reader.read(&mut buf).await.map_err(|e| {
-                        Aria2Error::Io(format!("Read error during checksum verification: {}", e))
-                    })?;
-                    if n == 0 {
-                        break;
-                    }
-                    validator.update(&buf[..n]);
-                }
-                if !validator.finalize()? {
+                if !verify_file(&self.output_path, &cs).await? {
                     tracing::error!(
                         algo = %algo,
                         path = %self.output_path.display(),

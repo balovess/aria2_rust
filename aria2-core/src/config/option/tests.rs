@@ -399,6 +399,20 @@ fn test_registry_identity_defaults_match_original_aria2() {
 
 #[cfg(feature = "bittorrent")]
 #[test]
+fn test_piece_priority_has_no_synthetic_default() {
+    let registry = OptionRegistry::new();
+
+    assert!(matches!(
+        registry
+            .get("bt-prioritize-piece")
+            .expect("piece-priority option must be registered")
+            .default_value(),
+        OptionValue::None
+    ));
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
 fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {
     let reg = OptionRegistry::new();
 
