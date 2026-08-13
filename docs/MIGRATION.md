@@ -121,6 +121,20 @@ cargo fmt --all -- --check
   PASS
 ~~~
 
+## RPC Multicall Envelope Checkpoint (2026-08-14)
+
+The `system.multicall` adapter now preserves the original authorization seam:
+the envelope does not consume a `token:` parameter, and parameter zero must
+be the list of sub-call structs. Each protected sub-call authenticates and
+strips its own leading `token:` value. A missing or mistyped envelope
+parameter returns execution error `code=1`; a sub-call with a missing, null,
+object, or scalar `params` member receives an empty positional list.
+
+This is implemented in the Rust wire/dispatch adapter without copying the C++
+method hierarchy or changing CLI, configuration, default, or product-version
+values. The overall migration remains `PARTIAL`; this checkpoint covers only
+the multicall envelope and sub-call parameter seam.
+
 This checkpoint closes the Rust-owned BitTorrent persistence slice only. It does
 not establish binary `.aria2` interoperability with aria2_original, complete
 BitTorrent scheduler/seeding parity, Metalink lifecycle parity, the complete
@@ -1014,3 +1028,34 @@ This closes the periodic lookup scheduling and local lifecycle regression
 slice only. Public-network DHT behavior, original-client interoperability,
 full BitTorrent scheduler and seeding parity, and workspace acceptance remain
 open; DHT, BitTorrent, and the overall migration remain `PARTIAL`.
+
+#### BitTorrent DHT engine lifecycle checkpoint (2026-08-14)
+
+- `aria2-protocol/src/bittorrent/dht/engine.rs` now owns all background task
+  handles for receive, periodic maintenance, and bootstrap. A shared Tokio
+  `watch` signal reaches every task; normal async shutdown waits for
+  cooperative exit, aborts only tasks still blocked in network work, and
+  joins every handle before routing-table persistence.
+- `shutdown()` immediately exposes `ShuttingDown` through both `state()` and
+  `stats()`. The change is internal Rust ownership/lifecycle work and does not
+  alter user configuration, defaults, product version, or DHT wire behavior.
+- The former `aria2-core/src/dht/` implementation was removed after an
+  independent source/dependency audit confirmed that production code and tests
+  use only `aria2-protocol/src/bittorrent/dht/`. This is duplicate-code cleanup,
+  not a compatibility-layer change; configuration, defaults, product identity,
+  and DHT wire behavior are unchanged.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-protocol --features bittorrent --lib bittorrent::dht::engine::tests -- --test-threads=1
+  7 passed, 0 failed
+cargo test -p aria2-core --test dht_integration_tests --features bittorrent -- --test-threads=1
+  30 passed, 0 failed, 4 ignored
+cargo check -p aria2-core --features bittorrent --lib
+  PASS
+cargo clippy -p aria2-protocol --all-targets --features bittorrent -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~

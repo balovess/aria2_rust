@@ -419,30 +419,30 @@ interoperability matrix is reproducibly green.
 
 ### 11. DHT
 
-**Status:** Near-Complete -- full engine implemented; BT integration wiring needed
-**Rust files:** `aria2-core/src/dht/` (29 files)
+**Status:** Partial -- the canonical protocol engine is integrated; public-network,
+interoperability, and full BitTorrent lifecycle evidence remain open
+**Rust files:** `aria2-protocol/src/bittorrent/dht/` (22 files)
+The former `aria2-core/src/dht/` duplicate was removed on 2026-08-14 after a
+source/dependency audit confirmed that it was not declared or referenced by
+production code or tests.
 **C++ files:** ~60 DHT*.h/.cc files
 
 | C++ Component | Rust Equivalent | Status |
 |---------------|----------------|--------|
-| DHTConstants.h | constants.rs | Complete |
-| DHTNode.h/.cc | node.rs + node_id.rs | Complete |
-| DHTBucket.h/.cc | bucket.rs | Complete |
-| DHTBucketTree.h/.cc | bucket_tree.rs | Complete |
-| DHTRoutingTable.h/.cc | routing_table.rs | Complete |
-| DHTTokenTracker.h/.cc | token_tracker.rs | Complete |
-| DHTConnectionImpl.h/.cc | transport.rs | Complete |
-| DHTMessageTracker.h/.cc | tracker.rs | Complete |
-| DHTPeerAnnounceStorage.h/.cc | peer_announce.rs | Complete |
-| DHTMessageDispatcherImpl.h/.cc | dispatcher.rs | Complete |
-| DHTMessageReceiver.h/.cc | receiver.rs | Complete |
-| All DHT message types | message.rs + message_codec.rs + message_decode.rs | Complete |
-| DHTRoutingTableSerializer/Deserializer | routing_table_ser.rs | Complete |
-| DHTTask hierarchy | task/ (6 files) | Complete |
-| DHTSetup + DHTInteractionCommand | DhtEngine::new() + run() | Complete |
-| All periodic commands | Periodic in run() loop | Complete |
-| DHTRegistry.h | Owned by DhtEngine | Complete |
-| DHTGetPeersCommand | DhtEngine::lookup_peers() | Complete |
+| DHTConstants.h | constants and timing values in `mod.rs`, `task.rs`, and engine config | Partial |
+| DHTNode.h/.cc | `node.rs` | Complete |
+| DHTBucket.h/.cc | `bucket.rs` + `bucket_tree.rs` | Complete |
+| DHTRoutingTable.h/.cc | `routing_table.rs` | Complete |
+| DHTTokenTracker.h/.cc | `token_tracker.rs` | Complete |
+| DHTConnectionImpl.h/.cc | `socket.rs` | Complete |
+| DHTMessageTracker.h/.cc | `tracker.rs` + `transaction.rs` | Complete |
+| DHTPeerAnnounceStorage.h/.cc | `peer_storage.rs` | Partial |
+| DHTMessageDispatcher/Receiver | `handler.rs` + `socket.rs` | Complete |
+| All DHT message types | `message.rs` | Complete |
+| DHT routing-table persistence | `persistence.rs` | Partial |
+| DHT task hierarchy | `task.rs`, `task_impl.rs`, `task_peer.rs`, `replace_node.rs` | Partial |
+| DHT setup and interaction loop | `engine.rs` + `engine_inner.rs` | Partial |
+| DHT get-peers lookup | `client.rs` + `lookup.rs` | Partial |
 
 #### Remaining Gaps
 

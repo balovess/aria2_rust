@@ -1652,10 +1652,10 @@ async fn regression_multicall_subcall_bad_token_isolated() {
     assert!(ok.get("version").is_some());
 }
 
-/// Test: a token supplied on the multicall envelope authorizes sub-calls that
-/// do not carry one of their own (the non-AriaNg client convention).
+/// Test: a token supplied on the multicall envelope is rejected like the C++
+/// implementation, which requires parameter zero to be the call list.
 #[tokio::test]
-async fn regression_multicall_envelope_token_authorizes_subcalls() {
+async fn regression_multicall_envelope_token_is_not_a_fallback() {
     let secret = "multicall-secret";
     let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
 
@@ -1670,21 +1670,11 @@ async fn regression_multicall_envelope_token_authorizes_subcalls() {
         ]),
     );
     let resp = engine.handle_request(&req).await;
-    assert_success(&resp);
-
-    assert!(
-        assert_multicall_ok(&resp, 0, "aria2.getVersion")
-            .get("version")
-            .is_some()
-    );
-    assert!(
-        assert_multicall_ok(&resp, 1, "aria2.getGlobalStat")
-            .get("downloadSpeed")
-            .is_some()
-    );
+    assert_error_code(&resp, 1);
 }
 
-/// Test: an invalid token on the multicall envelope is still rejected outright.
+/// Test: an invalid token-shaped first envelope parameter is still rejected as
+/// a wrong multicall parameter, rather than being treated as authentication.
 #[tokio::test]
 async fn regression_multicall_envelope_bad_token_rejected() {
     let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("real-secret"));

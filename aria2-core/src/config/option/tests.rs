@@ -247,10 +247,12 @@ fn test_size_bounds_are_applied_by_the_definition() {
 fn test_option_def_parse_boolean() {
     let def = OptionDef::new("verbose", OptionType::Boolean);
     assert!(def.parse_value("true").unwrap().as_bool().unwrap());
-    assert!(def.parse_value("yes").unwrap().as_bool().unwrap());
-    assert!(def.parse_value("1").unwrap().as_bool().unwrap());
     assert!(!def.parse_value("false").unwrap().as_bool().unwrap());
-    assert!(!def.parse_value("no").unwrap().as_bool().unwrap());
+    assert!(def.parse_value("").unwrap().as_bool().unwrap());
+    assert!(def.parse_value("yes").is_err());
+    assert!(def.parse_value("1").is_err());
+    assert!(def.parse_value("no").is_err());
+    assert!(def.parse_value("TRUE").is_err());
     assert!(def.parse_value("invalid").is_err());
 }
 
@@ -277,7 +279,7 @@ fn test_option_def_parse_enum_rejects_unknown_choice() {
 }
 
 #[test]
-fn test_option_def_parse_empty_uses_default() {
+fn test_option_def_parse_explicit_empty_is_not_a_default_request() {
     let def = OptionDef {
         name: "dir".into(),
         opt_type: OptionType::Path,
@@ -285,7 +287,32 @@ fn test_option_def_parse_empty_uses_default() {
         ..Default::default()
     };
     let v = def.parse_value("").unwrap();
-    assert_eq!(v.as_str().unwrap(), "/tmp");
+    assert_eq!(v.as_str().unwrap(), "");
+    assert_eq!(def.parse_default_value().unwrap().as_str(), Some("/tmp"));
+}
+
+#[test]
+fn test_rpc_empty_values_use_explicit_option_semantics() {
+    let registry = OptionRegistry::new();
+
+    assert_eq!(
+        registry
+            .parse_rpc_value("dir", &serde_json::json!(""))
+            .unwrap()
+            .as_str(),
+        Some("")
+    );
+    assert!(
+        registry
+            .parse_rpc_value("split", &serde_json::json!(""))
+            .is_err()
+    );
+    assert!(
+        registry
+            .parse_rpc_value("rpc-secret", &serde_json::json!(""))
+            .is_err()
+    );
+    assert!(!registry.get("rpc-secret").unwrap().allow_empty);
 }
 
 #[test]

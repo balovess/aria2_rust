@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
+use crate::server::RpcAuthMiddleware;
 use crate::types::{SessionInfo, StatusInfo, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::download::download_context::DownloadContext;
@@ -990,6 +991,39 @@ async fn test_multicall_invalid_entries_match_cpp_errors_and_continue() {
             .contains("Recursive")
     );
     assert!(results[2].as_array().unwrap()[0].get("version").is_some());
+}
+
+#[tokio::test]
+async fn test_multicall_rejects_envelope_token_like_cpp() {
+    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("secret"));
+    let req = JsonRpcRequest::new(
+        "system.multicall",
+        serde_json::json!(["token:secret", [{"methodName": "aria2.getVersion"}]]),
+    )
+    .with_id(1);
+
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_error());
+    assert_eq!(resp.error.as_ref().map(|error| error.code), Some(1));
+}
+
+#[tokio::test]
+async fn test_multicall_treats_non_array_subcall_params_as_empty() {
+    let engine = RpcEngine::new();
+    let req = JsonRpcRequest::new(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.getVersion", "params": {"token": "ignored"}},
+            {"methodName": "aria2.getSessionInfo", "params": null}
+        ]]),
+    )
+    .with_id(1);
+
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success());
+    let results = resp.result.unwrap();
+    assert!(results[0][0].get("version").is_some());
+    assert!(results[1][0].get("sessionId").is_some());
 }
 
 #[tokio::test]

@@ -164,23 +164,27 @@ impl RpcEngine {
     ///    other method to [`RpcEngine::dispatch_single`].
     /// 3. Post-process the result into aria2's wire format.
     ///
-    /// `system.multicall` is deliberately exempt from step 1's *mandatory*
-    /// check: C++ aria2's `SystemMulticallRpcMethod::execute()` overrides the
-    /// base `RpcMethod::execute()` and therefore never calls `authorize()` on
-    /// the multicall envelope — each sub-call authorizes itself instead.
-    /// AriaNg / webui-aria2 depend on this, since they put the secret into
-    /// every sub-call's `params[0]` and never into the envelope. An envelope
-    /// token that *is* present is still validated here and additionally used
-    /// as the fallback secret for sub-calls that omit their own.
+    /// `system.multicall` is deliberately exempt from step 1: C++ aria2's
+    /// `SystemMulticallRpcMethod::execute()` overrides the base
+    /// `RpcMethod::execute()` and therefore never authorizes the multicall
+    /// envelope. Each sub-call authorizes itself instead. This matters for
+    /// AriaNg and webui-aria2, which put the secret into every sub-call's
+    /// `params[0]` and leave the envelope parameters as the call list.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let is_multicall = req.method == "system.multicall";
+
+        if is_multicall {
+            return self
+                .handle_multicall(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone()));
+        }
 
         // Authenticate: extract token from params and validate.
         // Supports both array-style ("token:xxx" as first param element)
         // and object-style ({"token": "xxx"}) params for backward compatibility.
         let (token, stripped_params) = split_auth_token(&req.params);
         if rpc_method_requires_auth(&req.method)
-            && (!is_multicall || token.is_some())
             && let Err(auth_err) = self.auth_middleware.validate(token.as_deref())
         {
             return auth_err.into_response(req.id.clone());
@@ -203,13 +207,7 @@ impl RpcEngine {
             None => req,
         };
 
-        if is_multicall {
-            self.handle_multicall(dispatch_req, token.as_deref())
-                .await
-                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone()))
-        } else {
-            self.dispatch_single(dispatch_req).await
-        }
+        self.dispatch_single(dispatch_req).await
     }
 
     /// Dispatch one already-authenticated, token-stripped JSON-RPC request.

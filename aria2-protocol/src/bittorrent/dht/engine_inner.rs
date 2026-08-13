@@ -15,6 +15,7 @@ use tracing::{debug, info, trace, warn};
 use super::DhtEngine;
 use super::DhtEngineState;
 use super::bootstrap::DhtBootstrap;
+use super::engine::DhtEngineContext;
 use super::handler::DhtQueryHandler;
 use super::lookup::iterative_find_node;
 use super::message::DhtMessage;
@@ -35,22 +36,28 @@ impl DhtEngine {
     /// Spawn the main UDP receive loop as a background task.
     pub(super) fn spawn_receive_loop(
         self: &Arc<Self>,
-        mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
-        let engine = Arc::clone(self);
-        let socket = self.socket.clone();
-        let tracker = Arc::clone(&self.tracker);
-        let handler_self_id = self.handler.self_id();
+        let context = Arc::clone(&self.context);
+        let socket = context.socket.clone();
+        let tracker = Arc::clone(&context.tracker);
+        let handler_self_id = context.handler_self_id;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let handler = DhtQueryHandler::new(handler_self_id);
             info!("DHT receive loop started");
             let mut buf = [0u8; 4096];
 
             loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+
                 let recv_result = tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        info!("DHT receive loop shutting down");
+                    result = shutdown_rx.changed() => {
+                        if result.is_ok() {
+                            info!("DHT receive loop shutting down");
+                        }
                         break;
                     }
                     result = socket.recv_with_timeout(&mut buf, Duration::from_secs(1)) => {
@@ -60,7 +67,7 @@ impl DhtEngine {
 
                 match recv_result {
                     Ok((len, from)) if len > 0 => {
-                        engine
+                        context
                             .process_inbound_message(&buf[..len], from, &tracker, &handler)
                             .await;
                     }
@@ -74,12 +81,13 @@ impl DhtEngine {
                 // Process transaction timeouts
                 let timed_out = tracker.handle_timeouts();
                 for (addr, _query_type, node_id) in timed_out {
-                    engine.handle_timeout(addr, node_id).await;
+                    context.handle_timeout(addr, node_id).await;
                 }
             }
 
             info!("DHT receive loop exited");
         });
+        self.register_background_task(handle);
     }
 
     /// Spawn periodic maintenance tasks.
@@ -90,51 +98,54 @@ impl DhtEngine {
     /// `DhtTaskQueue` for concurrency-limited scheduling (matching C++'s
     /// periodicTaskQueue1/2 design).
     pub(super) fn spawn_periodic_tasks(self: &Arc<Self>) {
-        let engine = Arc::clone(self);
+        let context = Arc::clone(&self.context);
+        let config = context.config.clone();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         // Token rotation + bucket refresh + node contact + peer cleanup + auto-save
-        tokio::spawn(async move {
-            let mut token_interval = tokio::time::interval(engine.config.token_rotation_interval);
-            let mut refresh_check_interval =
-                tokio::time::interval(engine.config.refresh_check_interval);
-            let mut node_contact_interval =
-                tokio::time::interval(engine.config.node_contact_interval);
+        let handle = tokio::spawn(async move {
+            let mut token_interval = tokio::time::interval(config.token_rotation_interval);
+            let mut refresh_check_interval = tokio::time::interval(config.refresh_check_interval);
+            let mut node_contact_interval = tokio::time::interval(config.node_contact_interval);
             let mut cleanup_interval = tokio::time::interval(Duration::from_secs(300));
             let mut save_interval = tokio::time::interval(Duration::from_secs(1800));
 
             loop {
                 tokio::select! {
+                    result = shutdown_rx.changed() => {
+                        if result.is_ok() {
+                            info!("DHT periodic tasks shutting down");
+                        }
+                        break;
+                    }
                     _ = token_interval.tick() => {
-                        let mut tt = engine.token_tracker.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut tt = context.token_tracker.lock().unwrap_or_else(|e| e.into_inner());
                         tt.maybe_rotate();
                         trace!("DHT token rotation check");
                     }
                     _ = refresh_check_interval.tick() => {
-                        engine.refresh_buckets().await;
+                        context.refresh_buckets().await;
                     }
                     _ = node_contact_interval.tick() => {
-                        engine.contact_nodes().await;
+                        context.contact_nodes().await;
                     }
                     _ = cleanup_interval.tick() => {
-                        engine.peer_storage.cleanup_expired();
-                        engine.tracker.cleanup_expired();
-                        engine.evict_and_replace_nodes().await;
+                        context.peer_storage.cleanup_expired();
+                        context.tracker.cleanup_expired();
+                        context.evict_and_replace_nodes().await;
                         trace!("DHT periodic cleanup");
                     }
                     _ = save_interval.tick() => {
-                        engine.save_routing_table().await;
+                        context.save_routing_table().await;
                     }
                 }
             }
         });
+        self.register_background_task(handle);
     }
+}
 
-    /// Bootstrap into the DHT network by resolving entry point hostnames,
-    /// pinging them, and performing an initial find_node for our own ID.
-    ///
-    /// This is the equivalent of C++ `DHTEntryPointNameResolveCommand` +
-    /// `DHTInteractionCommand` bootstrap flow. The C++ resolves hostnames
-    /// via c-ares; we use tokio's async DNS resolver.
+impl DhtEngineContext {
     pub(super) async fn bootstrap(&self) {
         let self_id = self.inner.read().await.self_id;
 
@@ -183,7 +194,12 @@ impl DhtEngine {
             for node in discovered_rt.all_nodes() {
                 inner.routing_table.insert(node.clone());
             }
-            inner.state = DhtEngineState::Running;
+            if !self
+                .shutdown_requested
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                inner.state = DhtEngineState::Running;
+            }
         }
 
         // Perform a direct bucket refresh to fully populate the routing

@@ -78,6 +78,15 @@ impl ConfigParser {
     }
 
     pub fn set_raw(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.set_raw_from(name, value, ConfigSource::CommandLine);
+    }
+
+    fn set_raw_from(
+        &mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+        source: ConfigSource,
+    ) {
         let key = name.into();
         let val_str = value.into();
         if let Some(def) = self.registry.get(key.as_str()) {
@@ -109,7 +118,7 @@ impl ConfigParser {
                         }
                     }
                     Err(e) => self.errors.push(ConfigError {
-                        source: ConfigSource::CommandLine,
+                        source: source.clone(),
                         option: key.clone(),
                         message: e,
                     }),
@@ -120,7 +129,7 @@ impl ConfigParser {
                         self.options.insert(key, v);
                     }
                     Err(e) => self.errors.push(ConfigError {
-                        source: ConfigSource::CommandLine,
+                        source: source.clone(),
                         option: key.clone(),
                         message: e,
                     }),
@@ -167,19 +176,24 @@ impl ConfigParser {
                     if parts.len() == 2 {
                         self.set_raw(parts[0], parts[1]);
                     }
+                } else if let Some(def) = self.registry.get(opt_name) {
+                    if def.opt_type() == OptionType::Boolean {
+                        self.set(opt_name, OptionValue::Bool(true));
+                    } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                        self.set_raw(opt_name, args[i + 1]);
+                        i += 1;
+                    } else {
+                        self.errors.push(ConfigError {
+                            source: ConfigSource::CommandLine,
+                            option: opt_name.to_string(),
+                            message: "option requires a value".to_string(),
+                        });
+                    }
                 } else if i + 1 < args.len() && !args[i + 1].starts_with('-') {
                     self.set_raw(opt_name, args[i + 1]);
                     i += 1;
                 } else {
-                    if let Some(def) = self.registry.get(opt_name) {
-                        if def.opt_type() == OptionType::Boolean {
-                            self.set(opt_name, OptionValue::Bool(true));
-                        } else {
-                            self.set_raw(opt_name, "");
-                        }
-                    } else {
-                        self.set_raw(opt_name, "");
-                    }
+                    self.set_raw(opt_name, "");
                 }
             } else if arg.starts_with('-') && arg.len() == 2 {
                 let c = arg.chars().nth(1).unwrap();
@@ -190,11 +204,27 @@ impl ConfigParser {
                     .find(|def| def.short_name() == Some(c))
                     .map(|def| def.name().to_string());
                 if let Some(name) = opt_name {
-                    if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    if self
+                        .registry
+                        .get(&name)
+                        .is_some_and(|def| def.opt_type() != OptionType::Boolean)
+                        && i + 1 < args.len()
+                        && !args[i + 1].starts_with('-')
+                    {
                         self.set_raw(&name, args[i + 1]);
                         i += 1;
-                    } else {
+                    } else if self
+                        .registry
+                        .get(&name)
+                        .is_some_and(|def| def.opt_type() == OptionType::Boolean)
+                    {
                         self.set(&name, OptionValue::Bool(true));
+                    } else {
+                        self.errors.push(ConfigError {
+                            source: ConfigSource::CommandLine,
+                            option: name,
+                            message: "option requires a value".to_string(),
+                        });
                     }
                 }
             } else if let Some(rest) = arg.strip_prefix('@') {
@@ -225,7 +255,7 @@ impl ConfigParser {
                         if !self.registry.contains(name) {
                             tracing::warn!("Unknown option '{}' in config file '{}'", name, path);
                         }
-                        self.set_raw(name, value);
+                        self.set_raw_from(name, value, ConfigSource::ConfigFile);
                     }
                 }
             }
@@ -237,7 +267,7 @@ impl ConfigParser {
         for (key, value) in std::env::vars() {
             if let Some(rest) = key.strip_prefix("ARIA2_") {
                 let opt_name = rest.to_lowercase().replace('_', "-");
-                self.set_raw(opt_name, &value);
+                self.set_raw_from(opt_name, &value, ConfigSource::Environment);
             }
         }
     }
@@ -275,9 +305,11 @@ impl ConfigParser {
         self.sources.push(ConfigSource::Defaults);
         for def in self.registry.all().values() {
             if !matches!(def.default_value(), OptionValue::None) {
-                self.options
-                    .entry(def.name().to_string())
-                    .or_insert_with(|| def.default_value().clone());
+                if let Some(default_value) = def.parse_default_value() {
+                    self.options
+                        .entry(def.name().to_string())
+                        .or_insert(default_value);
+                }
             }
         }
     }
@@ -385,6 +417,43 @@ mod tests {
         assert_eq!(p.get_str("dir").unwrap(), "/tmp");
         assert_eq!(p.get_i64("split").unwrap(), 3);
         assert!(p.get_bool("quiet").unwrap());
+    }
+
+    #[test]
+    fn test_explicit_empty_cli_values_do_not_use_defaults() {
+        let mut p = ConfigParser::new();
+        p.apply_defaults();
+        p.parse_cli_args(&["--dir=", "--split="]);
+
+        assert_eq!(p.get_str("dir"), Some(""));
+        assert!(p.has_errors());
+        assert_eq!(p.get_i64("split"), Some(16));
+    }
+
+    #[test]
+    fn test_missing_value_for_non_boolean_cli_option_is_an_error() {
+        let mut p = ConfigParser::new();
+        p.apply_defaults();
+        p.parse_cli_args(&["--dir", "--quiet"]);
+
+        assert!(p.has_errors());
+        assert_eq!(p.get_str("dir"), Some("."));
+        assert_eq!(p.get_bool("quiet"), Some(true));
+    }
+
+    #[test]
+    fn test_config_file_explicit_empty_values_use_the_same_seam() {
+        let mut p = ConfigParser::new();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("aria2.conf");
+        std::fs::write(&config_path, "dir=\nquiet=\nsplit=\n").unwrap();
+
+        p.parse_file(config_path.to_str().unwrap());
+
+        assert_eq!(p.get_str("dir"), Some(""));
+        assert_eq!(p.get_bool("quiet"), Some(true));
+        assert!(p.has_errors());
+        assert!(!p.contains("split"));
     }
 
     #[test]

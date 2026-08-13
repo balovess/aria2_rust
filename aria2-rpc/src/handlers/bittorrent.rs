@@ -363,8 +363,9 @@ impl RpcEngine {
     /// `RpcMethod::execute` → `RpcMethod::authorize`): the multicall envelope
     /// itself is not authorized, but **each sub-call is**. A sub-call carries
     /// its own `"token:xxx"` first parameter, which is validated and then
-    /// stripped so the handler's positional arguments do not shift.
-    /// `envelope_token` is the secret found on the multicall request itself, if any.
+    /// stripped so the handler's positional arguments do not shift. The
+    /// envelope must contain the call list at parameter zero; an envelope
+    /// token is not a supported alternative in aria2's wire contract.
     ///
     /// # Error handling
     ///
@@ -374,9 +375,23 @@ impl RpcEngine {
     pub async fn handle_multicall(
         &self,
         req: &JsonRpcRequest,
-        envelope_token: Option<&str>,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let calls: Vec<serde_json::Value> = req.get_param(0)?;
+        // C++ checkRequiredParam<List>() reports a method execution error
+        // (code 1), rather than JSON-RPC -32602, for a missing or mistyped
+        // multicall envelope parameter.
+        let calls: Vec<serde_json::Value> = match req.optional_param_value(0) {
+            Some(serde_json::Value::Array(calls)) => calls.clone(),
+            Some(_) => {
+                return Err(JsonRpcError::RpcExecution(
+                    "The parameter at 0 has wrong type.".to_string(),
+                ));
+            }
+            None => {
+                return Err(JsonRpcError::RpcExecution(
+                    "The parameter at 0 is required but missing.".to_string(),
+                ));
+            }
+        };
 
         if calls.is_empty() {
             return Ok(JsonRpcResponse::success(
@@ -395,17 +410,11 @@ impl RpcEngine {
                 }));
                 continue;
             };
-            let Some(method_name) = call_obj.get("methodName") else {
+            let Some(method_name) = call_obj.get("methodName").and_then(|value| value.as_str())
+            else {
                 results.push(serde_json::json!({
                     "code": 1,
                     "message": "Missing methodName."
-                }));
-                continue;
-            };
-            let Some(method_name) = method_name.as_str() else {
-                results.push(serde_json::json!({
-                    "code": 1,
-                    "message": "methodName must be a string."
                 }));
                 continue;
             };
@@ -417,10 +426,13 @@ impl RpcEngine {
                 continue;
             }
 
-            let call_params = call_obj
-                .get("params")
-                .cloned()
-                .unwrap_or(serde_json::json!([]));
+            // The original implementation accepts only a list for a
+            // sub-call's params member. Missing, null, object, and scalar
+            // values all become an empty list before authorization/dispatch.
+            let call_params = match call_obj.get("params") {
+                Some(serde_json::Value::Array(params)) => serde_json::Value::Array(params.clone()),
+                _ => serde_json::Value::Array(Vec::new()),
+            };
 
             // Authorize the sub-call the same way C++ RpcMethod::authorize()
             // does for every method invocation: pop a leading "token:xxx"
@@ -428,13 +440,11 @@ impl RpcEngine {
             // into the handler as a positional argument and shift every
             // subsequent parameter by one.
             let (sub_token, stripped_params) = split_auth_token(&call_params);
-            let effective_token = sub_token.as_deref().or(envelope_token);
-
             let sub_request =
                 JsonRpcRequest::new(method_name, stripped_params.unwrap_or(call_params));
 
             let sub_response = if rpc_method_requires_auth(method_name) {
-                match self.auth_middleware.validate(effective_token) {
+                match self.auth_middleware.validate(sub_token.as_deref()) {
                     Ok(()) => self.dispatch_single(&sub_request).await,
                     Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
                 }

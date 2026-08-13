@@ -298,12 +298,10 @@ fn regression_config_file_empty_value() {
 
     parser.parse_file(config_path.to_str().unwrap());
 
-    // When an option has an empty value, parse_value returns the default value
-    // For rpc-secret, the default is OptionValue::None (no default)
-    // So contains() returns true (option was parsed), but get_str() returns None
-    assert!(parser.contains("rpc-secret"));
-    // The value is OptionValue::None, not a string, so get_str returns None
-    assert!(parser.get_str("rpc-secret").is_none());
+    // aria2_original rejects an empty RPC secret instead of treating it as a
+    // request to inject a default or silently disabling authentication.
+    assert!(!parser.contains("rpc-secret"));
+    assert!(parser.has_errors());
 }
 
 /// Test: Config file without equals sign is skipped.

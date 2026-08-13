@@ -317,6 +317,11 @@ pub struct OptionDef {
     /// An empty slice keeps custom definitions backward-compatible and means
     /// that the enum is open-ended until its owner supplies a choice set.
     pub allowed_values: &'static [&'static str],
+    /// Whether an explicitly supplied empty string is a valid value.
+    ///
+    /// This is separate from default injection: most original string options
+    /// accept `name=`, while secret handlers such as `rpc-secret` reject it.
+    pub allow_empty: bool,
     pub deprecated: bool,
     pub hidden: bool,
     /// Whether this option belongs in `aria2.getGlobalOption`'s original
@@ -345,6 +350,7 @@ impl Default for OptionDef {
             min: None,
             max: None,
             allowed_values: &[],
+            allow_empty: true,
             deprecated: false,
             hidden: false,
             expose_in_aria2_rpc: true,
@@ -396,12 +402,25 @@ impl OptionDef {
         self.allowed_values
     }
 
+    /// Return the configured default without routing it through explicit-value
+    /// parsing. Defaults are injected by the configuration loader as a
+    /// separate phase, matching aria2's `parseDefaultValues` behavior.
+    pub fn parse_default_value(&self) -> Option<OptionValue> {
+        (!matches!(self.default_value, OptionValue::None)).then(|| self.default_value.clone())
+    }
+
+    /// Parse one explicitly supplied wire value.
+    ///
+    /// An empty string is still a value. It must not be confused with a
+    /// missing value or with the option's configured default.
     pub fn parse_value(&self, s: &str) -> Result<OptionValue, String> {
-        if s.is_empty() {
-            return Ok(self.default_value.clone());
-        }
         match self.opt_type {
-            OptionType::String | OptionType::Path => Ok(OptionValue::Str(s.to_string())),
+            OptionType::String | OptionType::Path => {
+                if !self.allow_empty && s.is_empty() {
+                    return Err("empty string is not allowed".to_string());
+                }
+                Ok(OptionValue::Str(s.to_string()))
+            }
             OptionType::IntegerRange => {
                 let max = self
                     .max
@@ -467,9 +486,9 @@ impl OptionDef {
                 }
                 Ok(OptionValue::Float(value))
             }
-            OptionType::Boolean => match s.to_lowercase().as_str() {
-                "true" | "yes" | "1" | "on" => Ok(OptionValue::Bool(true)),
-                "false" | "no" | "0" | "off" => Ok(OptionValue::Bool(false)),
+            OptionType::Boolean => match s {
+                "true" | "" => Ok(OptionValue::Bool(true)),
+                "false" => Ok(OptionValue::Bool(false)),
                 _ => Err(format!("invalid boolean '{}'", s)),
             },
             OptionType::List => Ok(OptionValue::List(
