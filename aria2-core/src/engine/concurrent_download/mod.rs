@@ -98,6 +98,12 @@ impl ConcurrentDownloader {
             Ok(g) if g.is_paused_flag() => {
                 Err(Aria2Error::DownloadFailed("Download paused".into()))
             }
+            Ok(g) if g.is_force_halt_requested() => {
+                Err(Aria2Error::DownloadFailed("Download halted".into()))
+            }
+            Ok(g) if g.is_halt_requested() => {
+                Err(Aria2Error::DownloadFailed("Download halted".into()))
+            }
             _ => Ok(()),
         }
     }

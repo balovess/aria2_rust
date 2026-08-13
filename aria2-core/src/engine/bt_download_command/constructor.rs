@@ -176,7 +176,21 @@ impl BtDownloadCommand {
     ) -> Result<Self> {
         let gid = group.recover().gid();
         let mut command = Self::new(gid, torrent_bytes, options, output_dir)?;
-        let parsed_context = if file_mappings.is_empty() {
+        let current_info_hash = command.group.recover().get_bt_info_hash_hex();
+        let existing_context = group.recover().get_download_context();
+        let parsed_context = if existing_context.as_ref().is_some_and(|context| {
+            context.get_bt_info_hash_hex().is_some_and(|info_hash| {
+                current_info_hash
+                    .as_deref()
+                    .is_some_and(|current| info_hash.eq_ignore_ascii_case(current))
+            })
+        }) {
+            // A dependency may have already installed a context carrying
+            // Metalink-selected paths and mirrors. Reuse it only when it
+            // belongs to this exact torrent; a stale session context must not
+            // leak piece hashes or output mappings into a new torrent.
+            existing_context
+        } else if file_mappings.is_empty() {
             command.group.recover().get_download_context()
         } else {
             let meta =
@@ -402,8 +416,11 @@ impl BtDownloadCommand {
             started_at: None,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
-            seed_enabled: options.seed_time.unwrap_or(0.0) > 0.0
-                || options.seed_ratio.unwrap_or(0.0) > 0.0,
+            // An explicit seed-time=0 is the original way to disable
+            // seeding, even though seed-ratio has a positive default.
+            seed_enabled: options.seed_time != Some(0.0)
+                && (options.seed_time.unwrap_or(0.0) > 0.0
+                    || options.seed_ratio.unwrap_or(0.0) > 0.0),
             seed_time,
             seed_ratio,
             total_uploaded: 0,
@@ -478,8 +495,15 @@ impl BtDownloadCommand {
                 crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
             )),
             incoming_peers: None,
-            bt_listener: None,
+            // Direct command users do not pass through DownloadEngine's
+            // dependency injector. Give that public construction path a
+            // listener manager; the engine replaces it with its shared
+            // process-level manager before execution.
+            bt_listener: Some(std::sync::Arc::new(
+                crate::engine::bt_peer_listener::BtPeerListenerManager::new(),
+            )),
             bt_peer_route: None,
+            checkpoint: None,
         };
         command.apply_context_paths()?;
         Ok(command)

@@ -13,8 +13,10 @@ use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
-use crate::engine::http_connection_pool::{HttpConnectionPool, HttpSegmentJob, server_key};
 use crate::engine::http_segment_downloader::WriteChunk;
+use crate::engine::http_segment_request_executor::{
+    HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
+};
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -40,15 +42,14 @@ pub async fn execute(
     }
 
     let options = dl.group.recover().options_arc();
-    let split = options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize;
+    let split = (options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize).max(1);
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
         .clamp(1, 16) as usize;
-    let server_key = server_key(uri).unwrap_or_else(|| uri.to_string());
-    let per_server_limit = max_conn.min(split);
-    let mut adaptive = HttpAdaptiveConcurrency::new(per_server_limit, options.retry_wait);
-    let seg_size = total_length / split as u64;
+    let authority_key = authority_key(uri).unwrap_or_else(|| uri.to_string());
+    let mut adaptive = HttpAdaptiveConcurrency::new(max_conn, options.retry_wait);
+    let seg_size = total_length.div_ceil(split as u64).max(1);
 
     tracing::info!(
         "Concurrent download started: split={}, max_conn={}, segment_size={} bytes, total={}",
@@ -60,7 +61,10 @@ pub async fn execute(
 
     let mut manager =
         ConcurrentSegmentManager::new(total_length, vec![uri.to_string()], Some(seg_size));
-    manager.set_max_connections_per_mirror(max_conn.min(split));
+    // MirrorState is only a segment-selection capacity. The actual server
+    // limit is enforced by HttpSegmentRequestExecutor, which also merges
+    // multiple URLs sharing one authority.
+    manager.set_max_connections_per_mirror(split);
     manager.set_max_retries(max_retries_per_segment);
 
     let mut consecutive_416_count = 0u32;
@@ -147,15 +151,15 @@ pub async fn execute(
     // Write channel: segment futures send chunks as they arrive,
     // the main loop drains them to disk via tokio::select!
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
-    let mut pool = HttpConnectionPool::new(
+    let mut executor = HttpSegmentRequestExecutor::new(
         &dl.client,
         dl.request_policy.clone(),
         dl.cookie_helper.clone(),
         dl.auth_options.clone(),
         dl.netrc_path.clone(),
-        per_server_limit,
-        std::slice::from_ref(&server_key),
-        per_server_limit,
+        split,
+        std::slice::from_ref(&authority_key),
+        max_conn,
     );
 
     // Pause/remove check interval — allows the download loop to detect
@@ -171,17 +175,21 @@ pub async fn execute(
         // cancellation is detected before spawning new segment fetches and
         // before awaiting the next segment completion.
         if let Err(e) = dl.check_cancelled() {
-            // ADR-0001: Save control file before exiting on pause/remove.
-            if let Some(ref mut cf) = ctrl_file {
-                cf.update_completed_length(completed_bytes);
-                if let Err(save_err) = cf.save().await {
-                    tracing::warn!("Control file save on pause/remove failed: {}", save_err);
-                }
-            }
+            cancel_and_persist(
+                executor,
+                &mut write_rx,
+                &mut writer,
+                limiter.as_ref(),
+                dl.global_limiter.as_ref(),
+                &mut ctrl_file,
+                completed_bytes,
+                &mut progress_handles,
+            )
+            .await?;
             return Err(e);
         }
 
-        while adaptive.can_start(pool.in_flight_for(&server_key)) {
+        while adaptive.can_start(executor.in_flight_for(&authority_key)) {
             match manager.next_pending_segment_for_mirror(0) {
                 Some((seg_idx, offset, length)) => {
                     // Create per-segment progress channel for real-time updates
@@ -229,10 +237,10 @@ pub async fn execute(
                     seg_reported.insert(seg_idx, seg_reported_arc);
                     active_segs.insert(seg_idx, offset);
 
-                    let submitted = pool.try_submit(HttpSegmentJob {
+                    let submitted = executor.try_submit(HttpSegmentRequest {
                         mirror_index: 0,
                         segment_index: seg_idx,
-                        server_key: server_key.clone(),
+                        authority_key: authority_key.clone(),
                         url: uri.to_string(),
                         offset,
                         length,
@@ -261,7 +269,7 @@ pub async fn execute(
             }
         }
 
-        if pool.in_flight() == 0 {
+        if executor.in_flight() == 0 {
             // Drain any remaining write chunks before checking completion
             while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
                 if let Some(ref lim) = limiter {
@@ -284,7 +292,7 @@ pub async fn execute(
                 break;
             }
             if let Some(new_target) = adaptive.finish_round() {
-                pool.set_target(&server_key, new_target);
+                executor.set_target(&authority_key, new_target);
                 tracing::info!(
                     old_target = adaptive.hard_limit().min(max_conn),
                     new_target,
@@ -331,7 +339,7 @@ pub async fn execute(
         // channel while other segments are still downloading.
         tokio::select! {
             // A segment completed
-            Some(pool_result) = pool.next_result() => {
+            Some(pool_result) = executor.next_result() => {
                 let seg_idx = pool_result.segment_index;
                 let result = pool_result.result;
                 let peer_addr = pool_result.peer_addr;
@@ -494,28 +502,17 @@ pub async fn execute(
             // when segment futures are blocked on slow network reads.
             _ = cancel_tick.tick() => {
                 if let Err(e) = dl.check_cancelled() {
-                    // Flush already-received chunks before persisting progress.
-                    while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-                        writer.write_bytes_at(offset, data).await.map_err(|write_err| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Write failed while cancelling: {}",
-                                write_err
-                            )))
-                        })?;
-                    }
-                    writer.flush().await.map_err(|flush_err| {
-                        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                            "Flush failed while cancelling: {}",
-                            flush_err
-                        )))
-                    })?;
-                    // ADR-0001: Save control file before exiting on pause/remove.
-                    if let Some(ref mut cf) = ctrl_file {
-                        cf.update_completed_length(completed_bytes);
-                        if let Err(save_err) = cf.save().await {
-                            tracing::warn!("Control file save on pause/remove failed: {}", save_err);
-                        }
-                    }
+                    cancel_and_persist(
+                        executor,
+                        &mut write_rx,
+                        &mut writer,
+                        limiter.as_ref(),
+                        dl.global_limiter.as_ref(),
+                        &mut ctrl_file,
+                        completed_bytes,
+                        &mut progress_handles,
+                    )
+                    .await?;
                     return Err(e);
                 }
             }
@@ -525,9 +522,9 @@ pub async fn execute(
     // Stop workers before the final drain. This is immediate on Range
     // fallback so cancelled requests cannot enqueue more chunks afterward.
     if should_fallback {
-        pool.cancel().await;
+        executor.cancel().await;
     } else {
-        pool.shutdown().await;
+        executor.shutdown().await;
     }
 
     // Final drain: ensure all pending write chunks are flushed to disk
@@ -605,4 +602,54 @@ pub async fn execute(
     }
     dl.cookie_helper.save_cookies_if_configured();
     Ok(ConcurrentDownloadResult::Complete)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn cancel_and_persist(
+    executor: HttpSegmentRequestExecutor,
+    write_rx: &mut mpsc::UnboundedReceiver<WriteChunk>,
+    writer: &mut CachedDiskWriter,
+    limiter: Option<&RateLimiter>,
+    global_limiter: Option<&RateLimiter>,
+    ctrl_file: &mut Option<ControlFile>,
+    completed_bytes: u64,
+    progress_handles: &mut HashMap<u32, tokio::task::JoinHandle<()>>,
+) -> Result<()> {
+    executor.cancel().await;
+
+    for (_, handle) in progress_handles.drain() {
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+        if let Some(limiter) = limiter {
+            limiter.acquire_download(data.len() as u64).await;
+        }
+        if let Some(global_limiter) = global_limiter
+            && global_limiter.is_download_limited()
+        {
+            global_limiter.acquire_download(data.len() as u64).await;
+        }
+        writer.write_bytes_at(offset, data).await.map_err(|error| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "Write failed while cancelling: {error}"
+            )))
+        })?;
+    }
+
+    writer.flush().await.map_err(|error| {
+        Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+            "Flush failed while cancelling: {error}"
+        )))
+    })?;
+
+    if let Some(ctrl_file) = ctrl_file {
+        ctrl_file.update_completed_length(completed_bytes);
+        if let Err(error) = ctrl_file.save().await {
+            tracing::warn!("Control file save on pause/remove failed: {error}");
+        }
+    }
+
+    Ok(())
 }

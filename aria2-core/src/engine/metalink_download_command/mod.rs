@@ -47,12 +47,17 @@ pub struct MetalinkDownloadCommand {
     /// Parsed files for a grouped Metalink payload. A single command owns
     /// the group so the request context can schedule all selected files.
     pub(crate) grouped_file_infos: Vec<(std::path::PathBuf, FileDownloadInfo)>,
+    pub(crate) checkpoint: Option<crate::engine::progress_checkpoint::ProgressCheckpoint>,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for mirror downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
     #[cfg(feature = "bittorrent")]
     pub(crate) public_tracker_catalog:
         Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
 }
 
 impl MetalinkDownloadCommand {
@@ -149,9 +154,14 @@ impl MetalinkDownloadCommand {
             metalink_data: metalink_bytes.to_vec(),
             file_info: None,
             grouped_file_infos: Vec::new(),
+            checkpoint: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
+            #[cfg(feature = "bittorrent")]
+            bt_registry: None,
+            #[cfg(feature = "bittorrent")]
+            bt_listener: None,
         })
     }
 
@@ -286,9 +296,14 @@ impl MetalinkDownloadCommand {
                     metalink_data: Vec::new(),
                     file_info: Some(file_info),
                     grouped_file_infos: Vec::new(),
+                    checkpoint: None,
                     global_limiter: None,
                     #[cfg(feature = "bittorrent")]
                     public_tracker_catalog: None,
+                    #[cfg(feature = "bittorrent")]
+                    bt_registry: None,
+                    #[cfg(feature = "bittorrent")]
+                    bt_listener: None,
                 },
                 file_index: i,
             });
@@ -391,9 +406,14 @@ impl MetalinkDownloadCommand {
                 metalink_data: Vec::new(),
                 file_info: Some(file_info),
                 grouped_file_infos: Vec::new(),
+                checkpoint: None,
                 global_limiter: None,
                 #[cfg(feature = "bittorrent")]
                 public_tracker_catalog: None,
+                #[cfg(feature = "bittorrent")]
+                bt_registry: None,
+                #[cfg(feature = "bittorrent")]
+                bt_listener: None,
             },
             file_index: 0,
         }])
@@ -460,7 +480,10 @@ impl MetalinkDownloadCommand {
             }
             entry.set_suffix_path(file.name.clone());
             entry.set_max_connection_per_server(
-                options.max_connection_per_server.unwrap_or(1).max(1) as usize,
+                options
+                    .max_connection_per_server
+                    .unwrap_or(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+                    .clamp(1, 16) as usize,
             );
             entry.set_unique_protocol(options.metalink_enable_unique_protocol);
             offset = offset.saturating_add(file.size.unwrap_or(0));
@@ -500,9 +523,14 @@ impl MetalinkDownloadCommand {
             metalink_data: Vec::new(),
             file_info: None,
             grouped_file_infos,
+            checkpoint: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
+            #[cfg(feature = "bittorrent")]
+            bt_registry: None,
+            #[cfg(feature = "bittorrent")]
+            bt_listener: None,
         })
     }
 
@@ -560,9 +588,14 @@ impl MetalinkDownloadCommand {
             metalink_data: Vec::new(),
             file_info: Some(file_info),
             grouped_file_infos: Vec::new(),
+            checkpoint: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
+            #[cfg(feature = "bittorrent")]
+            bt_registry: None,
+            #[cfg(feature = "bittorrent")]
+            bt_listener: None,
         })
     }
 
@@ -585,6 +618,22 @@ impl MetalinkDownloadCommand {
         catalog: Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
     ) {
         self.public_tracker_catalog = Some(catalog);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_bt_registry(
+        &mut self,
+        registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+    ) {
+        self.bt_registry = Some(registry);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_bt_listener(
+        &mut self,
+        listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    ) {
+        self.bt_listener = Some(listener);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {

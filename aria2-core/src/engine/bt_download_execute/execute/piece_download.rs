@@ -331,6 +331,23 @@ impl BtDownloadCommand {
             aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::RarestFirst,
         );
 
+        if !self.check_integrity
+            && let Some(bitfield) = self
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.bitfield())
+        {
+            for index in 0..num_pieces as usize {
+                if bitfield
+                    .get(index / 8)
+                    .is_some_and(|byte| byte & (1 << (7 - index % 8)) != 0)
+                {
+                    piece_picker.mark_completed(index as u32);
+                    piece_manager.mark_piece_complete(index as u32);
+                }
+            }
+        }
+
         let prioritized_pieces = {
             let group = self.group.recover();
             let rules = crate::config::parse_piece_priority(&group.options().bt_prioritize_piece)
@@ -405,6 +422,16 @@ impl BtDownloadCommand {
                 writer.close().await.map_err(|error| {
                     Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                 })?;
+                if let Some(checkpoint) = self.checkpoint.as_mut() {
+                    checkpoint
+                        .save(&piece_picker.export_bitfield(), self.completed_bytes)
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::FileIo(format!(
+                                "Failed to save halted BT checkpoint: {error}"
+                            ))
+                        })?;
+                }
                 return Err(Aria2Error::DownloadFailed(
                     "BitTorrent download halted".into(),
                 ));
@@ -703,10 +730,16 @@ impl BtDownloadCommand {
                         self.completed_bytes += piece_data_len as u64;
 
                         // Sync bitfield to RequestGroup for session persistence
+                        let bitfield = piece_picker.export_bitfield();
                         {
-                            let bitfield = piece_picker.export_bitfield();
                             let g = self.group.recover();
-                            g.set_bt_bitfield(Some(bitfield));
+                            g.set_bt_bitfield(Some(bitfield.clone()));
+                        }
+                        if let Some(checkpoint) = self.checkpoint.as_mut()
+                            && let Err(error) =
+                                checkpoint.save(&bitfield, self.completed_bytes).await
+                        {
+                            tracing::warn!(%error, "Failed to save BT checkpoint after piece completion");
                         }
 
                         BtPeerInteraction::broadcast_have(
@@ -814,6 +847,9 @@ impl BtDownloadCommand {
             .close()
             .await
             .map_err(|error| Aria2Error::FileIo(format!("Failed to close BT output: {error}")))?;
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.remove().await?;
+        }
         tracing::info!("[BT] Writer flushed and closed OK");
         info!(
             "BT download done: {} ({} bytes)",

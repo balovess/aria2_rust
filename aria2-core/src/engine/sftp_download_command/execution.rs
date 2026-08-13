@@ -148,11 +148,38 @@ impl Command for SftpDownloadCommand {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0)
         };
-        self.completed_bytes = Self::validate_resume_offset(existing_length, total_length)?;
+        let continue_download = self.group.recover().options().continue_download;
+        let resume_input_length =
+            crate::engine::progress_checkpoint::ProgressCheckpoint::resume_input_length(
+                &self.output_path,
+                existing_length,
+                continue_download,
+                total_length,
+            )
+            .await;
+        Self::validate_resume_offset(resume_input_length, total_length)?;
+        if in_memory_download {
+            self.checkpoint = None;
+            self.completed_bytes = 0;
+        } else {
+            self.checkpoint = Some(
+                crate::engine::progress_checkpoint::ProgressCheckpoint::open(
+                    &self.output_path,
+                    total_length,
+                    resume_input_length,
+                )
+                .await,
+            );
+            self.completed_bytes = self
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.resume_offset(resume_input_length))
+                .unwrap_or(resume_input_length);
+        }
         {
             let g = self.group.recover();
             g.set_total_length(total_length);
-            g.update_progress(existing_length);
+            g.update_progress(self.completed_bytes);
         }
 
         // -----------------------------------------------------------------
@@ -216,13 +243,24 @@ impl Command for SftpDownloadCommand {
         loop {
             let halted = {
                 let group = self.group.recover();
-                group.is_force_halt_requested() || group.is_halt_requested()
+                group.is_removed() || group.is_force_halt_requested() || group.is_halt_requested()
             };
             if halted {
+                let halt_error = {
+                    let group = self.group.recover();
+                    if group.is_removed() {
+                        "Download cancelled by user"
+                    } else if group.is_paused_flag() {
+                        "Download paused"
+                    } else {
+                        "SFTP download halted"
+                    }
+                };
                 let _ = remote_file.close().await;
-                let _ = writer.finalize().await;
+                self.finalize_partial_writer(&mut writer).await;
+                self.flush_checkpoint().await;
                 let _ = conn.disconnect().await;
-                return Err(Aria2Error::DownloadFailed("SFTP download halted".into()));
+                return Err(Aria2Error::DownloadFailed(halt_error.into()));
             }
 
             let remaining = total_length.saturating_sub(self.completed_bytes);
@@ -243,6 +281,9 @@ impl Command for SftpDownloadCommand {
                         "[SFTP-CMD] EOF at offset {} (expected {})",
                         self.completed_bytes, total_length
                     );
+                    let _ = remote_file.close().await;
+                    self.finalize_partial_writer(&mut writer).await;
+                    let _ = conn.disconnect().await;
                     return Err(Aria2Error::DownloadFailed(format!(
                         "SFTP remote file ended before the advertised length: {} < {}",
                         self.completed_bytes, total_length
@@ -255,6 +296,7 @@ impl Command for SftpDownloadCommand {
                         self.completed_bytes, e
                     );
                     let _ = remote_file.close().await;
+                    self.finalize_partial_writer(&mut writer).await;
                     let _ = conn.disconnect().await;
                     let err = FileOpError::from(e);
                     return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
@@ -266,6 +308,7 @@ impl Command for SftpDownloadCommand {
             if let Err(e) = writer.write(&data).await {
                 error!("[SFTP-CMD] Disk write error: {}", e);
                 let _ = remote_file.close().await;
+                self.finalize_partial_writer(&mut writer).await;
                 let _ = conn.disconnect().await;
                 return Err(Aria2Error::Fatal(FatalError::Config(format!(
                     "Disk write failed: {}",
@@ -274,6 +317,9 @@ impl Command for SftpDownloadCommand {
             }
 
             self.completed_bytes += n as u64;
+            if let Some(checkpoint) = self.checkpoint.as_mut() {
+                checkpoint.update(self.completed_bytes, false).await;
+            }
 
             // Update progress in RequestGroup
             {
@@ -303,11 +349,16 @@ impl Command for SftpDownloadCommand {
 
         // Finalize disk writer (flush, sync, etc.). Completion is not valid
         // unless the local bytes have been durably finalized.
-        let finalized_data = writer.finalize().await.map_err(|error| {
-            Aria2Error::FileIo(format!(
-                "[SFTP-CMD] Failed to finalize disk writer: {error}"
-            ))
-        })?;
+        let finalized_data = match writer.finalize().await {
+            Ok(data) => data,
+            Err(error) => {
+                self.flush_checkpoint().await;
+                let _ = conn.disconnect().await;
+                return Err(Aria2Error::FileIo(format!(
+                    "[SFTP-CMD] Failed to finalize disk writer: {error}"
+                )));
+            }
+        };
 
         if in_memory_download {
             let group = self.group.recover();
@@ -320,6 +371,8 @@ impl Command for SftpDownloadCommand {
         if let Err(e) = conn.disconnect().await {
             warn!("[SFTP-CMD] Warning during SSH disconnect: {}", e);
         }
+
+        self.complete_checkpoint().await;
 
         // Calculate final statistics
         let final_speed = {
@@ -374,5 +427,28 @@ impl Command for SftpDownloadCommand {
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))
+    }
+
+    async fn shutdown(&mut self) {
+        self.flush_checkpoint().await;
+    }
+}
+
+impl SftpDownloadCommand {
+    async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
+        let _ = writer.finalize().await;
+        self.flush_checkpoint().await;
+    }
+
+    async fn flush_checkpoint(&mut self) {
+        if let Some(checkpoint) = self.checkpoint.as_mut() {
+            checkpoint.update(self.completed_bytes, true).await;
+        }
+    }
+
+    async fn complete_checkpoint(&mut self) {
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.complete().await;
+        }
     }
 }

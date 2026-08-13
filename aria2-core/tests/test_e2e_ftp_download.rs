@@ -1,7 +1,12 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
+use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
+use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::mock_ftp_server::{MockFtpServer, medium_pattern, small_content};
 use std::path::Path;
@@ -9,6 +14,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU32, Ordering},
 };
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -18,6 +24,59 @@ async fn start_server() -> MockFtpServer {
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
+}
+
+async fn wait_for_ftp_group_status(
+    group: &Arc<std::sync::RwLock<RequestGroup>>,
+    expected: DownloadStatus,
+) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if group.read().unwrap().status() == expected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("FTP download did not reach the expected lifecycle state");
+}
+
+async fn wait_for_ftp_control_file(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("FTP download did not create its control file");
+}
+
+async fn wait_for_ftp_progress(group: &Arc<std::sync::RwLock<RequestGroup>>) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if group.read().unwrap().get_completed_length() > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("FTP download did not report in-flight progress");
+}
+
+async fn wait_for_ftp_engine(
+    handle: tokio::task::JoinHandle<aria2_core::error::Result<()>>,
+    message: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(30), handle)
+        .await
+        .expect(message)
+        .expect("FTP download engine task panicked")
+        .expect("FTP download engine returned an error");
 }
 
 #[test]
@@ -479,6 +538,167 @@ async fn test_e2e_ftp_concurrent_downloads() -> Result<(), Box<dyn std::error::E
         h.await.expect("任务panic")?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn test_engine_ftp_pause_unpause_preserves_control_file() {
+    let server = MockFtpServer::start_slow().await;
+    let dir = tmp_dir();
+    let output_name = "medium.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(407);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new())));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_ftp_group_status(&group, DownloadStatus::Active).await;
+    wait_for_ftp_control_file(&control_path).await;
+    wait_for_ftp_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::Pause { gid })
+        .expect("pause command should be accepted");
+    wait_for_ftp_group_status(&group, DownloadStatus::Paused).await;
+    wait_for_ftp_control_file(&control_path).await;
+    assert!(
+        output_path.exists(),
+        "pause must preserve partial FTP output"
+    );
+
+    command_tx
+        .send(EngineCommand::Unpause { gid })
+        .expect("unpause command should be accepted");
+    wait_for_ftp_engine(
+        engine_task,
+        "paused FTP download did not finish after unpause",
+    )
+    .await;
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+
+    let downloaded = std::fs::read(&output_path).expect("FTP output should be readable");
+    let expected = vec![medium_pattern(); 1024 * 1024];
+    assert_eq!(
+        downloaded.len(),
+        expected.len(),
+        "resumed FTP output length"
+    );
+    let first_mismatch = downloaded
+        .iter()
+        .zip(&expected)
+        .position(|(actual, expected)| actual != expected);
+    assert_eq!(
+        first_mismatch, None,
+        "resumed FTP output differs at byte {:?}",
+        first_mismatch
+    );
+    assert!(
+        !control_path.exists(),
+        "successful FTP completion must remove the control file"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_ftp_remove_preserves_partial_control_file() {
+    let server = MockFtpServer::start_slow().await;
+    let dir = tmp_dir();
+    let output_name = "medium.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(408);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new())));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_ftp_group_status(&group, DownloadStatus::Active).await;
+    wait_for_ftp_control_file(&control_path).await;
+    wait_for_ftp_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::RemoveDownload { gid })
+        .expect("remove command should be accepted");
+    wait_for_ftp_engine(engine_task, "removed FTP download did not stop promptly").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Removed);
+    assert!(
+        output_path.exists(),
+        "remove must retain partial FTP output"
+    );
+    assert!(
+        control_path.exists(),
+        "remove must retain the FTP control file"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_continue_false_restarts_existing_output() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "fresh-ftp.bin";
+    let output_path = dir.path().join(output_name);
+    let expected = small_content();
+    let prefix_len = expected.len() / 2;
+    std::fs::write(&output_path, vec![0xEE; prefix_len])
+        .expect("existing FTP output should be created");
+
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        continue_download: false,
+        ..DownloadOptions::default()
+    };
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", server.addr().port());
+    let mut command = FtpDownloadCommand::new(
+        GroupId::new(409),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some(output_name),
+    )
+    .expect("FTP command should construct");
+
+    command
+        .execute()
+        .await
+        .expect("FTP fresh download should succeed");
+    assert_eq!(std::fs::read(output_path).unwrap(), expected);
 }
 
 #[tokio::test]

@@ -14,8 +14,8 @@ pub mod engine_command;
 pub mod engine_loop;
 pub mod halt_watchers;
 pub mod http_adaptive_concurrency;
-pub mod http_connection_pool;
 pub mod http_segment_downloader;
+pub mod http_segment_request_executor;
 pub mod http_tail_reclaim;
 pub mod http_tracker_client;
 pub mod mirror_coordinator;
@@ -25,6 +25,7 @@ pub mod peer_stats;
 #[cfg(test)]
 pub mod peer_stats_tests;
 pub mod post_download_handler;
+pub(crate) mod progress_checkpoint;
 pub mod range_prober;
 pub mod resume_data;
 pub mod retry_policy;
@@ -33,6 +34,8 @@ pub mod task_spawner;
 pub mod timer;
 
 // ── BitTorrent feature-gated modules ──────────────────────────────────
+#[cfg(feature = "bittorrent")]
+pub(crate) mod bt_checkpoint;
 #[cfg(feature = "bittorrent")]
 pub mod bt_choke_hooks;
 #[cfg(feature = "bittorrent")]

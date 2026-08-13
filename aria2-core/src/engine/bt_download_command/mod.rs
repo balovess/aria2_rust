@@ -231,10 +231,11 @@ pub struct BtDownloadCommand {
     pub(crate) incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
     /// Process-level listener shared by all BitTorrent downloads.
-    pub(crate) bt_listener:
-        Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
+    pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     /// RAII registration for this torrent's info-hash route.
     pub(crate) bt_peer_route: Option<crate::engine::bt_peer_listener::BtPeerRouteHandle>,
+    /// Rust-owned A2CF checkpoint for verified torrent pieces.
+    pub(crate) checkpoint: Option<crate::engine::bt_checkpoint::BtCheckpoint>,
 }
 
 impl BtDownloadCommand {
@@ -343,7 +344,7 @@ impl BtDownloadCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::BtRuntimeState;
+    use super::{BtDownloadCommand, BtRuntimeState};
 
     #[test]
     fn runtime_state_uses_the_same_min_peer_boundary_as_tracker_demand() {
@@ -369,5 +370,41 @@ mod tests {
         runtime.set_max_peers(8);
         assert!(!runtime.less_than_min_peers());
         assert_eq!(runtime.max_peers(), 8);
+    }
+
+    #[test]
+    fn explicit_zero_seed_time_overrides_the_default_seed_ratio() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions {
+            seed_time: Some(0.0),
+            ..Default::default()
+        };
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(10),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        assert!(!command.seed_enabled);
+    }
+
+    #[test]
+    fn positive_seed_options_enable_seeding() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions {
+            seed_time: Some(1.0),
+            ..Default::default()
+        };
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(11),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        assert!(command.seed_enabled);
     }
 }

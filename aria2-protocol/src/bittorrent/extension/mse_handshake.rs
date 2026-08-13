@@ -34,6 +34,17 @@ const RECEIVER_SYNC_LIMIT: usize = 628;
 /// Public wire limits used by the asynchronous incoming-peer adapter.
 pub const MSE_PUBLIC_KEY_LENGTH: usize = KEY_LENGTH;
 pub const MSE_MAX_BUFFER_LENGTH: usize = 636;
+/// Maximum absolute size of the incoming step-2 wire payload before the
+/// incremental adapter has consumed its PadA and encrypted padding fields.
+pub const MSE_MAX_INCOMING_HANDSHAKE_LENGTH: usize = MAX_PAD_LENGTH
+    + SHA1_LENGTH
+    + SHA1_LENGTH
+    + VC_LENGTH
+    + CRYPTO_BITFIELD_LENGTH
+    + 2
+    + MAX_PAD_LENGTH
+    + 2
+    + 68;
 
 /// Handshake phase tracking.
 #[derive(Debug, Clone, PartialEq)]
@@ -203,12 +214,14 @@ impl MseHandshake {
             // The initiator's encryptor uses keyA (for sending step 3)
             self.initiator_encryptor = Some(init_rc4(&keys.key_a));
             // The initiator's decryptor uses keyB (for receiving step 4)
-            let mut peer_cipher = init_rc4(&keys.key_b);
+            let mut marker_cipher = init_rc4(&keys.key_b);
             // Compute VC marker = RC4(zeros) using peer cipher
-            let vc_marker = compute_vc(&mut peer_cipher);
+            let vc_marker = compute_vc(&mut marker_cipher);
             self.initiator_vc_marker = Some(vc_marker);
-            // Store the peer cipher for later decryption of step 4
-            self.initiator_decryptor = Some(peer_cipher);
+            // Keep a separate cipher at the post-discard position. The VC
+            // marker is only a look-ahead value and must not consume the
+            // cipher used to decrypt the receiver response.
+            self.initiator_decryptor = Some(init_rc4(&keys.key_b));
         }
 
         self.phase = MseHandshakePhase::PublicKeyReceived;
@@ -448,8 +461,8 @@ impl MseHandshake {
         let mut decryptor = init_rc4(&keys.key_a);
         decryptor.process(&mut length_prefix);
         ia_length.copy_from_slice(
-            &length_prefix[ia_length_offset - encrypted_start
-                ..ia_length_offset - encrypted_start + 2],
+            &length_prefix
+                [ia_length_offset - encrypted_start..ia_length_offset - encrypted_start + 2],
         );
         let ia_length = u16::from_be_bytes(ia_length) as usize;
         Ok(Some(ia_length_offset + 2 + ia_length))
@@ -556,7 +569,20 @@ impl MseHandshake {
         // Find the VC marker in the data
         let vc_pos = find_vc_marker(data, &vc_marker, INITIATOR_SYNC_LIMIT)?;
 
-        // Decrypt everything after the VC marker using the initiator's decryptor
+        // Consume and verify the VC with the main decryptor before decoding the
+        // following fields. The marker cipher is only a look-ahead cipher.
+        let mut vc = [0u8; VC_LENGTH];
+        vc.copy_from_slice(&data[vc_pos..vc_pos + VC_LENGTH]);
+        if let Some(ref mut cipher) = self.initiator_decryptor {
+            cipher.process(&mut vc);
+        } else {
+            return Err("Initiator decryptor not initialized".to_string());
+        }
+        if vc != [0u8; VC_LENGTH] {
+            return Err("VC verification failed".to_string());
+        }
+
+        // Decrypt everything after the VC marker using the same decryptor.
         let encrypted_start = vc_pos + VC_LENGTH;
         if data.len() < encrypted_start + CRYPTO_BITFIELD_LENGTH + 2 {
             return Err(format!(
@@ -577,7 +603,10 @@ impl MseHandshake {
             u32::from_be_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]);
 
         // Determine negotiated method
-        if (crypto_select & MseCryptoMethod::Plain.as_u32()) != 0 && !self.force_encryption {
+        if (crypto_select & MseCryptoMethod::Plain.as_u32()) != 0
+            && !self.force_encryption
+            && !self.prefer_encryption
+        {
             self.negotiated_method = MseCryptoMethod::Plain;
         } else if (crypto_select & MseCryptoMethod::Rc4.as_u32()) != 0 {
             self.negotiated_method = MseCryptoMethod::Rc4;
@@ -633,7 +662,9 @@ impl MseHandshake {
             header[CRYPTO_BITFIELD_LENGTH],
             header[CRYPTO_BITFIELD_LENGTH + 1],
         ]) as usize;
-        Ok(Some(header_start + CRYPTO_BITFIELD_LENGTH + 2 + pad_d_length))
+        Ok(Some(
+            header_start + CRYPTO_BITFIELD_LENGTH + 2 + pad_d_length,
+        ))
     }
 
     // ── Finalize: Extract crypto state ───────────────────────────────
@@ -644,41 +675,39 @@ impl MseHandshake {
     /// all subsequent BT protocol messages.
     pub fn finalize(mut self) -> Result<MseCryptoState, String> {
         match self.phase {
-            MseHandshakePhase::Completed(method) => {
-                match method {
-                    MseCryptoMethod::Plain => Ok(MseCryptoState::new_plain()),
-                    MseCryptoMethod::Rc4 if self.initiator => {
-                        let send = self
-                            .initiator_encryptor
-                            .take()
-                            .ok_or("Initiator encryptor not initialized")?;
-                        let recv = self
-                            .initiator_decryptor
-                            .take()
-                            .ok_or("Initiator decryptor not initialized")?;
-                        Ok(MseCryptoState::from_rc4_states(
-                            send,
-                            recv,
-                            MseCryptoMethod::Rc4,
-                        ))
-                    }
-                    MseCryptoMethod::Rc4 => {
-                        let send = self
-                            .receiver_encryptor
-                            .take()
-                            .ok_or("Receiver encryptor not initialized")?;
-                        let recv = self
-                            .receiver_decryptor
-                            .take()
-                            .ok_or("Receiver decryptor not initialized")?;
-                        Ok(MseCryptoState::from_rc4_states(
-                            send,
-                            recv,
-                            MseCryptoMethod::Rc4,
-                        ))
-                    }
+            MseHandshakePhase::Completed(method) => match method {
+                MseCryptoMethod::Plain => Ok(MseCryptoState::new_plain()),
+                MseCryptoMethod::Rc4 if self.initiator => {
+                    let send = self
+                        .initiator_encryptor
+                        .take()
+                        .ok_or("Initiator encryptor not initialized")?;
+                    let recv = self
+                        .initiator_decryptor
+                        .take()
+                        .ok_or("Initiator decryptor not initialized")?;
+                    Ok(MseCryptoState::from_rc4_states(
+                        send,
+                        recv,
+                        MseCryptoMethod::Rc4,
+                    ))
                 }
-            }
+                MseCryptoMethod::Rc4 => {
+                    let send = self
+                        .receiver_encryptor
+                        .take()
+                        .ok_or("Receiver encryptor not initialized")?;
+                    let recv = self
+                        .receiver_decryptor
+                        .take()
+                        .ok_or("Receiver decryptor not initialized")?;
+                    Ok(MseCryptoState::from_rc4_states(
+                        send,
+                        recv,
+                        MseCryptoMethod::Rc4,
+                    ))
+                }
+            },
             MseHandshakePhase::Failed(e) => Err(e),
             _ => Err(format!("Handshake not completed: {:?}", self.phase)),
         }
@@ -747,7 +776,8 @@ fn find_req1_marker(
 }
 
 fn find_marker_if_present(data: &[u8], marker: &[u8]) -> Option<usize> {
-    data.windows(marker.len()).position(|window| window == marker)
+    data.windows(marker.len())
+        .position(|window| window == marker)
 }
 
 /// Find the VC marker in the receiver's response data.
@@ -936,6 +966,100 @@ mod tests {
         assert_ne!(enc2, original2.to_vec());
         crypto_r2.decrypt(&mut enc2);
         assert_eq!(enc2, original2.to_vec());
+    }
+
+    #[test]
+    fn test_receiver_response_with_plain_pad_b_prefix() {
+        let info_hash = test_info_hash();
+        let mut initiator = MseHandshake::new_initiator(info_hash);
+        let mut responder = MseHandshake::new_responder(info_hash);
+        let i_step1 = initiator.build_step1();
+        let r_step1 = responder.build_step1();
+        initiator.receive_step1(&r_step1).unwrap();
+        responder.receive_step1(&i_step1).unwrap();
+        let i_step3 = initiator.build_initiator_step2().unwrap();
+        responder
+            .receive_initiator_step2(&i_step3, &[info_hash])
+            .unwrap();
+        let r_step4 = responder.build_receiver_step2().unwrap();
+
+        let mut buffered_response = vec![0xA5; 17];
+        buffered_response.extend_from_slice(&r_step4);
+        let required = initiator
+            .initiator_step2_required_len(&buffered_response)
+            .unwrap()
+            .unwrap();
+        assert_eq!(required, buffered_response.len());
+        initiator
+            .receive_receiver_step2(&buffered_response)
+            .unwrap();
+        let mut crypto_i = initiator.finalize().unwrap();
+        let mut crypto_r = responder.finalize().unwrap();
+
+        let mut handshake = [0x5Au8; 68];
+        crypto_i.encrypt(&mut handshake);
+        crypto_r.decrypt(&mut handshake);
+        assert_eq!(handshake, [0x5Au8; 68]);
+
+        let mut reverse = [0x6Bu8; 68];
+        crypto_r.encrypt(&mut reverse);
+        crypto_i.decrypt(&mut reverse);
+        assert_eq!(reverse, [0x6Bu8; 68]);
+    }
+
+    #[test]
+    fn test_full_wire_flow_retains_pad_a_and_pad_b() {
+        let info_hash = test_info_hash();
+        let mut initiator = MseHandshake::new_initiator(info_hash);
+        let mut responder = MseHandshake::new_responder([0u8; 20]);
+        let initiator_step1 = initiator.build_step1();
+        let responder_step1 = responder.build_step1();
+
+        initiator
+            .receive_step1(&responder_step1[..KEY_LENGTH])
+            .unwrap();
+        responder
+            .receive_step1(&initiator_step1[..KEY_LENGTH])
+            .unwrap();
+
+        let initiator_step3 = initiator.build_initiator_step2().unwrap();
+        let mut responder_buffer = initiator_step1[KEY_LENGTH..].to_vec();
+        responder_buffer.extend_from_slice(&initiator_step3);
+        let discovered = responder
+            .receiver_info_hash(&responder_buffer, &[info_hash])
+            .unwrap()
+            .unwrap();
+        responder.set_info_hash(discovered).unwrap();
+        let required = responder
+            .receiver_step2_required_len(&responder_buffer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(required, responder_buffer.len());
+        responder
+            .receive_initiator_step2(&responder_buffer, &[info_hash])
+            .unwrap();
+        let responder_step4 = responder.build_receiver_step2().unwrap();
+
+        let mut initiator_buffer = responder_step1[KEY_LENGTH..].to_vec();
+        initiator_buffer.extend_from_slice(&responder_step4);
+        let required = initiator
+            .initiator_step2_required_len(&initiator_buffer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(required, initiator_buffer.len());
+        initiator.receive_receiver_step2(&initiator_buffer).unwrap();
+        let mut initiator_crypto = initiator.finalize().unwrap();
+        let mut responder_crypto = responder.finalize().unwrap();
+
+        let mut message = [0x77u8; 68];
+        initiator_crypto.encrypt(&mut message);
+        responder_crypto.decrypt(&mut message);
+        assert_eq!(message, [0x77u8; 68]);
+
+        let mut reverse = [0x88u8; 68];
+        responder_crypto.encrypt(&mut reverse);
+        initiator_crypto.decrypt(&mut reverse);
+        assert_eq!(reverse, [0x88u8; 68]);
     }
 
     #[test]

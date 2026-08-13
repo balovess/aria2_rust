@@ -254,7 +254,7 @@ async fn test_tell_status_has_real_progress_data() {
     );
     assert_eq!(
         status_val["connections"].as_str(),
-        Some("5"),
+        Some("16"),
         "Connections reflect the configured split count"
     );
 }
@@ -319,7 +319,7 @@ async fn test_tell_status_includes_upload_fields() {
     );
     assert_eq!(
         status_val["connections"].as_str(),
-        Some("5"),
+        Some("16"),
         "Connections reflect the configured split count"
     );
 }
@@ -589,20 +589,12 @@ async fn test_change_global_tracker_options_updates_global_state_and_engine() {
         .await
         .result
         .expect("global options response");
-    assert_eq!(
-        options.get("bt-tracker-source"),
-        Some(&serde_json::json!(
-            "https://one.example/list.txt\nhttps://two.example/list.txt"
-        ))
-    );
-    assert_eq!(
-        options.get("bt-tracker-update-interval"),
-        Some(&serde_json::json!("900"))
-    );
-    assert_eq!(
-        options.get("enable-public-trackers"),
-        Some(&serde_json::json!("false"))
-    );
+    let options = options
+        .as_object()
+        .expect("global options must be an object");
+    assert!(!options.contains_key("bt-tracker-source"));
+    assert!(!options.contains_key("bt-tracker-update-interval"));
+    assert!(!options.contains_key("enable-public-trackers"));
 
     let mut commands = Vec::new();
     for _ in 0..3 {
@@ -621,6 +613,40 @@ async fn test_change_global_tracker_options_updates_global_state_and_engine() {
         command,
         EngineCommand::SetPublicTrackersEnabled { enabled } if !enabled
     )));
+
+    let add = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([[
+            "http://example.test/file",
+        ], {
+            "enable-public-trackers": "false",
+            "bt-tracker-source": "https://three.example/list.txt",
+            "bt-tracker-update-interval": "1200"
+        }]),
+    )
+    .with_id(3);
+    let gid: String = serde_json::from_value(
+        engine
+            .handle_request(&add)
+            .await
+            .result
+            .expect("extension options should be accepted for task creation"),
+    )
+    .expect("task creation should return a GID");
+
+    let task_options = engine
+        .handle_request(
+            &JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid])).with_id(4),
+        )
+        .await
+        .result
+        .expect("task options response");
+    let task_options = task_options
+        .as_object()
+        .expect("task options must be an object");
+    assert!(!task_options.contains_key("enable-public-trackers"));
+    assert!(!task_options.contains_key("bt-tracker-source"));
+    assert!(!task_options.contains_key("bt-tracker-update-interval"));
 }
 
 #[tokio::test]

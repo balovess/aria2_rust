@@ -5,11 +5,28 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub struct MockBtPeerServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    requested_pieces: std::sync::Arc<tokio::sync::Mutex<Vec<u32>>>,
+}
+
+impl std::fmt::Debug for MockBtPeerServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockBtPeerServer")
+            .field("addr", &self.addr)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MockBtPeerServer {
     pub async fn start(info_hash: [u8; 20], piece_data: Vec<Vec<u8>>) -> Self {
         Self::start_with_metadata(info_hash, piece_data, None).await
+    }
+
+    pub async fn start_with_response_delay(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        delay: std::time::Duration,
+    ) -> Self {
+        Self::start_with_metadata_and_delay(info_hash, piece_data, None, Some(delay)).await
     }
 
     pub async fn start_failing() -> Self {
@@ -31,6 +48,7 @@ impl MockBtPeerServer {
         Self {
             addr: actual_addr,
             shutdown: Some(shutdown_tx),
+            requested_pieces: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -39,12 +57,23 @@ impl MockBtPeerServer {
         piece_data: Vec<Vec<u8>>,
         torrent_metadata: Option<Vec<u8>>,
     ) -> Self {
+        Self::start_with_metadata_and_delay(info_hash, piece_data, torrent_metadata, None).await
+    }
+
+    pub async fn start_with_metadata_and_delay(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        torrent_metadata: Option<Vec<u8>>,
+        piece_response_delay: Option<std::time::Duration>,
+    ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .expect("Failed to bind mock peer port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let requested_pieces = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let requested_pieces_for_task = std::sync::Arc::clone(&requested_pieces);
 
         tokio::spawn(async move {
             loop {
@@ -55,7 +84,18 @@ impl MockBtPeerServer {
                                 let ih = info_hash;
                                 let pd = piece_data.clone();
                                 let md = torrent_metadata.clone();
-                                tokio::spawn(async move { Self::handle_peer(&mut stream, &ih, &pd, md.as_deref()).await; });
+                                let requests = std::sync::Arc::clone(&requested_pieces_for_task);
+                                tokio::spawn(async move {
+                                    Self::handle_peer(
+                                        &mut stream,
+                                        &ih,
+                                        &pd,
+                                        md.as_deref(),
+                                        requests,
+                                        piece_response_delay,
+                                    )
+                                    .await;
+                                });
                             }
                             Err(_) => break,
                         }
@@ -68,6 +108,7 @@ impl MockBtPeerServer {
         MockBtPeerServer {
             addr: actual_addr,
             shutdown: Some(shutdown_tx),
+            requested_pieces,
         }
     }
 
@@ -75,11 +116,17 @@ impl MockBtPeerServer {
         self.addr
     }
 
+    pub async fn requested_pieces(&self) -> Vec<u32> {
+        self.requested_pieces.lock().await.clone()
+    }
+
     async fn handle_peer(
         stream: &mut tokio::net::TcpStream,
         expected_info_hash: &[u8; 20],
         piece_data: &[Vec<u8>],
         torrent_metadata: Option<&[u8]>,
+        requested_pieces: std::sync::Arc<tokio::sync::Mutex<Vec<u32>>>,
+        piece_response_delay: Option<std::time::Duration>,
     ) {
         const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 
@@ -158,6 +205,7 @@ impl MockBtPeerServer {
                             u32::from_be_bytes(payload[5..9].try_into().unwrap_or([0u8; 4]));
                         let length =
                             u32::from_be_bytes(payload[9..13].try_into().unwrap_or([0u8; 4]));
+                        requested_pieces.lock().await.push(index);
 
                         let data = if (index as usize) < piece_data.len() {
                             let piece = &piece_data[index as usize];
@@ -177,6 +225,9 @@ impl MockBtPeerServer {
                         piece_payload.extend_from_slice(&begin.to_be_bytes());
                         piece_payload.extend_from_slice(&data);
                         let piece_msg = build_message(7, &piece_payload);
+                        if let Some(delay) = piece_response_delay {
+                            tokio::time::sleep(delay).await;
+                        }
                         stream.write_all(&piece_msg).await.ok();
                         stream.flush().await.ok();
                     }

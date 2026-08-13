@@ -7,6 +7,16 @@ pub fn build_test_torrent(
     piece_length: u32,
     tracker_url: &str,
 ) -> Vec<u8> {
+    build_test_torrent_with_web_seeds(name, total_size, piece_length, tracker_url, &[])
+}
+
+pub fn build_test_torrent_with_web_seeds(
+    name: &str,
+    total_size: u64,
+    piece_length: u32,
+    tracker_url: &str,
+    web_seed_urls: &[String],
+) -> Vec<u8> {
     let file_data = generate_file_data(total_size);
     let num_pieces = total_size.div_ceil(piece_length as u64) as usize;
     let mut pieces_hash = Vec::with_capacity(num_pieces * 20);
@@ -27,10 +37,25 @@ pub fn build_test_torrent(
     let info_key = b"info";
     let info_val = bencode_dict(&info_dict);
 
-    bencode_dict(&[
+    let mut torrent_entries = vec![
         (announce_key.to_vec(), announce_val),
         (info_key.to_vec(), info_val),
-    ])
+    ];
+    if !web_seed_urls.is_empty() {
+        let web_seed_value = if web_seed_urls.len() == 1 {
+            bencode_str(&web_seed_urls[0])
+        } else {
+            bencode_list(
+                &web_seed_urls
+                    .iter()
+                    .map(|url| bencode_str(url))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        torrent_entries.push((b"url-list".to_vec(), web_seed_value));
+    }
+
+    bencode_dict(&torrent_entries)
 }
 
 pub fn generate_file_data(size: u64) -> Vec<u8> {
@@ -77,6 +102,15 @@ fn bencode_bytes(b: &[u8]) -> Vec<u8> {
         .into_iter()
         .chain(b.iter().copied())
         .collect()
+}
+
+fn bencode_list(values: &[Vec<u8>]) -> Vec<u8> {
+    let mut result = b"l".to_vec();
+    for value in values {
+        result.extend_from_slice(value);
+    }
+    result.push(b'e');
+    result
 }
 
 fn bencode_dict(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {

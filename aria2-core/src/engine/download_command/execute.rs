@@ -125,18 +125,27 @@ impl DownloadCommand {
                 }
             }
         }
-        self.output_path = global_registry()
-            .resolve_with_policy(
-                &original_path,
-                OutputPathPolicy {
-                    allow_overwrite: options.allow_overwrite,
-                    auto_file_renaming: options.auto_file_renaming,
-                    continue_download: options.continue_download,
-                    check_integrity: self.check_integrity,
-                    total_length: (total_length > 0).then_some(total_length),
-                },
-            )
-            .await?;
+        if !self.output_path_resolved {
+            self.output_path = global_registry()
+                .resolve_with_policy(
+                    &original_path,
+                    OutputPathPolicy {
+                        allow_overwrite: options.allow_overwrite,
+                        auto_file_renaming: options.auto_file_renaming,
+                        continue_download: options.continue_download,
+                        check_integrity: self.check_integrity,
+                        total_length: (total_length > 0).then_some(total_length),
+                    },
+                )
+                .await?;
+            self.output_path_resolved = true;
+        } else {
+            // A mirror failover re-enters this attempt with the same command.
+            // Reclaim the already-resolved path instead of applying the
+            // filesystem collision policy a second time and renaming the
+            // partial/preallocated output.
+            self.output_path = global_registry().resolve(&self.output_path).await;
+        }
         if self.output_path != original_path {
             info!(
                 "Filename collision resolved: '{}' -> '{}'",
@@ -521,7 +530,13 @@ impl Command for DownloadCommand {
                 }
                 Err(error) => {
                     last_error = Some(error);
-                    break;
+                    // A request group may contain mirrors. Exhaust the
+                    // candidates before returning the last error so a
+                    // transient or mirror-local failure does not abort the
+                    // whole download prematurely.
+                    if candidates.peek().is_none() {
+                        break;
+                    }
                 }
             }
         }

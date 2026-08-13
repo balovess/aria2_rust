@@ -1,6 +1,8 @@
 use super::build_test_torrent;
 use super::*;
-use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{
+    BtDependency, BtFileMapping, DownloadOptions, GroupId, MetadataInfo, RequestGroup,
+};
 use std::sync::{Arc, RwLock};
 
 fn build_multi_file_torrent() -> Vec<u8> {
@@ -196,6 +198,138 @@ fn test_external_group_mapping_preserves_shared_torrent_file_identity() {
     assert!(!entries[1].is_unique_protocol());
 
     drop(command);
+}
+
+#[test]
+fn test_external_dependency_context_survives_plain_group_construction() {
+    let temp_dir = tempfile::tempdir().expect("temporary download directory");
+    let output_dir = temp_dir.path();
+    let torrent_bytes = build_multi_file_torrent();
+    let options = DownloadOptions {
+        dir: Some(output_dir.to_string_lossy().into_owned()),
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(RwLock::new(RequestGroup::new(
+        GroupId::new(105),
+        Vec::new(),
+        options.clone(),
+    )));
+    let mappings = vec![
+        BtFileMapping {
+            original_name: "dir1/file1.txt".to_string(),
+            path: output_dir.join("first.bin").to_string_lossy().into_owned(),
+            uris: vec!["http://mirror.test/first.bin".to_string()],
+            max_connection_per_server: 2,
+            unique_protocol: true,
+        },
+        BtFileMapping {
+            original_name: "dir2/file2.dat".to_string(),
+            path: output_dir.join("second.bin").to_string_lossy().into_owned(),
+            uris: vec!["http://mirror.test/second.bin".to_string()],
+            max_connection_per_server: 3,
+            unique_protocol: false,
+        },
+    ];
+
+    let dependency = BtDependency::new(
+        GroupId::new(104),
+        Arc::clone(&group),
+        torrent_bytes.clone(),
+        output_dir.join("multitest"),
+        MetadataInfo::new(GroupId::new(104), "https://mirror.test/multitest.torrent"),
+    )
+    .with_file_mappings(mappings.clone());
+    dependency
+        .mark_metadata_complete()
+        .expect("torrent metadata should install the mapped context");
+
+    let command = BtDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &torrent_bytes,
+        &options,
+        Some(output_dir.to_string_lossy().as_ref()),
+    )
+    .expect("plain group construction should retain the dependency context");
+    let context = group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("mapped torrent context");
+    let entries = context.get_file_entries();
+
+    assert_eq!(entries[0].path(), mappings[0].path);
+    assert_eq!(entries[1].path(), mappings[1].path);
+    assert_eq!(
+        entries[0].remaining_uris().front(),
+        Some(&mappings[0].uris[0])
+    );
+    assert_eq!(
+        entries[1].remaining_uris().front(),
+        Some(&mappings[1].uris[0])
+    );
+    assert_eq!(entries[0].max_connection_per_server(), 2);
+    assert_eq!(entries[1].max_connection_per_server(), 3);
+    assert!(entries[0].is_unique_protocol());
+    assert!(!entries[1].is_unique_protocol());
+
+    drop(command);
+}
+
+#[test]
+fn test_external_context_with_different_torrent_is_rebuilt() {
+    let temp_dir = tempfile::tempdir().expect("temporary download directory");
+    let options = DownloadOptions {
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        ..DownloadOptions::default()
+    };
+    let stale_torrent = build_multi_file_torrent();
+    let current_torrent = build_test_torrent();
+    let stale_command = BtDownloadCommand::new(
+        GroupId::new(106),
+        &stale_torrent,
+        &options,
+        Some(temp_dir.path().to_string_lossy().as_ref()),
+    )
+    .expect("stale torrent should construct");
+    let stale_context = stale_command
+        .group
+        .read()
+        .expect("stale request group lock")
+        .get_download_context()
+        .expect("stale torrent context");
+    let group = Arc::new(RwLock::new(RequestGroup::new(
+        GroupId::new(107),
+        Vec::new(),
+        options.clone(),
+    )));
+    group
+        .write()
+        .expect("request group lock")
+        .set_download_context(stale_context);
+
+    let command = BtDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &current_torrent,
+        &options,
+        Some(temp_dir.path().to_string_lossy().as_ref()),
+    )
+    .expect("current torrent should construct");
+    let current_meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&current_torrent)
+            .expect("current torrent should parse");
+    let context = group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("current torrent context");
+
+    assert_eq!(
+        context.get_bt_info_hash_hex(),
+        Some(current_meta.info_hash.as_hex())
+    );
+    assert_eq!(context.get_file_entries().len(), 1);
+    assert_eq!(context.get_file_entries()[0].original_name(), "test");
+    assert_eq!(command.output_path, temp_dir.path().join("test"));
 }
 
 #[test]

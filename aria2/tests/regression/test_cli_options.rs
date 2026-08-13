@@ -992,7 +992,7 @@ fn regression_registry_default_values() {
     );
     assert_eq!(
         registry.get("split").unwrap().default_value(),
-        &OptionValue::Int(5)
+        &OptionValue::Int(16)
     );
     assert_eq!(
         registry.get("timeout").unwrap().default_value(),
@@ -1150,7 +1150,7 @@ fn regression_registry_count() {
 // ConfigParser Validation Tests (unchanged - test ConfigParser directly)
 // =========================================================================
 
-/// Test: split option range validation (1-16).
+/// Test: split option validation accepts values above the default.
 #[test]
 fn regression_split_range_validation() {
     let mut parser = ConfigParser::new();
@@ -1162,8 +1162,8 @@ fn regression_split_range_validation() {
     assert_eq!(parser2.get_i64("split").unwrap(), 1);
 
     let mut parser3 = ConfigParser::new();
-    parser3.parse_cli_args(&["--split=16"]);
-    assert_eq!(parser3.get_i64("split").unwrap(), 16);
+    parser3.parse_cli_args(&["--split=100"]);
+    assert_eq!(parser3.get_i64("split").unwrap(), 100);
 }
 
 /// Test: max-connection-per-server range validation (1-16).
@@ -1213,7 +1213,7 @@ fn regression_defaults_applied() {
     parser.apply_defaults();
 
     assert_eq!(parser.get_str("dir").unwrap(), ".");
-    assert_eq!(parser.get_i64("split").unwrap(), 5);
+    assert_eq!(parser.get_i64("split").unwrap(), 16);
     assert_eq!(parser.get_i64("timeout").unwrap(), 60);
     assert!(!parser.get_bool("quiet").unwrap());
     assert!(parser.get_bool("check-certificate").unwrap());

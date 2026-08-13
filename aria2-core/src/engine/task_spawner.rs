@@ -13,11 +13,23 @@ use super::command::Command;
 use super::engine_command::TaskResult;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::Aria2Error;
-use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 use tokio_util::sync::CancellationToken;
+
+/// Shared services required while constructing a command.
+pub(crate) struct CommandDependencies {
+    pub(crate) dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+    pub(crate) global_limiter: Option<RateLimiter>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) public_tracker_catalog:
+        Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+}
 
 /// Spawns a download command as a tokio task and wires up the completion
 /// channel. Returns the `JoinHandle` for task management.
@@ -32,18 +44,9 @@ use tokio_util::sync::CancellationToken;
 ///
 /// After the task completes, sends `(GID, generation, TaskResult)` via the completion
 /// channel so the engine can decrement `num_commands` and check for demotion.
-pub fn spawn_download_task(
+pub(crate) fn spawn_download_task(
     group: Arc<std::sync::RwLock<RequestGroup>>,
-    _ftp_pool: Arc<FtpConnectionPool>,
-    _dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
-    global_limiter: Option<RateLimiter>,
-    #[cfg(feature = "bittorrent")] public_tracker_catalog: Arc<
-        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList,
-    >,
-    #[cfg(feature = "bittorrent")] bt_registry: Arc<
-        std::sync::RwLock<crate::engine::bt_registry::BtRegistry>,
-    >,
-    #[cfg(feature = "bittorrent")] bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    dependencies: CommandDependencies,
     generation: u64,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
 ) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)> {
@@ -66,7 +69,6 @@ pub fn spawn_download_task(
 
     let shutdown = CancellationToken::new();
     let task_shutdown = shutdown.clone();
-    let dns_cache = _dns_cache;
     let completion_tx = completion_tx.clone();
 
     // Command construction may perform DNS resolution and build protocol
@@ -79,14 +81,7 @@ pub fn spawn_download_task(
                 Arc::clone(&group),
                 first_uri,
                 options,
-                global_limiter,
-                #[cfg(feature = "bittorrent")]
-                public_tracker_catalog,
-                #[cfg(feature = "bittorrent")]
-                bt_registry,
-                #[cfg(feature = "bittorrent")]
-                bt_listener,
-                dns_cache,
+                dependencies,
             ) => {
                 match command_result {
                     Ok(mut cmd) => tokio::select! {
@@ -156,15 +151,7 @@ async fn create_command_for_group(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     first_uri: String,
     options: Arc<DownloadOptions>,
-    global_limiter: Option<RateLimiter>,
-    #[cfg(feature = "bittorrent")] public_tracker_catalog: Arc<
-        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList,
-    >,
-    #[cfg(feature = "bittorrent")] bt_registry: Arc<
-        std::sync::RwLock<crate::engine::bt_registry::BtRegistry>,
-    >,
-    #[cfg(feature = "bittorrent")] bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
-    dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+    dependencies: CommandDependencies,
 ) -> crate::error::Result<Box<dyn Command>> {
     #[cfg(feature = "metalink")]
     if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
@@ -176,32 +163,20 @@ async fn create_command_for_group(
             &options,
             base_uri.as_deref(),
         )?;
-        if let Some(limiter) = global_limiter {
+        if let Some(limiter) = dependencies.global_limiter.clone() {
             command.set_global_limiter(limiter);
         }
         #[cfg(feature = "bittorrent")]
-        command.set_public_tracker_catalog(public_tracker_catalog);
+        command.set_public_tracker_catalog(Arc::clone(&dependencies.public_tracker_catalog));
         #[cfg(feature = "bittorrent")]
-        command.set_bt_registry(Arc::clone(&bt_registry));
-        #[cfg(feature = "bittorrent")]
-        command.set_bt_listener(Arc::clone(&bt_listener));
+        {
+            command.set_bt_registry(Arc::clone(&dependencies.bt_registry));
+            command.set_bt_listener(Arc::clone(&dependencies.bt_listener));
+        }
         return Ok(Box::new(command));
     }
 
-    create_command_for_uri(
-        &first_uri,
-        group,
-        &options,
-        global_limiter,
-        #[cfg(feature = "bittorrent")]
-        public_tracker_catalog,
-        #[cfg(feature = "bittorrent")]
-        bt_registry,
-        #[cfg(feature = "bittorrent")]
-        bt_listener,
-        &dns_cache,
-    )
-    .await
+    create_command_for_uri(&first_uri, group, &options, dependencies).await
 }
 
 /// Create the appropriate `Command` implementation for a URI.
@@ -213,16 +188,9 @@ async fn create_command_for_uri(
     uri: &str,
     group: Arc<std::sync::RwLock<RequestGroup>>,
     options: &DownloadOptions,
-    global_limiter: Option<RateLimiter>,
-    #[cfg(feature = "bittorrent")] public_tracker_catalog: Arc<
-        aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList,
-    >,
-    #[cfg(feature = "bittorrent")] bt_registry: Arc<
-        std::sync::RwLock<crate::engine::bt_registry::BtRegistry>,
-    >,
-    #[cfg(feature = "bittorrent")] bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
-    dns_cache: &Arc<tokio::sync::Mutex<DnsCache>>,
+    dependencies: CommandDependencies,
 ) -> crate::error::Result<Box<dyn Command>> {
+    let dns_cache = &dependencies.dns_cache;
     let uri_lower = uri.to_lowercase();
 
     // SFTP downloads use the engine-owned group, matching other v2 protocols.
@@ -235,7 +203,7 @@ async fn create_command_for_uri(
             options.dir.as_deref(),
             options.out.as_deref(),
         )?;
-        if let Some(limiter) = global_limiter {
+        if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
         return Ok(Box::new(cmd));
@@ -267,12 +235,12 @@ async fn create_command_for_uri(
             options,
             output_dir,
         )?;
-        cmd.set_bt_listener(bt_listener);
-        cmd.set_bt_registry(bt_registry);
-        if let Some(limiter) = global_limiter {
+        cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
+        cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
+        if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
-        cmd.set_public_tracker_catalog(public_tracker_catalog);
+        cmd.set_public_tracker_catalog(Arc::clone(&dependencies.public_tracker_catalog));
         return Ok(Box::new(cmd));
     }
 
@@ -284,12 +252,12 @@ async fn create_command_for_uri(
             crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
                 group, output_dir,
             )?;
-        cmd.set_bt_listener(bt_listener);
-        cmd.set_bt_registry(bt_registry);
-        if let Some(limiter) = global_limiter.clone() {
+        cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
+        cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
+        if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
-        cmd.set_public_tracker_catalog(public_tracker_catalog);
+        cmd.set_public_tracker_catalog(Arc::clone(&dependencies.public_tracker_catalog));
         return Ok(Box::new(cmd));
     }
 
@@ -302,7 +270,7 @@ async fn create_command_for_uri(
             output_dir,
             output_name,
         )?;
-        if let Some(limiter) = global_limiter.clone() {
+        if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
         cmd.set_dns_cache(Arc::clone(dns_cache));
@@ -332,7 +300,7 @@ async fn create_command_for_uri(
             output_name,
             resolved_addresses,
         )?;
-    if let Some(limiter) = global_limiter {
+    if let Some(limiter) = dependencies.global_limiter {
         cmd.set_global_limiter(limiter);
     }
     Ok(Box::new(cmd))

@@ -177,8 +177,6 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-seed-unverified",
     "bt-stop-timeout",
     "bt-tracker",
-    #[cfg(feature = "bittorrent")]
-    "enable-public-trackers",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
@@ -498,6 +496,9 @@ mod tests {
     #[test]
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
+        #[cfg(feature = "bittorrent")]
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 107);
+        #[cfg(not(feature = "bittorrent"))]
         assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 106);
         assert_eq!(
             is_option_changeable("max-download-limit", true),

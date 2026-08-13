@@ -172,12 +172,18 @@ aria2c -o output.dat -d /downloads -s 4 -x 8 http://example.com/large.bin
 |--------|-------------|---------|
 | `-d, --dir` | Save directory | `.` |
 | `-o, --out` | Output filename | auto |
-| `-s, --split` | Connections per download | `16` |
-| `-x, --max-connection-per-server` | HTTP max connections per server; adaptive download may lower it | `16` |
+| `-s, --split` | Concurrent segment requests per download | `16` |
+| `-x, --max-connection-per-server` | Per-authority HTTP segment request cap; adaptive download may lower it | `16` |
 | `--max-download-limit` | Max download speed | unlimited |
 | `--timeout` | Timeout in seconds | `60` |
 | `-q, --quiet` | Quiet mode | false |
 
+For segmented HTTP downloads, `split` is the total concurrent request budget
+for one file. `max-connection-per-server` is the independent cap for each
+`scheme://host:port` authority. With multiple mirrors, different authorities
+may run concurrently within the `split` budget; mirrors sharing one authority
+share that authority's cap. HTTP adaptive concurrency starts at the configured
+cap and lowers only the authority that returns `429` or `503`.
 ### BitTorrent Download
 
 ```bash
@@ -190,7 +196,7 @@ Create a text file with URIs (one entry per block, Tab-separated mirrors):
 
 ```
   dir=/downloads
-  split=5
+  split=16
 http://mirror1.example.com/file.iso	http://mirror2.example.com/file.iso
 http://mirror3.example.com/file.iso
 ```
@@ -208,13 +214,13 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-12): the current focused evidence includes
+Verification snapshot (2026-08-13): the current focused evidence includes
 40 option-parser tests, 13 BitTorrent selector tests, 37 protocol picker tests,
 20 CLI/app tests, 105 CLI regression tests, and a previously completed 402-test
 RPC all-feature run, plus one additional targeted RPC default-visibility
-regression. The full RPC run preceded the concurrent workspace version update;
-under the current `0.2.9`, the version entry point, app tests, Clippy, and the
-targeted parser/RPC regressions pass. `aria2c --version` reports
+regression. The core all-feature library target currently reports 3335 passed,
+0 failed, and 1 ignored. Under the current `0.2.9`, the version entry point,
+app tests, Clippy, and the targeted parser/RPC regressions pass. `aria2c --version` reports
 `aria2-rust 0.2.9`,
 and the four Rust workspace members, SDK packages, Homebrew formula, and Scoop
 manifest resolve to product version `0.2.9`. The single workspace

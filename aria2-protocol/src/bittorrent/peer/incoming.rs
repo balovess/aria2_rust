@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::bittorrent::extension::mse_handshake::{
-    MSE_MAX_BUFFER_LENGTH, MSE_PUBLIC_KEY_LENGTH, MseHandshake,
-};
 use crate::bittorrent::extension::mse_crypto::MseCryptoState;
+use crate::bittorrent::extension::mse_handshake::{
+    MSE_MAX_INCOMING_HANDSHAKE_LENGTH, MSE_PUBLIC_KEY_LENGTH, MseHandshake,
+};
 use crate::bittorrent::message::handshake::Handshake;
 
 const HANDSHAKE_LENGTH: usize = 68;
@@ -31,8 +31,8 @@ pub struct IncomingCryptoPolicy {
 }
 
 pub enum IncomingConnection {
-    Plain(crate::bittorrent::peer::connection::PeerConnection),
-    Encrypted(crate::bittorrent::peer::encrypted_connection::EncryptedConnection),
+    Plain(Box<crate::bittorrent::peer::connection::PeerConnection>),
+    Encrypted(Box<crate::bittorrent::peer::encrypted_connection::EncryptedConnection>),
 }
 
 impl IncomingConnection {
@@ -52,7 +52,7 @@ pub enum IncomingHandshake {
     Mse {
         stream: TcpStream,
         handshake: Handshake,
-        crypto: MseCryptoState,
+        crypto: Box<MseCryptoState>,
     },
 }
 
@@ -73,12 +73,12 @@ impl IncomingHandshake {
                     .write_all(&Handshake::new(&handshake.info_hash, &local_peer_id).to_bytes())
                     .await
                     .map_err(|error| format!("Failed to send handshake response: {error}"))?;
-                Ok(IncomingConnection::Plain(
+                Ok(IncomingConnection::Plain(Box::new(
                     crate::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
                         stream,
                         handshake.peer_id,
                     ),
-                ))
+                )))
             }
             Self::Mse {
                 mut stream,
@@ -92,11 +92,11 @@ impl IncomingHandshake {
                     .await
                     .map_err(|error| format!("Failed to send MSE handshake response: {error}"))?;
                 Ok(IncomingConnection::Encrypted(
-                    crate::bittorrent::peer::encrypted_connection::EncryptedConnection::from_incoming_parts(
+                    Box::new(crate::bittorrent::peer::encrypted_connection::EncryptedConnection::from_incoming_parts(
                         stream,
-                        crypto,
+                        *crypto,
                         handshake.peer_id,
-                    ),
+                    )),
                 ))
             }
         }
@@ -133,10 +133,7 @@ pub async fn receive_with_policies(
         {
             return Err("The legacy BitTorrent handshake is disabled by policy".to_string());
         }
-        return Ok(IncomingHandshake::Plain {
-            stream,
-            handshake,
-        });
+        return Ok(IncomingHandshake::Plain { stream, handshake });
     }
 
     let mut responder = MseHandshake::new_responder([0u8; 20]);
@@ -149,24 +146,38 @@ pub async fn receive_with_policies(
         .await
         .map_err(|error| format!("Failed to send MSE public key: {error}"))?;
 
-    let mut step2 = Vec::with_capacity(MSE_MAX_BUFFER_LENGTH);
-    loop {
+    let mut step2 = Vec::with_capacity(MSE_MAX_INCOMING_HANDSHAKE_LENGTH);
+    let info_hash = loop {
         if let Some(info_hash) = responder.receiver_info_hash(&step2, known_info_hashes)? {
             responder.set_info_hash(info_hash)?;
-            break;
+            break info_hash;
         }
-        if step2.len() >= MSE_MAX_BUFFER_LENGTH {
-            return Err("MSE handshake exceeded receiver buffer limit".to_string());
+        if step2.len() >= MSE_MAX_INCOMING_HANDSHAKE_LENGTH {
+            return Err(format!(
+                "MSE handshake exceeded receiver buffer limit; prefix={:02x?}",
+                &step2[..step2.len().min(48)]
+            ));
         }
         let mut byte = [0u8; 1];
         read_exact(&mut stream, &mut byte).await?;
         step2.push(byte[0]);
-    }
+    };
 
-    let required = responder
-        .receiver_step2_required_len(&step2)?
-        .ok_or("MSE handshake length is incomplete")?;
-    if required > MSE_MAX_BUFFER_LENGTH {
+    let required = loop {
+        if let Some(required) = responder.receiver_step2_required_len(&step2)? {
+            break required;
+        }
+        if step2.len() >= MSE_MAX_INCOMING_HANDSHAKE_LENGTH {
+            return Err(format!(
+                "MSE handshake exceeded receiver buffer limit; prefix={:02x?}",
+                &step2[..step2.len().min(48)]
+            ));
+        }
+        let mut byte = [0u8; 1];
+        read_exact(&mut stream, &mut byte).await?;
+        step2.push(byte[0]);
+    };
+    if required > MSE_MAX_INCOMING_HANDSHAKE_LENGTH {
         return Err("MSE handshake IA exceeds receiver buffer limit".to_string());
     }
     while step2.len() < required {
@@ -177,7 +188,7 @@ pub async fn receive_with_policies(
         step2.extend_from_slice(&chunk);
     }
 
-    let info_hash = *responder.info_hash();
+    debug_assert_eq!(info_hash, *responder.info_hash());
     let policy = policies.get(&info_hash).copied().unwrap_or_default();
     responder.set_crypto_preferences(policy.force_encryption, policy.prefer_encryption);
     responder.receive_initiator_step2(&step2, &[info_hash])?;
@@ -192,7 +203,12 @@ pub async fn receive_with_policies(
     read_exact(&mut stream, &mut handshake_bytes).await?;
     let mut handshake_data = handshake_bytes.to_vec();
     crypto.decrypt(&mut handshake_data);
-    let handshake = Handshake::parse(&handshake_data)?;
+    let handshake = Handshake::parse(&handshake_data).map_err(|error| {
+        format!(
+            "{error}; decrypted handshake prefix={:02x?}",
+            &handshake_data[..8]
+        )
+    })?;
     if handshake.info_hash != info_hash {
         return Err("MSE BitTorrent handshake info_hash mismatch".to_string());
     }
@@ -200,7 +216,7 @@ pub async fn receive_with_policies(
     Ok(IncomingHandshake::Mse {
         stream,
         handshake,
-        crypto,
+        crypto: Box::new(crypto),
     })
 }
 
@@ -210,4 +226,133 @@ async fn read_exact(stream: &mut TcpStream, buffer: &mut [u8]) -> Result<(), Str
         .map_err(|_| "Incoming handshake read timeout".to_string())?
         .map(|_| ())
         .map_err(|error| format!("Incoming handshake read failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bittorrent::message::types::BtMessage;
+    use crate::bittorrent::peer::connection::PeerAddr;
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+
+    async fn run_incoming_server(
+        info_hash: [u8; 20],
+        policy: IncomingCryptoPolicy,
+    ) -> (
+        SocketAddr,
+        tokio::task::JoinHandle<Result<IncomingConnection, String>>,
+    ) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.map_err(|error| error.to_string())?;
+            let mut policies = HashMap::new();
+            policies.insert(info_hash, policy);
+            let incoming = receive_with_policies(stream, &[info_hash], &policies).await?;
+            incoming.complete([2u8; 20]).await
+        });
+        (address, server)
+    }
+
+    #[tokio::test]
+    async fn mse_rc4_socket_handshake_preserves_post_handshake_cipher_state() {
+        let info_hash = [0x31u8; 20];
+        let (address, server) = run_incoming_server(
+            info_hash,
+            IncomingCryptoPolicy {
+                reject_plain: true,
+                force_encryption: true,
+                prefer_encryption: true,
+            },
+        )
+        .await;
+
+        let client_result =
+            crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(
+                &PeerAddr::new("127.0.0.1", address.port()),
+                &info_hash,
+                true,
+                true,
+            )
+            .await;
+        let mut client = match client_result {
+            Ok(client) => client,
+            Err(error) => {
+                let server_result = server.await.unwrap();
+                let server_error = match server_result {
+                    Ok(_) => "ok".to_owned(),
+                    Err(server_error) => server_error,
+                };
+                panic!("client: {error}; server: {server_error}");
+            }
+        };
+        assert!(client.is_encrypted());
+        client.send_message(&BtMessage::KeepAlive).await.unwrap();
+        let mut server_connection = server.await.unwrap().unwrap();
+        let server_connection = match &mut server_connection {
+            IncomingConnection::Encrypted(connection) => connection,
+            IncomingConnection::Plain(_) => panic!("expected an encrypted connection"),
+        };
+        assert_eq!(
+            server_connection.read_message().await.unwrap(),
+            Some(BtMessage::KeepAlive)
+        );
+
+        server_connection
+            .send_message(&BtMessage::Choke)
+            .await
+            .unwrap();
+        assert_eq!(client.read_message().await.unwrap(), Some(BtMessage::Choke));
+    }
+
+    #[tokio::test]
+    async fn mse_plain_socket_handshake_keeps_aria2_fallback() {
+        let info_hash = [0x32u8; 20];
+        let (address, server) =
+            run_incoming_server(info_hash, IncomingCryptoPolicy::default()).await;
+
+        let client =
+            crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(
+                &PeerAddr::new("127.0.0.1", address.port()),
+                &info_hash,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        assert!(!client.is_encrypted());
+        let server_connection = server.await.unwrap().unwrap();
+        assert!(matches!(
+            server_connection,
+            IncomingConnection::Encrypted(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn legacy_plain_handshake_is_rejected_by_policy() {
+        let info_hash = [0x33u8; 20];
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut policies = HashMap::new();
+            policies.insert(
+                info_hash,
+                IncomingCryptoPolicy {
+                    reject_plain: true,
+                    ..IncomingCryptoPolicy::default()
+                },
+            );
+            receive_with_policies(stream, &[info_hash], &policies).await
+        });
+
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(&Handshake::new(&info_hash, &[9u8; 20]).to_bytes())
+            .await
+            .unwrap();
+        let result = server.await.unwrap();
+        assert!(result.is_err());
+    }
 }

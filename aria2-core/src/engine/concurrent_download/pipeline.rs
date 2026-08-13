@@ -1,7 +1,7 @@
 //! Multi-mirror concurrent download pipeline.
 //!
 //! Mirror selection remains owned by `MirrorCoordinator`; all HTTP range
-//! requests are executed by one bounded, long-lived connection pool.
+//! requests are executed by one dynamic request executor.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,9 +13,12 @@ use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
-use crate::engine::http_connection_pool::{HttpConnectionPool, HttpSegmentJob, server_key};
 use crate::engine::http_segment_downloader::WriteChunk;
+use crate::engine::http_segment_request_executor::{
+    HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
+};
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -30,8 +33,14 @@ pub async fn execute_with_coordinator(
     resume_state: &ResumeState,
     max_retries_per_segment: u32,
 ) -> Result<ConcurrentDownloadResult> {
-    let split = dl.group.recover().options().split.unwrap_or(1) as usize;
-    let segment_size = total_length.div_ceil(split as u64);
+    let split = (dl
+        .group
+        .recover()
+        .options()
+        .split
+        .unwrap_or(constants::DEFAULT_SPLIT) as usize)
+        .max(1);
+    let segment_size = total_length.div_ceil(split as u64).max(1);
     let max_conn = dl
         .group
         .recover()
@@ -41,8 +50,8 @@ pub async fn execute_with_coordinator(
         .clamp(1, 16) as usize;
 
     let mirror_config = crate::engine::mirror_coordinator::MirrorConfig {
-        max_connections_per_mirror: max_conn.min(split),
-        max_total_connections: max_conn.min(split),
+        max_connections_per_mirror: split,
+        max_total_connections: split,
         speed_threshold: constants::MIRROR_SPEED_THRESHOLD,
         cooldown_secs: constants::MIRROR_COOLDOWN_SECS,
         max_retries: max_retries_per_segment,
@@ -62,7 +71,10 @@ pub async fn execute_with_coordinator(
         selector,
     );
     let mut segment_manager = segment_manager;
-    segment_manager.set_max_connections_per_mirror(max_conn.min(split));
+    // Segment selection may offer any mirror up to the per-download split
+    // budget. Authority admission below applies the real server cap and
+    // shares it across mirrors with the same scheme/host/port.
+    segment_manager.set_max_connections_per_mirror(split);
     let mut coordinator =
         crate::engine::mirror_coordinator::MirrorCoordinator::with_segment_manager(
             crate::selector::server_stat_man::ServerStatMan::shared().clone(),
@@ -72,18 +84,124 @@ pub async fn execute_with_coordinator(
             uris.to_vec(),
         );
 
-    if resume_state.should_resume {
-        tracing::debug!(
-            "Resume: existing {} bytes, continuing from offset {}",
-            resume_state.existing_length,
-            resume_state.start_offset
-        );
-    }
-
     let use_mmap = dl.file_allocation == "mmap" && total_length >= dl.mmap_threshold;
     let mut writer =
         CachedDiskWriter::new_with_mmap(&dl.output_path, Some(total_length), None, use_mmap);
-    dl.progress_updater.reset(0);
+
+    let num_pieces = coordinator.num_segments().max(1);
+    let ctrl_path = ControlFile::control_path_for(&dl.output_path);
+    dl.group.recover().set_control_file_path(ctrl_path.clone());
+    let expected_bitfield_len = num_pieces.div_ceil(8);
+    let persisted_prefix = resume_state
+        .control_file
+        .as_ref()
+        .map(ControlFile::completed_length)
+        .filter(|&length| length > 0)
+        .or_else(|| {
+            (resume_state.control_file.is_none() && resume_state.should_resume)
+                .then_some(resume_state.start_offset)
+        })
+        .unwrap_or(0);
+    let compatible_control_file = resume_state.control_file.as_ref().filter(|control_file| {
+        control_file.total_length() == total_length
+            && control_file.bitfield().len() == expected_bitfield_len
+    });
+
+    // ResumeHelper is the authority for whether a sidecar belongs to this
+    // attempt. In particular, continue=false deliberately returns no control
+    // file even when an old sidecar is present; do not let open_or_create()
+    // resurrect that state behind the resume seam.
+    let has_untrusted_control_file = resume_state.control_file.is_none() && ctrl_path.exists();
+    let can_initialize_new_control_file = if compatible_control_file.is_some() {
+        true
+    } else if has_untrusted_control_file || resume_state.control_file.is_some() {
+        match tokio::fs::remove_file(&ctrl_path).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                tracing::warn!(
+                    path = %ctrl_path.display(),
+                    %error,
+                    "Failed to replace stale multi-mirror control file"
+                );
+                false
+            }
+        }
+    } else {
+        true
+    };
+    // A file-length-only resume is safe only when there is no untrusted
+    // sidecar left behind. If replacing that sidecar failed, the file and
+    // its progress metadata cannot be reconciled, so restart the segments
+    // instead of trusting ResumeState::start_offset.
+    let can_restore_prefix = resume_state.control_file.is_none()
+        && resume_state.should_resume
+        && (!has_untrusted_control_file || can_initialize_new_control_file);
+
+    let mut ctrl_file = if let Some(control_file) = compatible_control_file {
+        Some(control_file.clone())
+    } else if can_initialize_new_control_file {
+        if has_untrusted_control_file || resume_state.control_file.is_some() {
+            tracing::debug!(
+                path = %ctrl_path.display(),
+                "Discarding stale control-file layout before multi-mirror resume"
+            );
+        }
+        match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
+            Ok(control_file) => Some(control_file),
+            Err(error) => {
+                tracing::warn!(
+                    path = %ctrl_path.display(),
+                    %error,
+                    "Failed to create multi-mirror control file; resume will be less reliable"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let restored_bytes = if let Some(control_file) = ctrl_file.as_ref() {
+        let restored = if compatible_control_file.is_some() && control_file.completed_pieces() > 0 {
+            coordinator.restore_completed_from_bitfield(control_file.bitfield())
+        } else if compatible_control_file.is_some() || can_restore_prefix {
+            coordinator.restore_completed_prefix(persisted_prefix)
+        } else {
+            0
+        };
+        if resume_state.should_resume {
+            tracing::debug!(
+                existing_length = resume_state.existing_length,
+                start_offset = resume_state.start_offset,
+                restored_bytes = restored,
+                "Resuming multi-mirror download from persisted segment state"
+            );
+        }
+        restored
+    } else if can_restore_prefix {
+        let restored = coordinator.restore_completed_prefix(resume_state.start_offset);
+        tracing::debug!(
+            existing_length = resume_state.existing_length,
+            start_offset = resume_state.start_offset,
+            restored_bytes = restored,
+            "Resuming multi-mirror download from conservative completed prefix"
+        );
+        restored
+    } else {
+        0
+    };
+    dl.progress_updater.reset(restored_bytes);
+    dl.progress.set_completed_length(restored_bytes);
+
+    if let Some(control_file) = ctrl_file.as_mut() {
+        control_file.update_completed_length(restored_bytes);
+        if let Err(error) = control_file.save().await {
+            tracing::warn!(%error, "Failed to save initial multi-mirror control file");
+        }
+    }
+    let ctrl_save_interval = (total_length / num_pieces as u64).max(1);
+    let mut ctrl_bytes_since_save = 0u64;
 
     let fallback_threshold_consecutive = 3u32;
     let fallback_threshold_ratio = 0.2f64;
@@ -93,32 +211,27 @@ pub async fn execute_with_coordinator(
 
     let server_keys: Vec<String> = uris
         .iter()
-        .map(|uri| server_key(uri).unwrap_or_else(|| uri.clone()))
+        .map(|uri| authority_key(uri).unwrap_or_else(|| uri.clone()))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let per_server_limit = max_conn.min(split).max(1);
-    let pool_limit = per_server_limit
-        .saturating_mul(server_keys.len())
-        .min(split)
-        .max(1);
     let retry_wait = dl.group.recover().options().retry_wait;
     let mut adaptive = HashMap::new();
     for key in &server_keys {
         adaptive.insert(
             key.clone(),
-            HttpAdaptiveConcurrency::new(per_server_limit, retry_wait),
+            HttpAdaptiveConcurrency::new(max_conn, retry_wait),
         );
     }
-    let mut pool = HttpConnectionPool::new(
+    let mut executor = HttpSegmentRequestExecutor::new(
         &dl.client,
         dl.request_policy.clone(),
         dl.cookie_helper.clone(),
         dl.auth_options.clone(),
         dl.netrc_path.clone(),
-        pool_limit,
+        split,
         &server_keys,
-        per_server_limit,
+        max_conn,
     );
     let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
     let mut active: HashMap<u32, (usize, Instant)> = HashMap::new();
@@ -126,15 +239,28 @@ pub async fn execute_with_coordinator(
     let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
 
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
-        dl.check_cancelled()?;
+        if let Err(error) = dl.check_cancelled() {
+            super::segment::cancel_and_persist(
+                executor,
+                &mut write_rx,
+                &mut writer,
+                None,
+                dl.global_limiter.as_ref(),
+                &mut ctrl_file,
+                coordinator.completed_bytes(),
+                &mut progress_handles,
+            )
+            .await?;
+            return Err(error);
+        }
 
         // Each authority closes its feedback round independently. A slow
         // mirror must not delay a capacity decision for another server.
         for (key, controller) in &mut adaptive {
-            if pool.in_flight_for(key) == 0
+            if executor.in_flight_for(key) == 0
                 && let Some(new_target) = controller.finish_round()
             {
-                pool.set_target(key, new_target);
+                executor.set_target(key, new_target);
                 tracing::info!(
                     server = key,
                     new_target,
@@ -144,13 +270,14 @@ pub async fn execute_with_coordinator(
         }
 
         let mut scheduling_attempts = 0usize;
-        while scheduling_attempts < uris.len().max(1) * per_server_limit {
+        while scheduling_attempts < uris.len().max(1) * split {
             let excluded_mirrors: Vec<usize> = uris
                 .iter()
                 .enumerate()
-                .filter_map(|(mirror_idx, key)| {
-                    let controller = adaptive.get_mut(key)?;
-                    (!controller.can_start(pool.in_flight_for(key))).then_some(mirror_idx)
+                .filter_map(|(mirror_idx, uri)| {
+                    let key = authority_key(uri).unwrap_or_else(|| uri.clone());
+                    let controller = adaptive.get_mut(&key)?;
+                    (!controller.can_start(executor.in_flight_for(&key))).then_some(mirror_idx)
                 })
                 .collect();
             let Some((mirror_idx, mirror_url, (seg_idx, offset, length))) =
@@ -159,7 +286,7 @@ pub async fn execute_with_coordinator(
                 break;
             };
             scheduling_attempts += 1;
-            let key = server_key(&mirror_url).unwrap_or_else(|| mirror_url.clone());
+            let key = authority_key(&mirror_url).unwrap_or_else(|| mirror_url.clone());
 
             let (seg_progress_tx, mut seg_progress_rx) =
                 mpsc::unbounded_channel::<ProgressUpdate>();
@@ -170,10 +297,10 @@ pub async fn execute_with_coordinator(
                 }
             });
 
-            let submitted = pool.try_submit(HttpSegmentJob {
+            let submitted = executor.try_submit(HttpSegmentRequest {
                 mirror_index: mirror_idx,
                 segment_index: seg_idx,
-                server_key: key,
+                authority_key: key,
                 url: mirror_url.clone(),
                 offset,
                 length,
@@ -212,7 +339,7 @@ pub async fn execute_with_coordinator(
             break;
         }
 
-        if pool.in_flight() == 0 {
+        if executor.in_flight() == 0 {
             if let Some(wait) = adaptive
                 .values()
                 .filter_map(|c| c.cooldown_remaining())
@@ -236,7 +363,7 @@ pub async fn execute_with_coordinator(
         }
 
         tokio::select! {
-            Some(pool_result) = pool.next_result() => {
+            Some(pool_result) = executor.next_result() => {
                 let seg_idx = pool_result.segment_index;
                 let Some((mirror_idx, seg_start)) = active.remove(&seg_idx) else {
                     continue;
@@ -245,10 +372,10 @@ pub async fn execute_with_coordinator(
                     let _ = progress_handle.await;
                 }
 
-                let result_server_key = pool_result.server_key.clone();
+                let result_authority_key = pool_result.authority_key.clone();
                 match pool_result.result {
                     Ok(bytes_downloaded) => {
-                        if let Some(controller) = adaptive.get_mut(&result_server_key) {
+                        if let Some(controller) = adaptive.get_mut(&result_authority_key) {
                             controller.record(AdaptiveOutcome::Success);
                         }
                         let elapsed = seg_start.elapsed();
@@ -267,6 +394,18 @@ pub async fn execute_with_coordinator(
                                 format!("Segment {} completed with invalid length {}", seg_idx, bytes_downloaded),
                             )));
                         }
+                        if let Some(control_file) = ctrl_file.as_mut() {
+                            control_file.mark_piece_done(seg_idx as usize);
+                            ctrl_bytes_since_save =
+                                ctrl_bytes_since_save.saturating_add(bytes_downloaded);
+                            if ctrl_bytes_since_save >= ctrl_save_interval {
+                                control_file.update_completed_length(coordinator.completed_bytes());
+                                if let Err(error) = control_file.save().await {
+                                    tracing::warn!(%error, "Failed to save multi-mirror control file");
+                                }
+                                ctrl_bytes_since_save = 0;
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(seg_idx, mirror_idx, error = %e, "Pooled segment download failed");
@@ -275,7 +414,7 @@ pub async fn execute_with_coordinator(
                             Aria2Error::Recoverable(RecoverableError::ServerError { code })
                                 if matches!(*code, 429 | 503)
                         );
-                        if let Some(controller) = adaptive.get_mut(&result_server_key) {
+                        if let Some(controller) = adaptive.get_mut(&result_authority_key) {
                             controller.record(if is_capacity_limited {
                                 AdaptiveOutcome::CapacityLimited
                             } else {
@@ -299,7 +438,7 @@ pub async fn execute_with_coordinator(
                             break;
                         }
                         let preserve_retry_budget = adaptive
-                            .get(&result_server_key)
+                            .get(&result_authority_key)
                             .is_some_and(HttpAdaptiveConcurrency::preserve_retry_budget);
                         if is_capacity_limited && preserve_retry_budget {
                             coordinator.requeue_segment(seg_idx);
@@ -331,7 +470,20 @@ pub async fn execute_with_coordinator(
                 })?;
             }
             _ = cancel_tick.tick() => {
-                dl.check_cancelled()?;
+                if let Err(error) = dl.check_cancelled() {
+                    super::segment::cancel_and_persist(
+                        executor,
+                        &mut write_rx,
+                        &mut writer,
+                        None,
+                        dl.global_limiter.as_ref(),
+                        &mut ctrl_file,
+                        coordinator.completed_bytes(),
+                        &mut progress_handles,
+                    )
+                    .await?;
+                    return Err(error);
+                }
             }
         }
 
@@ -341,9 +493,19 @@ pub async fn execute_with_coordinator(
     }
 
     if should_fallback {
-        pool.cancel().await;
+        super::segment::cancel_and_persist(
+            executor,
+            &mut write_rx,
+            &mut writer,
+            None,
+            dl.global_limiter.as_ref(),
+            &mut ctrl_file,
+            coordinator.completed_bytes(),
+            &mut progress_handles,
+        )
+        .await?;
     } else {
-        pool.shutdown().await;
+        executor.shutdown().await;
     }
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
         writer.write_bytes_at(offset, data).await.map_err(|e| {
@@ -397,6 +559,18 @@ pub async fn execute_with_coordinator(
         dl.progress_updater.last_progress_update(),
         final_speed
     );
+    if let Some(control_file) = ctrl_file.as_mut() {
+        control_file.update_completed_length(coordinator.completed_bytes());
+        if let Err(error) = control_file.save().await {
+            tracing::warn!(%error, "Failed to save final multi-mirror control file");
+        }
+    }
+    drop(ctrl_file);
+    if ctrl_path.exists()
+        && let Err(error) = tokio::fs::remove_file(&ctrl_path).await
+    {
+        tracing::debug!(%error, "Failed to delete multi-mirror control file on completion");
+    }
     dl.cookie_helper.save_cookies_if_configured();
     Ok(ConcurrentDownloadResult::Complete)
 }

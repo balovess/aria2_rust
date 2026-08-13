@@ -855,13 +855,14 @@ fn regression_config_parser_error_invalid_integer() {
     assert_eq!(parser.errors()[0].option, "split");
 }
 
-/// Test: ConfigParser error on out of range.
+/// Test: ConfigParser accepts a split value above the default.
 #[test]
-fn regression_config_parser_error_out_of_range() {
+fn regression_config_parser_accepts_large_split() {
     let mut parser = ConfigParser::new();
-    parser.set_raw("split", "100"); // Max is 16
+    parser.set_raw("split", "100");
 
-    assert!(parser.has_errors());
+    assert!(!parser.has_errors());
+    assert_eq!(parser.get_i64("split"), Some(100));
 }
 
 /// Test: ConfigParser error on zero split.

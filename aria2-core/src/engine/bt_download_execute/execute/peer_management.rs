@@ -7,6 +7,7 @@ use crate::engine::bt_download_command::{BtDownloadCommand, MAX_PUBLIC_TRACKERS_
 use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_peer_interaction::BtPeerCryptoPolicy;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
@@ -370,8 +371,19 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
     ) -> Result<Vec<BtPeerConn>> {
-        let require_crypto = { self.group.recover().options().bt_require_crypto };
-        let force_encrypt = { self.group.recover().options().bt_force_encrypt };
+        let crypto_policy = {
+            let group = self.group.recover();
+            BtPeerCryptoPolicy {
+                require_mse: group.options().bt_require_crypto || group.options().bt_force_encrypt,
+                force_encryption: group.options().bt_force_encrypt,
+                prefer_encryption: group.effective_option_snapshot().is_some_and(|snapshot| {
+                    snapshot
+                        .get("bt-min-crypto-level")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|level| level.eq_ignore_ascii_case("arc4"))
+                }) || group.options().bt_force_encrypt,
+            }
+        };
 
         // Generate our local peer ID for this session. This is used for
         // self-connection detection (C++ bittorrent::getStaticPeerId()).
@@ -437,8 +449,7 @@ impl BtDownloadCommand {
             num_pieces,
             piece_length,
             total_size,
-            require_crypto,
-            force_encrypt,
+            crypto_policy,
         )
         .await
         {

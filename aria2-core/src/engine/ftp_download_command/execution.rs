@@ -89,6 +89,7 @@ impl Command for FtpDownloadCommand {
                     return Ok(());
                 }
                 Err(attempt_error) => {
+                    self.flush_checkpoint().await;
                     let FtpAttemptError {
                         source: e,
                         failed_control,
@@ -150,6 +151,10 @@ impl Command for FtpDownloadCommand {
         }
     }
 
+    async fn shutdown(&mut self) {
+        self.flush_checkpoint().await;
+    }
+
     fn status(&self) -> CommandStatus {
         if self.completed_bytes > 0 || self.started {
             CommandStatus::Running
@@ -177,6 +182,23 @@ impl Command for FtpDownloadCommand {
 }
 
 impl FtpDownloadCommand {
+    async fn flush_checkpoint(&mut self) {
+        if let Some(checkpoint) = self.checkpoint.as_mut() {
+            checkpoint.update(self.completed_bytes, true).await;
+        }
+    }
+
+    async fn complete_checkpoint(&mut self) {
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.complete().await;
+        }
+    }
+
+    async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
+        let _ = writer.finalize().await;
+        self.flush_checkpoint().await;
+    }
+
     /// Execute a single download attempt
     async fn execute_single_attempt(
         &mut self,
@@ -256,8 +278,17 @@ impl FtpDownloadCommand {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0)
         };
+        let continue_download = self.group.recover().options().continue_download;
         let mut restart_from_zero = false;
         if let Some(actual_size) = file_size {
+            let resume_input_length =
+                crate::engine::progress_checkpoint::ProgressCheckpoint::resume_input_length(
+                    &self.output_path,
+                    local_size,
+                    continue_download,
+                    actual_size,
+                )
+                .await;
             {
                 let g = self.group.recover();
                 g.validate_total_length(g.total_length(), actual_size)
@@ -265,7 +296,26 @@ impl FtpDownloadCommand {
                 g.set_total_length(actual_size);
             }
 
-            if !in_memory_download && local_size == actual_size {
+            if in_memory_download {
+                self.checkpoint = None;
+            } else {
+                self.checkpoint = Some(
+                    crate::engine::progress_checkpoint::ProgressCheckpoint::open(
+                        &self.output_path,
+                        actual_size,
+                        resume_input_length,
+                    )
+                    .await,
+                );
+                self.resume_offset = self
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.resume_offset(resume_input_length))
+                    .unwrap_or(resume_input_length);
+            }
+
+            if !in_memory_download && local_size == actual_size && self.resume_offset == actual_size
+            {
                 let checksum_valid = {
                     let checksum_config = self.group.recover().options().checksum.clone();
                     match checksum_config {
@@ -296,6 +346,7 @@ impl FtpDownloadCommand {
                         self.group.recover().set_checksum_verified(true);
                     }
                     self.group.recover_mut().complete()?;
+                    self.complete_checkpoint().await;
                     info!(
                         path = %self.output_path.display(),
                         size = actual_size,
@@ -321,6 +372,7 @@ impl FtpDownloadCommand {
                         )))
                     })?;
                 self.resume_offset = 0;
+                self.flush_checkpoint().await;
                 restart_from_zero = true;
             }
 
@@ -339,9 +391,16 @@ impl FtpDownloadCommand {
                         )))
                     })?;
                 self.resume_offset = 0;
+                self.flush_checkpoint().await;
             } else if !restart_from_zero {
-                self.resume_offset = local_size;
+                self.resume_offset = self
+                    .checkpoint
+                    .as_ref()
+                    .map(|checkpoint| checkpoint.resume_offset(resume_input_length))
+                    .unwrap_or(resume_input_length);
             }
+        } else if !in_memory_download {
+            self.resume_offset = if continue_download { local_size } else { 0 };
         }
 
         // Step 5: Allocate the destination before RETR, matching the C++
@@ -528,25 +587,57 @@ impl FtpDownloadCommand {
         info!("Starting data reception from FTP server");
 
         loop {
-            let bytes_read = data_stream.read(&mut buffer).await.map_err(|e| {
-                // Classify IO errors
-                use std::io::ErrorKind;
-                match e.kind() {
-                    ErrorKind::Interrupted
-                    | ErrorKind::WouldBlock
-                    | ErrorKind::ConnectionReset
-                    | ErrorKind::ConnectionAborted
-                    | ErrorKind::BrokenPipe
-                    | ErrorKind::TimedOut => {
-                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                            message: format!("Data read error (transient): {}", e),
-                        })
+            let halted = {
+                let group = self.group.recover();
+                group.is_removed() || group.is_force_halt_requested() || group.is_halt_requested()
+            };
+            if halted {
+                let halt_error = {
+                    let group = self.group.recover();
+                    if group.is_removed() {
+                        "Download cancelled by user"
+                    } else if group.is_paused_flag() {
+                        "Download paused"
+                    } else {
+                        "FTP download halted"
                     }
-                    _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("Data read error: {}", e),
-                    }),
+                };
+                drop(data_stream);
+                let _ = writer.finalize().await;
+                self.flush_checkpoint().await;
+                ctrl.abort_transfer().await;
+                ctrl.quit().await.ok();
+                return Err(FtpAttemptError::from(Aria2Error::DownloadFailed(
+                    halt_error.into(),
+                )));
+            }
+
+            let bytes_read = match data_stream.read(&mut buffer).await {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    use std::io::ErrorKind;
+                    let error = match error.kind() {
+                        ErrorKind::Interrupted
+                        | ErrorKind::WouldBlock
+                        | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
+                        | ErrorKind::BrokenPipe
+                        | ErrorKind::TimedOut => {
+                            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                                message: format!("Data read error (transient): {}", error),
+                            })
+                        }
+                        _ => Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            message: format!("Data read error: {}", error),
+                        }),
+                    };
+                    drop(data_stream);
+                    self.finalize_partial_writer(&mut writer).await;
+                    ctrl.abort_transfer().await;
+                    ctrl.quit().await.ok();
+                    return Err(FtpAttemptError::from(error));
                 }
-            })?;
+            };
 
             if bytes_read == 0 {
                 debug!("End of data stream reached");
@@ -554,8 +645,17 @@ impl FtpDownloadCommand {
             }
 
             // Write to disk (with rate limiting if enabled)
-            writer.write(&buffer[..bytes_read]).await?;
+            if let Err(error) = writer.write(&buffer[..bytes_read]).await {
+                drop(data_stream);
+                self.finalize_partial_writer(&mut writer).await;
+                ctrl.abort_transfer().await;
+                ctrl.quit().await.ok();
+                return Err(FtpAttemptError::from(error));
+            }
             self.completed_bytes += bytes_read as u64;
+            if let Some(checkpoint) = self.checkpoint.as_mut() {
+                checkpoint.update(self.completed_bytes, false).await;
+            }
 
             // Update progress in request group
             {
@@ -581,6 +681,10 @@ impl FtpDownloadCommand {
         if let Some(expected_size) = file_size
             && self.completed_bytes != expected_size
         {
+            drop(data_stream);
+            self.finalize_partial_writer(&mut writer).await;
+            ctrl.abort_transfer().await;
+            ctrl.quit().await.ok();
             return Err(FtpAttemptError::from(Aria2Error::FtpProtocol(format!(
                 "FTP transfer length mismatch: expected {}, got {}",
                 expected_size, self.completed_bytes
@@ -591,9 +695,17 @@ impl FtpDownloadCommand {
         drop(data_stream); // Close data connection
 
         // Finalize disk writer (flush buffers, etc.)
-        let finalized_data = writer.finalize().await.map_err(|e| {
-            Aria2Error::Fatal(FatalError::Config(format!("Finalize writer failed: {}", e)))
-        })?;
+        let finalized_data = match writer.finalize().await {
+            Ok(data) => data,
+            Err(error) => {
+                self.flush_checkpoint().await;
+                ctrl.abort_transfer().await;
+                ctrl.quit().await.ok();
+                return Err(FtpAttemptError::from(Aria2Error::Fatal(
+                    FatalError::Config(format!("Finalize writer failed: {}", error)),
+                )));
+            }
+        };
 
         let checksum_config = self.group.recover().options().checksum.clone();
         if let Some((algorithm, expected)) = checksum_config {
@@ -626,6 +738,8 @@ impl FtpDownloadCommand {
 
         // Read transfer completion response from control channel
         ctrl.read_transfer_complete().await?;
+
+        self.complete_checkpoint().await;
 
         // Disconnect gracefully
         ctrl.quit().await.ok();

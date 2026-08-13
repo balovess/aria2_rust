@@ -474,6 +474,10 @@ impl RawFtpControl {
         }
     }
 
+    pub(super) async fn abort_transfer(&mut self) {
+        let _ = self.command("ABOR").await;
+    }
+
     /// Gracefully disconnect from server
     pub(super) async fn quit(mut self) -> Result<()> {
         debug!("Sending QUIT command");

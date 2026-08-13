@@ -22,9 +22,10 @@ impl BtPeerConn {
     pub async fn connect_mse(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
-        require_encryption: bool,
+        force_encryption: bool,
+        prefer_encryption: bool,
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, require_encryption).await {
+        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, force_encryption, prefer_encryption).await {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {

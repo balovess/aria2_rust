@@ -112,10 +112,10 @@ fn test_option_def_builder() {
         name: "split".into(),
         opt_type: OptionType::Integer,
         short_name: Some('s'),
-        default_value: OptionValue::Int(5),
-        description: "Connections per download".into(),
+        default_value: OptionValue::Int(16),
+        description: "Concurrent segment requests per download".into(),
         min: Some(1),
-        max: Some(16),
+        max: Some(128),
         category: OptionCategory::HttpFtp,
         ..Default::default()
     };
@@ -132,7 +132,7 @@ fn test_option_def_parse_integer() {
         name: "split".into(),
         opt_type: OptionType::Integer,
         min: Some(1),
-        max: Some(16),
+        max: Some(128),
         ..Default::default()
     };
     let v = def.parse_value("5").unwrap();
@@ -409,6 +409,44 @@ fn test_piece_priority_has_no_synthetic_default() {
             .default_value(),
         OptionValue::None
     ));
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn test_seed_time_has_no_default_but_preserves_explicit_zero() {
+    let registry = OptionRegistry::new();
+    let definition = registry
+        .get("seed-time")
+        .expect("seed-time option must be registered");
+
+    assert!(matches!(definition.default_value(), OptionValue::None));
+    assert_eq!(definition.parse_value("0").unwrap().as_f64(), Some(0.0));
+}
+
+#[test]
+fn test_optimize_concurrent_download_coefficients_match_original_wire_names() {
+    let registry = OptionRegistry::new();
+    let coeff_a = registry
+        .get("optimize-concurrent-downloads-coeffA")
+        .expect("original coefficient A option must be registered");
+    let coeff_b = registry
+        .get("optimize-concurrent-downloads-coeffB")
+        .expect("original coefficient B option must be registered");
+
+    assert_eq!(coeff_a.default_value().as_f64(), Some(5.0));
+    assert_eq!(coeff_b.default_value().as_f64(), Some(25.0));
+    assert_eq!(coeff_a.parse_value("7.5").unwrap().as_f64(), Some(7.5));
+    assert_eq!(coeff_b.parse_value("30").unwrap().as_f64(), Some(30.0));
+    assert!(
+        registry
+            .get("optimize-concurrent-downloads-coeffa")
+            .is_none()
+    );
+    assert!(
+        registry
+            .get("optimize-concurrent-downloads-coeffb")
+            .is_none()
+    );
 }
 
 #[cfg(feature = "bittorrent")]

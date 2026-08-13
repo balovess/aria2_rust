@@ -349,8 +349,10 @@ impl MetalinkToRequestGroup {
         options: &DownloadOptions,
     ) -> Vec<BtFileMapping> {
         let output_dir = options.dir.as_deref().unwrap_or(".");
-        let max_connection_per_server =
-            options.max_connection_per_server.unwrap_or(1).max(1) as usize;
+        let max_connection_per_server = options
+            .max_connection_per_server
+            .unwrap_or(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+            .clamp(1, 16) as usize;
 
         indices
             .iter()

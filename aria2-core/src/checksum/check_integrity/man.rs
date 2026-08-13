@@ -240,6 +240,14 @@ impl CheckIntegrityTask for FileChunkValidator {
     fn passed(&self) -> bool {
         self.passed && self.finished
     }
+
+    fn failed_piece_indices(&self) -> Vec<usize> {
+        self.failed_indices.clone()
+    }
+
+    fn verified_piece_indices(&self) -> Vec<usize> {
+        self.verified_indices.clone()
+    }
 }
 
 /// Validates the logical byte stream of a multi-file torrent.

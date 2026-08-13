@@ -206,6 +206,19 @@ impl MirrorCoordinator {
         self.segment_manager.requeue_segment(seg_idx)
     }
 
+    /// Restore fully completed segments from a persisted control-file
+    /// bitfield and return the resulting byte count.
+    pub fn restore_completed_from_bitfield(&mut self, bitfield: &[u8]) -> u64 {
+        self.segment_manager
+            .restore_completed_from_bitfield(bitfield)
+    }
+
+    /// Restore the conservative completed prefix used when the persisted
+    /// control file has no compatible segment layout.
+    pub fn restore_completed_prefix(&mut self, length: u64) -> u64 {
+        self.segment_manager.restore_completed_prefix(length)
+    }
+
     /// Get the maximum download speed across all mirrors.
     ///
     /// This is used as a baseline for calculating optimal connections.

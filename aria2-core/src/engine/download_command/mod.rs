@@ -41,6 +41,10 @@ pub struct DownloadCommand {
     /// being attempted.
     pub(super) initial_uri: String,
     pub(super) output_path: std::path::PathBuf,
+    /// Whether the output path has already gone through collision resolution.
+    /// Mirror failover reuses this resolved path after the prior attempt
+    /// releases its temporary registry claim.
+    pub(super) output_path_resolved: bool,
     pub(super) started: bool,
     pub(super) completed: bool,
     pub(super) completed_bytes: u64,
@@ -409,6 +413,7 @@ impl DownloadCommand {
             client,
             initial_uri: uri.to_string(),
             output_path: path,
+            output_path_resolved: false,
             started: false,
             completed: false,
             completed_bytes: 0,
@@ -538,6 +543,7 @@ impl DownloadCommand {
             client,
             initial_uri: uri.to_string(),
             output_path: path,
+            output_path_resolved: false,
             started: false,
             completed: false,
             completed_bytes: 0,

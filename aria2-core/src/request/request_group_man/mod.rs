@@ -327,8 +327,6 @@ impl RequestGroupMan {
         if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
             let group = group_lock.recover();
             group.request_halt(HaltReason::UserRequest);
-            group.remove_control_file();
-            let _ = group.process_remove_control_file();
             info!("Requested removal of active download task #{}", gid.value());
             return Ok(());
         }
@@ -360,11 +358,6 @@ impl RequestGroupMan {
             group_lock
                 .recover()
                 .request_force_halt(HaltReason::UserRequest);
-            if let Some(group) = self.active.get(&gid).map(|entry| entry.value().clone()) {
-                let group = group.recover();
-                group.remove_control_file();
-                let _ = group.process_remove_control_file();
-            }
             info!(
                 "Requested force removal of active download task #{}",
                 gid.value()

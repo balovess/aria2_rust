@@ -93,6 +93,33 @@ fn test_completed_ranges_exclude_partial_or_failed_segments() {
         vec![(100, 200)]
     );
 }
+
+#[test]
+fn test_restore_completed_segments_from_bitfield() {
+    let mut mgr = ConcurrentSegmentManager::new(400, vec!["http://x.com/f".to_string()], Some(100));
+
+    // Segment zero and segment two are complete; segments one and three must
+    // remain pending for a safe resume.
+    let completed = mgr.restore_completed_from_bitfield(&[0b1010_0000]);
+
+    assert_eq!(completed, 200);
+    assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(1), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.segment_status(2), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(3), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.completed_ranges(), vec![(0, 100), (200, 100)]);
+}
+
+#[test]
+fn test_restore_completed_prefix_ignores_partial_segment() {
+    let mut mgr = ConcurrentSegmentManager::new(400, vec!["http://x.com/f".to_string()], Some(100));
+
+    assert_eq!(mgr.restore_completed_prefix(250), 200);
+    assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(1), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(2), Some(SegmentStatus::Pending));
+}
+
 #[test]
 fn test_fail_and_reassign() {
     let mut mgr = ConcurrentSegmentManager::new(

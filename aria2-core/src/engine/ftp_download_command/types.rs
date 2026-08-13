@@ -8,6 +8,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tracing::info;
 
 use crate::dns::dns_cache::DnsCache;
+use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::ftp::connection::{FtpsConfig, TlsVersion};
 use crate::network::ConnectionContext;
@@ -51,6 +52,7 @@ pub struct FtpDownloadCommand {
     /// File allocation strategy selected by the request options.
     pub(super) file_allocation: String,
     pub(super) secure_falloc: bool,
+    pub(super) checkpoint: Option<ProgressCheckpoint>,
 }
 
 impl FtpDownloadCommand {
@@ -163,6 +165,7 @@ impl FtpDownloadCommand {
                 .clone()
                 .unwrap_or_else(|| crate::constants::DEFAULT_FILE_ALLOCATION.to_string()),
             secure_falloc: options.secure_falloc,
+            checkpoint: None,
         })
     }
 

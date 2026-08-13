@@ -2,9 +2,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info};
 
 use crate::bittorrent::extension::mse_crypto::MseCryptoState;
-use crate::bittorrent::extension::mse_handshake::{
-    MSE_PUBLIC_KEY_LENGTH, MseHandshake,
-};
+use crate::bittorrent::extension::mse_handshake::{MSE_PUBLIC_KEY_LENGTH, MseHandshake};
 use crate::bittorrent::message::handshake::Handshake;
 use crate::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 use crate::bittorrent::peer::connection::{PeerAddr, PeerConnection};
@@ -14,6 +12,7 @@ pub struct EncryptedConnection {
     inner: PeerConnection,
     crypto: MseCryptoState,
     mse_negotiated: bool,
+    read_ahead: Vec<u8>,
 }
 
 impl EncryptedConnection {
@@ -28,13 +27,15 @@ impl EncryptedConnection {
             inner: PeerConnection::from_stream_with_peer(stream, peer_id),
             crypto,
             mse_negotiated: true,
+            read_ahead: Vec::new(),
         }
     }
 
     pub async fn connect_with_mse(
         addr: &PeerAddr,
         info_hash: &[u8; 20],
-        require_encryption: bool,
+        force_encryption: bool,
+        prefer_encryption: bool,
     ) -> Result<Self, String> {
         let socket_addr = addr.to_socket_addr();
         debug!("MSE connecting to peer: {}", socket_addr);
@@ -49,19 +50,17 @@ impl EncryptedConnection {
 
         // aria2's MSE path starts with DH. The 68-byte BitTorrent handshake
         // is exchanged only after MSE has selected the stream cipher.
-        Self::complete_mse_handshake(stream, info_hash, require_encryption).await
+        Self::complete_mse_handshake(stream, info_hash, force_encryption, prefer_encryption).await
     }
 
     async fn complete_mse_handshake(
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
-        require_encryption: bool,
+        force_encryption: bool,
+        prefer_encryption: bool,
     ) -> Result<Self, String> {
         let mut initiator = MseHandshake::new_initiator(*info_hash);
-        // The aria2 default is `bt-min-crypto-level=plain`: offer both
-        // methods and let the responder select plaintext. Required crypto
-        // offers RC4 only.
-        initiator.set_crypto_preferences(require_encryption, require_encryption);
+        initiator.set_crypto_preferences(force_encryption, prefer_encryption);
 
         // Step 1: Exchange DH public keys
         let step1_i = initiator.build_step1();
@@ -93,20 +92,24 @@ impl EncryptedConnection {
             .map_err(|e| format!("MSE Step3 flush failed: {}", e))?;
 
         let mut step4_r_buf = Vec::with_capacity(1_152);
+        let mut read_ahead = Vec::new();
         let response_len = loop {
             let mut chunk = [0u8; 64];
-            let read_len = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                stream.read(&mut chunk),
-            )
-            .await
-            .map_err(|_| "MSE response read timeout".to_string())?
-            .map_err(|error| format!("MSE response read failed: {error}"))?;
+            let read_len =
+                tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut chunk))
+                    .await
+                    .map_err(|_| "MSE response read timeout".to_string())?
+                    .map_err(|error| format!("MSE response read failed: {error}"))?;
             if read_len == 0 {
                 return Err("MSE response: peer closed connection".to_string());
             }
             step4_r_buf.extend_from_slice(&chunk[..read_len]);
-            if let Some(length) = initiator.initiator_step2_required_len(&step4_r_buf)? {
+            if let Some(length) = initiator.initiator_step2_required_len(&step4_r_buf)?
+                && step4_r_buf.len() >= length
+            {
+                if step4_r_buf.len() > length {
+                    read_ahead.extend_from_slice(&step4_r_buf.split_off(length));
+                }
                 break length;
             }
             if step4_r_buf.len() >= 1_152 {
@@ -133,9 +136,20 @@ impl EncryptedConnection {
             .map_err(|error| format!("Failed to send encrypted handshake: {error}"))?;
 
         let mut remote_handshake = [0u8; 68];
-        Self::read_exact_with_timeout(&mut stream, &mut remote_handshake, "MSE handshake").await?;
+        Self::read_exact_with_pending(
+            &mut stream,
+            &mut read_ahead,
+            &mut remote_handshake,
+            "MSE handshake",
+        )
+        .await?;
         crypto.decrypt(&mut remote_handshake);
-        let remote_hs = Handshake::parse(&remote_handshake)?;
+        let remote_hs = Handshake::parse(&remote_handshake).map_err(|error| {
+            format!(
+                "{error}; decrypted handshake prefix={:02x?}",
+                &remote_handshake[..8]
+            )
+        })?;
         if remote_hs.info_hash != *info_hash {
             return Err("info_hash mismatch".to_string());
         }
@@ -145,6 +159,7 @@ impl EncryptedConnection {
             inner: conn,
             crypto,
             mse_negotiated: true,
+            read_ahead,
         })
     }
 
@@ -153,20 +168,29 @@ impl EncryptedConnection {
         buffer: &mut [u8],
         label: &str,
     ) -> Result<(), String> {
-        tokio::time::timeout(std::time::Duration::from_secs(30), stream.read_exact(buffer))
-            .await
-            .map_err(|_| format!("{label} read timeout"))?
-            .map(|_| ())
-            .map_err(|error| format!("{label} read failed: {error}"))
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.read_exact(buffer),
+        )
+        .await
+        .map_err(|_| format!("{label} read timeout"))?
+        .map(|_| ())
+        .map_err(|error| format!("{label} read failed: {error}"))
     }
 
-    fn from_plain_connection(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {
-        let conn = PeerConnection::from_stream_with_peer(stream, peer_id);
-        EncryptedConnection {
-            inner: conn,
-            crypto: MseCryptoState::new_plain(),
-            mse_negotiated: false,
+    async fn read_exact_with_pending(
+        stream: &mut tokio::net::TcpStream,
+        pending: &mut Vec<u8>,
+        buffer: &mut [u8],
+        label: &str,
+    ) -> Result<(), String> {
+        let copied = pending.len().min(buffer.len());
+        buffer[..copied].copy_from_slice(&pending[..copied]);
+        pending.drain(..copied);
+        if copied < buffer.len() {
+            Self::read_exact_with_timeout(stream, &mut buffer[copied..], label).await?;
         }
+        Ok(())
     }
 
     pub fn is_encrypted(&self) -> bool {
@@ -220,7 +244,15 @@ impl EncryptedConnection {
     }
 
     async fn read_encrypted_exact(&mut self, buf: &mut [u8]) -> Result<bool, String> {
-        match self.inner.stream_read_exact(buf).await {
+        let copied = self.read_ahead.len().min(buf.len());
+        buf[..copied].copy_from_slice(&self.read_ahead[..copied]);
+        self.read_ahead.drain(..copied);
+        let result = if copied < buf.len() {
+            self.inner.stream_read_exact(&mut buf[copied..]).await
+        } else {
+            Ok(())
+        };
+        match result {
             Ok(_) => {
                 self.crypto.decrypt(buf);
                 Ok(true)
@@ -330,6 +362,7 @@ mod tests {
         let result = EncryptedConnection::connect_with_mse(
             &PeerAddr::new("127.0.0.1", 1),
             &[0xAB; 20],
+            false,
             false,
         )
         .await;

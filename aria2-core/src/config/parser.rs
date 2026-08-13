@@ -458,7 +458,7 @@ mod tests {
         let err = ConfigError {
             source: ConfigSource::CommandLine,
             option: "split".into(),
-            message: "value 100 exceeds maximum 16".into(),
+            message: "value 200 exceeds maximum 128".into(),
         };
         let s = format!("{}", err);
         assert!(s.contains("split"));

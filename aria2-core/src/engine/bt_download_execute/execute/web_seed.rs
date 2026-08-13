@@ -58,14 +58,20 @@ pub(super) async fn try_web_seed_fallback(
                         .await?;
                 }
 
-                // Sync bitfield to RequestGroup for session persistence (Task 4)
+                let bitfield = piece_picker.export_bitfield();
+                // Keep the in-memory status and on-disk checkpoint on the same
+                // verified-piece snapshot regardless of the source adapter.
                 {
-                    let bitfield = piece_picker.export_bitfield();
                     let g = cmd.group.recover();
-                    g.set_bt_bitfield(Some(bitfield));
+                    g.set_bt_bitfield(Some(bitfield.clone()));
                 }
 
                 cmd.completed_bytes += web_seed_len;
+                if let Some(checkpoint) = cmd.checkpoint.as_mut()
+                    && let Err(error) = checkpoint.save(&bitfield, cmd.completed_bytes).await
+                {
+                    warn!(%error, "Failed to save BT checkpoint after web-seed piece completion");
+                }
                 Ok(true)
             } else {
                 warn!(

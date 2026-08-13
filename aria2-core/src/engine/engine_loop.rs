@@ -20,7 +20,7 @@ use tracing::{debug, info, warn};
 
 use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
 use super::engine_command::{EngineCommand, TaskResult};
-use super::task_spawner::spawn_download_task;
+use super::task_spawner::{CommandDependencies, spawn_download_task};
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
@@ -165,7 +165,6 @@ pub async fn run_engine_loop(
             &mut running_downloads,
             &mut halt_requested,
             &mut force_halt_requested,
-            &completion_tx,
         )
         .await;
 
@@ -191,15 +190,16 @@ pub async fn run_engine_loop(
             next_generation = next_generation.wrapping_add(1);
             match spawn_download_task(
                 Arc::clone(group),
-                Arc::clone(&ctx.ftp_pool),
-                Arc::clone(&ctx.dns_cache),
-                ctx.global_limiter.clone(),
-                #[cfg(feature = "bittorrent")]
-                Arc::clone(&ctx.public_tracker_catalog),
-                #[cfg(feature = "bittorrent")]
-                Arc::clone(&ctx.bt_registry),
-                #[cfg(feature = "bittorrent")]
-                Arc::clone(&ctx.bt_listener),
+                CommandDependencies {
+                    dns_cache: Arc::clone(&ctx.dns_cache),
+                    global_limiter: ctx.global_limiter.clone(),
+                    #[cfg(feature = "bittorrent")]
+                    public_tracker_catalog: Arc::clone(&ctx.public_tracker_catalog),
+                    #[cfg(feature = "bittorrent")]
+                    bt_registry: Arc::clone(&ctx.bt_registry),
+                    #[cfg(feature = "bittorrent")]
+                    bt_listener: Arc::clone(&ctx.bt_listener),
+                },
                 generation,
                 completion_tx.clone(),
             ) {
@@ -338,7 +338,6 @@ async fn process_engine_commands(
     running_downloads: &mut [(GroupId, RunningDownload)],
     halt_requested: &mut bool,
     force_halt_requested: &mut bool,
-    completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
 ) {
     while let Ok(cmd) = cmd_rx.try_recv() {
         // Every EngineCommand mutates session state (queue membership,
@@ -372,16 +371,10 @@ async fn process_engine_commands(
                     warn!(gid = gid.value(), error = %e, "Failed to remove download");
                     continue;
                 }
-                // Graceful removal is observed by the protocol command. If the
-                // transport is waiting for a response, wake it through the
-                // command's shutdown channel so the completion can be recorded
-                // without waiting for a network timeout.
-                for (_, running) in running_downloads.iter_mut().filter(|(id, _)| *id == gid) {
-                    if !request_shutdown_and_wait(running).await {
-                        let _ =
-                            completion_tx.send((gid, running.generation, TaskResult::Cancelled));
-                    }
-                }
+                // Let the command observe the RequestGroup halt signal. This
+                // preserves the protocol-owned cleanup seam: HTTP downloaders
+                // cancel requests, flush queued writes, and save progress
+                // before reporting the user removal.
             }
 
             EngineCommand::ForceRemoveDownload { gid } => {
@@ -390,12 +383,9 @@ async fn process_engine_commands(
                     warn!(gid = gid.value(), error = %e, "Failed to force-remove download");
                     continue;
                 }
-                for (_, running) in running_downloads.iter_mut().filter(|(id, _)| *id == gid) {
-                    if !request_shutdown_and_wait(running).await {
-                        let _ =
-                            completion_tx.send((gid, running.generation, TaskResult::Cancelled));
-                    }
-                }
+                // Force removal still travels through the command's halt
+                // check so protocol-specific writers can persist a coherent
+                // checkpoint before the task is accounted as removed.
             }
 
             EngineCommand::Pause { gid } => {
@@ -1125,14 +1115,12 @@ mod tests {
 
         let mut halt_requested = false;
         let mut force_halt_requested = false;
-        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         process_engine_commands(
             &mut ctx,
             &mut rx,
             &mut Vec::new(),
             &mut halt_requested,
             &mut force_halt_requested,
-            &completion_tx,
         )
         .await;
 
@@ -1164,8 +1152,6 @@ mod tests {
         })
         .unwrap();
 
-        let (completion_tx, _completion_rx) =
-            mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
         let mut running_downloads = Vec::new();
         let mut halt_requested = false;
         let mut force_halt_requested = false;
@@ -1175,7 +1161,6 @@ mod tests {
             &mut running_downloads,
             &mut halt_requested,
             &mut force_halt_requested,
-            &completion_tx,
         )
         .await;
 

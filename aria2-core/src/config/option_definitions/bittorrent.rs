@@ -10,7 +10,10 @@ impl crate::config::OptionRegistry {
             name: "seed-time".into(),
             opt_type: OptionType::Float,
             short_name: Some('G'),
-            default_value: OptionValue::Float(0.0),
+            // aria2_original uses NO_DEFAULT_VALUE here. A configured zero
+            // must remain distinguishable from an omitted option because it
+            // explicitly disables the seed-time criterion.
+            default_value: OptionValue::None,
             description: "Seeding time in minutes (0=infinite)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -328,6 +331,10 @@ impl crate::config::OptionRegistry {
             cumulative_delimiter: Some("\n"),
             description: "Remote public tracker list sources".into(),
             category: OptionCategory::BitTorrent,
+            // Rust-only extension. Keep it out of the original
+            // getGlobalOption/getOption projections while retaining the
+            // explicit extension option for local configuration and RPC.
+            expose_in_aria2_rpc: false,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -337,6 +344,7 @@ impl crate::config::OptionRegistry {
             min: Some(1),
             description: "Public tracker list refresh interval in seconds".into(),
             category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: false,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -345,6 +353,7 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Bool(true),
             description: "Use public trackers in addition to torrent trackers".into(),
             category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: false,
             ..Default::default()
         });
         self.register(OptionDef {

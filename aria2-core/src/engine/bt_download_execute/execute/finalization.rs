@@ -54,6 +54,10 @@ impl BtDownloadCommand {
             warn!(%error, "Failed to remove progress file after completion");
         }
 
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.remove().await?;
+        }
+
         if let Some(ref hooks) = self.hook_manager {
             let context = HookContext {
                 gid: self.group.recover().gid(),

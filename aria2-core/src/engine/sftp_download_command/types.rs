@@ -9,6 +9,7 @@ use std::time::Duration;
 use tracing::info;
 
 use crate::constants;
+use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::http::auth::netrc::find_netrc_file;
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
@@ -51,6 +52,7 @@ pub struct SftpDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for this download.
     pub(super) global_limiter: Option<RateLimiter>,
+    pub(super) checkpoint: Option<ProgressCheckpoint>,
 }
 
 /// Source-compatible SFTP URI fields before credential resolution.
@@ -150,6 +152,7 @@ impl SftpDownloadCommand {
             host_key_fingerprint: options.ssh_host_key_md.clone(),
             remote_path: parsed.remote_path,
             global_limiter: None,
+            checkpoint: None,
         })
     }
 
@@ -187,6 +190,7 @@ impl SftpDownloadCommand {
             host_key_fingerprint: options.ssh_host_key_md.clone(),
             remote_path: parsed.remote_path,
             global_limiter: None,
+            checkpoint: None,
         })
     }
 

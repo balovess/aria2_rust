@@ -12,7 +12,10 @@ mod e2e_helpers;
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::filesystem::control_file::ControlFile;
+use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
 use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
@@ -69,6 +72,59 @@ fn has_range_header(entry: &crate::e2e_helpers::mock_http_server::RequestLog) ->
         .headers
         .iter()
         .any(|(k, _)| k.eq_ignore_ascii_case("range"))
+}
+
+async fn wait_for_group_status(
+    group: &Arc<std::sync::RwLock<RequestGroup>>,
+    expected: DownloadStatus,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if group.read().unwrap().status() == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("download did not reach the expected lifecycle state");
+}
+
+async fn wait_for_control_file(path: &std::path::Path) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("download did not create its control file");
+}
+
+async fn wait_for_progress(group: &Arc<std::sync::RwLock<RequestGroup>>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if group.read().unwrap().get_completed_length() > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("download did not report in-flight progress");
+}
+
+async fn wait_for_engine(
+    handle: tokio::task::JoinHandle<aria2_core::error::Result<()>>,
+    message: &str,
+) {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+        .await
+        .expect(message)
+        .expect("download engine task panicked");
+    result.expect("download engine returned an error");
 }
 
 /// Register a GET range handler for the given path.
@@ -258,7 +314,304 @@ async fn test_concurrent_download_multiple_range_requests() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Capacity feedback lowers concurrency and requeues 429 segments
+// Test 4: Multi-mirror concurrent resume restores the control-file bitfield
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_multi_mirror_resume_restores_completed_segments() {
+    let first_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start first mirror");
+    let second_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start second mirror");
+
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 17);
+    register_range_with_head(&first_server, "/mirror-file", &data);
+    register_range_with_head(&second_server, "/mirror-file", &data);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "multi-mirror-resume.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+
+    // split=4 creates four 512 KiB segments. Persist only segment zero and
+    // prewrite its bytes; the resumed pipeline must request segments 1..3.
+    tokio::fs::write(&output_path, &data[..file_size / 4])
+        .await
+        .expect("Failed to seed the completed segment");
+    let mut control_file = ControlFile::open_or_create(&control_path, file_size as u64, 4)
+        .await
+        .expect("Failed to create resume control file");
+    control_file.mark_piece_done(0);
+    control_file
+        .save()
+        .await
+        .expect("Failed to save resume state");
+
+    let first_url = make_url(&first_server.base_url(), "/mirror-file");
+    let second_url = make_url(&second_server.base_url(), "/mirror-file");
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.continue_download = true;
+    options.allow_overwrite = true;
+    let group = std::sync::Arc::new(std::sync::RwLock::new(
+        aria2_core::request::request_group::RequestGroup::new(
+            GroupId::new(401),
+            vec![first_url.clone(), second_url],
+            options.clone(),
+        ),
+    ));
+    let mut command = DownloadCommand::new_with_group(
+        group,
+        &first_url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some(output_name),
+    )
+    .expect("Failed to create multi-mirror download command");
+
+    command
+        .execute()
+        .await
+        .expect("Multi-mirror resume should succeed");
+
+    assert_eq!(tokio::fs::read(&output_path).await.unwrap(), data);
+    assert!(
+        !control_path.exists(),
+        "successful multi-mirror completion must remove the control file"
+    );
+
+    let first_ranges = first_server
+        .take_request_log()
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .headers
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+                .map(|(_, value)| value)
+        })
+        .chain(
+            second_server
+                .take_request_log()
+                .into_iter()
+                .filter_map(|entry| {
+                    entry
+                        .headers
+                        .into_iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+                        .map(|(_, value)| value)
+                }),
+        )
+        .collect::<Vec<_>>();
+    assert!(!first_ranges.is_empty(), "resume must issue Range requests");
+    assert!(
+        first_ranges
+            .iter()
+            .all(|range| !range.starts_with("bytes=0-")),
+        "restored segment zero must not be requested again: {first_ranges:?}"
+    );
+
+    first_server.shutdown().await;
+    second_server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_multi_mirror_without_continue_discards_stale_control_file() {
+    let first_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start first mirror");
+    let second_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start second mirror");
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 29);
+    register_range_with_head(&first_server, "/fresh-file", &data);
+    register_range_with_head(&second_server, "/fresh-file", &data);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "fresh-multi-mirror.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let mut stale = ControlFile::open_or_create(&control_path, file_size as u64, 4)
+        .await
+        .expect("Failed to create stale control file");
+    stale.mark_piece_done(0);
+    stale
+        .save()
+        .await
+        .expect("Failed to save stale control file");
+
+    let first_url = make_url(&first_server.base_url(), "/fresh-file");
+    let second_url = make_url(&second_server.base_url(), "/fresh-file");
+    let options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    let group = std::sync::Arc::new(std::sync::RwLock::new(
+        aria2_core::request::request_group::RequestGroup::new(
+            GroupId::new(402),
+            vec![first_url.clone(), second_url],
+            options.clone(),
+        ),
+    ));
+    let mut command = DownloadCommand::new_with_group(
+        group,
+        &first_url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some(output_name),
+    )
+    .expect("Failed to create fresh multi-mirror command");
+
+    command
+        .execute()
+        .await
+        .expect("fresh multi-mirror download should succeed");
+
+    assert_eq!(tokio::fs::read(&output_path).await.unwrap(), data);
+    assert!(!control_path.exists());
+    let range_count = first_server
+        .take_request_log()
+        .into_iter()
+        .chain(second_server.take_request_log())
+        .filter(has_range_header)
+        .count();
+    assert!(
+        range_count >= 4,
+        "continue=false must download all segments, got {range_count} range requests"
+    );
+
+    first_server.shutdown().await;
+    second_server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Engine pause/remove preserve HTTP concurrent checkpoints
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 8 * 1024 * 1024;
+    let data = generate_test_data(file_size, 41);
+    server.register_slow_range_response("/pause-file", &data, 64 * 1024, 10);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "engine-pause-resume.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = make_url(&server.base_url(), "/pause-file");
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.continue_download = true;
+    options.allow_overwrite = true;
+
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(403),
+        vec![url.clone()],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    )));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_group_status(&group, DownloadStatus::Active).await;
+    wait_for_control_file(&control_path).await;
+    wait_for_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::Pause {
+            gid: GroupId::new(403),
+        })
+        .expect("pause command should be accepted");
+    wait_for_group_status(&group, DownloadStatus::Paused).await;
+    assert!(
+        control_path.exists(),
+        "pause must preserve the HTTP control file for resume"
+    );
+
+    command_tx
+        .send(EngineCommand::Unpause {
+            gid: GroupId::new(403),
+        })
+        .expect("unpause command should be accepted");
+    wait_for_engine(engine_task, "paused download did not finish after unpause").await;
+
+    assert_eq!(tokio::fs::read(&output_path).await.unwrap(), data);
+    assert!(
+        !control_path.exists(),
+        "successful completion must remove the control file"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 8 * 1024 * 1024;
+    let data = generate_test_data(file_size, 53);
+    server.register_slow_range_response("/remove-file", &data, 64 * 1024, 10);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "engine-remove.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = make_url(&server.base_url(), "/remove-file");
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.continue_download = true;
+    options.allow_overwrite = true;
+
+    let gid = GroupId::new(404);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    )));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_group_status(&group, DownloadStatus::Active).await;
+    wait_for_control_file(&control_path).await;
+    wait_for_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::RemoveDownload { gid })
+        .expect("remove command should be accepted");
+    wait_for_engine(engine_task, "removed download did not stop promptly").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Removed);
+    assert!(
+        output_path.exists(),
+        "remove should retain the partial output for the saved checkpoint"
+    );
+    assert!(
+        control_path.exists(),
+        "remove must preserve the incomplete HTTP control file"
+    );
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Capacity feedback lowers concurrency and requeues 429 segments
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

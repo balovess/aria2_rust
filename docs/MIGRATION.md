@@ -19,11 +19,271 @@
 | 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
 | 2026-08-12 | 产品身份统一为 `aria2-rust 0.2.9`；只兼容 aria2_original 的外部 CLI/RPC/协议行为，不复用原版版本报告文本或内部 C++ 结构 |
 | 2026-08-12 | FTP 生产路径补齐协议错误边界、`550` 文件不存在映射和 `REST 0` 行为；本地 FTP E2E 通过，真实第三方 FTP/FTPS 和原版客户端互操作仍为 PARTIAL |
+| 2026-08-13 | BitTorrent 共享 TCP listener 与 info-hash 路由完成；MSE PadA/PadB、RC4/Plain negotiation、`bt-force-encryption`、`bt-require-crypto`、`bt-min-crypto-level` 和 listener shutdown 增加真实 socket 回归证据；整体迁移仍为 PARTIAL |
+| 2026-08-13 | 修正 `config::runtime` feature-aware 测试断言：启用 BitTorrent 时 Rust-only `enable-public-trackers` 会使 reserved-changeable 集合为 107，默认构建仍为 106；不是兼容行为回退 |
+| 2026-08-13 | Rust 并发配置保持产品自有语义：`split=16`、`max-connection-per-server=16`，与内部 HTTP executor/pool 的容量策略一致；不将原版默认值强行覆盖到 Rust 实现 |
+| 2026-08-13 | 修复共享 BitTorrent listener 接线后的直接 command E2E 回归：standalone `BtDownloadCommand` 现在拥有独立 Rust listener，engine 路径仍覆盖为进程级共享 listener；显式 `seed-time=0` 优先于默认 `seed-ratio=1.0`，避免下载完成后误进入无限 seeding。BitTorrent E2E `21 passed, 0 failed, 2 ignored`；整体迁移仍为 PARTIAL |
+| 2026-08-13 | 对照 `aria2_original` 的 `NO_DEFAULT_VALUE` 语义，修正 `seed-time`：省略时保持未配置，只有显式 `seed-time=0` 才禁用时间条件；`seed-ratio` 仍默认为 `1.0`。新增配置注册、选项映射和 RPC 更新回归测试；整体迁移仍为 PARTIAL |
+| 2026-08-13 | HTTP 并发路径补齐多镜像 `.aria2` 生命周期：兼容 bitfield 恢复、stale sidecar 拒绝、周期 checkpoint、pause/remove 与 Range fallback 前取消/排队写入排空/flush/save、成功删除；双镜像真实 HTTP E2E 和 segment-manager 回归通过；跨协议 pause/remove 与 integrity 回调仍为 PARTIAL |
+| 2026-08-13 | FTP/SFTP 传输循环补齐 `Removed`、暂停和恢复生命周期：暂停/移除会关闭远端句柄、finalize 本地 writer 并强制保存 Rust `A2CF` checkpoint，unpause 从持久化前缀重新排队；真实慢速 FTP/SFTP E2E 分别为 `29 passed, 2 ignored` 和 `18 passed, 2 ignored`；原版客户端互操作、第三方服务器和全协议生命周期仍为 PARTIAL |
+| 2026-08-13 | BitTorrent checkpoint 生命周期补齐：Rust A2CF 绑定 torrent info-hash，校验 piece 位图长度和 trailing bits，要求 payload 存在，按最后一个 piece 的真实长度恢复进度；peer 和 web-seed 完成路径共享保存 seam，halt、pause/resume、verified-piece skip 与边界单测通过；复跑 BitTorrent 命令级 E2E 为 `25 passed, 0 failed, 2 ignored`，整体迁移仍为 PARTIAL |
+| 2026-08-13 | Metalink 普通 payload 生命周期补齐：响应体流式写盘，暂停/移除 finalize writer 并强制保存 Rust `A2CF` checkpoint，恢复使用持久化前缀发出 Range，成功完成删除 checkpoint，整文件 hash 与 `<pieces>` 校验改为流式读取；`deep_e2e_cross_protocol` 为 `8 passed`，专用生命周期 E2E 为 `2 passed`，整体 Metalink 与迁移仍为 PARTIAL |
+| 2026-08-13 | Metalink torrent graph 增加真实 engine 生命周期证据：`EngineCommand::AddMetalinkGraph` 提交 metadata/payload graph，metadata 只请求一次，`BtDependency` 在 promotion 前安装 Rust torrent context 和 Metalink 输出映射，payload 通过 web-seed 完成；专用 E2E 为 `13 passed, 0 failed, 2 ignored`，整体 Metalink 与迁移仍为 PARTIAL |
 
 ## 对照范围
 
 - `aria2_original/src`：415 个 `.cc` + 115 个 header-only = **530 个对照单元**
 - 台账骨架历史上由 `scripts/gen_migration_matrix.py` 生成；当前 checkout 的 `scripts/` 目录不包含该脚本，不能把“可重新生成”当作当前工具能力
+
+## 2026-08-13 FTP/SFTP lifecycle checkpoint
+
+FTP and SFTP transfer loops now treat pause and removal as explicit lifecycle
+outcomes. The command closes the remote handle, finalizes the local writer, and
+forces a progress checkpoint before publishing the result. An unpause promotes
+a fresh command, which resumes from the persisted prefix; successful completion
+removes the checkpoint.
+
+The `.aria2` suffix is retained as a familiar external path, but the checkpoint
+payload is the Rust-owned `A2CF` format. It is not claimed to be binary-
+compatible with an aria2_original sidecar. This keeps the public compatibility
+contract at the CLI/config/RPC/protocol seam while leaving persistence
+implementation autonomous.
+
+Verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_ftp_download --all-features -- --test-threads=1
+  29 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test test_e2e_sftp_download --all-features -- --test-threads=1
+  18 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+These results are focused local-server evidence. They do not close the full
+original-client matrix, third-party FTP/SFTP interoperability, public-key SFTP
+authentication, checksum-integrity callback parity, or workspace acceptance.
+
+## 2026-08-13 BitTorrent MSE/listener checkpoint
+
+The process listener is now a shared Rust-owned socket with per-torrent
+info-hash routes. Route handles unregister on drop and shutdown waits for the
+listener task to stop before the port is reused. Incoming legacy handshakes
+are policy-checked after their info-hash is parsed; MSE handshakes conceal the
+info-hash until `req2 ^ req3` verification succeeds.
+
+The MSE implementation keeps the aria2-compatible wire sequence while using
+Rust state ownership internally. The VC marker uses a look-ahead RC4 state,
+the main decryptor consumes the VC exactly once, and post-handshake RC4 state
+continues from the negotiation stream. The initiator also waits for the full
+PadD response boundary before reading the following BitTorrent handshake;
+this fixed the intermittent plaintext-after-MSE boundary failure.
+
+Verification on 2026-08-13:
+
+~~~text
+cargo test -p aria2-protocol --features bittorrent mse_handshake --lib -- --test-threads=1  18 passed
+cargo test -p aria2-protocol --features bittorrent incoming::tests --lib -- --test-threads=1  3 passed
+cargo test -p aria2-core --features bittorrent bt_peer_listener::tests --lib -- --test-threads=1  3 passed
+cargo check -p aria2-protocol --features bittorrent  PASS
+cargo check -p aria2-core --features bittorrent      PASS
+~~~
+
+These are focused compatibility results. Full BitTorrent scheduler,
+dependency, seeding, original-client interoperability, workspace E2E, and
+aria2 C performance comparison remain acceptance work.
+
+## 2026-08-13 BitTorrent checkpoint lifecycle
+
+BitTorrent keeps the familiar `.aria2` sidecar path but uses the Rust-owned
+`A2CF` format. A checkpoint is accepted only when it is marked as torrent state,
+matches the current total length and info-hash, has a valid piece bitfield, and
+has a payload on disk. Restore computes completed bytes from each piece's actual
+length, including a shorter final piece. Invalid trailing bits, a different
+torrent identity, a missing payload, or malformed state are discarded. Peer and
+web-seed piece completion both update the same in-memory and durable snapshot;
+successful completion removes the sidecar.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --lib engine::bt_checkpoint --all-features -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_bittorrent_download --all-features -- --test-threads=1
+  25 passed, 0 failed, 2 ignored
+cargo check -p aria2-core --all-features
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+This checkpoint closes the Rust-owned BitTorrent persistence slice only. It does
+not establish binary `.aria2` interoperability with aria2_original, complete
+BitTorrent scheduler/seeding parity, Metalink lifecycle parity, the complete
+original-client matrix, workspace acceptance, or the aria2 C++ performance
+comparison.
+
+## 2026-08-13 BitTorrent web-seed and integrity checkpoint
+
+The command-level BitTorrent fixture now exercises two distinct public
+behaviours without importing the original implementation: a torrent with no
+peer is served through its `url-list` web seed, and a paused web-seed transfer
+resumes from the Rust checkpoint before removing that checkpoint on success.
+The `--check-integrity` path also validates an existing payload against piece
+hashes, skips the verified piece, requests only the failed piece, and leaves
+the final bitfield and checkpoint lifecycle coherent. `FileChunkValidator`
+now preserves verified and failed piece indices through the
+`CheckIntegrityTask` interface so the picker can consume the result instead of
+starting over with every piece.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_bittorrent_download --all-features -- --test-threads=1
+  25 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --lib checksum::check_integrity --all-features -- --test-threads=1
+  9 passed, 0 failed
+~~~
+
+This is Rust-native execution behind the compatible torrent/web-seed and CLI
+seams. It does not claim binary `.aria2` interoperability, complete original
+client interoperability, full scheduler/seeding parity, or workspace
+acceptance.
+
+## 2026-08-13 Metalink payload lifecycle checkpoint
+
+The ordinary Metalink payload path now owns a Rust-native streaming lifecycle.
+HTTP response bodies are written incrementally through the local disk-writer
+seam instead of being collected as one in-memory payload. Pause and removal
+finalize the writer and force-save the Rust `A2CF` checkpoint; a later command
+restores the persisted prefix and sends a byte `Range` request. Successful
+completion removes the checkpoint. Whole-file hashes and `<pieces>` hashes are
+verified by streaming the completed file from disk, and invalid validation
+attempts discard both the output and checkpoint.
+
+Focused verification on 2026-08-13:
+
+~~~text
+cargo test -p aria2-core --test deep_e2e_cross_protocol --features metalink --no-default-features
+  8 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_metalink_lifecycle --features metalink --no-default-features
+  2 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --features metalink --no-default-features -- -D warnings
+  PASS
+cargo check -p aria2-core --features metalink --no-default-features
+  PASS
+cargo check -p aria2-core --all-features
+  PASS
+~~~
+
+This closes the ordinary Metalink payload lifecycle slice only. Metalink
+metadata dependency/session restoration, torrent fallback interoperability,
+complete cross-protocol lifecycle parity, original-client interoperability,
+workspace acceptance, and the aria2 C++ performance comparison remain open.
+
+## 2026-08-13 Metalink torrent graph engine checkpoint
+
+The Metalink torrent path now has a process-level regression through the public
+engine command seam. The test builds a memory-backed metadata/payload graph,
+submits it with `EngineCommand::AddMetalinkGraph`, downloads the torrent
+metadata once, resolves `BtDependency`, and waits for the payload group to be
+promoted by `DownloadEngine`. The resolved torrent context preserves the
+Metalink-selected output path before the BitTorrent command starts; the final
+payload is served by a local web seed and is verified byte-for-byte.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_metalink_lifecycle --all-features -- --test-threads=1
+  13 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test test_e2e_metalink_lifecycle --features metalink --no-default-features -- --test-threads=1
+  2 passed, 0 failed
+cargo test -p aria2-core --lib engine::bt_download_command_tests --all-features -- --test-threads=1
+  36 passed, 0 failed
+cargo test -p aria2-core --lib request::request_group::dependency --all-features -- --test-threads=1
+  8 passed, 0 failed
+cargo test -p aria2-core --lib engine::metalink_request_graph --all-features -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_session --all-features -- --test-threads=1
+  13 passed, 0 failed
+~~~
+
+This closes the tested engine submission, dependency resolution, mapping, and
+payload promotion slice. It does not close session graph restoration,
+multi-file torrent interoperability across every path, complete original
+client interoperability, workspace acceptance, or the aria2 C++ performance
+comparison. Metalink and BitTorrent therefore remain `PARTIAL`.
+
+## 2026-08-13 Product identity, defaults, and feature wiring checkpoint
+
+`aria2-rust` owns the product identity and release version. The workspace,
+Rust crates, SDK metadata, CLI version action, RPC `aria2.getVersion`, HTTP
+User-Agent, and BitTorrent peer identity all resolve to `aria2-rust 0.2.9`.
+The upstream C++ version-report text remains intentionally removed. JSON-RPC
+`2.0`, Metalink `3.0`/`4.0`, and SFTP `3` remain wire-format versions and are
+not product versions.
+
+The public `aria2-rust` option defaults intentionally remain Rust-owned:
+`split=16` and `max-connection-per-server=16`, with `split` capped at 128 in
+this implementation. These values are not claims about `aria2_original`;
+compatibility requires the option names, parsing, RPC shapes, and observable
+wire behavior, while internal Rust concurrency policy remains independent.
+
+The Rust-only public-tracker controls remain available as additive input
+options, but are deliberately excluded from the original `getGlobalOption` and
+task `getOption` projections. This keeps the extension useful to the Rust
+engine without adding fields to standard aria2-compatible responses.
+
+`CommandDependencies` now owns the shared services used by task construction.
+Metalink commands retain the process BitTorrent registry and listener, and
+both torrent fallback paths forward them to `BtDownloadCommand`. This keeps
+the Rust ownership model independent of the original C++ class hierarchy while
+preserving the incoming peer routing behavior.
+
+Verification on 2026-08-13:
+
+~~~text
+cargo test -p aria2 --test test_cli_options --all-features -- --test-threads=1  105 passed
+cargo test -p aria2-core --features 'bittorrent,metalink' --lib option::option_handler::tests::tests::test_to_download_options  PASS
+cargo test -p aria2-core --features 'bittorrent,metalink' --lib config::parser  27 passed
+cargo test -p aria2-core --features 'bittorrent,metalink' --lib metalink_download_command  16 passed
+cargo test -p aria2-rpc --all-features --lib handlers::handler_tests::test_get_version_uses_product_version  PASS
+cargo check -p aria2 --all-features  PASS
+cargo clippy -p aria2-core --features 'bittorrent,metalink' --all-targets -- -D warnings  PASS
+cargo fmt --all -- --check  PASS
+~~~
+
+These results close the observed default-value and all-feature compilation
+regressions only. Complete original-client interoperability, workspace E2E,
+and the aria2 C performance comparison remain open.
+
+## 2026-08-13 HTTP concurrent control-file checkpoint
+
+The single- and multi-mirror HTTP concurrent paths now use the same durable
+control-file lifecycle seam. `ResumeHelper` remains the authority for whether
+an existing `.aria2` sidecar is trusted. A compatible bitfield restores only
+fully completed segments; a mismatched layout or untrusted sidecar is not
+silently reused. Cancellation and Range fallback cancel admitted HTTP tasks,
+drain queued writes, flush the output, and save the completed segment count.
+Successful completion removes the sidecar.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_concurrent_http_range test_multi_mirror_resume_restores_completed_segments --all-features -- --test-threads=1  1 passed
+cargo test -p aria2-core --test test_e2e_concurrent_http_range test_multi_mirror_without_continue_discards_stale_control_file --all-features -- --test-threads=1  1 passed
+cargo test -p aria2-core --lib concurrent_segment_manager --all-features -- --test-threads=1  22 passed
+cargo check -p aria2-core --all-features  PASS
+cargo fmt --all -- --check  PASS
+git diff --check  PASS
+~~~
+
+This closes the observed multi-mirror HTTP control-file gap only. Engine-level
+pause/remove orchestration across FTP, SFTP, BitTorrent, and Metalink,
+integrity-entry callbacks, complete original-client interoperability, and the
+aria2 C performance baseline remain open acceptance work.
 
 ## 2026-08-09 当前增量检查点
 
@@ -67,6 +327,12 @@ E2E fixture 广告错误地址仍能下载的回归，避免把 NAT/错误广告
 - FTP E2E：25 passed / 0 failed / 2 ignored
 - FTP-related core unit tests：200 passed / 0 failed / 1 ignored
 - RPC HTTP E2E：43 passed / 0 failed
+
+本轮 CLI/config 生命周期对照还确认 `OptionHandlerFactory.cc` 的四组原版
+集合没有缺项：`setInitialOption` 113/113、`setChangeGlobalOption` 120/120、
+`setChangeOptionForReserved` 106/106、`setChangeOption` 7/7。Rust-only
+公共 tracker 控制项作为扩展输入保留，但不进入原版兼容的全局和任务选项
+响应。
 
 这些是增量证据，不代表 530 个 C++ 对照单元都已达到行为兼容，也不代表
 workspace、原版浏览器插件和完整端到端矩阵已经全部通过。
@@ -560,6 +826,37 @@ tests, and the aria2 C++ performance baseline remain open in
   GIDs return execution error code 1, while active results include only real
   in-flight requests and never synthesize servers from configured mirrors.
 
+#### Current-tree RPC client interoperability checkpoint (2026-08-13)
+
+The current tree now has reproducible process-level evidence for the public
+client seams. AriaNg's `system.multicall` refresh shape was sent to a live
+`aria2c` process with one `token:` per sub-call and the expected nested result
+arrays. A live XML-RPC client authenticated at `/rpc`, received `text/xml`
+responses with string statistics, and shut the process down. A live WebSocket
+client authenticated at `/jsonrpc`, correlated request IDs, received start/stop
+notifications for the same GID, recovered after an oversized-request parse
+error, and reconnected after a clean close.
+
+Current-tree verification:
+
+~~~text
+cargo test -p aria2-rpc --all-features --tests -j 1 -- --test-threads=1
+  404 passed, 0 failed
+cargo clippy -p aria2-rpc --all-targets --all-features -- -D warnings
+  PASS
+cargo test -p aria2 --test e2e_arianng_rpc_client --all-features -- --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2 --test e2e_xmlrpc_client --all-features -- --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2 --test e2e_websocket_rpc_client --all-features -- --test-threads=1
+  3 passed, 0 failed
+~~~
+
+This closes only the tested wire/client slices. The complete Chrome/browser
+extension matrix, broader original-client workflows, notification ordering and
+reconnect breadth, and complete XML-RPC method/error coverage remain acceptance
+work; RPC and WebSocket therefore remain `PARTIAL`.
+
 #### Request-group identity seam and XML-RPC HTTP contract (2026-08-09)
 
 - `RequestGroupMan` now keeps a canonical GID index for every non-terminal
@@ -648,6 +945,19 @@ PASS
 
 This checkpoint does not claim live public-tracker availability or complete
 BitTorrent/original-client interoperability. Those remain acceptance work.
+
+#### Exact hidden option spelling checkpoint (2026-08-13)
+
+The hidden optimization options now use the exact case-sensitive names from
+`aria2_original/src/prefs.cc`: `optimize-concurrent-downloads-coeffA` and
+`optimize-concurrent-downloads-coeffB`. Their defaults are `5.0` and `25.0`,
+respectively. The former Rust-only lowercase spellings are not accepted as
+aliases, because accepting them would change the original CLI/config/RPC
+option contract.
+
+The product version remains owned by `aria2-rust`; compatibility covers the
+`aria2c` entry point and external wire/configuration behavior, not upstream
+version-report text or C++ implementation identity.
 
 #### Application RPC CORS default checkpoint (2026-08-09)
 

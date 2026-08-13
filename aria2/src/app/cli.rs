@@ -965,7 +965,7 @@ pub struct HttpFtpArgs {
     #[arg(long = "retry-wait")]
     pub retry_wait: Option<u64>,
 
-    /// Connections per download
+    /// Maximum concurrent segment requests per download
     #[arg(short = 's', long)]
     pub split: Option<u64>,
 

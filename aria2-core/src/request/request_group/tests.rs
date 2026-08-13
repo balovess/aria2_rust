@@ -719,6 +719,19 @@ fn test_runtime_option_enum_validation_is_shared_with_registry() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
+#[test]
+fn test_option_map_distinguishes_omitted_and_explicit_zero_seed_time() {
+    let omitted = DownloadOptions::from_option_strings(&std::collections::HashMap::new());
+    assert_eq!(omitted.seed_time, None);
+
+    let explicit_zero = DownloadOptions::from_option_strings(&std::collections::HashMap::from([(
+        "seed-time".to_string(),
+        "0".to_string(),
+    )]));
+    assert_eq!(explicit_zero.seed_time, Some(0.0));
+}
+
 /// Verify that `is_removed()` correctly reflects the group's Removed
 /// status, and that it is non-blocking (does not deadlock when the
 /// status lock is contended).

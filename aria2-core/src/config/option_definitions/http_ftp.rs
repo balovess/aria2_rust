@@ -199,8 +199,8 @@ impl crate::config::OptionRegistry {
             short_name: Some('s'),
             default_value: OptionValue::Int(16),
             min: Some(1),
-            max: Some(16),
-            description: "Connections per download".into(),
+            max: Some(128),
+            description: "Concurrent segment requests per download".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });
@@ -222,7 +222,7 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Int(16),
             min: Some(1),
             max: Some(16),
-            description: "HTTP max connections per server (adaptive hard limit)".into(),
+            description: "Max concurrent segment requests per HTTP server".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

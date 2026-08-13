@@ -34,6 +34,18 @@ struct SharedListenerState {
     next_route_id: u64,
 }
 
+/// Configuration for one torrent route on the process-level listener.
+pub struct BtPeerRouteConfig {
+    pub bind_ip: IpAddr,
+    pub ports: Vec<u16>,
+    pub info_hash: [u8; 20],
+    pub local_peer_id: [u8; 20],
+    pub caretaker_id: u64,
+    pub max_peers: usize,
+    pub peer_storage: Arc<Mutex<DefaultPeerStorage>>,
+    pub crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
+}
+
 /// Process-level BitTorrent listener and info-hash router.
 ///
 /// The socket is created once for an engine and routes incoming plain
@@ -67,59 +79,20 @@ impl BtPeerListenerManager {
         }
     }
 
-    /// Bind the process listener if necessary and register one torrent route.
-    pub async fn register(
-        &self,
-        bind_ip: IpAddr,
-        ports: impl IntoIterator<Item = u16>,
-        info_hash: [u8; 20],
-        local_peer_id: [u8; 20],
-        caretaker_id: u64,
-        max_peers: usize,
-        peer_storage: Arc<Mutex<DefaultPeerStorage>>,
-    ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
-        self.register_with_policy(
-            bind_ip,
-            ports,
-            info_hash,
-            local_peer_id,
-            caretaker_id,
-            max_peers,
-            peer_storage,
-            Default::default(),
-        )
-        .await
-    }
-
     /// Bind the process listener if necessary and register a route with its
     /// incoming handshake policy.
-    pub async fn register_with_policy(
+    pub async fn register(
         &self,
-        bind_ip: IpAddr,
-        ports: impl IntoIterator<Item = u16>,
-        info_hash: [u8; 20],
-        local_peer_id: [u8; 20],
-        caretaker_id: u64,
-        max_peers: usize,
-        peer_storage: Arc<Mutex<DefaultPeerStorage>>,
-        crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
+        config: BtPeerRouteConfig,
     ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
         let mut state = self.state.lock().await;
         if let Some(listener) = state.listener.as_ref() {
             let port = listener.local_addr()?.port();
             drop(state);
-            return self.insert_route(
-                info_hash,
-                local_peer_id,
-                caretaker_id,
-                max_peers,
-                peer_storage,
-                port,
-                crypto_policy,
-            );
+            return self.insert_route(config, port);
         }
 
-        let listener = bind_ports(bind_ip, ports).await?;
+        let listener = bind_ports(config.bind_ip, config.ports.clone()).await?;
         let local_addr = listener.local_addr()?;
         let listener = Arc::new(listener);
         state.local_addr = Some(local_addr);
@@ -130,15 +103,7 @@ impl BtPeerListenerManager {
         let shutdown = self.shutdown.clone();
         tokio::spawn(async move { run_shared_listener(listener, routes, shutdown).await });
 
-        self.insert_route(
-            info_hash,
-            local_peer_id,
-            caretaker_id,
-            max_peers,
-            peer_storage,
-            local_addr.port(),
-            crypto_policy,
-        )
+        self.insert_route(config, local_addr.port())
     }
 
     pub async fn local_addr(&self) -> Option<SocketAddr> {
@@ -155,14 +120,18 @@ impl BtPeerListenerManager {
 
     fn insert_route(
         &self,
-        info_hash: [u8; 20],
-        local_peer_id: [u8; 20],
-        caretaker_id: u64,
-        max_peers: usize,
-        peer_storage: Arc<Mutex<DefaultPeerStorage>>,
+        config: BtPeerRouteConfig,
         port: u16,
-        crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
     ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
+        let BtPeerRouteConfig {
+            info_hash,
+            local_peer_id,
+            caretaker_id,
+            max_peers,
+            peer_storage,
+            crypto_policy,
+            ..
+        } = config;
         let (sender, receiver) = mpsc::channel(max_peers.max(1));
         let mut state = self
             .state
@@ -214,6 +183,15 @@ impl Default for BtPeerListenerManager {
     }
 }
 
+impl Drop for BtPeerListenerManager {
+    fn drop(&mut self) {
+        // Directly constructed commands own their manager. Cancelling here
+        // lets the accept task release its socket when the last Arc goes
+        // away; DownloadEngine still performs its explicit async shutdown.
+        self.shutdown.cancel();
+    }
+}
+
 impl Drop for BtPeerRouteHandle {
     fn drop(&mut self) {
         let Some(routes) = self.routes.upgrade() else {
@@ -222,7 +200,10 @@ impl Drop for BtPeerRouteHandle {
         let mut routes = routes
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if routes.get(&self.info_hash).is_some_and(|route| route.id == self.id) {
+        if routes
+            .get(&self.info_hash)
+            .is_some_and(|route| route.id == self.id)
+        {
             routes.remove(&self.info_hash);
         }
     }
@@ -238,14 +219,15 @@ async fn bind_ports(
     for port in ports {
         match TcpListener::bind(SocketAddr::new(bind_ip, port)).await {
             Ok(listener) => return Ok(listener),
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                last_error = Some(error)
-            }
+            Err(error) if error.kind() == io::ErrorKind::AddrInUse => last_error = Some(error),
             Err(error) => return Err(error),
         }
     }
     Err(last_error.unwrap_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "BitTorrent listen port range is empty")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "BitTorrent listen port range is empty",
+        )
     }))
 }
 
@@ -259,7 +241,9 @@ async fn run_shared_listener(
             _ = shutdown.cancelled() => break,
             result = listener.accept() => result,
         };
-        let Ok((stream, endpoint)) = accepted else { break };
+        let Ok((stream, endpoint)) = accepted else {
+            break;
+        };
         let routes = Arc::clone(&routes);
         tokio::spawn(async move {
             let known_info_hashes = {
@@ -329,11 +313,7 @@ async fn run_shared_listener(
                         .add_and_checkout_peer(entry, route.caretaker_id)
                         .is_some();
                     if admitted {
-                        storage.set_peer_active(
-                            &endpoint.ip().to_string(),
-                            endpoint.port(),
-                            true,
-                        );
+                        storage.set_peer_active(&endpoint.ip().to_string(), endpoint.port(), true);
                     }
                     admitted
                 }
@@ -343,7 +323,10 @@ async fn run_shared_listener(
             }
             if route
                 .sender
-                .send(IncomingPeer { connection, endpoint })
+                .send(IncomingPeer {
+                    connection,
+                    endpoint,
+                })
                 .await
                 .is_err()
             {
@@ -372,27 +355,29 @@ mod tests {
         let hash_a = [11u8; 20];
         let hash_b = [22u8; 20];
         let (port, mut rx_a, route_a) = manager
-            .register(
-                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                [0],
-                hash_a,
-                [1; 20],
-                1,
-                4,
-                storage_a,
-            )
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                ports: vec![0],
+                info_hash: hash_a,
+                local_peer_id: [1; 20],
+                caretaker_id: 1,
+                max_peers: 4,
+                peer_storage: storage_a,
+                crypto_policy: Default::default(),
+            })
             .await
             .unwrap();
         let (_, mut rx_b, route_b) = manager
-            .register(
-                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                [port],
-                hash_b,
-                [2; 20],
-                2,
-                4,
-                storage_b,
-            )
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                ports: vec![port],
+                info_hash: hash_b,
+                local_peer_id: [2; 20],
+                caretaker_id: 2,
+                max_peers: 4,
+                peer_storage: storage_b,
+                crypto_policy: Default::default(),
+            })
             .await
             .unwrap();
 
@@ -436,19 +421,51 @@ mod tests {
         let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
         let hash = [33u8; 20];
         let (_, _, route) = manager
-            .register(
-                IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                [0],
-                hash,
-                [1; 20],
-                1,
-                1,
-                storage,
-            )
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                ports: vec![0],
+                info_hash: hash,
+                local_peer_id: [1; 20],
+                caretaker_id: 1,
+                max_peers: 1,
+                peer_storage: storage,
+                crypto_policy: Default::default(),
+            })
             .await
             .unwrap();
         drop(route);
         assert!(manager.routes.read().unwrap().get(&hash).is_none());
     }
 
+    #[tokio::test]
+    async fn shutdown_releases_the_shared_listener_socket() {
+        let manager = BtPeerListenerManager::new();
+        let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+        let (port, _receiver, _route) = manager
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                ports: vec![0],
+                info_hash: [44u8; 20],
+                local_peer_id: [1; 20],
+                caretaker_id: 1,
+                max_peers: 1,
+                peer_storage: storage,
+                crypto_policy: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        manager.shutdown().await;
+        let rebound = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)).await {
+                    break listener;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("listener shutdown must release the socket");
+        drop(rebound);
+    }
 }

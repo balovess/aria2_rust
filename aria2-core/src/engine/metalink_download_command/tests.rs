@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(feature = "bittorrent")]
 use crate::engine::command::Command;
 use crate::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::metalink::parser::UrlEntry;

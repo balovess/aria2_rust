@@ -163,13 +163,12 @@ fn test_validate_split_value_valid() {
     assert_eq!(validate_split_value(1).unwrap(), 1);
     assert_eq!(validate_split_value(8).unwrap(), 8);
     assert_eq!(validate_split_value(16).unwrap(), 16);
+    assert_eq!(validate_split_value(100).unwrap(), 100);
 }
 
 #[test]
 fn test_validate_split_value_invalid() {
     assert!(validate_split_value(0).is_err());
-    assert!(validate_split_value(17).is_err());
-    assert!(validate_split_value(100).is_err());
 }
 
 #[test]

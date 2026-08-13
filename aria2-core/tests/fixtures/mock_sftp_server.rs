@@ -25,6 +25,7 @@ const FILE_HANDLE: &[u8] = b"aria2-sftp-fixture";
 
 struct FixtureData {
     content: Arc<[u8]>,
+    read_delay: Option<Duration>,
 }
 
 /// A deterministic, protocol-level SFTP server for command E2E tests.
@@ -42,6 +43,18 @@ pub struct MockSftpServer {
 
 impl MockSftpServer {
     pub async fn start() -> Self {
+        Self::start_with_read_delay(None).await
+    }
+
+    /// Start a server that delays each SFTP READ response.
+    ///
+    /// This keeps a real transfer in flight long enough for lifecycle tests to
+    /// request pause or removal through the command's shared group.
+    pub async fn start_slow() -> Self {
+        Self::start_with_read_delay(Some(Duration::from_millis(50))).await
+    }
+
+    async fn start_with_read_delay(read_delay: Option<Duration>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("mock SFTP server should bind");
@@ -67,6 +80,7 @@ impl MockSftpServer {
         });
         let fixture = Arc::new(FixtureData {
             content: Arc::clone(&content),
+            read_delay,
         });
         let (shutdown, mut shutdown_rx) = oneshot::channel();
         let accept_task = tokio::spawn(async move {
@@ -288,6 +302,9 @@ impl server::Handler for MockSftpHandler {
 
         for request in requests {
             let response = self.response_for(request);
+            if let Some(delay) = self.fixture.read_delay {
+                tokio::time::sleep(delay).await;
+            }
             let encoded = response.encode()?;
             session.data(channel, encoded)?;
         }

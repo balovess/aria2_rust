@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 const CONTROL_MAGIC: &[u8; 4] = b"A2CF";
 const CONTROL_VERSION: u16 = 1;
 const FLAG_HAS_CHECKSUM: u8 = 0x01;
+const FLAG_TORRENT_CHECKPOINT: u8 = 0x02;
+const FLAG_TORRENT_INFO_HASH: u8 = 0x04;
 const CONTROL_HEADER_LEN: usize = 39;
 
 #[derive(Debug, Clone)]
@@ -16,6 +18,8 @@ pub struct ControlFile {
     num_pieces: usize,
     checksum_algo: u8,
     checksum_value: Vec<u8>,
+    torrent_checkpoint: bool,
+    torrent_info_hash: Option<[u8; 20]>,
 }
 
 impl ControlFile {
@@ -37,6 +41,32 @@ impl ControlFile {
     }
     pub fn checksum_algo(&self) -> u8 {
         self.checksum_algo
+    }
+
+    /// Mark this Rust-owned checkpoint as BitTorrent state.
+    ///
+    /// The marker prevents a generic HTTP/FTP checkpoint with the same output
+    /// path and shape from being mistaken for verified torrent pieces.
+    pub fn mark_torrent_checkpoint(&mut self) {
+        self.torrent_checkpoint = true;
+    }
+
+    pub fn is_torrent_checkpoint(&self) -> bool {
+        self.torrent_checkpoint
+    }
+
+    /// Store the torrent identity for a Rust-owned BitTorrent checkpoint.
+    pub fn set_torrent_info_hash(&mut self, info_hash: [u8; 20]) {
+        self.torrent_info_hash = Some(info_hash);
+    }
+
+    pub fn torrent_info_hash(&self) -> Option<[u8; 20]> {
+        self.torrent_info_hash
+    }
+
+    /// Replace the persisted piece bitfield with a complete snapshot.
+    pub fn set_bitfield(&mut self, bitfield: Vec<u8>) {
+        self.bitfield = bitfield;
     }
 
     pub async fn open_or_create(
@@ -62,6 +92,8 @@ impl ControlFile {
                 num_pieces,
                 checksum_algo: 0,
                 checksum_value: Vec::new(),
+                torrent_checkpoint: false,
+                torrent_info_hash: None,
             })
         }
     }
@@ -142,6 +174,23 @@ impl ControlFile {
             Vec::new()
         };
 
+        let torrent_info_hash = if flags & FLAG_TORRENT_INFO_HASH != 0 {
+            let end = offset.checked_add(20).ok_or_else(|| {
+                Aria2Error::FileIo("Control file torrent info hash length overflow".to_string())
+            })?;
+            if end > data.len() {
+                return Err(Aria2Error::FileIo(
+                    "Truncated control file torrent info hash".to_string(),
+                ));
+            }
+            let mut info_hash = [0u8; 20];
+            info_hash.copy_from_slice(&data[offset..end]);
+            offset = end;
+            Some(info_hash)
+        } else {
+            None
+        };
+
         let bitfield_end = offset.checked_add(bitfield_length).ok_or_else(|| {
             Aria2Error::FileIo("Control file bitfield length overflow".to_string())
         })?;
@@ -169,6 +218,8 @@ impl ControlFile {
             num_pieces,
             checksum_algo,
             checksum_value,
+            torrent_checkpoint: flags & FLAG_TORRENT_CHECKPOINT != 0,
+            torrent_info_hash,
         }))
     }
 
@@ -181,6 +232,12 @@ impl ControlFile {
         if self.checksum_algo > 0 && !self.checksum_value.is_empty() {
             flags |= FLAG_HAS_CHECKSUM;
         }
+        if self.torrent_checkpoint {
+            flags |= FLAG_TORRENT_CHECKPOINT;
+        }
+        if self.torrent_info_hash.is_some() {
+            flags |= FLAG_TORRENT_INFO_HASH;
+        }
         buf.push(flags);
         buf.extend_from_slice(&self.total_length.to_le_bytes());
         buf.extend_from_slice(&self.completed_length.to_le_bytes());
@@ -190,6 +247,10 @@ impl ControlFile {
         if flags & FLAG_HAS_CHECKSUM != 0 {
             buf.push(self.checksum_algo);
             buf.extend_from_slice(&self.checksum_value);
+        }
+
+        if let Some(info_hash) = self.torrent_info_hash {
+            buf.extend_from_slice(&info_hash);
         }
 
         buf.extend_from_slice(&self.bitfield);

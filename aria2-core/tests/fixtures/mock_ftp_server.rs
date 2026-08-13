@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::debug;
@@ -17,6 +18,7 @@ struct FtpSession {
     pasv_advertised_host: [u8; 4],
     binary_mode: bool,
     rest_offset: u64,
+    transfer_delay: Option<Duration>,
     transfer_complete: Option<tokio::sync::oneshot::Receiver<()>>,
 }
 
@@ -27,10 +29,25 @@ pub struct MockFtpServer {
 
 impl MockFtpServer {
     pub async fn start() -> Self {
-        Self::start_with_pasv_advertised_host([127, 0, 0, 1]).await
+        Self::start_with_options([127, 0, 0, 1], None).await
+    }
+
+    /// Start a server that emits transfer data in small delayed chunks.
+    ///
+    /// The fixture is intentionally slow enough for lifecycle tests to issue
+    /// pause/remove while a real FTP data connection is still active.
+    pub async fn start_slow() -> Self {
+        Self::start_with_options([127, 0, 0, 1], Some(Duration::from_millis(5))).await
     }
 
     pub async fn start_with_pasv_advertised_host(advertised_host: [u8; 4]) -> Self {
+        Self::start_with_options(advertised_host, None).await
+    }
+
+    async fn start_with_options(
+        advertised_host: [u8; 4],
+        transfer_delay: Option<Duration>,
+    ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
@@ -46,6 +63,7 @@ impl MockFtpServer {
                             Ok((mut stream, _)) => {
                                 let session = tokio::sync::Mutex::new(FtpSession {
                                     pasv_advertised_host: advertised_host,
+                                    transfer_delay,
                                     ..FtpSession::default()
                                 });
                                 use tokio::io::AsyncWriteExt;
@@ -198,14 +216,27 @@ impl MockFtpServer {
             } else {
                 content
             };
+            let transfer_delay = sess.transfer_delay;
 
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             sess.transfer_complete = Some(done_rx);
 
             tokio::spawn(async move {
                 if let Ok((mut data_stream, _addr)) = listener.accept().await {
-                    data_stream.write_all(&actual_content).await.ok();
-                    data_stream.flush().await.ok();
+                    if let Some(delay) = transfer_delay {
+                        for chunk in actual_content.chunks(16 * 1024) {
+                            if data_stream.write_all(chunk).await.is_err() {
+                                break;
+                            }
+                            if data_stream.flush().await.is_err() {
+                                break;
+                            }
+                            tokio::time::sleep(delay).await;
+                        }
+                    } else {
+                        data_stream.write_all(&actual_content).await.ok();
+                        data_stream.flush().await.ok();
+                    }
                     drop(data_stream);
                 }
                 let _ = done_tx.send(());

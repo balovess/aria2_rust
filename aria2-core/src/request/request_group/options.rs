@@ -655,10 +655,7 @@ impl DownloadOptions {
                 .get("hash-check-only")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            seed_time: options
-                .get("seed-time")
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|value| *value > 0.0),
+            seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
                 .and_then(|v| v.parse::<f64>().ok()),
