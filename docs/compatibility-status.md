@@ -219,6 +219,33 @@ the complete CLI/RPC/client matrix, full BitTorrent scheduler and seeding
 parity, workspace all-target E2E completion, or the aria2 C performance
 comparison.
 
+### BitTorrent context identity checkpoint (2026-08-13)
+
+BitTorrent command promotion keeps an externally prepared `DownloadContext`
+only when its Rust torrent attribute carries the same info-hash as the current
+torrent bytes. A dependency context with a matching hash retains Metalink
+output paths, URI mappings, and mirror settings. A missing or mismatched hash
+causes the context to be rebuilt from the current torrent, preventing stale
+piece hashes or output mappings from crossing session or dependency reuse.
+This is an internal Rust ownership invariant behind the compatible torrent
+entry point; it does not change public configuration, defaults, or product
+identity.
+
+Focused verification on 2026-08-13:
+
+~~~text
+cargo test -p aria2-core --features bittorrent bt_download_command_tests --lib -- --test-threads=1
+  37 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the stale-context regression slice only. BitTorrent remains
+`PARTIAL` until scheduler/seeding parity, dependency/session graph coverage,
+and original-client interoperability have complete evidence.
+
 ### Product Identity, Defaults, and Feature Wiring (2026-08-13)
 
 `aria2-rust` is an independent product. The workspace and all public product
@@ -886,3 +913,35 @@ completed source comparison must not be reported as workspace all pass.
 Performance claims also require a recorded benchmark protocol and comparable
 aria2 C measurements. Rust-only benchmark results are regression evidence,
 not proof of outperforming the original.
+
+## BitTorrent DHT Periodic Lookup Checkpoint (2026-08-14)
+
+The periodic DHT lookup preserves the original command's two distinct peer
+observations. Active connections select the adaptive interval, while the
+tracked peer count includes both queued and connected peers and drives the
+retry/max-peer decision. Results are collected without blocking the piece loop,
+then admitted through the existing connection and `PeerStorage` seam before
+retry state is committed. Normal command shutdown cancels and joins a pending
+lookup; `Drop` supplies only the synchronous fallback.
+
+Focused evidence:
+
+~~~text
+cargo test -p aria2-core --features bittorrent --lib engine::bt_download_execute::execute::dht_periodic_lookup::tests -- --test-threads=1
+  12 passed, 0 failed
+cargo test -p aria2-core --test dht_integration_tests --features bittorrent -- --test-threads=1
+  30 passed, 0 failed, 4 ignored
+cargo test -p aria2-core --test test_e2e_bittorrent_download --features bittorrent -- --test-threads=1
+  25 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test deep_e2e_bittorrent --features bittorrent -- --test-threads=1
+  31 passed, 0 failed, 2 ignored
+cargo check -p aria2-core --features bittorrent --lib
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+This is a local scheduling and lifecycle checkpoint, not a claim of complete
+DHT compatibility. Public-network behavior, exact advertise-port lifecycle,
+original-client interoperability, full BitTorrent scheduler/seeding parity,
+and the workspace acceptance gates remain open. The area remains `PARTIAL`.

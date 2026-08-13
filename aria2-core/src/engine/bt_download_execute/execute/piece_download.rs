@@ -586,6 +586,64 @@ impl BtDownloadCommand {
                 }
             }
 
+            // DHTGetPeersCommand counterpart. The lookup runs in a background
+            // task and this poll never waits on network I/O, so DHT timeouts do
+            // not stall piece scheduling or halt detection.
+            self.dht_periodic_lookup
+                .set_peer_limits(self.bt_runtime.min_peers(), self.bt_runtime.max_peers());
+            let mut dht_peers = Vec::new();
+            super::check_periodic_dht_lookup(
+                &mut self.dht_periodic_lookup,
+                self.dht_engine.as_ref(),
+                &meta.info_hash.bytes,
+                active_connections.len(),
+                &mut dht_peers,
+            )
+            .await;
+            dht_peers.retain(|peer| !self.is_peer_temporarily_rejected(&peer.ip));
+            if !dht_peers.is_empty() {
+                info!(
+                    discovered = dht_peers.len(),
+                    "[BT] Periodic DHT lookup found new peers"
+                );
+                let new_connections = self
+                    .connect_to_discovered_peers(
+                        &dht_peers,
+                        &meta.info_hash.bytes,
+                        num_pieces,
+                        active_connections,
+                        piece_length,
+                        total_size,
+                    )
+                    .await;
+                let mut context = NewPeerConnectionsContext {
+                    peer_last_data_time: &mut peer_last_data_time,
+                    pex_enabled_peers,
+                    allowed_fast_sent_peers: &mut self.allowed_fast_sent_peers,
+                    suggest_sent_counts: &mut self.suggest_sent_counts,
+                    peer_tracker: &mut peer_tracker,
+                    choking_algo: &mut self.choking_algo,
+                };
+                let connected = Self::append_new_connections(
+                    active_connections,
+                    new_connections,
+                    self.group.recover().options().bt_max_peers,
+                    self.is_private,
+                    &mut context,
+                    &self.peer_storage,
+                    self.group.recover().gid().value(),
+                );
+                if connected > 0 {
+                    info!("[BT] Connected to {} DHT-discovered peers", connected);
+                    let group = self.group.recover();
+                    sync_peer_snapshots(&group, active_connections);
+                }
+            }
+            if self.dht_periodic_lookup.is_lookup_completion_pending() {
+                self.dht_periodic_lookup
+                    .on_lookup_completed(self.tracked_peer_count());
+            }
+
             let remaining = piece_picker.remaining_count();
             let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
 

@@ -188,8 +188,7 @@ pub struct BtDownloadCommand {
     /// C++: DHTGetPeersCommand runs as a per-torrent command that
     /// triggers DHT lookups at adaptive intervals (15min normal,
     /// 5min low peers, 1min zero peers, 5s retry).
-    /// TODO: Wire into BT download loop for periodic DHT peer discovery.
-    #[allow(dead_code)]
+    /// Periodic lookup state is polled from the BT piece loop.
     pub(crate) dht_periodic_lookup: super::bt_download_execute::execute::DhtPeriodicLookup,
 
     // File lock (J6): prevents concurrent aria2 instances from writing to same output dir

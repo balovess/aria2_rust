@@ -268,33 +268,38 @@ impl BtDownloadCommand {
             }
         }
 
-        if let Some(ref engine) = self.dht_engine
-            && let Ok(result) = engine.find_peers(info_hash_raw).await
-        {
-            if !result.peers.is_empty() {
-                let before = peer_addrs.len();
-                for addr in &result.peers {
-                    let ip_str = addr.ip().to_string();
-                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                        &ip_str,
-                        addr.port(),
-                    );
-                    if !self.is_peer_temporarily_rejected(&paddr.ip)
-                        && !peer_addrs
-                            .iter()
-                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                    {
-                        peer_addrs.push(paddr);
+        if let Some(ref engine) = self.dht_engine {
+            match engine.find_peers(info_hash_raw).await {
+                Ok(result) => {
+                    if !result.peers.is_empty() {
+                        let before = peer_addrs.len();
+                        for addr in &result.peers {
+                            let ip_str = addr.ip().to_string();
+                            let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                                &ip_str,
+                                addr.port(),
+                            );
+                            if !self.is_peer_temporarily_rejected(&paddr.ip)
+                                && !peer_addrs
+                                    .iter()
+                                    .any(|p| p.ip == paddr.ip && p.port == paddr.port)
+                            {
+                                peer_addrs.push(paddr);
+                            }
+                        }
+                        tracing::info!(
+                            "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
+                            peer_addrs.len() - before,
+                            peer_addrs.len(),
+                            result.nodes_contacted
+                        );
+                    } else {
+                        debug!("[BT] DHT find_peers returned no peers");
                     }
                 }
-                tracing::info!(
-                    "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
-                    peer_addrs.len() - before,
-                    peer_addrs.len(),
-                    result.nodes_contacted
-                );
-            } else {
-                debug!("[BT] DHT find_peers returned no peers");
+                Err(error) => {
+                    debug!(error = %error, "[BT] Initial DHT peer lookup failed");
+                }
             }
         }
 
@@ -350,6 +355,17 @@ impl BtDownloadCommand {
         }
 
         Ok(peer_addrs)
+    }
+
+    /// Return the number of peers currently owned by this torrent's storage.
+    ///
+    /// This is the Rust equivalent of C++ `PeerStorage::countAllPeer()` and
+    /// intentionally includes both queued and connected peers.
+    pub(super) fn tracked_peer_count(&self) -> usize {
+        self.peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .count_all_peers()
     }
 
     /// Establish connections to discovered peers and initialize the choking algorithm.

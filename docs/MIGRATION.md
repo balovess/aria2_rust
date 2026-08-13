@@ -30,6 +30,8 @@
 | 2026-08-13 | Metalink 普通 payload 生命周期补齐：响应体流式写盘，暂停/移除 finalize writer 并强制保存 Rust `A2CF` checkpoint，恢复使用持久化前缀发出 Range，成功完成删除 checkpoint，整文件 hash 与 `<pieces>` 校验改为流式读取；`deep_e2e_cross_protocol` 为 `8 passed`，专用生命周期 E2E 为 `2 passed`，整体 Metalink 与迁移仍为 PARTIAL |
 | 2026-08-13 | Metalink torrent graph 增加真实 engine 生命周期证据：`EngineCommand::AddMetalinkGraph` 提交 metadata/payload graph，metadata 只请求一次，`BtDependency` 在 promotion 前安装 Rust torrent context 和 Metalink 输出映射，payload 通过 web-seed 完成；专用 E2E 为 `13 passed, 0 failed, 2 ignored`，整体 Metalink 与迁移仍为 PARTIAL |
 
+| 2026-08-13 | BitTorrent promotion now validates external `DownloadContext` identity by torrent info-hash; mismatched session or dependency contexts are rebuilt from the current torrent, preventing stale piece hashes, paths, and mirror mappings. Constructor verification is `37 passed, 0 failed`; the migration remains PARTIAL |
+
 ## 对照范围
 
 - `aria2_original/src`：415 个 `.cc` + 115 个 header-only = **530 个对照单元**
@@ -193,6 +195,13 @@ promoted by `DownloadEngine`. The resolved torrent context preserves the
 Metalink-selected output path before the BitTorrent command starts; the final
 payload is served by a local web seed and is verified byte-for-byte.
 
+The promotion seam now treats the torrent info-hash as the identity boundary
+for an externally supplied `DownloadContext`. A matching dependency context is
+retained so Metalink-selected paths and mirrors survive promotion; a missing or
+mismatched context is rebuilt from the current torrent bytes. This is a
+Rust-owned lifecycle invariant and does not copy the original C++ ownership
+hierarchy or alter CLI/configuration values.
+
 Focused verification:
 
 ~~~text
@@ -201,7 +210,7 @@ cargo test -p aria2-core --test test_e2e_metalink_lifecycle --all-features -- --
 cargo test -p aria2-core --test test_e2e_metalink_lifecycle --features metalink --no-default-features -- --test-threads=1
   2 passed, 0 failed
 cargo test -p aria2-core --lib engine::bt_download_command_tests --all-features -- --test-threads=1
-  36 passed, 0 failed
+  37 passed, 0 failed
 cargo test -p aria2-core --lib request::request_group::dependency --all-features -- --test-threads=1
   8 passed, 0 failed
 cargo test -p aria2-core --lib engine::metalink_request_graph --all-features -- --test-threads=1
@@ -971,3 +980,37 @@ version-report text or C++ implementation identity.
 - Explicit `rpc-allow-origin-all` and `rpc-cors-domain` remain additive opt-in
   paths. The RPC status remains `PARTIAL` until original browser extensions and
   the full external-client matrix are exercised.
+
+#### BitTorrent DHT periodic lookup checkpoint (2026-08-14)
+
+The periodic BitTorrent DHT lookup now follows the original command's two
+distinct peer observations while keeping the implementation Rust-owned. The
+active connection count selects the same 15-minute, 5-minute, 1-minute, and
+5-second retry intervals as `aria2_original/src/DHTGetPeersCommand.cc`. The
+retry and max-peer decision uses `DefaultPeerStorage::count_all_peers()`, the
+Rust equivalent of C++ `PeerStorage::countAllPeer()`, and is committed only
+after returned peers pass normal connection and storage admission. Pending
+lookup tasks are cancelled and joined during command shutdown; `Drop` remains
+the synchronous abort fallback.
+
+Focused verification from the current tree:
+
+~~~text
+cargo test -p aria2-core --features bittorrent --lib engine::bt_download_execute::execute::dht_periodic_lookup::tests -- --test-threads=1
+  12 passed, 0 failed
+cargo test -p aria2-core --test dht_integration_tests --features bittorrent -- --test-threads=1
+  30 passed, 0 failed, 4 ignored
+cargo test -p aria2-core --test test_e2e_bittorrent_download --features bittorrent -- --test-threads=1
+  25 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test deep_e2e_bittorrent --features bittorrent -- --test-threads=1
+  31 passed, 0 failed, 2 ignored
+cargo check -p aria2-core --features bittorrent --lib
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+This closes the periodic lookup scheduling and local lifecycle regression
+slice only. Public-network DHT behavior, original-client interoperability,
+full BitTorrent scheduler and seeding parity, and workspace acceptance remain
+open; DHT, BitTorrent, and the overall migration remain `PARTIAL`.
