@@ -304,12 +304,12 @@ impl ConfigParser {
     pub fn apply_defaults(&mut self) {
         self.sources.push(ConfigSource::Defaults);
         for def in self.registry.all().values() {
-            if !matches!(def.default_value(), OptionValue::None) {
-                if let Some(default_value) = def.parse_default_value() {
-                    self.options
-                        .entry(def.name().to_string())
-                        .or_insert(default_value);
-                }
+            if !matches!(def.default_value(), OptionValue::None)
+                && let Some(default_value) = def.parse_default_value()
+            {
+                self.options
+                    .entry(def.name().to_string())
+                    .or_insert(default_value);
             }
         }
     }
