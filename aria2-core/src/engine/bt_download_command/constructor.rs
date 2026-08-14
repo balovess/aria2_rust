@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use crate::config::parse_index_out;
+use crate::config::{parse_index_out, parse_integer_segments};
 use crate::constants;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::http_tracker_client::TrackerState;
@@ -133,6 +133,48 @@ fn apply_file_mapping(entry: &mut crate::download::file_entry::FileEntry, mappin
     entry.set_unique_protocol(mapping.unique_protocol);
 }
 
+/// Apply the user-facing `select-file` syntax to a torrent context.
+///
+/// The parser is shared with the rest of the configuration system. File
+/// indices remain 1-based at this seam, while the context owns the mapping to
+/// requested file entries. An empty value has the same meaning as an omitted
+/// filter: request every file.
+pub(crate) fn apply_select_file_filter(
+    context: &mut crate::download::DownloadContext,
+    select_file: Option<&str>,
+) -> Result<()> {
+    let Some(select_file) = select_file else {
+        return Ok(());
+    };
+
+    if select_file.trim().is_empty() {
+        context.set_file_filter(Vec::new());
+        return Ok(());
+    }
+
+    let max_index = i64::try_from(usize::MAX).unwrap_or(i64::MAX);
+    let ranges = parse_integer_segments(select_file, 1, max_index)
+        .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
+        .into_iter()
+        .map(|range| -> Result<_> {
+            let start = usize::try_from(*range.start()).map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "select-file index does not fit the current platform".to_string(),
+                ))
+            })?;
+            let end = usize::try_from(*range.end()).map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "select-file index does not fit the current platform".to_string(),
+                ))
+            })?;
+            Ok(start..=end)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    context.set_file_filter_ranges(&ranges);
+    Ok(())
+}
+
 fn apply_index_out_paths(
     context: &mut crate::download::DownloadContext,
     index_out: Option<&str>,
@@ -215,6 +257,7 @@ impl BtDownloadCommand {
             let mut context = build_download_context_from_meta(&meta, context_path)?;
             apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
             apply_file_mappings(&mut context, file_mappings)?;
+            apply_select_file_filter(&mut context, options.select_file.as_deref())?;
             Some(std::sync::Arc::new(context))
         };
         let (piece_count, piece_length, info_hash) = {
@@ -321,6 +364,7 @@ impl BtDownloadCommand {
         // metadata fields. We replicate this here.
         let mut ctx = build_download_context_from_meta(&meta, path.to_string_lossy().to_string())?;
         apply_index_out_paths(&mut ctx, options.index_out.as_deref(), &dir)?;
+        apply_select_file_filter(&mut ctx, options.select_file.as_deref())?;
         group.set_download_context(std::sync::Arc::new(ctx));
 
         let seed_time = options.seed_time.and_then(|t| {

@@ -391,6 +391,72 @@ async fn test_e2e_bt_multi_file_integrity_repairs_piece_crossing_file_boundary()
 }
 
 #[tokio::test]
+async fn test_e2e_bt_select_file_downloads_cross_boundary_piece_and_removes_unselected_file() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_multi_file_test_torrent(
+        "multi-selective",
+        &[4, 6],
+        6,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, 6, 10), expected_piece_data(1, 6, 10)],
+    )
+    .await;
+    drop(tracker_placeholder);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data =
+        build_multi_file_test_torrent("multi-selective", &[4, 6], 6, &tracker.announce_url());
+    let output_dir = dir.path();
+    let unselected_path = output_dir.join("part-0.bin");
+    let selected_path = output_dir.join("part-1.bin");
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        file_allocation: Some("none".to_string()),
+        select_file: Some("2".to_string()),
+        bt_remove_unselected_file: true,
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9105),
+        &torrent_data,
+        &options,
+        Some(output_dir.to_str().unwrap()),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("selective multi-file download timed out")
+        .expect("selective multi-file download failed");
+
+    let mut requested = peer.requested_pieces().await;
+    requested.sort_unstable();
+    requested.dedup();
+    assert_eq!(
+        requested,
+        vec![0, 1],
+        "the selected second file needs both the crossing and final piece"
+    );
+    assert!(
+        !unselected_path.exists(),
+        "bt-remove-unselected-file must remove the unselected file after success"
+    );
+    assert_eq!(
+        std::fs::read(selected_path).unwrap(),
+        [4, 5, 6, 7, 8, 9],
+        "the selected file must retain bytes from the cross-file pieces"
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_bt_complete_integrity_honors_hash_check_controls() {
     use aria2_core::util::rwlock_ext::RwLockRecover;
 

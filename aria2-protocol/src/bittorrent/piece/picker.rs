@@ -120,6 +120,9 @@ pub struct PiecePicker {
     frequencies: Vec<u32>,
     /// Per-piece completion tracking (true = piece verified and written)
     completed: Vec<bool>,
+    /// Per-piece selection filter (true = piece is requested by this task).
+    /// Every selection strategy consults this same fact.
+    allowed: Vec<bool>,
     /// Per-piece in-progress tracking (true = piece is being downloaded)
     in_progress: Vec<bool>,
     /// Per-piece priority (0 = default, higher = more important)
@@ -129,8 +132,10 @@ pub struct PiecePicker {
     priority_pieces: Vec<u32>,
     /// Indices of pieces that are candidates for end-game mode
     endgame_candidates: Vec<usize>,
-    /// Number of pieces marked completed — keeps `remaining_count` O(1)
-    completed_count: usize,
+    /// Number of selected pieces marked completed.
+    completed_allowed_count: usize,
+    /// Number of pieces selected by the current filter.
+    allowed_count: usize,
     /// Forward scan cursor: every piece with index `< head_cursor` is
     /// completed or in progress. Only ever moves forward (or is reset
     /// backwards by [`PiecePicker::reopen`]).
@@ -153,11 +158,13 @@ impl PiecePicker {
             priority_mode: PiecePriorityMode::RarestFirst,
             frequencies: vec![0; n],
             completed: vec![false; n],
+            allowed: vec![true; n],
             in_progress: vec![false; n],
             priorities: vec![0; n],
             priority_pieces: Vec::new(),
             endgame_candidates: Vec::new(),
-            completed_count: 0,
+            completed_allowed_count: 0,
+            allowed_count: n,
             head_cursor: 0,
             tail_cursor: n,
             endgame_threshold: DEFAULT_ENDGAME_THRESHOLD,
@@ -212,6 +219,41 @@ impl PiecePicker {
         &self.priority_pieces
     }
 
+    /// Restrict selection and selective completion to the given piece
+    /// indexes.
+    ///
+    /// The completion bitfield remains global: unselected pieces that were
+    /// already present can still be persisted and reported, but they do not
+    /// contribute to selective-download completion or future selection.
+    pub fn set_allowed_pieces(&mut self, pieces: &[u32]) {
+        self.allowed.fill(false);
+        for &piece in pieces {
+            if let Some(allowed) = self.allowed.get_mut(piece as usize) {
+                *allowed = true;
+            }
+        }
+        self.allowed_count = self.allowed.iter().filter(|allowed| **allowed).count();
+        self.completed_allowed_count = self
+            .completed
+            .iter()
+            .zip(&self.allowed)
+            .filter(|(completed, allowed)| **completed && **allowed)
+            .count();
+        self.head_cursor = 0;
+        self.tail_cursor = self.num_pieces as usize;
+        self.refresh_endgame_candidates();
+    }
+
+    /// Whether a piece belongs to the current selective-download set.
+    pub fn is_allowed(&self, index: u32) -> bool {
+        self.allowed.get(index as usize).copied().unwrap_or(false)
+    }
+
+    /// Number of pieces selected by the current filter.
+    pub fn allowed_count(&self) -> usize {
+        self.allowed_count
+    }
+
     /// Override the remaining-piece count at which end-game mode activates.
     pub fn set_endgame_threshold(&mut self, threshold: usize) {
         self.endgame_threshold = threshold;
@@ -246,7 +288,7 @@ impl PiecePicker {
     /// being downloaded by another request.
     #[inline]
     fn is_available(&self, i: usize) -> bool {
-        !self.completed[i] && !self.in_progress[i]
+        self.allowed[i] && !self.completed[i] && !self.in_progress[i]
     }
 
     /// Test bit `i` of an MSB-first bitfield. `None` means "peer has everything".
@@ -316,6 +358,7 @@ impl PiecePicker {
         for &piece in &self.priority_pieces {
             let index = piece as usize;
             if index < n
+                && self.allowed[index]
                 && !self.completed[index]
                 && (allow_in_progress || !self.in_progress[index])
                 && Self::peer_has(bitfield, index)
@@ -355,7 +398,8 @@ impl PiecePicker {
         }
 
         let usable = |p: &Self, i: usize| -> bool {
-            !p.completed[i]
+            p.allowed[i]
+                && !p.completed[i]
                 && (allow_in_progress || !p.in_progress[i])
                 && Self::peer_has(bitfield, i)
         };
@@ -471,7 +515,7 @@ impl PiecePicker {
             return;
         }
         for i in 0..self.num_pieces as usize {
-            if !self.completed[i] {
+            if self.allowed[i] && !self.completed[i] {
                 self.endgame_candidates.push(i);
             }
         }
@@ -526,7 +570,8 @@ impl PiecePicker {
 
     /// Number of pieces not yet completed. O(1).
     pub fn remaining_count(&self) -> usize {
-        self.num_pieces as usize - self.completed_count
+        self.allowed_count()
+            .saturating_sub(self.completed_allowed_count)
     }
 
     /// Mark a piece as completed.
@@ -547,7 +592,9 @@ impl PiecePicker {
         }
         if !self.completed[i] {
             self.completed[i] = true;
-            self.completed_count += 1;
+            if self.allowed[i] {
+                self.completed_allowed_count += 1;
+            }
         }
         self.in_progress[i] = false;
         self.refresh_endgame_candidates();
@@ -604,7 +651,7 @@ impl PiecePicker {
 
     /// Check if all pieces are completed. O(1).
     pub fn is_complete(&self) -> bool {
-        self.completed_count == self.num_pieces as usize
+        self.completed_allowed_count == self.allowed_count()
     }
 }
 
@@ -674,6 +721,41 @@ mod tests {
         assert!(picker.endgame_candidates().is_empty());
         assert_eq!(picker.remaining_count(), 100);
         assert!(!picker.is_complete());
+    }
+
+    #[test]
+    fn test_allowed_piece_filter_controls_selection_and_completion() {
+        let mut picker = PiecePicker::new(4);
+        picker.set_endgame_threshold(0);
+        picker.set_allowed_pieces(&[1, 3]);
+
+        assert_eq!(picker.allowed_count(), 2);
+        assert_eq!(picker.remaining_count(), 2);
+        assert!(!picker.is_allowed(0));
+        assert!(picker.is_allowed(1));
+        assert_eq!(picker.pick_next(), Some(1));
+
+        picker.mark_completed(1);
+        assert_eq!(picker.remaining_count(), 1);
+        assert!(!picker.is_complete());
+        assert_eq!(picker.pick_next(), Some(3));
+
+        picker.mark_completed(3);
+        assert!(picker.is_complete());
+        assert_eq!(picker.remaining_count(), 0);
+        assert_eq!(picker.pick_next(), None);
+    }
+
+    #[test]
+    fn test_allowed_piece_filter_keeps_endgame_candidates_selective() {
+        let mut picker = PiecePicker::new(5);
+        picker.set_allowed_pieces(&[2, 4]);
+
+        assert_eq!(picker.endgame_candidates(), &[2, 4]);
+        picker.mark_completed(0);
+        assert_eq!(picker.endgame_candidates(), &[2, 4]);
+        picker.mark_completed(2);
+        assert_eq!(picker.endgame_candidates(), &[4]);
     }
 
     #[test]

@@ -204,20 +204,4 @@ pub trait PieceStorage: Send + Sync {
     /// Returns true if selective downloading mode is active.
     /// C++: `isSelectiveDownloadingMode()`
     fn is_selective_downloading_mode(&self) -> bool;
-
-    /// Set up the file filter for selective downloading.
-    ///
-    /// C++: `setupFileFilter()` — iterates `downloadContext_->getFileEntries()`
-    /// and calls `addFilter()` for each requested file's byte range.
-    /// After setting filter bits, calls `enableFilter()`.
-    ///
-    /// In Rust, this is called by the download engine when selective
-    /// downloading is configured (e.g., downloading specific files from
-    /// a multi-file torrent).
-    fn setup_file_filter(&mut self);
-
-    /// Clear the file filter, disabling selective downloading.
-    ///
-    /// C++: `clearFileFilter()` — calls `bitfieldMan_->clearFilter()`.
-    fn clear_file_filter(&mut self);
 }

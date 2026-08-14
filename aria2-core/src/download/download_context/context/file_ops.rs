@@ -136,8 +136,8 @@ impl DownloadContext {
     // File Filter
     // -----------------------------------------------------------------------
 
-    /// Mark file entries as requested / not-requested based on a sorted
-    /// list of 1-based indices.
+    /// Mark file entries as requested / not-requested based on a list of
+    /// 1-based indices.
     ///
     /// If the index list is empty or there is only one file entry, all
     /// entries are marked as requested. Otherwise, entries whose 1-based
@@ -149,39 +149,32 @@ impl DownloadContext {
     /// * `indices` - Sorted, deduplicated, 1-based file indices.
     ///   Must be >= 1.
     pub fn set_file_filter(&mut self, mut indices: Vec<usize>) {
+        indices.sort_unstable();
+        indices.dedup();
+        let ranges: Vec<_> = indices.into_iter().map(|index| index..=index).collect();
+        self.set_file_filter_ranges(&ranges);
+    }
+
+    /// Mark file entries as requested / not-requested based on inclusive
+    /// ranges of 1-based indices.
+    ///
+    /// This is the range-preserving form used by option parsing. It avoids
+    /// expanding a large user range into a potentially unbounded temporary
+    /// vector while keeping the same file-order semantics as
+    /// [`Self::set_file_filter`].
+    pub fn set_file_filter_ranges(&mut self, ranges: &[std::ops::RangeInclusive<usize>]) {
         // If no filter or single-file, all entries are requested
-        if indices.is_empty() || self.file_entries.len() <= 1 {
+        if ranges.is_empty() || self.file_entries.len() <= 1 {
             for fe in &mut self.file_entries {
                 fe.set_requested(true);
             }
             return;
         }
 
-        // Sort and dedup for safety
-        indices.sort_unstable();
-        indices.dedup();
-
-        let mut filter_iter = indices.iter().peekable();
         for (i, fe) in self.file_entries.iter_mut().enumerate() {
             // Convert to 1-based index for comparison
             let one_based = i + 1;
-            match filter_iter.peek() {
-                Some(&idx) if *idx == one_based => {
-                    fe.set_requested(true);
-                    let _ = filter_iter.next();
-                }
-                Some(&idx) if *idx > one_based => {
-                    fe.set_requested(false);
-                }
-                Some(_) => {
-                    // idx < one_based shouldn't happen with sorted input,
-                    // but mark not-requested as fallback
-                    fe.set_requested(false);
-                }
-                None => {
-                    fe.set_requested(false);
-                }
-            }
+            fe.set_requested(ranges.iter().any(|range| range.contains(&one_based)));
         }
 
         debug!(

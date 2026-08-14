@@ -69,6 +69,30 @@ fn test_multi_file_layout_created_for_multi_torrent() {
 }
 
 #[test]
+fn test_select_file_marks_only_requested_torrent_entries() {
+    let options = DownloadOptions {
+        select_file: Some("2".to_string()),
+        ..DownloadOptions::default()
+    };
+    let command = BtDownloadCommand::new(
+        GroupId::new(101),
+        &build_multi_file_torrent(),
+        &options,
+        Some("d:/tmp/multitest"),
+    )
+    .expect("select-file should be applied while constructing a BT command");
+
+    let context = command
+        .group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("BT context");
+    assert!(!context.get_file_entries()[0].is_requested());
+    assert!(context.get_file_entries()[1].is_requested());
+}
+
+#[test]
 fn test_index_out_updates_context_and_writer_layout() {
     let torrent_bytes = build_multi_file_torrent();
     let options = DownloadOptions {

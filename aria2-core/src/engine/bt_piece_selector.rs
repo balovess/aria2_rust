@@ -87,6 +87,56 @@ pub fn prioritized_piece_indices(
         .collect()
 }
 
+/// Calculate the pieces intersecting the requested files in a torrent
+/// context.
+///
+/// A piece is selected when any byte of it belongs to a requested file. This
+/// preserves BitTorrent's piece-hash granularity: a piece spanning a selected
+/// and an unselected file is downloaded as one unit. `None` means that no
+/// selective filter is active; `Some(empty)` is a valid filter that selects no
+/// pieces.
+pub fn allowed_piece_indices(
+    context: &crate::download::DownloadContext,
+    piece_length: u64,
+    num_pieces: u32,
+) -> Option<Vec<u32>> {
+    let entries = context.get_file_entries();
+    if entries.len() <= 1 || entries.iter().all(|entry| entry.is_requested()) {
+        return None;
+    }
+
+    let mut allowed = vec![false; num_pieces as usize];
+    if piece_length == 0 || allowed.is_empty() {
+        return Some(Vec::new());
+    }
+
+    for entry in entries.iter().filter(|entry| entry.is_requested()) {
+        if entry.length() == 0 {
+            continue;
+        }
+        let start = usize::try_from(entry.offset() / piece_length).unwrap_or(allowed.len());
+        let end_offset = entry.offset().saturating_add(entry.length());
+        let end = end_offset
+            .saturating_sub(1)
+            .checked_div(piece_length)
+            .and_then(|index| usize::try_from(index).ok())
+            .unwrap_or(allowed.len().saturating_sub(1));
+        let start = start.min(allowed.len());
+        let end = end.min(allowed.len().saturating_sub(1));
+        if start <= end {
+            allowed[start..=end].fill(true);
+        }
+    }
+
+    Some(
+        allowed
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, allowed)| allowed.then_some(index as u32))
+            .collect(),
+    )
+}
+
 /// Piece selector configuration
 #[derive(Debug, Clone)]
 pub struct PieceSelectorConfig {
@@ -218,7 +268,8 @@ impl BtPieceSelector {
 
             for &fast_idx in peer_conn.allowed_fast_set() {
                 // Check if piece is needed and peer has it
-                if let Some(info) = piece_picker.get_piece_info(fast_idx)
+                if piece_picker.is_allowed(fast_idx)
+                    && let Some(info) = piece_picker.get_piece_info(fast_idx)
                     && !info.completed
                     && !info.in_progress
                     && Self::is_bitfield_set(peer_bitfield, fast_idx)
@@ -485,5 +536,30 @@ mod tests {
     fn test_prioritized_piece_indices_rejects_zero_piece_length() {
         let entries = vec![FileEntry::new("a".into(), 1, 0, Vec::new())];
         assert!(prioritized_piece_indices(&[], &entries, 0).is_err());
+    }
+
+    #[test]
+    fn test_allowed_piece_indices_follow_requested_files() {
+        let mut context = crate::download::DownloadContext::new_default();
+        context.set_file_entries(vec![
+            FileEntry::new("a".into(), 4, 0, Vec::new()),
+            FileEntry::new("b".into(), 4, 4, Vec::new()),
+            FileEntry::new("c".into(), 4, 8, Vec::new()),
+        ]);
+        context.set_file_filter(vec![2]);
+
+        assert_eq!(allowed_piece_indices(&context, 4, 3), Some(vec![1]));
+    }
+
+    #[test]
+    fn test_allowed_piece_indices_include_piece_spanning_file_boundary() {
+        let mut context = crate::download::DownloadContext::new_default();
+        context.set_file_entries(vec![
+            FileEntry::new("a".into(), 3, 0, Vec::new()),
+            FileEntry::new("b".into(), 3, 3, Vec::new()),
+        ]);
+        context.set_file_filter(vec![2]);
+
+        assert_eq!(allowed_piece_indices(&context, 4, 2), Some(vec![0, 1]));
     }
 }

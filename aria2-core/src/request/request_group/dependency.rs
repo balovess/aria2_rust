@@ -13,7 +13,9 @@ use super::GroupId;
 #[cfg(feature = "bittorrent")]
 use super::{MetadataInfo, RequestGroup};
 #[cfg(feature = "bittorrent")]
-use crate::engine::bt_download_command::{apply_file_mappings, build_download_context_from_meta};
+use crate::engine::bt_download_command::{
+    apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
+};
 #[cfg(feature = "bittorrent")]
 use crate::util::rwlock_ext::RwLockRecover;
 #[cfg(feature = "bittorrent")]
@@ -409,6 +411,9 @@ impl BtDependency {
         .map_err(|error| error.to_string())?;
         let mut ctx = ctx;
         apply_file_mappings(&mut ctx, &self.file_mappings).map_err(|error| error.to_string())?;
+        let select_file = self.payload.recover().options().select_file.clone();
+        apply_select_file_filter(&mut ctx, select_file.as_deref())
+            .map_err(|error| error.to_string())?;
         let payload = self.payload.recover();
         payload.set_bt_metadata_data(data.clone());
         payload.set_bt_metadata(

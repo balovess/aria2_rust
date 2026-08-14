@@ -500,6 +500,7 @@ fn test_download_options_to_map_all_fields() {
         metalink_location: None,
         metalink_preferred_protocol: None,
         select_file: None,
+        bt_remove_unselected_file: true,
         piece_length: Some(1024 * 1024),
         metalink_enable_unique_protocol: false,
         // FTP
@@ -589,6 +590,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("bt-optimistic-unchoke-interval").unwrap(), "30");
     assert_eq!(map.get("bt-snubbed-timeout").unwrap(), "60");
     assert_eq!(map.get("bt-prioritize-piece").unwrap(), "head=512K");
+    assert_eq!(map.get("bt-remove-unselected-file").unwrap(), "true");
     assert_eq!(map.get("enable-utp").unwrap(), "true");
     assert_eq!(map.get("utp-listen-port").unwrap(), "6882");
 

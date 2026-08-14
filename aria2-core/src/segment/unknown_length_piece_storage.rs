@@ -415,14 +415,6 @@ impl PieceStorage for UnknownLengthPieceStorage {
     fn is_selective_downloading_mode(&self) -> bool {
         false
     }
-
-    fn setup_file_filter(&mut self) {
-        // No filtering for unknown-length downloads
-    }
-
-    fn clear_file_filter(&mut self) {
-        // No filtering for unknown-length downloads
-    }
 }
 
 // ===========================================================================

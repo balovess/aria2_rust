@@ -17,6 +17,8 @@ use tokio::net::TcpStream;
 use tokio::time::timeout;
 use url::Url;
 
+use aria2_protocol::http::response::is_redirect_status;
+
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::cookie_storage::{CookieJar, CookieStorage};
 
@@ -308,7 +310,7 @@ impl HttpConnectionManager {
         redirect_chain: &HashSet<Url>,
         redirect_count: u32,
     ) -> Result<Url> {
-        if !response.is_redirect() {
+        if !is_redirect_status(response.status_code) {
             return Err(Aria2Error::Parse(format!(
                 "Non-redirect response code: {}",
                 response.status_code
@@ -365,7 +367,7 @@ impl HttpConnectionManager {
                 )));
             }
             let resp = get_response(&current_url).await?;
-            if !resp.is_redirect() {
+            if !is_redirect_status(resp.status_code) {
                 return Ok(resp);
             }
             let location = resp.location().ok_or_else(|| {

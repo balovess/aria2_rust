@@ -747,6 +747,7 @@ async fn test_change_option_accepts_valid_keys() {
         "max-download-limit": 1048576,
         "max-upload-limit": 512000,
         "bt-max-peers": 60,
+        "bt-remove-unselected-file": "true",
         "bt-force-encryption": "true",
         "allow-overwrite": "true"
     });
@@ -777,6 +778,11 @@ async fn test_change_option_accepts_valid_keys() {
     assert!(
         opts.contains_key("bt-max-peers"),
         "bt-max-peers should be stored"
+    );
+    assert_eq!(
+        opts.get("bt-remove-unselected-file")
+            .and_then(|value| value.as_str()),
+        Some("true")
     );
     assert_eq!(
         opts.get("bt-force-encryption")

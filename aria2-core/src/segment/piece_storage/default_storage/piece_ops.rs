@@ -541,19 +541,4 @@ impl PieceStorage for DefaultPieceStorage {
         // selective downloading (file filtering) is active.
         self.bfman.is_filter_enabled()
     }
-
-    fn setup_file_filter(&mut self) {
-        // C++: iterates file entries and calls addFilter() for each
-        // requested file's byte range, then enables the filter.
-        // In Rust, this is a placeholder — the actual file entry iteration
-        // is handled by the download engine which calls bfman methods directly.
-        // The filter bits should already be configured before calling this.
-        self.bfman.enable_filter();
-    }
-
-    fn clear_file_filter(&mut self) {
-        // C++: bitfieldMan_->clearFilter() — clears filter bitfield,
-        // disables filter.
-        self.bfman.clear_filter();
-    }
 }

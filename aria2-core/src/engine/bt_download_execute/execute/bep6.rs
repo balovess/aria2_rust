@@ -232,7 +232,12 @@ impl BtDownloadCommand {
         // Select high-priority, low-availability pieces we need most urgently
         let mut suggestions: Vec<u32> = piece_picker
             .pieces_iter()
-            .filter(|p| !p.completed && !p.in_progress && p.frequency > 0)
+            .filter(|p| {
+                piece_picker.is_allowed(p.index)
+                    && !p.completed
+                    && !p.in_progress
+                    && p.frequency > 0
+            })
             .take(remaining)
             .map(|p| p.index)
             .collect();

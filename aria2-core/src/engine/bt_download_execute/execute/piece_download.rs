@@ -331,6 +331,25 @@ impl BtDownloadCommand {
             aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::RarestFirst,
         );
 
+        let allowed_pieces = {
+            let group = self.group.recover();
+            group.get_download_context().and_then(|context| {
+                crate::engine::bt_piece_selector::allowed_piece_indices(
+                    &context,
+                    piece_length as u64,
+                    num_pieces,
+                )
+            })
+        };
+        if let Some(allowed_pieces) = allowed_pieces {
+            info!(
+                "[BT] Selective file filter enabled: {} of {} pieces selected",
+                allowed_pieces.len(),
+                num_pieces
+            );
+            piece_picker.set_allowed_pieces(&allowed_pieces);
+        }
+
         if !self.check_integrity
             && let Some(bitfield) = self
                 .checkpoint

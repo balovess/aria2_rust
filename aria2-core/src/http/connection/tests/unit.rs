@@ -224,6 +224,21 @@ fn test_follow_redirects_missing_location() {
 }
 
 #[tokio::test]
+async fn test_follow_redirects_iterative_missing_location() {
+    let manager = HttpConnectionManager::new(&Default::default());
+    let current_url = Url::parse("http://example.com/").unwrap();
+
+    let result = manager
+        .follow_redirects_iterative(&current_url, |_url| async {
+            Ok(HttpResponse::new(301, "Moved".to_string()))
+        })
+        .await;
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("Location"));
+}
+
+#[tokio::test]
 async fn test_redirect_follow_5_jumps() {
     let manager = HttpConnectionManager::new(&create_test_config());
     let current_url = Url::parse("http://example.com/start").unwrap();

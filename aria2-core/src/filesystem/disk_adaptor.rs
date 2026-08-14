@@ -27,7 +27,7 @@ pub trait DiskAdaptor: Send + Sync {
 ///
 /// This is an advisory hint: failure to evict pages must not change the bytes
 /// returned to the caller. Non-POSIX callers simply omit the call.
-#[cfg(unix)]
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
 pub(crate) fn advise_drop_cache(file: &tokio::fs::File, offset: u64, length: u64) {
     use std::os::fd::AsRawFd;
 
@@ -43,6 +43,13 @@ pub(crate) fn advise_drop_cache(file: &tokio::fs::File, offset: u64, length: u64
     let _ =
         unsafe { libc::posix_fadvise(file.as_raw_fd(), offset, length, libc::POSIX_FADV_DONTNEED) };
 }
+
+// Apple libc does not expose the file-descriptor based `posix_fadvise` API.
+// `posix_madvise` is not equivalent: it operates on a mapped memory range,
+// not on a file descriptor. Cache eviction is only an advisory optimization,
+// so preserve the read contract with a no-op on Apple Unix.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) fn advise_drop_cache(_file: &tokio::fs::File, _offset: u64, _length: u64) {}
 
 pub struct DirectDiskAdaptor {
     file: Option<tokio::fs::File>,

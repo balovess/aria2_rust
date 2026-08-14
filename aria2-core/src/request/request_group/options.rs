@@ -235,6 +235,9 @@ pub struct DownloadOptions {
     /// Select specific files from a metalink by segment index (e.g. "1-3,5").
     /// Maps to C++ `PREF_SELECT_FILE`.
     pub select_file: Option<String>,
+    /// Remove unselected BitTorrent files after a successful download.
+    /// Maps to C++ `PREF_BT_REMOVE_UNSELECTED_FILE`.
+    pub bt_remove_unselected_file: bool,
     /// Piece length in bytes for metalink downloads. Default: 1 MiB (1_048_576).
     /// Maps to C++ `PREF_PIECE_LENGTH`.
     pub piece_length: Option<u64>,
@@ -462,6 +465,7 @@ impl Default for DownloadOptions {
             metalink_location: None,
             metalink_preferred_protocol: None,
             select_file: None,
+            bt_remove_unselected_file: false,
             piece_length: None,
             metalink_enable_unique_protocol: true,
             // FTP
@@ -840,6 +844,10 @@ impl DownloadOptions {
             metalink_location: options.get("metalink-location").cloned(),
             metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
             select_file: options.get("select-file").cloned(),
+            bt_remove_unselected_file: options
+                .get("bt-remove-unselected-file")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             piece_length: positive_size_u64("piece-length"),
             metalink_enable_unique_protocol: options
                 .get("metalink-enable-unique-protocol")
@@ -1187,11 +1195,13 @@ mod tests {
                 "false".to_string(),
             ),
             ("bt-hash-check-seed".to_string(), "false".to_string()),
+            ("bt-remove-unselected-file".to_string(), "true".to_string()),
         ]);
 
         let options = DownloadOptions::from_option_strings(&values);
 
         assert!(!options.bt_enable_hook_after_hash_check);
         assert!(!options.bt_hash_check_seed);
+        assert!(options.bt_remove_unselected_file);
     }
 }

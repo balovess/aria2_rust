@@ -1,6 +1,6 @@
 # Compatibility Status
 
-Last verified: 2026-08-14
+Last verified: 2026-08-15
 Reference implementation: aria2_original/  
 Rust workspace version: 0.2.9
 Public product identity: aria2-rust 0.2.9
@@ -703,7 +703,7 @@ checkpoint.
 | HTTP/HTTPS | aria2-core/src/http/, aria2-protocol/src/http/ | PARTIAL | Focused parser and download coverage exists, including existing-file naming, control-file cleanup, preallocation-safe resume recovery, unknown-remote-length resume, multi-URI resume failover, HTTP 200 responses that ignore a requested Range (CannotResume by default or fresh restart according to always-resume/max-resume-failure-tries), request-level GET/HEAD, cache, digest, keep-alive, explicit-header, gzip, chunked, and canonical CookieStorage coverage. Existing `check-certificate`, `ca-certificate`, `certificate`, and `private-key` options now use one Rust-owned TLS config in primary HTTP/HTTPS and Metalink clients, plus production BitTorrent HTTP tracker and web-seed clients; verification-disabled mode, strict multi-root PEM CA loading, separate PEM and legacy empty-password PKCS#12 client identities, PBES2/AES-256-CBC PFX construction, configuration errors, and local live HTTPS fixtures for custom CA, disabled verification, and legacy identity forms are covered. AES-128/192-CBC, AES-GCM, alternative PBKDF2 PRFs, plaintext keyBag, unsupported bag types, and the broader original-client HTTPS matrix remain unverified. Cookie lookup is host-suffix indexed with normalized domain keys, and domain eviction uses one lock order; the legacy CookieJar is only an API/session adapter. An E2E check proves max-tries counts total GET attempts with 0 meaning unlimited. Default production clients explicitly disable gzip negotiation and opt in only through http-accept-gzip; every unknown-length path, including explicit split > 1, starts with one ordinary GET and remains on the original single-connection unknown-length path without a synthetic Range probe. Concurrent buffered and streaming Range requests now share a bounded manual redirect seam, preserve Range validation after redirects, and propagate redirect Set-Cookie values through the task cookie store; 401/407 responses use the original authentication result mapping and the existing challenge credential retry seam for segmented requests. HTTP, HTTPS, and ALL proxy selection, proxy credentials from explicit options or proxy-URL userinfo, no-proxy matching, manual redirects, and real authenticated-proxy E2E coverage are implemented; a production E2E also proves proxy-URL credentials remain available for a 407 fallback. Rust's internal GrowSegment/unknown-length storage modules are not yet the production writer seam; this is an internal architecture difference, not a missing download path. Core owns production orchestration; aria2-protocol::http::client is the standalone adapter used by legacy protocol helpers, and broader original-binary interoperability remains unverified. |
 | FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Original FTP active/passive/auth behavior has focused coverage, including the canonical `PWD`/directory-level `CWD`/file-name `SIZE` and `RETR` order, optional `remote-time` `MDTM` query and local mtime application, FTP `dry-run` metadata-only completion without `REST`/`RETR`, `connect-timeout` enforcement for silent control peers, multiline response parsing with the C++ 64 KiB receive limit, the original PASV control-peer target rule, active-mode listeners bound to the control connection's local interface, `max-tries` total-attempt semantics, remote `SIZE` versus `RETR` length validation, whole-file checksum verification for both fresh downloads and same-length local-file short-circuiting, and real slow-server pause/remove/unpause lifecycle E2E (`test_e2e_ftp_download`: 35 passed, 2 ignored). The Rust command now persists partial progress through the internal `A2CF` checkpoint seam and removes the checkpoint only after successful completion. Live third-party-server, multi-homed process, and original-client interoperability evidence is incomplete. FTPS is a Rust-only additive extension: explicit/implicit control and data TLS paths exist, the plaintext downgrade regression is covered, and positive TLS-server interoperability is still unverified. |
 | SFTP | aria2-protocol/src/sftp/, aria2-core/src/engine/sftp_download_command/ | PARTIAL | A local `russh` SFTP server E2E verifies password acceptance and rejection, aria2_original's `sha-1=<hex>` host-key pin acceptance and mismatch rejection, missing-file mapping, complete output, resume from an existing local prefix, configured whole-file checksum verification after transfer, and real slow-server pause/remove/unpause lifecycle (`test_e2e_sftp_download`: 12 passed, 0 failed). A complete local output with a matching checksum is accepted before any SFTP `READ`; a mismatch resets the resume offset and returns to the remote transfer path. The Rust command persists partial progress through the internal `A2CF` checkpoint seam and removes it only after successful checksum-verified completion. Third-party SFTP server interoperability and the complete original error matrix remain unverified. Rust's protocol crate has an additive public-key authentication API, but aria2_original exposes no SSH private-key login option; `--private-key` remains an HTTP/HTTPS client-TLS option. Known-hosts persistence is not part of aria2_original's `ssh-host-key-md` contract. |
-| BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. `bt-prioritize-piece` now uses the original typed `head[=SIZE],tail[=SIZE]` parser and a file-boundary priority wrapper over rarest-first, with focused parser/picker/index tests. The process listener now owns one shared TCP socket, routes MSE and legacy handshakes by info-hash, unregisters routes with RAII, and releases its port on shutdown. MSE covers PadA/PadB, RC4 and plaintext-after-MSE negotiation, `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`; focused socket and state-machine evidence is recorded below. Rust A2CF checkpoints now bind the info-hash, reject malformed trailing bits, require payload presence, restore piece-sized progress, persist peer and web-seed completions, and are exercised through halt, pause/resume, verified-piece skip, no-peer web-seed download, failed-piece integrity recovery, complete-payload hash-check controls, and a real multi-file piece crossing two physical files. A successful complete integrity check emits the BT completion hook only when `bt-enable-hook-after-hash-check=true`; `bt-hash-check-seed=false` completes locally without tracker/peer discovery, while the default `true` path enters a real tracker/peer lifecycle. The command-level suite now reports `28 passed, 0 failed, 2 ignored`. Dependency graph, full scheduler/seeding parity, and live original-client interoperability remain open. |
+| BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. `bt-prioritize-piece` now uses the original typed `head[=SIZE],tail[=SIZE]` parser and a file-boundary priority wrapper over rarest-first, with focused parser/picker/index tests. The process listener now owns one shared TCP socket, routes MSE and legacy handshakes by info-hash, unregisters routes with RAII, and releases its port on shutdown. MSE covers PadA/PadB, RC4 and plaintext-after-MSE negotiation, `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`; focused socket and state-machine evidence is recorded below. Rust A2CF checkpoints now bind the info-hash, reject malformed trailing bits, require payload presence, restore piece-sized progress, persist peer and web-seed completions, and are exercised through halt, pause/resume, verified-piece skip, no-peer web-seed download, failed-piece integrity recovery, complete-payload hash-check controls, and a real multi-file piece crossing two physical files. A successful complete integrity check emits the BT completion hook only when `bt-enable-hook-after-hash-check=true`; `bt-hash-check-seed=false` completes locally without tracker/peer discovery, while the default `true` path enters a real tracker/peer lifecycle. The command-level suite now reports `29 passed, 0 failed, 2 ignored`; the obsolete context-free PieceStorage filter setup seam was removed because production BT selection is Rust-owned by `DownloadContext -> allowed_piece_indices -> PiecePicker`. Dependency graph, full scheduler/seeding parity, and live original-client interoperability remain open. |
 | DHT and trackers | aria2-protocol/src/bittorrent/dht/, aria2-protocol/src/bittorrent/tracker/ | PARTIAL | Production paths and tests use the protocol crate as the single canonical DHT implementation. The former unreferenced `aria2-core/src/dht/` duplicate was removed after a source/dependency audit; no public wire, configuration, default, or product-version behavior changed. DHT port ranges now try the ordered list and fall back after an occupied first port. The Rust-only public tracker catalog is wired through the BT announce path with source refresh, URL de-duplication, HTTP/UDP dispatch, private-torrent exclusion, disabled/enabled availability, exponential health backoff, and success recovery; these `enable-public-trackers`/`bt-tracker-source` options are additive extensions and do not alter original-client requests. Complete live-network and original-client interoperability evidence is still missing. |
 | Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Ordinary HTTP payloads now stream through the Rust disk-writer seam, persist pause/remove progress in Rust `A2CF`, resume with `Range`, remove the checkpoint on success, and verify whole-file and `<pieces>` hashes by streaming the output file. Named shared metaurls now form one multi-file payload with per-file direct-mirror and original-name mappings, and the original `metalink4-groupbymetaurl.xml` shape is covered. Both manager-owned `BtDependency` resolution and command-level direct-mirror fallback reuse one torrent-context mapping seam; a local HTTP regression proves that a failed shared group requests one torrent metadata resource and preserves every file path/name/URI mapping. A process-level E2E now submits `EngineCommand::AddMetalinkGraph`, verifies one metadata request, promotion-time context injection, the mapped output path, and a web-seed payload completion (`13 passed, 0 failed, 2 ignored`). The application session path now proves save/restart/restore of a standard memory-backed graph (`test_session_save_then_restart_restores_metalink_graph`: 1 passed), including metadata-first dependency reconstruction. Zero-length torrent payloads complete without peer discovery. Full `follow-torrent=mem` semantics, other Metalink lifecycle variants, and live protocol interoperability remain open. |
 | Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Single- and multi-mirror concurrent HTTP paths, ordinary Metalink payloads, and SFTP now create/load, checkpoint, flush on cancellation or Range fallback, restore compatible prefixes or segment bitfields, discard untrusted sidecars, and remove `.aria2` only after successful completion and checksum verification where configured; two real multi-mirror HTTP cases, the Metalink lifecycle E2E, and SFTP checksum preflight/transfer cases verify restored data is not incorrectly accepted. Metalink whole-file and piece hashes are checked through streaming file reads. Session serialization preserves original option names and non-default values for resume policy, trackers, port ranges, piece sizing, FTP/auth/netrc settings, plus the original 16-hex-digit GID form; Rust-only fields remain extensions. The result-code seam now contains exactly the original wire values `0..32`; `paused` remains a separate task status and cannot leak a Rust-only error code. Live engine pause/remove orchestration across every protocol, checksum-integrity dispatcher callbacks beyond the covered paths, and broader original-client interoperability remain incomplete or unverified. |
@@ -1934,6 +1934,67 @@ cargo test -p aria2-core multi_file_allocation_iterator --lib
 
 The broader filesystem matrix, platform-specific allocation behavior on
 macOS/Windows, and workspace migration acceptance remain `PARTIAL`.
+
+## BitTorrent Selective Files And Completion Cleanup Checkpoint (2026-08-15)
+
+The Rust BitTorrent command now keeps `select-file` at the existing external
+option seam while applying it in the Rust-owned torrent context and piece
+picker. File indices remain 1-based on the wire; selected file byte ranges are
+translated to global piece indices, so a piece shared by a selected and an
+unselected file is still downloaded and verified as one torrent piece. The
+picker's allowed set is consulted by all local selection strategies,
+priorities, endgame candidates, Suggest messages, and selective completion
+counts. The persisted checkpoint bitfield remains global so resume state is
+not rewritten into a Rust-only filtered format.
+
+The existing `bt-remove-unselected-file` option is now carried by
+`DownloadOptions`, RPC runtime updates, and session serialization. The BT
+finalization seam mirrors the original observable conditions: cleanup runs
+only after successful completion, for a BitTorrent context, on disk-backed
+downloads, and only for entries marked unrequested. Failed or missing file
+removals are warnings and do not turn an already completed download into a
+failed task. No option name, default, user configuration, product version, or
+upstream version-report text was changed; the implementation remains
+Rust-native.
+
+Focused verification:
+
+~~~text
+cargo fmt --all -- --check                                           PASS
+cargo test -p aria2-core --features bittorrent --lib engine::bt_download_execute::execute::finalization::tests -- --nocapture
+  2 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --lib request::request_group::options::tests -- --nocapture
+  10 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --lib session::session_entry::tests::test_download_options_to_map_all_fields -- --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --test test_e2e_bittorrent_download test_e2e_bt_select_file_downloads_cross_boundary_piece_and_removes_unselected_file -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --lib segment::piece_storage --all-features -- --test-threads=1
+  73 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --test test_e2e_bittorrent_download -- --test-threads=1
+  29 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3390 passed, 0 failed, 1 ignored
+cargo test -p aria2-rpc --all-features --lib -- --test-threads=1
+  232 passed, 0 failed
+cargo test -p aria2-protocol --all-features --lib -- --test-threads=1
+  831 passed, 0 failed
+cargo clippy -p aria2-core -p aria2-rpc -p aria2-protocol --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes the focused selective-file, checkpoint resume/web-seed, failed-peer,
+and completion-cleanup slice only. The overall BitTorrent and workspace
+migration remains `PARTIAL`: complete scheduler/seeding parity and
+original-client/browser interoperability still require reproducible evidence.
+The old context-free `PieceStorage` file-filter setup API was removed because
+it had no production caller and duplicated the Rust-owned
+`DownloadContext -> allowed_piece_indices -> PiecePicker` path. The underlying
+`BitfieldMan` filter behavior remains covered for segment-storage consumers;
+this internal cleanup changes no public option, default, session format, RPC
+wire shape, or product identity.
 
 ### Disk read cache hint checkpoint (2026-08-14)
 

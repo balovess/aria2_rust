@@ -111,6 +111,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.select_file {
         map.insert("select-file".to_string(), v.clone());
     }
+    if opts.bt_remove_unselected_file {
+        map.insert("bt-remove-unselected-file".to_string(), "true".to_string());
+    }
     if !opts.metalink_enable_unique_protocol {
         map.insert(
             "metalink-enable-unique-protocol".to_string(),
