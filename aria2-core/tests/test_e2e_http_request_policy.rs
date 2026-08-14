@@ -329,3 +329,87 @@ async fn configured_http_proxy_auth_downloads_through_real_proxy() {
     );
     proxy.await.expect("proxy fixture should finish");
 }
+
+#[tokio::test]
+async fn embedded_proxy_url_credentials_survive_407_fallback() {
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind proxy fixture");
+    let proxy_addr = listener.local_addr().expect("read proxy address");
+    let body = b"proxy-url-fallback".to_vec();
+    let expected_body = body.clone();
+    let proxy = tokio::spawn(async move {
+        for attempt in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept proxy request");
+            let request = read_proxy_headers(&mut stream).await;
+            assert!(
+                request
+                    .starts_with("GET http://origin.example/proxy-url-fallback.bin HTTP/1.1\r\n"),
+                "HTTP proxy must receive the absolute target URI: {request}"
+            );
+
+            let proxy_auth = request
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("proxy-authorization"))
+                .map(|(_, value)| value.trim());
+
+            if attempt == 0 {
+                // The transport may already send URL userinfo preemptively.
+                // Force the production 407 path so the retry resolver is tested.
+                let response = b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"proxy\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                stream
+                    .write_all(response)
+                    .await
+                    .expect("write proxy challenge");
+            } else {
+                assert_eq!(
+                    proxy_auth,
+                    Some("Basic dXJsLXVzZXI6dXJsLXBhc3M="),
+                    "embedded proxy URL credentials must be available to 407 retry: {request}"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write proxy response headers");
+                stream
+                    .write_all(&body)
+                    .await
+                    .expect("write proxy response body");
+            }
+        }
+    });
+
+    let directory = tempfile::tempdir().expect("create output directory");
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://url-user:url-pass@{proxy_addr}")),
+        ..DownloadOptions::default()
+    };
+    let url = "http://origin.example/proxy-url-fallback.bin";
+    let mut command = DownloadCommand::new(
+        GroupId::new(705),
+        url,
+        &options,
+        directory.path().to_str(),
+        Some("proxy-url-fallback.bin"),
+    )
+    .expect("create proxy URL credential download command");
+    command
+        .execute()
+        .await
+        .expect("download should succeed after proxy 407 fallback");
+
+    assert_eq!(
+        std::fs::read(directory.path().join("proxy-url-fallback.bin"))
+            .expect("read downloaded file"),
+        expected_body
+    );
+    proxy.await.expect("proxy fixture should finish");
+}

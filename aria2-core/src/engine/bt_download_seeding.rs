@@ -47,26 +47,19 @@ impl BtDownloadCommand {
             (None, None) => SeedExitCondition::infinite(),
         };
 
-        let plain_connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection> =
-            connections
-                .into_iter()
-                .filter_map(|c| {
-                    if let crate::engine::bt_peer_connection::InnerConnection::Plain(p) = c.inner {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
+        let upload_connections = connections
+            .into_iter()
+            .filter_map(|connection| connection.into_upload_connection())
+            .collect();
 
         // Reuse the download announcer so the completed event and tracker
         // timing state remain part of one lifecycle.
         let announcer = self.tracker_announcer.take();
         let peer_id = self.local_peer_id;
 
-        let mut manager = BtSeedManager::new_with_announcer(
+        let mut manager = BtSeedManager::new_with_transports(
             info_hash,
-            plain_connections,
+            upload_connections,
             file_provider,
             config,
             exit_cond,
@@ -74,6 +67,7 @@ impl BtDownloadCommand {
             self.choking_algo.take(),
             announcer,
             peer_id,
+            self.incoming_peers.take(),
         );
         let seeding_result = manager.run_seeding_loop().await;
         self.tracker_announcer = manager.take_announcer();

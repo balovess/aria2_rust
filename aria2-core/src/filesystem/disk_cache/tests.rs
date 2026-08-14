@@ -450,6 +450,66 @@ async fn test_range_based_read() {
 }
 
 #[tokio::test]
+async fn test_overlapping_writes_are_last_write_wins() {
+    let cache = make_small_cache(4096);
+
+    cache
+        .write(0, bytes::Bytes::from_static(b"abcdefghij"))
+        .await
+        .unwrap();
+    cache
+        .write(5, bytes::Bytes::from_static(b"XYZ"))
+        .await
+        .unwrap();
+
+    let data = cache.read(0, 10).await.unwrap().unwrap();
+    assert_eq!(&data[..], b"abcdeXYZij");
+    assert_eq!(cache.size().await, 10);
+
+    // The write splits the old entry into disjoint left/right fragments.
+    assert_eq!(cache.count().await, 3);
+    assert_eq!(&cache.read(3, 7).await.unwrap().unwrap()[..], b"deXYZij");
+}
+
+#[tokio::test]
+async fn test_overlapping_writes_flush_latest_bytes_to_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("overlap.bin");
+    let cache = make_small_cache(4096);
+
+    // Reverse the write order from the previous test. Offset ordering must
+    // not decide which bytes win when ranges overlap.
+    cache
+        .write(5, bytes::Bytes::from_static(b"XYZ"))
+        .await
+        .unwrap();
+    cache
+        .write(0, bytes::Bytes::from_static(b"abcdefghij"))
+        .await
+        .unwrap();
+
+    let mut writer = crate::filesystem::disk_writer::CachedDiskWriter::new(&path, None, None);
+    writer.open().await.unwrap();
+    cache.flush_to(&mut writer).await.unwrap();
+
+    let data = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&data[..], b"abcdefghij");
+}
+
+#[tokio::test]
+async fn test_cache_rejects_ranges_that_overflow_u64() {
+    let cache = make_small_cache(4096);
+
+    assert!(
+        cache
+            .write(u64::MAX, bytes::Bytes::from_static(b"x"))
+            .await
+            .is_err()
+    );
+    assert!(cache.read(u64::MAX, 2).await.is_err());
+}
+
+#[tokio::test]
 async fn test_multiple_flushes_only_return_dirty() {
     let cache = make_small_cache(4096);
 

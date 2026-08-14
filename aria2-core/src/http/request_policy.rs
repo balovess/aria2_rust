@@ -45,6 +45,12 @@ impl HttpRequestPolicy {
         !self.headers.is_empty()
     }
 
+    pub fn has_header(&self, name: &str) -> bool {
+        self.headers
+            .iter()
+            .any(|(header, _)| header.eq_ignore_ascii_case(name))
+    }
+
     /// Apply custom and automatically generated headers to a request.
     ///
     /// `extra_headers` exists for compatibility with lower-level callers that
@@ -92,6 +98,26 @@ impl HttpRequestPolicy {
         }
         if !self.keep_alive && !self.pipelining && !has("Connection") {
             request = request.header("Connection", "close");
+        }
+        request
+    }
+
+    /// Apply the common policy and add generated Basic authorization unless a
+    /// caller supplied an explicit Authorization header.
+    pub fn apply_with_basic_auth(
+        &self,
+        request: RequestBuilder,
+        cookie_header: Option<&str>,
+        extra_headers: &[(String, String)],
+        authorization: Option<&str>,
+    ) -> RequestBuilder {
+        let request = self.apply(request, cookie_header, extra_headers);
+        let explicit_authorization = self.has_header("Authorization")
+            || extra_headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
+        if !explicit_authorization && let Some(authorization) = authorization {
+            return request.header("Authorization", authorization);
         }
         request
     }
@@ -154,5 +180,41 @@ mod tests {
         assert!(request.headers().get("want-digest").is_none());
         assert!(request.headers().get("connection").is_none());
         assert!(request.headers().get("accept-encoding").is_none());
+    }
+
+    #[test]
+    fn generated_basic_auth_does_not_override_explicit_authorization() {
+        crate::http::client_pool::ensure_rustls_provider();
+        let policy = HttpRequestPolicy::default();
+        let request = policy
+            .apply_with_basic_auth(
+                reqwest::Client::new().get("http://example.test/file"),
+                None,
+                &[],
+                Some("Basic generated"),
+            )
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Basic generated"
+        );
+
+        let request = policy
+            .apply_with_basic_auth(
+                reqwest::Client::new().get("http://example.test/file"),
+                None,
+                &[(
+                    String::from("Authorization"),
+                    String::from("Bearer explicit"),
+                )],
+                Some("Basic generated"),
+            )
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            request.headers().get("authorization").unwrap(),
+            "Bearer explicit"
+        );
     }
 }

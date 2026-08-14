@@ -165,8 +165,7 @@ async fn engine_http_download_basic() {
 /// Tests how DownloadCommand handles authentication challenges:
 /// - Server returns 401 Unauthorized for /secret path
 /// - Without valid credentials, command should fail gracefully
-/// - GAP: DownloadCommand doesn't natively support auth headers yet,
-///       so we verify 401 is handled as a fatal error
+/// - Without credentials, the command fails with the aria2-compatible auth error
 #[tokio::test]
 async fn engine_http_download_with_auth() {
     let temp_dir = setup_temp_dir();
@@ -185,8 +184,6 @@ async fn engine_http_download_with_auth() {
     let mut cmd = build_http_command(&url, &output_path).expect("Failed to build command");
     let result: Result<(), _> = cmd.execute().await;
 
-    // GAP: DownloadCommand currently treats non-2xx as fatal error
-    // In production, this would trigger credential prompt or retry with stored creds
     assert!(
         result.is_err(),
         "Download without auth should fail: expected Err, got Ok"
@@ -207,6 +204,170 @@ async fn engine_http_download_with_auth() {
     );
 
     server.shutdown().await;
+}
+
+/// D3: DownloadCommand sends configured HTTP credentials preemptively.
+#[tokio::test]
+async fn engine_http_download_with_preemptive_auth() {
+    let temp_dir = setup_temp_dir();
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock HTTP server");
+
+    let secret_data = b"secret_content".to_vec();
+    server.register_auth_gated("/secret", "TestRealm", "Basic", &secret_data);
+
+    let url = format!("{}/secret", server.base_url());
+    let output_path = temp_dir.path().join("secret.bin");
+    let gid = GroupId::new(2);
+    let mut options = test_download_options(temp_dir.path());
+    options.http_user = Some("admin".to_string());
+    options.http_passwd = Some("password".to_string());
+    let mut cmd = DownloadCommand::new(gid, &url, &options, None, Some("secret.bin"))
+        .expect("Failed to build authenticated command");
+
+    let result = cmd.execute().await;
+    assert!(
+        result.is_ok(),
+        "Download with configured auth should succeed: {:?}",
+        result.err()
+    );
+    assert_file_contents(&output_path, &secret_data);
+    assert_cmd_completed(&cmd);
+
+    let log = server.take_request_log();
+    assert!(
+        log.iter().any(|request| {
+            request.headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("authorization") && value == "Basic YWRtaW46cGFzc3dvcmQ="
+            })
+        }),
+        "configured credentials must be sent on the wire: {log:?}"
+    );
+
+    server.shutdown().await;
+}
+
+/// D4: Sequential DownloadCommand completes an RFC-compatible Digest retry.
+#[tokio::test]
+async fn engine_http_download_with_digest_auth() {
+    use md5::{Digest, Md5};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    fn md5_hex(value: &str) -> String {
+        let mut hasher = Md5::new();
+        hasher.update(value.as_bytes());
+        hex::encode(hasher.finalize())
+    }
+
+    fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            line.split_once(':')
+                .and_then(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
+        })
+    }
+
+    fn digest_parameter<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+        header
+            .strip_prefix("Digest ")
+            .and_then(|parameters| {
+                parameters.split(", ").find_map(|parameter| {
+                    parameter
+                        .split_once('=')
+                        .and_then(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value))
+                })
+            })
+            .map(|value| value.trim_matches('"'))
+    }
+
+    async fn read_request(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1024];
+            let bytes = stream.read(&mut chunk).await.expect("read HTTP request");
+            if bytes == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..bytes]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8(request).expect("HTTP request must be UTF-8")
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind should succeed");
+    let addr = listener.local_addr().expect("local_addr should succeed");
+    let server_handle = tokio::spawn(async move {
+        let (mut first_stream, _) = listener.accept().await.expect("accept first request");
+        let first_request = read_request(&mut first_stream).await;
+        assert!(first_request.starts_with("GET /digest.bin HTTP/1.1"));
+        assert!(header_value(&first_request, "Authorization").is_none());
+        first_stream
+            .write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"download\", nonce=\"fixed-nonce\", qop=\"auth\", algorithm=MD5, opaque=\"opaque\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write digest challenge");
+
+        let (mut second_stream, _) = listener.accept().await.expect("accept retry request");
+        let second_request = read_request(&mut second_stream).await;
+        let authorization = header_value(&second_request, "Authorization")
+            .expect("sequential retry should include Digest authorization");
+        assert!(authorization.starts_with("Digest "));
+        assert_eq!(digest_parameter(authorization, "username"), Some("user"));
+        assert_eq!(digest_parameter(authorization, "realm"), Some("download"));
+        assert_eq!(
+            digest_parameter(authorization, "nonce"),
+            Some("fixed-nonce")
+        );
+        assert_eq!(digest_parameter(authorization, "uri"), Some("/digest.bin"));
+        assert_eq!(digest_parameter(authorization, "qop"), Some("auth"));
+        assert_eq!(digest_parameter(authorization, "nc"), Some("00000001"));
+        assert_eq!(digest_parameter(authorization, "opaque"), Some("opaque"));
+
+        let cnonce = digest_parameter(authorization, "cnonce").expect("digest cnonce");
+        let response = digest_parameter(authorization, "response").expect("digest response");
+        let ha1 = md5_hex("user:download:pass");
+        let ha2 = md5_hex("GET:/digest.bin");
+        let expected = md5_hex(&format!("{ha1}:fixed-nonce:00000001:{cnonce}:auth:{ha2}"));
+        assert_eq!(response, expected);
+
+        second_stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 20\r\nConnection: close\r\n\r\ndigest-content-12345",
+            )
+            .await
+            .expect("write authenticated response");
+    });
+
+    let temp_dir = setup_temp_dir();
+    let url = format!("http://{addr}/digest.bin");
+    let output_path = temp_dir.path().join("digest.bin");
+    let gid = GroupId::new(3);
+    let mut options = test_download_options(temp_dir.path());
+    options.http_auth_challenge = true;
+    options.http_user = Some("user".to_string());
+    options.http_passwd = Some("pass".to_string());
+    let mut cmd = DownloadCommand::new(gid, &url, &options, None, Some("digest.bin"))
+        .expect("Failed to build digest-authenticated command");
+
+    let result = cmd.execute().await;
+    assert!(
+        result.is_ok(),
+        "Digest-authenticated download should succeed: {:?}",
+        result.err()
+    );
+    assert_file_contents(&output_path, b"digest-content-12345");
+    assert_cmd_completed(&cmd);
+
+    tokio::time::timeout(Duration::from_secs(2), server_handle)
+        .await
+        .expect("digest auth fixture should finish")
+        .expect("digest auth fixture task should succeed");
 }
 
 /// D3: FTP download via FtpDownloadCommand

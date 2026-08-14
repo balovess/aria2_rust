@@ -319,6 +319,10 @@ impl EncryptedConnection {
         self.inner.remote_peer_id.as_ref()
     }
 
+    pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
+        self.inner.remote_addr()
+    }
+
     pub fn is_connected(&self) -> bool {
         self.inner.is_connected()
     }

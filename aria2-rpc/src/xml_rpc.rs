@@ -362,7 +362,7 @@ impl XmlRpcResponse {
         Self::single(XmlRpcValue::bool_(value))
     }
     pub fn array_val(values: Vec<XmlRpcValue>) -> Self {
-        Self::success(values)
+        Self::single(XmlRpcValue::array(values))
     }
     pub fn fault(code: i32, msg: &str) -> Self {
         Self::Fault(code, msg.to_string())
@@ -420,45 +420,50 @@ fn read_scalar(
     reader: &mut quick_xml::Reader<&[u8]>,
     e: &quick_xml::events::BytesStart<'_>,
     tag: &str,
-) -> Result<XmlRpcValue, XmlRpcError> {
+) -> Result<Option<XmlRpcValue>, XmlRpcError> {
     let text = reader
         .read_text(e.name())
         .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
         .into_owned();
     let numeric_text = text.trim();
     match tag {
-        "int" | "i4" | "i8" => numeric_text
-            .parse()
-            .map(XmlRpcValue::int)
-            .map_err(|e| XmlRpcError::InvalidParams(format!("invalid integer: {e}"))),
+        // aria2_original stores XML-RPC int/i4 as its 32-bit Integer value.
+        // A syntactically valid but out-of-range integer leaves the parser
+        // frame empty; the enclosing param/member then omits that value.
+        "int" | "i4" => Ok(numeric_text
+            .parse::<i32>()
+            .ok()
+            .map(i64::from)
+            .map(XmlRpcValue::int)),
+        // Keep the standard i8 extension accepted by the Rust adapter. It is
+        // an additive wire type and does not change the original int/i4 path.
+        "i8" => Ok(numeric_text.parse::<i64>().ok().map(XmlRpcValue::int)),
         "boolean" => match numeric_text {
-            "1" | "true" => Ok(XmlRpcValue::bool_(true)),
-            "0" | "false" => Ok(XmlRpcValue::bool_(false)),
-            _ => Err(XmlRpcError::InvalidParams(format!(
-                "invalid boolean: {numeric_text}"
-            ))),
+            "1" | "true" => Ok(Some(XmlRpcValue::bool_(true))),
+            "0" | "false" => Ok(Some(XmlRpcValue::bool_(false))),
+            _ => Ok(None),
         },
         // aria2_original's XML-RPC parser keeps both explicit string values
         // and double values as strings. The latter is observable for option
         // maps such as {"seed-ratio": <double>0.99</double>}.
-        "string" | "double" => Ok(XmlRpcValue::string(text)),
-        "dateTime.iso8601" => Ok(XmlRpcValue {
+        "string" | "double" => Ok(Some(XmlRpcValue::string(text))),
+        "dateTime.iso8601" => Ok(Some(XmlRpcValue {
             inner: XmlRpcValueInner::DateTime(text),
-        }),
-        "base64" => Ok(XmlRpcValue {
+        })),
+        "base64" => Ok(Some(XmlRpcValue {
             inner: XmlRpcValueInner::Base64(crate::rpc_helpers::decode_aria2_base64(&text)),
-        }),
-        _ => Err(XmlRpcError::ParseError(format!(
-            "unknown XML-RPC type: {tag}"
-        ))),
+        })),
+        _ => Ok(None),
     }
 }
 
 fn parse_xml_value(
     reader: &mut quick_xml::Reader<&[u8]>,
     value_start: &quick_xml::events::BytesStart<'_>,
-) -> Result<XmlRpcValue, XmlRpcError> {
+) -> Result<Option<XmlRpcValue>, XmlRpcError> {
     use quick_xml::events::Event;
+    let mut implicit_text = String::new();
+
     loop {
         match reader
             .read_event()
@@ -466,31 +471,64 @@ fn parse_xml_value(
         {
             Event::Start(e) => {
                 let tag = xml_tag(&e)?;
-                return match tag.as_str() {
-                    "array" => parse_xml_array(reader, &e),
-                    "struct" => parse_xml_struct(reader, &e),
+                let value = match tag.as_str() {
+                    "array" => Some(parse_xml_array(reader, &e)?),
+                    "struct" => Some(parse_xml_struct(reader, &e)?),
                     "nil" => {
                         reader
                             .read_to_end(e.name())
                             .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
-                        Ok(XmlRpcValue::nil())
+                        Some(XmlRpcValue::nil())
                     }
-                    scalar => read_scalar(reader, &e, scalar),
+                    scalar => read_scalar(reader, &e, scalar)?,
                 };
+
+                if value.is_some() {
+                    reader
+                        .read_to_end(value_start.name())
+                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                    return Ok(value);
+                }
+
+                // Invalid known scalar nodes have already been consumed by
+                // read_scalar. The C++ state machine then continues parsing
+                // the enclosing <value> frame instead of failing the whole
+                // XML request.
             }
-            Event::Empty(e) if xml_tag(&e)? == "nil" => return Ok(XmlRpcValue::nil()),
+            Event::Empty(e) => {
+                let tag = xml_tag(&e)?;
+                let value = match tag.as_str() {
+                    "array" => Some(XmlRpcValue::array(Vec::new())),
+                    "struct" => Some(XmlRpcValue::struct_(Vec::new())),
+                    "nil" => Some(XmlRpcValue::nil()),
+                    "string" | "double" | "dateTime.iso8601" => Some(XmlRpcValue::string("")),
+                    "base64" => Some(XmlRpcValue {
+                        inner: XmlRpcValueInner::Base64(Vec::new()),
+                    }),
+                    // Empty numeric/boolean values are invalid in the
+                    // original parser and therefore leave no frame value.
+                    "int" | "i4" | "i8" | "boolean" => None,
+                    _ => None,
+                };
+                if value.is_some() {
+                    reader
+                        .read_to_end(value_start.name())
+                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
+                    return Ok(value);
+                }
+            }
             Event::Text(text) => {
                 let text = text
                     .unescape()
                     .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
-                if !text.trim().is_empty() {
-                    reader
-                        .read_to_end(value_start.name())
-                        .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
-                    return Ok(XmlRpcValue::string(text.into_owned()));
-                }
+                implicit_text.push_str(&text);
             }
-            Event::End(e) if e.name() == value_start.name() => return Ok(XmlRpcValue::string("")),
+            Event::CData(text) => {
+                implicit_text.push_str(&String::from_utf8_lossy(text.as_ref()));
+            }
+            Event::End(e) if e.name() == value_start.name() => {
+                return Ok((!implicit_text.is_empty()).then(|| XmlRpcValue::string(implicit_text)));
+            }
             Event::Eof => return Err(XmlRpcError::ParseError("unexpected end of value".into())),
             _ => {}
         }
@@ -508,7 +546,11 @@ fn parse_xml_array(
             .read_event()
             .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
         {
-            Event::Start(e) if xml_tag(&e)? == "value" => values.push(parse_xml_value(reader, &e)?),
+            Event::Start(e) if xml_tag(&e)? == "value" => {
+                if let Some(value) = parse_xml_value(reader, &e)? {
+                    values.push(value);
+                }
+            }
             Event::End(e) if e.name() == array_start.name() => {
                 return Ok(XmlRpcValue::array(values));
             }
@@ -546,7 +588,12 @@ fn parse_xml_struct(
                             );
                         }
                         Event::Start(e) if xml_tag(&e)? == "value" => {
-                            value = Some(parse_xml_value(reader, &e)?)
+                            value = parse_xml_value(reader, &e)?
+                        }
+                        Event::Start(e) => {
+                            reader
+                                .read_to_end(e.name())
+                                .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
                         }
                         Event::End(e) if e.name() == member.name() => break,
                         Event::Eof => {
@@ -555,13 +602,11 @@ fn parse_xml_struct(
                         _ => {}
                     }
                 }
-                let name = name.ok_or_else(|| {
-                    XmlRpcError::InvalidParams("struct member name is missing".into())
-                })?;
-                let value = value.ok_or_else(|| {
-                    XmlRpcError::InvalidParams("struct member value is missing".into())
-                })?;
-                members.push(XmlRpcMember::new(name, value));
+                if let (Some(name), Some(value)) = (name, value)
+                    && !name.is_empty()
+                {
+                    members.push(XmlRpcMember::new(name, value));
+                }
             }
             Event::End(e) if e.name() == struct_start.name() => {
                 return Ok(XmlRpcValue::struct_(members));
@@ -596,7 +641,9 @@ pub fn parse_request(data: &[u8]) -> Result<XmlRpcRequest, XmlRpcError> {
                     .map_err(|e| XmlRpcError::ParseError(e.to_string()))?
                 {
                     Event::Start(value) if xml_tag(&value)? == "value" => {
-                        params.push(parse_xml_value(&mut reader, &value)?);
+                        if let Some(value) = parse_xml_value(&mut reader, &value)? {
+                            params.push(value);
+                        }
                         reader
                             .read_to_end(e.name())
                             .map_err(|e| XmlRpcError::ParseError(e.to_string()))?;
@@ -810,6 +857,53 @@ bG8g@d29ybGQ=</base64></value></param>
             .expect("base64 value should convert to JSON");
 
         assert_eq!(value, serde_json::json!("aGVsbG8gd29ybGQ="));
+    }
+
+    #[test]
+    fn test_parse_invalid_values_and_members_like_original_state_machine() {
+        let xml = r#"<methodCall><methodName>aria2.addUri</methodName><params>
+            <param><value><int>not-an-int</int></value></param>
+            <param><value><int>2147483648</int></value></param>
+            <param><value><unknown>ignored</unknown></value></param>
+            <param><value><foo/><string>kept</string></value></param>
+            <param><value><struct>
+                <member><name>missing-value</name></member>
+                <member><value><string>missing-name</string></value></member>
+                <member><name></name><value><string>empty-name</string></value></member>
+                <member><name>kept</name><value><string>yes</string></value></member>
+            </struct></value></param>
+        </params></methodCall>"#;
+
+        let request = parse_request(xml.as_bytes()).expect("well-formed XML should parse");
+        assert_eq!(request.params.len(), 2);
+        assert_eq!(request.params[0].as_str(), Some("kept"));
+        let members = request.params[1].as_struct().expect("struct value");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name(), "kept");
+        assert_eq!(members[0].value().as_str(), Some("yes"));
+    }
+
+    #[test]
+    fn test_empty_implicit_value_is_omitted_like_original() {
+        let xml = r#"<methodCall><methodName>aria2.addUri</methodName><params>
+            <param><value></value></param>
+            <param><value>   </value></param>
+        </params></methodCall>"#;
+
+        let request = parse_request(xml.as_bytes()).expect("well-formed XML should parse");
+        assert_eq!(request.params.len(), 1);
+        assert_eq!(request.params[0].as_str(), Some("   "));
+    }
+
+    #[test]
+    fn test_array_response_is_one_xmlrpc_param() {
+        let response = XmlRpcResponse::array_val(vec![XmlRpcValue::int(1), XmlRpcValue::int(2)]);
+        let xml = response.to_xml();
+
+        assert_eq!(xml.matches("<param>").count(), 1);
+        assert!(xml.contains("<array>"));
+        assert!(xml.contains("<int>1</int>"));
+        assert!(xml.contains("<int>2</int>"));
     }
 
     #[test]

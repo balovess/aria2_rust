@@ -78,25 +78,18 @@ impl DigestAuthChallenge {
     /// assert_eq!(challenge.nonce, "dcd98b7102dd2f0e8b11d0f600bfb0c093");
     /// ```
     pub fn parse(header_value: &str) -> Result<Self, Aria2Error> {
-        // Extract after "Digest " prefix
-        let digest_part = header_value.strip_prefix("Digest ").ok_or_else(|| {
-            Aria2Error::Parse("Not a Digest challenge: missing 'Digest ' prefix".to_string())
-        })?;
-
-        // Split by comma to get key=value pairs, then parse each pair
-        let mut params = HashMap::new();
-        for pair in digest_part.split(',') {
-            let pair = pair.trim();
-            if let Some((key, value)) = pair.split_once('=') {
-                let key = key.trim().to_lowercase();
-                let mut value = value.trim().to_string();
-                // Strip surrounding quotes if present
-                if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                    value = value[1..value.len() - 1].to_string();
-                }
-                params.insert(key, value);
-            }
+        let mut header_parts = header_value
+            .trim()
+            .splitn(2, |character: char| character.is_ascii_whitespace());
+        let scheme = header_parts.next().unwrap_or_default();
+        if !scheme.eq_ignore_ascii_case("Digest") {
+            return Err(Aria2Error::Parse(
+                "Not a Digest challenge: missing 'Digest' scheme".to_string(),
+            ));
         }
+        let digest_part = header_parts.next().unwrap_or_default();
+
+        let params = parse_digest_parameters(digest_part)?;
 
         // Validate required fields
         let nonce = params.get("nonce").cloned().ok_or_else(|| {
@@ -106,11 +99,8 @@ impl DigestAuthChallenge {
         Ok(DigestAuthChallenge {
             realm: params.get("realm").cloned().unwrap_or_default(),
             nonce,
-            qop: params.get("qop").cloned(),
-            algorithm: params
-                .get("algorithm")
-                .cloned()
-                .unwrap_or_else(|| "MD5".to_string()),
+            qop: select_qop(params.get("qop").map(String::as_str))?,
+            algorithm: normalize_algorithm(params.get("algorithm").map(String::as_str))?,
             opaque: params.get("opaque").cloned(),
             stale: params
                 .get("stale")
@@ -118,6 +108,121 @@ impl DigestAuthChallenge {
                 .unwrap_or(false),
         })
     }
+}
+
+fn parse_digest_parameters(input: &str) -> Result<HashMap<String, String>, Aria2Error> {
+    let bytes = input.as_bytes();
+    let mut index = 0;
+    let mut params = HashMap::new();
+
+    while index < bytes.len() {
+        while index < bytes.len() && (bytes[index].is_ascii_whitespace() || bytes[index] == b',') {
+            index += 1;
+        }
+        if index == bytes.len() {
+            break;
+        }
+
+        let key_start = index;
+        while index < bytes.len() && bytes[index] != b'=' && bytes[index] != b',' {
+            index += 1;
+        }
+        let key = input[key_start..index].trim();
+        if key.is_empty() || index == bytes.len() || bytes[index] != b'=' {
+            return Err(Aria2Error::Parse(
+                "Invalid Digest challenge parameter".to_string(),
+            ));
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+
+        let value = if bytes.get(index) == Some(&b'"') {
+            index += 1;
+            let mut value = String::new();
+            let mut closed = false;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\\' if index + 1 < bytes.len() => {
+                        value.push(bytes[index + 1] as char);
+                        index += 2;
+                    }
+                    b'"' => {
+                        index += 1;
+                        closed = true;
+                        break;
+                    }
+                    byte => {
+                        value.push(byte as char);
+                        index += 1;
+                    }
+                }
+            }
+            if !closed {
+                return Err(Aria2Error::Parse(
+                    "Unterminated quoted Digest challenge parameter".to_string(),
+                ));
+            }
+            value
+        } else {
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != b',' {
+                index += 1;
+            }
+            input[value_start..index].trim().to_string()
+        };
+
+        params.insert(key.to_ascii_lowercase(), value);
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index < bytes.len() && bytes[index] != b',' {
+            return Err(Aria2Error::Parse(
+                "Invalid Digest challenge parameter separator".to_string(),
+            ));
+        }
+    }
+
+    Ok(params)
+}
+
+fn select_qop(value: Option<&str>) -> Result<Option<String>, Aria2Error> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    value
+        .split(',')
+        .map(str::trim)
+        .find(|qop| qop.eq_ignore_ascii_case("auth"))
+        .or_else(|| {
+            value
+                .split(',')
+                .map(str::trim)
+                .find(|qop| qop.eq_ignore_ascii_case("auth-int"))
+        })
+        .map(|qop| qop.to_ascii_lowercase())
+        .ok_or_else(|| Aria2Error::Parse(format!("Unsupported Digest qop: {value}")))
+        .map(Some)
+}
+
+fn normalize_algorithm(value: Option<&str>) -> Result<String, Aria2Error> {
+    let algorithm = value.unwrap_or("MD5");
+    let canonical = match algorithm.to_ascii_uppercase().as_str() {
+        "MD5" => "MD5",
+        "MD5-SESS" => "MD5-sess",
+        "SHA-256" => "SHA-256",
+        "SHA-256-SESS" => "SHA-256-sess",
+        "SHA-512-256" => "SHA-512-256",
+        "SHA-512-256-SESS" => "SHA-512-256-sess",
+        _ => {
+            return Err(Aria2Error::Parse(format!(
+                "Unsupported Digest algorithm: {algorithm}"
+            )));
+        }
+    };
+    Ok(canonical.to_string())
 }
 
 /// Built Digest authentication response ready for inclusion in an Authorization header
@@ -157,19 +262,28 @@ impl DigestAuthResponse {
     ///        algorithm="...", opaque="..."
     /// ```
     pub fn to_header_value(&self) -> String {
-        format!(
-            r#"Digest username="{}", realm="{}", nonce="{}", uri="{}", nc={:08x}, cnonce="{}", qop="{}", response="{}", algorithm="{}", opaque="{}""#,
-            self.username,
-            self.realm,
-            self.nonce,
-            self.uri,
-            self.nc,
-            self.cnonce,
-            self.qop.as_deref().unwrap_or(""),
-            self.response,
-            self.algorithm,
-            self.opaque.as_deref().unwrap_or("")
-        )
+        let mut fields = vec![
+            format!(r#"username="{}""#, escape_quoted(&self.username)),
+            format!(r#"realm="{}""#, escape_quoted(&self.realm)),
+            format!(r#"nonce="{}""#, escape_quoted(&self.nonce)),
+            format!(r#"uri="{}""#, escape_quoted(&self.uri)),
+            format!(r#"response="{}""#, self.response),
+            format!("algorithm={}", self.algorithm),
+        ];
+        if let Some(qop) = self.qop.as_deref() {
+            fields.push(format!("qop={qop}"));
+            fields.push(format!("nc={:08x}", self.nc));
+            fields.push(format!(r#"cnonce="{}""#, escape_quoted(&self.cnonce)));
+        } else if self.algorithm.eq_ignore_ascii_case("MD5-sess")
+            || self.algorithm.eq_ignore_ascii_case("SHA-256-sess")
+            || self.algorithm.eq_ignore_ascii_case("SHA-512-256-sess")
+        {
+            fields.push(format!(r#"cnonce="{}""#, escape_quoted(&self.cnonce)));
+        }
+        if let Some(opaque) = self.opaque.as_deref() {
+            fields.push(format!(r#"opaque="{}""#, escape_quoted(opaque)));
+        }
+        format!("Digest {}", fields.join(", "))
     }
 
     /// Compute a Digest authentication response per RFC 2617 section 3.2.2.1.
@@ -206,24 +320,33 @@ impl DigestAuthResponse {
         nc: u32,
     ) -> Self {
         // Determine the hash algorithm from the challenge
-        let algorithm = match challenge.algorithm.to_uppercase().as_str() {
+        let algorithm_name = challenge.algorithm.to_ascii_uppercase();
+        let algorithm = match algorithm_name.as_str() {
             "SHA-256" | "SHA-256-SESS" => DigestAlgorithm::Sha256,
             "SHA-512-256" | "SHA-512-256-SESS" => DigestAlgorithm::Sha512_256,
-            _ => DigestAlgorithm::Md5, // Default: MD5, MD5-SESS
+            _ => DigestAlgorithm::Md5,
         };
+        let is_session_algorithm = algorithm_name.ends_with("-SESS");
 
         // Create a DigestAuthProvider to leverage its correct hash implementations
         let provider =
             DigestAuthProvider::new(username.to_string(), password.to_string(), Some(algorithm));
 
-        // Compute HA1 = H(username:realm:password)
-        let ha1 = provider.compute_ha1(&challenge.realm);
-
         // Compute HA2 = H(method:uri)
-        let ha2 = provider.compute_ha2(method, uri, challenge.qop.as_deref(), None);
-
         // Generate random cnonce (client nonce) using crypto-quality randomness
         let cnonce = format!("{:016x}", rand::random::<u64>());
+        let qop = select_qop(challenge.qop.as_deref()).unwrap_or(None);
+
+        // RFC 7616 uses a second HA1 derivation for -sess algorithms.
+        let initial_ha1 = provider.compute_ha1(&challenge.realm);
+        let ha1 = if is_session_algorithm {
+            provider.hash_kd(&initial_ha1, &format!("{}:{}", challenge.nonce, cnonce))
+        } else {
+            initial_ha1
+        };
+
+        let ha2 = provider.compute_ha2(method, uri, qop.as_deref(), None);
+
         let nc_str = format!("{:08x}", nc);
 
         // Compute final response = KD(HA1, nonce:nc:cnonce:qop:HA2) or KD(HA1, nonce:HA2)
@@ -232,7 +355,7 @@ impl DigestAuthResponse {
             &challenge.nonce,
             &nc_str,
             &cnonce,
-            challenge.qop.as_deref(),
+            qop.as_deref(),
             &ha2,
         );
 
@@ -241,7 +364,7 @@ impl DigestAuthResponse {
             realm: challenge.realm.clone(),
             nonce: challenge.nonce.clone(),
             uri: uri.to_string(),
-            qop: challenge.qop.clone(),
+            qop,
             nc,
             cnonce,
             response,
@@ -249,6 +372,10 @@ impl DigestAuthResponse {
             opaque: challenge.opaque.clone(),
         }
     }
+}
+
+fn escape_quoted(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]
@@ -312,6 +439,30 @@ mod tests {
         assert_eq!(challenge.algorithm, "SHA-256");
     }
 
+    #[test]
+    fn test_digest_challenge_parse_case_insensitive_scheme_and_quoted_commas() {
+        let challenge = DigestAuthChallenge::parse(
+            r#"dIgEsT realm="download, private", nonce="n\"1", qop="auth-int, auth", algorithm=MD5"#,
+        )
+        .unwrap();
+
+        assert_eq!(challenge.realm, "download, private");
+        assert_eq!(challenge.nonce, "n\"1");
+        assert_eq!(challenge.qop.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn test_digest_challenge_rejects_unknown_algorithm() {
+        let result =
+            DigestAuthChallenge::parse(r#"Digest realm="test", nonce="nonce", algorithm=SHA-1"#);
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Unsupported Digest algorithm")
+        );
+    }
+
     // --- DigestAuthResponse tests ---
 
     #[test]
@@ -357,8 +508,9 @@ mod tests {
 
         assert!(response.qop.is_none());
         let header_val = response.to_header_value();
-        assert!(header_val.contains("qop=")); // empty qop in output
-        assert!(header_val.contains(r#"algorithm="MD5""#));
+        assert!(!header_val.contains("qop="));
+        assert!(header_val.contains("algorithm=MD5"));
+        assert!(!header_val.contains("cnonce="));
     }
 
     #[test]
@@ -392,7 +544,7 @@ mod tests {
         assert!(authorization.contains(&format!("nonce=\"{}\"", challenge.nonce)));
         assert!(authorization.contains(r#"uri="/download/file.torrent""#));
         assert!(authorization.contains("nc=00000001"));
-        assert!(authorization.contains(r#"qop="auth""#));
+        assert!(authorization.contains("qop=auth"));
         assert!(authorization.contains(r#"opaque="FQwERTYuiop123""#));
 
         // Verify we can re-parse the generated header structure (sanity check)

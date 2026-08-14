@@ -417,5 +417,10 @@ mod tests {
         .expect("test torrent should construct");
 
         assert!(command.seed_enabled);
+        assert_eq!(
+            command.seed_time,
+            Some(std::time::Duration::from_secs(60)),
+            "seed-time is expressed in fractional minutes"
+        );
     }
 }

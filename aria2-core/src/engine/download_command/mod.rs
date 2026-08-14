@@ -695,7 +695,7 @@ impl DownloadCommand {
     pub(super) fn create_progress_updater(&self) -> ProgressUpdater {
         ProgressUpdater::new(
             self.progress_sender.clone(),
-            Arc::clone(&self.group),
+            self.group.recover().global_net_stat(),
             Arc::clone(&self.progress),
             Arc::clone(&self.atomic_metrics),
             self.perf_monitor.clone(),

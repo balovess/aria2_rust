@@ -4,11 +4,30 @@
 //! download, using the lock-free `AtomicProgress` counters where
 //! possible to avoid contention on the `RwLock`.
 
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl super::RequestGroup {
+    /// Attach the manager-owned session counters to this group.
+    pub(crate) fn set_global_net_stat(
+        &mut self,
+        stats: Arc<crate::request::global_net_stat::GlobalNetStat>,
+    ) {
+        *self.global_net_stat.recover_mut() = Some(Arc::clone(&stats));
+        if let Some(context) = self.download_context.recover().as_ref() {
+            context.set_global_net_stat(stats);
+        }
+    }
+
+    /// Return the manager-owned session counters, if this group is registered.
+    pub(crate) fn global_net_stat(
+        &self,
+    ) -> Option<Arc<crate::request::global_net_stat::GlobalNetStat>> {
+        self.global_net_stat.recover().clone()
+    }
+
     // ── Progress Queries ────────────────────────────────────────────────
 
     /// Total file length in bytes.

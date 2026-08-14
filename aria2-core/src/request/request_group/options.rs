@@ -1,4 +1,5 @@
 use crate::config::OptionValue;
+use url::Url;
 
 /// How a metadata file should be handled after it is downloaded.
 ///
@@ -959,15 +960,48 @@ impl DownloadOptions {
         &self,
         scheme: &str,
     ) -> (Option<String>, Option<String>) {
-        let (user, passwd) = match scheme {
-            "https" => (&self.https_proxy_user, &self.https_proxy_passwd),
-            "http" => (&self.http_proxy_user, &self.http_proxy_passwd),
-            _ => (&self.all_proxy_user, &self.all_proxy_passwd),
+        let (user, passwd, proxy_url) = match scheme {
+            "https" => (
+                &self.https_proxy_user,
+                &self.https_proxy_passwd,
+                self.https_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
+            ),
+            "http" => (
+                &self.http_proxy_user,
+                &self.http_proxy_passwd,
+                self.http_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
+            ),
+            _ => (
+                &self.all_proxy_user,
+                &self.all_proxy_passwd,
+                self.all_proxy.as_deref().filter(|value| !value.is_empty()),
+            ),
         };
 
+        let embedded = proxy_url
+            .and_then(|value| Url::parse(value).ok())
+            .map(|url| {
+                (
+                    (!url.username().is_empty()).then(|| url.username().to_string()),
+                    url.password().map(str::to_string),
+                )
+            })
+            .unwrap_or((None, None));
+
         (
-            user.clone().or_else(|| self.all_proxy_user.clone()),
-            passwd.clone().or_else(|| self.all_proxy_passwd.clone()),
+            user.clone()
+                .or_else(|| self.all_proxy_user.clone())
+                .or(embedded.0),
+            passwd
+                .clone()
+                .or_else(|| self.all_proxy_passwd.clone())
+                .or(embedded.1),
         )
     }
 }
@@ -1027,6 +1061,51 @@ mod tests {
         );
         assert_eq!(
             options.proxy_credentials_for_scheme("all"),
+            (Some("all-user".to_string()), Some("all-pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn proxy_credentials_fall_back_to_embedded_proxy_url_values() {
+        let options = DownloadOptions {
+            http_proxy: Some("http://url-user:url-pass@proxy.example:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (Some("url-user".to_string()), Some("url-pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_credentials_override_embedded_proxy_url_values() {
+        let options = DownloadOptions {
+            http_proxy: Some("http://url-user:url-pass@proxy.example:8080".to_string()),
+            http_proxy_user: Some("option-user".to_string()),
+            http_proxy_passwd: Some("option-pass".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (
+                Some("option-user".to_string()),
+                Some("option-pass".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn embedded_proxy_credentials_follow_non_empty_proxy_fallback() {
+        let options = DownloadOptions {
+            http_proxy: Some(String::new()),
+            all_proxy: Some("http://all-user:all-pass@proxy.example:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
             (Some("all-user".to_string()), Some("all-pass".to_string()))
         );
     }

@@ -24,6 +24,7 @@ use stopped::StoppedResults;
 
 pub use reserved::PositionMode as ChangePositionMode;
 
+use super::global_net_stat::GlobalNetStat;
 use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph;
@@ -70,6 +71,9 @@ pub struct RequestGroupMan {
 
     /// Global upload speed limit (bytes/sec).
     global_upload_limit: std::sync::RwLock<Option<u64>>,
+
+    /// Session transfer counters shared by all registered groups.
+    global_net_stat: Arc<GlobalNetStat>,
 }
 
 impl RequestGroupMan {
@@ -87,6 +91,7 @@ impl RequestGroupMan {
             graph_insert_lock: std::sync::Mutex::new(()),
             global_download_limit: std::sync::RwLock::new(None),
             global_upload_limit: std::sync::RwLock::new(None),
+            global_net_stat: Arc::new(GlobalNetStat::default()),
         }
     }
 
@@ -817,6 +822,9 @@ impl RequestGroupMan {
         let gid = group.recover().gid();
         match self.groups.entry(gid) {
             Entry::Vacant(entry) => {
+                group
+                    .recover_mut()
+                    .set_global_net_stat(Arc::clone(&self.global_net_stat));
                 entry.insert(group);
                 true
             }
@@ -874,6 +882,26 @@ mod tests {
         }
 
         assert_eq!(man.count(), num_tasks);
+    }
+
+    #[test]
+    fn registered_group_receives_session_transfer_counters() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group = man.find_group(gid).expect("registered group");
+        let stats = group
+            .recover()
+            .global_net_stat()
+            .expect("manager counters must be injected");
+
+        stats.update_download(7);
+
+        assert_eq!(stats.session_download_length_for_test(), 7);
     }
 
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]

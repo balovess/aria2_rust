@@ -54,6 +54,9 @@ impl super::RequestGroup {
     /// independently (e.g. by `BtDownloadCommand` after parsing torrent
     /// metadata), so we transfer URIs lazily at the point of attachment.
     pub fn set_download_context(&self, mut ctx: Arc<DownloadContext>) {
+        if let Some(stats) = self.global_net_stat() {
+            ctx.set_global_net_stat(stats);
+        }
         let mut guard = self.download_context.recover_mut();
 
         // Transfer initial URIs to the first FileEntry's remaining_uris.

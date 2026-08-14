@@ -7,6 +7,60 @@ use crate::rate_limiter::RateLimiterConfig;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
+use aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection;
+
+/// Transport variants that can serve upload requests after a torrent is complete.
+///
+/// Incoming MSE connections must remain encrypted for the whole upload session;
+/// converting them to `PeerConnection` would silently drop the crypto state.
+pub(crate) enum BtUploadConnection {
+    Plain(Box<PeerConnection>),
+    Encrypted(Box<EncryptedConnection>),
+}
+
+impl BtUploadConnection {
+    async fn read_message(&mut self) -> std::result::Result<Option<BtMessage>, String> {
+        match self {
+            Self::Plain(connection) => connection.read_message().await,
+            Self::Encrypted(connection) => connection.read_message().await,
+        }
+    }
+
+    async fn send_message(&mut self, message: &BtMessage) -> std::result::Result<(), String> {
+        match self {
+            Self::Plain(connection) => connection.send_message(message).await,
+            Self::Encrypted(connection) => connection.send_message(message).await,
+        }
+    }
+
+    async fn send_choke(&mut self) -> std::result::Result<(), String> {
+        match self {
+            Self::Plain(connection) => connection.send_choke().await,
+            Self::Encrypted(connection) => connection.send_choke().await,
+        }
+    }
+
+    async fn send_unchoke(&mut self) -> std::result::Result<(), String> {
+        match self {
+            Self::Plain(connection) => connection.send_unchoke().await,
+            Self::Encrypted(connection) => connection.send_unchoke().await,
+        }
+    }
+
+    fn remote_addr(&self) -> Option<std::net::SocketAddr> {
+        match self {
+            Self::Plain(connection) => connection.remote_addr(),
+            Self::Encrypted(connection) => connection.remote_addr(),
+        }
+    }
+
+    fn remote_peer_id(&self) -> Option<[u8; 20]> {
+        match self {
+            Self::Plain(connection) => connection.remote_peer_id,
+            Self::Encrypted(connection) => connection.remote_peer_id().copied(),
+        }
+    }
+}
 
 pub trait PieceDataProvider: Send + Sync {
     fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>>;
@@ -35,7 +89,7 @@ impl Default for BtSeedingConfig {
 }
 
 pub struct BtUploadSession {
-    conn: PeerConnection,
+    conn: BtUploadConnection,
     am_choke_state: bool,
     peer_interested: bool,
     uploaded_bytes: u64,
@@ -47,6 +101,10 @@ pub struct BtUploadSession {
 
 impl BtUploadSession {
     pub fn new(conn: PeerConnection, config: &BtSeedingConfig) -> Self {
+        Self::new_with_connection(BtUploadConnection::Plain(Box::new(conn)), config)
+    }
+
+    pub(crate) fn new_with_connection(conn: BtUploadConnection, config: &BtSeedingConfig) -> Self {
         let upload_limiter = config
             .max_upload_bytes_per_sec
             .filter(|&r| r > 0)
@@ -116,7 +174,7 @@ impl BtUploadSession {
                                         begin: request.begin,
                                         data: piece_data,
                                     }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
-                                        crate::error::RecoverableError::TemporaryNetworkFailure { message: e }
+                                        crate::error::RecoverableError::TemporaryNetworkFailure { message: e.to_string() }
                                     ))?;
                                     self.uploaded_bytes += data_len;
                                 } else {
@@ -213,7 +271,9 @@ impl BtUploadSession {
         if self.am_choke_state {
             self.conn.send_unchoke().await.map_err(|e| {
                 crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure { message: e },
+                    crate::error::RecoverableError::TemporaryNetworkFailure {
+                        message: e.to_string(),
+                    },
                 )
             })?;
             self.am_choke_state = false;
@@ -225,7 +285,9 @@ impl BtUploadSession {
         if !self.am_choke_state {
             self.conn.send_choke().await.map_err(|e| {
                 crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure { message: e },
+                    crate::error::RecoverableError::TemporaryNetworkFailure {
+                        message: e.to_string(),
+                    },
                 )
             })?;
             self.am_choke_state = true;
@@ -251,12 +313,19 @@ impl BtUploadSession {
             .map(|addr| (addr.ip().to_string(), addr.port()))
     }
 
+    pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
+        self.conn.remote_peer_id()
+    }
+
     pub fn uploaded_bytes(&self) -> u64 {
         self.uploaded_bytes
     }
 
-    pub fn connection_mut(&mut self) -> &mut PeerConnection {
-        &mut self.conn
+    pub fn connection_mut(&mut self) -> Option<&mut PeerConnection> {
+        match &mut self.conn {
+            BtUploadConnection::Plain(connection) => Some(connection),
+            BtUploadConnection::Encrypted(_) => None,
+        }
     }
 }
 

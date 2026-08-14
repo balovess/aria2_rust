@@ -648,7 +648,7 @@ impl Command for BtDownloadCommand {
                 .await;
         }
 
-        if self.seed_enabled && !active_connections.is_empty() {
+        if self.seed_enabled {
             info!(
                 "Starting seeding phase with {} peers...",
                 active_connections.len()
@@ -661,11 +661,7 @@ impl Command for BtDownloadCommand {
             )
             .await?;
         } else {
-            info!(
-                "Skipping seeding (enabled={}, connections={})",
-                self.seed_enabled,
-                active_connections.len()
-            );
+            info!("Skipping seeding (enabled={})", self.seed_enabled,);
             for conn in &mut active_connections {
                 let _ = conn;
             }

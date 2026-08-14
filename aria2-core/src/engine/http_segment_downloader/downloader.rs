@@ -108,9 +108,20 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
     ) -> Result<bool> {
-        let req = self
-            .request_policy
-            .apply(self.client.head(url), cookie_header, headers);
+        let authorization = self.auth_options.as_ref().and_then(|auth_options| {
+            let mut auth_factory = AuthConfigFactory::new();
+            if let Some(path) = &self.netrc_path {
+                let _ = auth_factory.load_netrc_file(std::path::Path::new(path));
+            }
+            let url = reqwest::Url::parse(url).ok()?;
+            auth_factory.resolve_basic_authorization(&url, auth_options)
+        });
+        let req = self.request_policy.apply_with_basic_auth(
+            self.client.head(url),
+            cookie_header,
+            headers,
+            authorization.as_deref(),
+        );
         let resp = req.send().await.map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("HEAD request failed: {}", e),
@@ -192,7 +203,12 @@ impl HttpSegmentDownloader {
                 .as_deref()
                 .filter(|value| !value.is_empty())
                 .or_else(|| (redirect_count == 0).then_some(cookie_header).flatten());
-            let request = self.request_policy.apply(
+            let authorization = self.auth_options.as_ref().and_then(|auth_options| {
+                auth_factory.as_mut().and_then(|factory| {
+                    factory.resolve_basic_authorization(&current_url, auth_options)
+                })
+            });
+            let request = self.request_policy.apply_with_basic_auth(
                 self.client
                     .get(current_url.as_str())
                     .header("Range", range_header)
@@ -201,6 +217,7 @@ impl HttpSegmentDownloader {
                     )),
                 request_cookie_header,
                 headers,
+                authorization.as_deref(),
             );
             let response = request.send().await.map_err(|error| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -209,12 +226,18 @@ impl HttpSegmentDownloader {
             })?;
 
             let status_code = response.status().as_u16();
+            let authentication_used = authorization.is_some()
+                || self.request_policy.has_header("Authorization")
+                || headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
             if status_code == 401 || status_code == 407 {
                 let Some(auth_options) = &self.auth_options else {
                     return Ok((response, current_url));
                 };
                 let is_proxy = status_code == 407;
-                if (!is_proxy && !auth_options.http_auth_challenge)
+                if authentication_used
+                    || (!is_proxy && !auth_options.http_auth_challenge)
                     || (is_proxy && auth_options.proxy_user.is_none())
                 {
                     return Ok((response, current_url));
@@ -261,7 +284,7 @@ impl HttpSegmentDownloader {
                     &current_url,
                     auth_options,
                     crate::http::request_response::HttpMethod::Get,
-                    false,
+                    authentication_used,
                     1,
                 );
                 let AuthChallengeResult::RetryWithAuth {
@@ -622,6 +645,26 @@ mod tests {
             line.split_once(':')
                 .is_some_and(|(key, _)| key.eq_ignore_ascii_case(name))
         })
+    }
+
+    fn header_value<'a>(request: &'a str, name: &str) -> Option<&'a str> {
+        request.lines().find_map(|line| {
+            line.split_once(':')
+                .and_then(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
+        })
+    }
+
+    fn digest_parameter<'a>(header: &'a str, name: &str) -> Option<&'a str> {
+        header
+            .strip_prefix("Digest ")
+            .and_then(|parameters| {
+                parameters.split(", ").find_map(|parameter| {
+                    parameter
+                        .split_once('=')
+                        .and_then(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value))
+                })
+            })
+            .map(|value| value.trim_matches('"'))
     }
 
     #[tokio::test]
@@ -1056,6 +1099,147 @@ mod tests {
             .await
             .expect("auth fixture should finish")
             .expect("auth fixture task should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_range_sends_preemptive_basic_auth_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = [0u8; 4096];
+            let bytes = stream.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            assert!(has_header(&request, "Range", "bytes=0-9"));
+            assert!(has_header(&request, "Authorization", "Basic dXNlcjpwYXNz"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+                )
+                .await
+                .expect("write authenticated response");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let auth_options = AuthResolveOptions {
+            http_user: Some("user".to_string()),
+            http_passwd: Some("pass".to_string()),
+            ..AuthResolveOptions::default()
+        };
+        let dl = HttpSegmentDownloader::new(&client).with_auth_options(auth_options, None);
+        let url = format!("http://{addr}/file.bin");
+
+        let result = dl
+            .download_range(&url, 0, 10, None, &[], None, 20)
+            .await
+            .expect("preemptively authenticated range download should succeed");
+        assert_eq!(result.as_ref(), b"0123456789");
+
+        tokio::time::timeout(Duration::from_secs(2), server_handle)
+            .await
+            .expect("preemptive auth fixture should finish")
+            .expect("preemptive auth fixture task should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_range_verifies_digest_auth_response() {
+        use md5::{Digest, Md5};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        fn md5_hex(value: &str) -> String {
+            let mut hasher = Md5::new();
+            hasher.update(value.as_bytes());
+            hex::encode(hasher.finalize())
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut first_stream, _) = listener.accept().await.expect("accept first request");
+            let mut first_request = [0u8; 4096];
+            let bytes = first_stream
+                .read(&mut first_request)
+                .await
+                .expect("read first request");
+            let first_request = String::from_utf8_lossy(&first_request[..bytes]);
+            assert!(!has_header_name(&first_request, "Authorization"));
+            first_stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Digest realm=\"download\", nonce=\"fixed-nonce\", qop=\"auth\", algorithm=MD5, opaque=\"opaque\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write digest challenge");
+
+            let (mut second_stream, _) = listener.accept().await.expect("accept retry request");
+            let mut second_request = [0u8; 4096];
+            let bytes = second_stream
+                .read(&mut second_request)
+                .await
+                .expect("read retry request");
+            let second_request = String::from_utf8_lossy(&second_request[..bytes]);
+            let authorization =
+                header_value(&second_request, "Authorization").expect("digest auth header");
+            assert!(authorization.starts_with("Digest "));
+            assert_eq!(digest_parameter(authorization, "username"), Some("user"));
+            assert_eq!(digest_parameter(authorization, "realm"), Some("download"));
+            assert_eq!(
+                digest_parameter(authorization, "nonce"),
+                Some("fixed-nonce")
+            );
+            assert_eq!(digest_parameter(authorization, "uri"), Some("/file.bin"));
+            assert_eq!(digest_parameter(authorization, "qop"), Some("auth"));
+            assert_eq!(digest_parameter(authorization, "nc"), Some("00000001"));
+            assert_eq!(digest_parameter(authorization, "opaque"), Some("opaque"));
+
+            let cnonce = digest_parameter(authorization, "cnonce").expect("digest cnonce");
+            let response = digest_parameter(authorization, "response").expect("digest response");
+            let ha1 = md5_hex("user:download:pass");
+            let ha2 = md5_hex("GET:/file.bin");
+            let expected = md5_hex(&format!("{ha1}:fixed-nonce:00000001:{cnonce}:auth:{ha2}"));
+            assert_eq!(response, expected);
+
+            second_stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/20\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+                )
+                .await
+                .expect("write authenticated response");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let auth_options = AuthResolveOptions {
+            http_auth_challenge: true,
+            http_user: Some("user".to_string()),
+            http_passwd: Some("pass".to_string()),
+            ..AuthResolveOptions::default()
+        };
+        let dl = HttpSegmentDownloader::new(&client).with_auth_options(auth_options, None);
+        let url = format!("http://{addr}/file.bin");
+
+        let result = dl
+            .download_range(&url, 0, 10, None, &[], None, 20)
+            .await
+            .expect("digest-authenticated range download should succeed");
+        assert_eq!(result.as_ref(), b"0123456789");
+
+        tokio::time::timeout(Duration::from_secs(2), server_handle)
+            .await
+            .expect("digest auth fixture should finish")
+            .expect("digest auth fixture task should succeed");
     }
 
     #[tokio::test]

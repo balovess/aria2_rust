@@ -61,6 +61,24 @@ fn test_find_cookies_for_url() {
 }
 
 #[test]
+fn test_find_cookies_uses_case_insensitive_domain_candidates() {
+    let store = CookieStorage::new();
+
+    let mut parent = Cookie::new("parent", "1", ".Example.COM");
+    parent.host_only = false;
+    store.add(parent);
+    store.add(Cookie::new("host", "2", "A.B.Example.COM"));
+    store.add(Cookie::new("other", "3", "other.example.com"));
+
+    let found = store.find_cookies("A.B.example.com", "/", false, false);
+    let names: Vec<&str> = found.iter().map(|cookie| cookie.name.as_str()).collect();
+
+    assert!(names.contains(&"parent"));
+    assert!(names.contains(&"host"));
+    assert!(!names.contains(&"other"));
+}
+
+#[test]
 fn test_expire_cookies() {
     let store = CookieStorage::new();
     let now = SystemTime::now()

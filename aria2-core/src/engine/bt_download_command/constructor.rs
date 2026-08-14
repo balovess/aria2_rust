@@ -324,10 +324,12 @@ impl BtDownloadCommand {
         group.set_download_context(std::sync::Arc::new(ctx));
 
         let seed_time = options.seed_time.and_then(|t| {
-            if t == 0.0 {
+            if t <= 0.0 || !t.is_finite() {
                 None
             } else {
-                Some(std::time::Duration::from_secs_f64(t))
+                // aria2_original treats seed-time as fractional minutes and
+                // truncates the converted value to whole seconds.
+                Some(std::time::Duration::from_secs((t * 60.0).floor() as u64))
             }
         });
         let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);

@@ -134,6 +134,27 @@ pub struct BtPeerConn {
 }
 
 impl BtPeerConn {
+    /// Transfer a TCP connection into the upload-session transport seam.
+    ///
+    /// uTP remains a download transport for now; the previous seeding path
+    /// already excluded it, while plain and MSE connections can both serve
+    /// upload messages without losing their transport state.
+    pub(crate) fn into_upload_connection(
+        self,
+    ) -> Option<crate::engine::bt_upload_session::BtUploadConnection> {
+        match self.inner {
+            InnerConnection::Plain(connection) => Some(
+                crate::engine::bt_upload_session::BtUploadConnection::Plain(Box::new(connection)),
+            ),
+            InnerConnection::Encrypted(connection) => Some(
+                crate::engine::bt_upload_session::BtUploadConnection::Encrypted(Box::new(
+                    connection,
+                )),
+            ),
+            InnerConnection::Utp(_) => None,
+        }
+    }
+
     /// Returns the remote peer ID learned during the protocol handshake.
     pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
         match &self.inner {

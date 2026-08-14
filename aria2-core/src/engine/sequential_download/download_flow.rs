@@ -31,6 +31,15 @@ impl SequentialDownloader {
         // CANNOT_RESUME. DownloadCommand owns the higher-level decision to
         // try another URI or restart from byte zero.
         let mut effective_resume_state = resume_state.clone();
+        let initial_scheme = reqwest::Url::parse(uri)
+            .ok()
+            .map(|url| url.scheme().to_owned())
+            .unwrap_or_else(|| "http".to_string());
+        let (mut auth_factory, auth_options) = self.auth_context(&initial_scheme);
+        let _has_preemptive_origin_auth = reqwest::Url::parse(uri)
+            .ok()
+            .and_then(|url| auth_factory.resolve_basic_authorization(&url, &auth_options))
+            .is_some();
 
         #[cfg(not(target_os = "linux"))]
         let _ = total_length;
@@ -48,6 +57,7 @@ impl SequentialDownloader {
                 && !uri.starts_with("https://")
                 && !self.request_policy.has_custom_headers()
                 && self.cookie_helper.build_cookie_header(uri).is_none()
+                && !_has_preemptive_origin_auth
             {
                 match self.try_splice_sequential(uri, total_length).await {
                     Ok(()) => return Ok(()),
@@ -73,6 +83,9 @@ impl SequentialDownloader {
 
         loop {
             let url_parsed = reqwest::Url::parse(&current_uri).ok();
+            let authorization = url_parsed
+                .as_ref()
+                .and_then(|url| auth_factory.resolve_basic_authorization(url, &auth_options));
             let base_request = if let Some(range_header) =
                 ResumeHelper::build_range_header(&effective_resume_state)
             {
@@ -118,11 +131,17 @@ impl SequentialDownloader {
             let cookie_header = url_parsed
                 .as_ref()
                 .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
-            let request = self.request_policy.apply(
+            let request = self.request_policy.apply_with_basic_auth(
                 base_request,
                 cookie_header.as_deref().filter(|value| !value.is_empty()),
                 &extra_headers,
+                authorization.as_deref(),
             );
+            let authentication_used = authorization.is_some()
+                || self.request_policy.has_header("Authorization")
+                || extra_headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
 
             let response = tokio::select! {
                 result = request.send() => result.map_err(|e| {
@@ -230,7 +249,7 @@ impl SequentialDownloader {
                         &current_uri,
                         &url_parsed,
                         status_code,
-                        false, // authentication_used = false (first attempt)
+                        authentication_used,
                         &effective_resume_state,
                     )
                     .await

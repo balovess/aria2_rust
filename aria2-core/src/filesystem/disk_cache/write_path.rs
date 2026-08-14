@@ -10,6 +10,11 @@ const EVICTION_TARGET_RATIO: f64 = 0.5;
 impl WrDiskCache {
     /// Write data at the given offset into the cache.
     ///
+    /// The cache maintains non-overlapping entries. A new write supersedes
+    /// the covered portion of older entries while preserving their untouched
+    /// left and right fragments. This makes range reads and flushes obey the
+    /// same last-write-wins ordering as the eventual file contents.
+    ///
     /// If writing this entry will exceed max_size_bytes, LRU eviction is triggered.
     /// Only clean (already-flushed) entries are eligible for eviction -- dirty entries
     /// are never evicted to prevent data loss. If insufficient clean entries exist
@@ -19,43 +24,87 @@ impl WrDiskCache {
     /// This method accepts bytes::Bytes which enables zero-copy slicing.
     /// The caller can pass a slice of a larger buffer without copying.
     pub async fn write(&self, offset: u64, data: bytes::Bytes) -> Result<()> {
-        let entry_size = data.len();
-        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-
-        // Pre-check: if adding this entry will exceed the limit, try eviction first
-        let current = self.total_cached_bytes.load(Ordering::Relaxed);
-        if current.saturating_add(entry_size) > self.max_size_bytes {
-            self.evict_clean_entries(entry_size).await;
+        if data.is_empty() {
+            return Ok(());
         }
 
+        let entry_size = data.len();
+        let end = offset.checked_add(entry_size as u64).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument(
+                "write range exceeds u64 address space".to_string(),
+            )
+        })?;
+        let _flush_guard = self.flush_gate.lock().await;
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.lock().await;
 
-        // Re-check after acquiring lock (another task may have changed things)
-        let current_locked = self.total_cached_bytes.load(Ordering::Relaxed);
-        if current_locked.saturating_add(entry_size) > self.max_size_bytes {
-            // Try again with lock held for precise accounting
-            self.evict_clean_entries_locked(&mut entries, entry_size);
+        // Split every entry touched by the new range into the portions that
+        // remain visible. The map invariant after this block is that entries
+        // are pairwise disjoint, so one predecessor lookup is sufficient for
+        // a complete range read.
+        let overlapping_keys: Vec<u64> = entries
+            .range(..end)
+            .filter(|(_, entry)| {
+                entry
+                    .offset
+                    .checked_add(entry.data.len() as u64)
+                    .is_some_and(|entry_end| entry_end > offset)
+            })
+            .map(|(&key, _)| key)
+            .collect();
+
+        let mut retained = Vec::with_capacity(overlapping_keys.len() * 2);
+        for key in overlapping_keys {
+            let entry = entries
+                .remove(&key)
+                .expect("overlapping cache entry must still exist");
+            self.total_cached_bytes
+                .fetch_sub(entry.size_bytes(), Ordering::Relaxed);
+
+            let entry_end = entry.offset + entry.data.len() as u64;
+            if entry.offset < offset {
+                let left_len = (offset - entry.offset) as usize;
+                retained.push(CacheEntry {
+                    offset: entry.offset,
+                    data: entry.data.slice(..left_len),
+                    dirty: entry.dirty,
+                    seq: entry.seq,
+                });
+            }
+            if entry_end > end {
+                let right_start = (end - entry.offset) as usize;
+                retained.push(CacheEntry {
+                    offset: end,
+                    data: entry.data.slice(right_start..),
+                    dirty: entry.dirty,
+                    seq: entry.seq,
+                });
+            }
         }
 
-        // Insert the new entry. If an entry already exists at this offset, it
-        // is replaced -- the new write supersedes the old one. Subtract the old
-        // entry's size so total_cached_bytes stays accurate.
-        let old_size = entries
-            .insert(
-                offset,
-                CacheEntry {
-                    offset,
-                    data,
-                    dirty: true,
-                    seq,
-                },
-            )
-            .map(|old| old.size_bytes());
-        if let Some(old) = old_size {
-            self.total_cached_bytes.fetch_sub(old, Ordering::Relaxed);
+        for entry in retained {
+            self.total_cached_bytes
+                .fetch_add(entry.size_bytes(), Ordering::Relaxed);
+            entries.insert(entry.offset, entry);
         }
+
+        entries.insert(
+            offset,
+            CacheEntry {
+                offset,
+                data,
+                dirty: true,
+                seq,
+            },
+        );
         self.total_cached_bytes
             .fetch_add(entry_size, Ordering::Relaxed);
+
+        // Normalize before eviction so the size accounting is based on the
+        // actual disjoint representation.
+        if self.total_cached_bytes.load(Ordering::Relaxed) > self.max_size_bytes {
+            self.evict_clean_entries_locked(&mut entries, 0);
+        }
 
         debug!(
             "Wrote to cache, offset: {}, size: {}, cache usage: {}/{} bytes",
@@ -74,18 +123,8 @@ impl WrDiskCache {
 
     /// Evict clean (non-dirty) entries to make room for `needed_size` additional bytes.
     ///
-    /// This method acquires the entries lock internally. For use when already holding
-    /// the lock, see [evict_clean_entries_locked](Self::evict_clean_entries_locked).
-    ///
-    /// # Invariant
-    /// Dirty entries are NEVER evicted. If all remaining entries are dirty and we still
-    /// need space, the cache will temporarily exceed its limit rather than lose data.
-    async fn evict_clean_entries(&self, needed_size: usize) {
-        let mut entries = self.entries.lock().await;
-        self.evict_clean_entries_locked(&mut entries, needed_size);
-    }
-
-    /// Core eviction logic -- must be called with entries lock held.
+    /// Core eviction logic -- must be called with both `flush_gate` and
+    /// `entries` held.
     ///
     /// Repeatedly removes the clean (non-dirty) entry with the smallest seq
     /// (oldest insertion = LRU candidate) until either:

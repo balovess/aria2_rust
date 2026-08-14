@@ -51,10 +51,10 @@ impl BtDownloadCommand {
         use crate::engine::bt_upload_session::BtSeedingConfig;
 
         let seed_ratio = self.seed_ratio.unwrap_or(0.0);
-        let seed_time = self.seed_time.map(|d| d.as_secs());
-
-        let exit_condition =
-            SeedExitCondition::with_time_and_ratio(seed_time.unwrap_or(0), seed_ratio);
+        let exit_condition = SeedExitCondition {
+            seed_time: self.seed_time,
+            seed_ratio: (seed_ratio > 0.0).then_some(seed_ratio),
+        };
 
         let config = BtSeedingConfig {
             max_upload_bytes_per_sec: self.group.recover().options().max_upload_limit,

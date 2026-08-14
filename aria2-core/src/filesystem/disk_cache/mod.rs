@@ -82,6 +82,13 @@ impl CacheEntry {
 pub struct WrDiskCache {
     /// Cache entries keyed by start offset, enabling O(log n) range queries.
     pub(crate) entries: Mutex<BTreeMap<u64, CacheEntry>>,
+    /// Serializes cache mutations with flushes that perform external I/O.
+    ///
+    /// The entry lock is intentionally released while a caller-provided
+    /// writer is awaited. This gate prevents a concurrent write from being
+    /// overwritten by a stale flush snapshot without holding the map lock
+    /// across disk I/O.
+    pub(crate) flush_gate: Mutex<()>,
     /// Maximum allowed cache size in bytes
     pub(crate) max_size_bytes: usize,
     /// Current total cached data size in bytes (atomic for lock-free reads)
@@ -116,6 +123,7 @@ impl WrDiskCache {
 
         WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
+            flush_gate: Mutex::new(()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
@@ -136,6 +144,7 @@ impl WrDiskCache {
 
         WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
+            flush_gate: Mutex::new(()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
@@ -188,6 +197,7 @@ impl WrDiskCache {
         &self,
         writer: &mut dyn crate::filesystem::disk_writer::SeekableDiskWriter,
     ) -> Result<()> {
+        let _flush_guard = self.flush_gate.lock().await;
         let pending: Vec<_> = {
             let entries = self.entries.lock().await;
             entries
@@ -215,6 +225,7 @@ impl WrDiskCache {
 
     /// Clear all entries from the cache and reset size tracking.
     pub async fn clear(&self) -> Result<()> {
+        let _flush_guard = self.flush_gate.lock().await;
         let mut entries = self.entries.lock().await;
 
         let cleared_bytes: usize = entries.values().map(|e| e.size_bytes()).sum();

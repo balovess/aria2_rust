@@ -294,6 +294,26 @@ fn test_netrc_url_creds_take_priority() {
 }
 
 #[test]
+fn test_netrc_http_cli_creds_take_priority_over_machine_entry() {
+    let mut factory = AuthConfigFactory::new();
+    factory
+        .load_netrc_str("machine example.com\nlogin netrcuser\npassword netrcpass\n")
+        .unwrap();
+
+    let url = Url::parse("http://example.com/file").unwrap();
+    let opts = AuthResolveOptions {
+        http_user: Some("cliuser".into()),
+        http_passwd: Some("clipass".into()),
+        ..Default::default()
+    };
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+
+    // Explicit HTTP options take priority over ambient machine credentials.
+    assert_eq!(ac.user(), "cliuser");
+    assert_eq!(ac.password(), "clipass");
+}
+
+#[test]
 fn test_netrc_parse_error_propagates() {
     let mut factory = AuthConfigFactory::new();
     let result = factory.load_netrc_str("login user\n");

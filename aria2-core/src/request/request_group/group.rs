@@ -112,6 +112,10 @@ pub struct RequestGroup {
     /// `None` until the download engine wires up a `ThrottledWriter`.
     pub rate_limiter: std::sync::RwLock<Option<RateLimiter>>,
 
+    /// Shared session transfer counters injected by `RequestGroupMan`.
+    pub(super) global_net_stat:
+        std::sync::RwLock<Option<Arc<crate::request::global_net_stat::GlobalNetStat>>>,
+
     // ── Lifecycle control flags (C++ haltRequested_/forceHaltRequested_/pauseRequested_) ──
     /// Number of in-flight command tasks for this group.
     /// When this reaches 0, the group can be demoted from active to stopped.
@@ -239,6 +243,7 @@ impl RequestGroup {
             bt_piece_length: AtomicU32::new(0),
             bt_info_hash_hex: std::sync::RwLock::new(None),
             rate_limiter: std::sync::RwLock::new(None),
+            global_net_stat: std::sync::RwLock::new(None),
             num_commands: AtomicU32::new(0),
             control_flags: DownloadControlFlags::new(),
             halt_reason: std::sync::RwLock::new(HaltReason::None),

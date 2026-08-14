@@ -80,6 +80,48 @@ pub struct CookieStorage {
 static SHARED_COOKIE_STORAGE: OnceLock<Arc<CookieStorage>> = OnceLock::new();
 
 impl CookieStorage {
+    /// Normalize a cookie-domain key once at the storage boundary.
+    ///
+    /// DNS names are case-insensitive and a leading/trailing dot is only
+    /// syntax for a domain cookie. Keeping one canonical key prevents
+    /// duplicate buckets and lets lookup use the same representation for
+    /// parsed cookies and manually supplied cookies.
+    fn canonical_domain(domain: &str) -> String {
+        domain
+            .trim()
+            .trim_start_matches('.')
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+    }
+
+    /// Return the only domain buckets that can contain cookies for `host`.
+    ///
+    /// This is the HashMap equivalent of aria2's domain tree walk: a request
+    /// for `a.b.example.test` can match `a.b.example.test`, `b.example.test`,
+    /// and `example.test`, but never an unrelated domain. IP literals do not
+    /// have parent domains.
+    fn domain_candidates(host: &str) -> Vec<String> {
+        let host = Self::canonical_domain(host);
+        if host.is_empty() {
+            return Vec::new();
+        }
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            return vec![host];
+        }
+
+        let mut candidates = Vec::new();
+        let mut start = 0;
+        loop {
+            let candidate = &host[start..];
+            candidates.push(candidate.to_string());
+            let Some(dot) = candidate.find('.') else {
+                break;
+            };
+            start += dot + 1;
+        }
+        candidates
+    }
+
     pub fn shared() -> Arc<Self> {
         Arc::clone(SHARED_COOKIE_STORAGE.get_or_init(|| Arc::new(Self::new())))
     }
@@ -111,6 +153,12 @@ impl CookieStorage {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
+
+        let mut cookie = cookie;
+        cookie.domain = Self::canonical_domain(&cookie.domain);
+        if cookie.domain.is_empty() {
+            return;
+        }
 
         // Check domain eviction trigger before adding
         self.evict_domains_if_needed();
@@ -214,8 +262,11 @@ impl CookieStorage {
     /// the front (oldest first), clear each domain's cookies, and remove
     /// the domain node. In our HashMap design, we simply remove the entry.
     fn evict_domains(&self, delnum: usize) {
-        let mut lru = self.lru_tracker.write().unwrap_or_else(|e| e.into_inner());
         let mut domains = self.domains.write().unwrap_or_else(|e| e.into_inner());
+        // Keep the lock order consistent with add(), expire_cookies(), and
+        // clear(): domains -> lru. The previous inverse order could deadlock
+        // when an insertion crossed the global eviction threshold.
+        let mut lru = self.lru_tracker.write().unwrap_or_else(|e| e.into_inner());
 
         let mut evicted = 0;
         while evicted < delnum {
@@ -277,12 +328,17 @@ impl CookieStorage {
             .unwrap_or_default()
             .as_secs() as i64;
 
-        // Collect matching cookies across all domains
+        // Walk only the domain buckets that can match this host. This keeps
+        // request lookup proportional to the hostname depth instead of the
+        // total number of domains in the process-wide jar.
         let domains = self.domains.read().unwrap_or_else(|e| e.into_inner());
         let mut matching: Vec<Cookie> = Vec::new();
         let mut accessed_domains: Vec<String> = Vec::new();
 
-        for (domain_key, bucket) in domains.iter() {
+        for domain_key in Self::domain_candidates(host) {
+            let Some(bucket) = domains.get(&domain_key) else {
+                continue;
+            };
             let mut domain_accessed = false;
             for c in &bucket.cookies {
                 if c.match_request(host, path, date, secure, is_cross_site) {
@@ -527,6 +583,8 @@ impl CookieStorage {
                 Some(c) => c,
                 None => return false,
             };
+        let mut cookie = cookie;
+        cookie.domain = Self::canonical_domain(&cookie.domain);
         // Check if this is a delete cookie with no existing match
         if cookie.is_delete_cookie() {
             let mut domains = self.domains.write().unwrap_or_else(|e| e.into_inner());
