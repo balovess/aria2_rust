@@ -183,8 +183,8 @@ async fn test_force_pause() {
         "forcePause should return the GID (C++ aria2 behavior)"
     );
 
-    // The test fixture intentionally does not run an engine loop; forcePause is queued.
-    // Verify the task remains waiting until the core command consumer executes it.
+    // The RPC contract commits the pause state before returning. The engine
+    // command is still responsible for draining any running protocol command.
     let status_req = JsonRpcRequest {
         version: Some("2.0".into()),
         method: "aria2.tellStatus".into(),
@@ -197,8 +197,8 @@ async fn test_force_pause() {
     let status_json = status_resp.result.unwrap();
     let status_str = status_json.get("status").unwrap().as_str().unwrap();
     assert_eq!(
-        status_str, "waiting",
-        "Without an engine loop, forcePause remains queued"
+        status_str, "paused",
+        "forcePause must be observable before the RPC response returns"
     );
 }
 

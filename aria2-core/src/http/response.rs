@@ -261,7 +261,8 @@ impl HttpResponse {
     /// Automatically selects appropriate decoders based on the HTTP response's Content-Encoding and Transfer-Encoding headers
     /// to decode the response body. Supports GZip, Chunked, BZip2, and other encoding formats.
     ///
-    /// Follows RFC 7230 Section 3.3.1: Transfer-Encoding takes precedence over Content-Encoding.
+    /// Decodes transfer framing before applying the independent content
+    /// encoding, matching the response pipeline used by the downloader.
     ///
     /// # Returns
     ///
@@ -277,7 +278,7 @@ impl HttpResponse {
         let encoding = self.header("Content-Encoding").map(|s| s.as_str());
         let transfer_enc = self.header("Transfer-Encoding").map(|s| s.as_str());
 
-        let mut filters = AutoFilterSelector::select_filters(encoding, transfer_enc);
+        let mut filters = AutoFilterSelector::select_filters(encoding, transfer_enc)?;
 
         match &self.body {
             Some(raw_data) => process_filters(&mut filters, raw_data),

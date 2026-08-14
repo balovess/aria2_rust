@@ -1321,16 +1321,17 @@ async fn e2e_force_remove_nonexistent_gid_errors() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
 
-    let resp = rpc_call(
+    let resp = rpc_error_call(
         &client,
         &base,
         "aria2.forceRemove",
         json![["deadbeefdeadbeef"]],
+        reqwest::StatusCode::BAD_REQUEST,
     )
     .await;
-    // forceRemove with nonexistent GID may succeed (no-op) or error
-    // depending on implementation; just verify valid JSON-RPC format
+    // A syntactically valid but unknown GID is an aria2 execution error.
     assert_jsonrpc_format(&resp, "aria2-forceRemove");
+    assert_error_code(&resp, 1);
 }
 
 #[tokio::test]

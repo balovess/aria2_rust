@@ -1327,8 +1327,8 @@ async fn test_force_remove_cancels_immediately() {
     let status_after_val = tell_resp2.result.unwrap();
     assert_eq!(
         status_after_val["status"].as_str(),
-        Some("waiting"),
-        "Without an engine loop, forceRemove remains queued"
+        Some("removed"),
+        "forceRemove must move a reserved task to stopped results synchronously"
     );
 }
 
@@ -1362,8 +1362,8 @@ async fn test_batch_gids_force_remove() {
         let status_val = tell_resp.result.unwrap();
         assert_eq!(
             status_val["status"].as_str(),
-            Some("waiting"),
-            "Without an engine loop, forceRemove remains queued for {}",
+            Some("removed"),
+            "forceRemove must remove reserved task {} synchronously",
             gid
         );
     }

@@ -1,5 +1,13 @@
 use tracing::debug;
 
+/// HTTP status codes that aria2 treats as redirects.
+///
+/// `304 Not Modified` is intentionally excluded: it is a conditional
+/// response, not a redirect, even though it is in the 3xx range.
+pub fn is_redirect_status(status_code: u16) -> bool {
+    matches!(status_code, 300..=303 | 307 | 308)
+}
+
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status_code: u16,
@@ -23,10 +31,9 @@ impl HttpResponse {
     }
 
     pub fn is_redirect(&self) -> bool {
-        // 300 Multiple Choices is also a redirect per RFC 7231 Section 6.4.1
-        // when a Location header is present. Per C++ aria2 behavior, 300
-        // with Location is treated as a redirect.
-        [300, 301, 302, 303, 307, 308].contains(&self.status_code)
+        // Match C++ `HttpResponse::isRedirect()`: a recognized redirect status
+        // is actionable only when the response supplies a Location header.
+        is_redirect_status(self.status_code) && self.location().is_some()
     }
 
     pub fn is_partial_content(&self) -> bool {
@@ -182,8 +189,20 @@ mod tests {
         assert!(resp_206.is_success());
         assert!(resp_206.is_partial_content());
 
-        let resp_301 = HttpResponse::new(301, "Moved".into());
+        let mut resp_301 = HttpResponse::new(301, "Moved".into());
+        resp_301
+            .headers
+            .push(("Location".to_string(), "/new".to_string()));
         assert!(resp_301.is_redirect());
+
+        let resp_302_without_location = HttpResponse::new(302, "Found".into());
+        assert!(!resp_302_without_location.is_redirect());
+
+        let mut resp_300 = HttpResponse::new(300, "Multiple Choices".into());
+        resp_300
+            .headers
+            .push(("Location".to_string(), "/choice".to_string()));
+        assert!(resp_300.is_redirect());
 
         let resp_404 = HttpResponse::new(404, "Not Found".into());
         assert!(resp_404.is_client_error());

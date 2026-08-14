@@ -255,16 +255,27 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
-        if let Some(group_man) = &self.group_man
-            && group_man.read().await.group_by_hex(&gid).is_none()
-        {
-            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        let enqueue_command = if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            if man.group_by_hex(&gid).is_none() {
+                return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+            }
+            man.remove_group(gid_parsed)
+                .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
+            // Reserved groups are removed synchronously and are already in the
+            // stopped-result store. Active groups remain indexed while their
+            // command drains and therefore still need an engine notification.
+            man.group_by_hex(&gid).is_some()
+        } else {
+            true
+        };
+        if enqueue_command {
+            engine_cmd_tx
+                .send(EngineCommand::RemoveDownload { gid: gid_parsed })
+                .map_err(|e| {
+                    JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+                })?;
         }
-        engine_cmd_tx
-            .send(EngineCommand::RemoveDownload { gid: gid_parsed })
-            .map_err(|e| {
-                JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
-            })?;
         let _ = self
             .event_publisher
             .publish(EventType::DownloadStop, DownloadEvent::download_stop(&gid));
@@ -329,10 +340,12 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
-        if let Some(group_man) = &self.group_man
-            && group_man.read().await.group_by_hex(&gid).is_none()
-        {
-            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+        if let Some(group_man) = &self.group_man {
+            group_man
+                .read()
+                .await
+                .force_pause_group(gid_parsed)
+                .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
         }
         engine_cmd_tx
             .send(EngineCommand::ForcePause { gid: gid_parsed })
@@ -427,14 +440,42 @@ impl RpcEngine {
                 "aria2.forceRemove is not supported by the core state model".into(),
             )
         })?;
-        for gid in &gids {
-            let gid_parsed = GroupId::from_hex_string(gid)
-                .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
-            engine_cmd_tx
-                .send(EngineCommand::ForceRemoveDownload { gid: gid_parsed })
-                .map_err(|e| {
-                    JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
-                })?;
+        let parsed_gids = gids
+            .iter()
+            .map(|gid| {
+                GroupId::from_hex_string(gid)
+                    .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let enqueue_commands = if let Some(group_man) = &self.group_man {
+            let man = group_man.read().await;
+            for gid in &gids {
+                if man.group_by_hex(gid).is_none() {
+                    return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
+                }
+            }
+            let mut enqueue_commands = Vec::with_capacity(parsed_gids.len());
+            for gid in &parsed_gids {
+                man.force_remove_group(*gid)
+                    .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
+                // Reserved groups are complete from the RPC caller's point of
+                // view. Active groups remain indexed until the command exits.
+                enqueue_commands.push(man.find_group(*gid).is_some());
+            }
+            enqueue_commands
+        } else {
+            vec![true; parsed_gids.len()]
+        };
+        for ((gid, gid_parsed), enqueue_command) in
+            gids.iter().zip(parsed_gids).zip(enqueue_commands)
+        {
+            if enqueue_command {
+                engine_cmd_tx
+                    .send(EngineCommand::ForceRemoveDownload { gid: gid_parsed })
+                    .map_err(|e| {
+                        JsonRpcError::InternalError(format!("Failed to send engine command: {e}"))
+                    })?;
+            }
             let _ = self
                 .event_publisher
                 .publish(EventType::DownloadStop, DownloadEvent::download_stop(gid));

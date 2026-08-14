@@ -92,6 +92,97 @@ that one aggregate workspace test execution, platform-specific binding runs,
 public C ABI compatibility, or complete original-client/browser-extension
 interoperability is complete.
 
+## 2026-08-14 HTTP Redirect Contract Checkpoint
+
+The Rust protocol response seam now matches
+`aria2_original/src/HttpResponse.cc`: `HttpResponse::is_redirect()` requires
+both a recognized redirect status (`300/301/302/303/307/308`) and a `Location`
+header. `304 Not Modified` remains outside the redirect set. The standalone
+Rust redirect helper now includes `300 Multiple Choices`, and core
+skip-response classification uses the shared status predicate so a recognized
+redirect without `Location` still produces the original protocol error path
+instead of being silently consumed.
+
+This is an internal Rust implementation correction at the external HTTP
+behavior seam. It does not change option names, defaults, user configuration,
+RPC/CLI wire behavior, or the `aria2-rust 0.2.9` product identity, and it does
+not copy the C++ command state machine.
+
+Verification on 2026-08-14:
+
+~~~text
+cargo test -p aria2-protocol --tests --all-features -- --test-threads=1
+  829 library + 6 integration + 53 uTP tests passed, 0 failed
+cargo test -p aria2-core --lib http::skip_response --all-features -- --test-threads=1
+  35 passed, 0 failed
+cargo test -p aria2-core --test deep_e2e_http --all-features -- --test-threads=1
+  12 passed, 0 failed
+cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+The broader HTTP and original-client/browser interoperability matrix remains
+`PARTIAL`.
+
+## 2026-08-14 HTTP Transfer-Encoding Contract Checkpoint
+
+The Rust HTTP body-filter seam now validates `Transfer-Encoding` before any
+response body is consumed. It accepts only the original aria2-supported
+case-insensitive single value `chunked`; `gzip`, `deflate`, `bzip2`, `br`,
+`identity`, unknown values, and multi-token values are rejected with an HTTP
+protocol error. Transfer decoding runs before the independent
+`Content-Encoding` filters, matching the original response pipeline while
+keeping the implementation Rust-native.
+
+The empty-body path is validated as well. No option name, default, user
+configuration, RPC/CLI wire behavior, or `aria2-rust 0.2.9` product identity
+was changed.
+
+Verification on 2026-08-14:
+
+~~~text
+cargo test -p aria2-core --lib http::stream_filter_tests --all-features -- --test-threads=1
+  31 passed, 0 failed
+cargo test -p aria2-core --lib http::skip_response --all-features -- --test-threads=1
+  36 passed, 0 failed
+~~~
+
+The broader HTTP body-stream integration and original-client/browser
+interoperability matrix remains `PARTIAL`.
+
+## 2026-08-14 RPC Lifecycle Commit Checkpoint
+
+The Rust RPC lifecycle seam now commits the externally visible transition
+before returning, matching the synchronous observation point of
+`aria2_original/src/RpcMethodImpl.cc`. `aria2.forcePause` reports a task as
+`paused` immediately; `aria2.remove` and `aria2.forceRemove` validate the GID
+and remove reserved tasks into the stopped-result store immediately, while
+active tasks remain indexed until the engine drains their protocol command.
+Unknown `forceRemove` GIDs now return aria2 execution error code `1`.
+
+The engine command channel remains responsible for protocol-specific
+cancellation, checkpoint finalization, and completion accounting. This is a
+Rust-native ordering correction behind the RPC seam; it changes no option
+name, default, user configuration, product version, or original wire shape.
+
+Verification on 2026-08-14:
+
+~~~text
+cargo test -p aria2-rpc --test integration_rpc --all-features -- --test-threads=1
+  18 passed, 0 failed
+cargo test -p aria2-rpc --lib handlers::handler_tests --all-features -- --test-threads=1
+  71 passed, 0 failed
+cargo test -p aria2-rpc --test test_e2e_all_rpc_methods --all-features -- --test-threads=1
+  55 passed, 0 failed
+~~~
+
+The broader original-client, browser-extension, XML-RPC, and WebSocket
+interoperability matrix remains `PARTIAL`.
+
 ## 2026-08-14 Client TLS Transport Checkpoint
 
 The existing aria2-compatible `check-certificate`, `ca-certificate`,

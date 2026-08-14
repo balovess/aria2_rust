@@ -5,7 +5,7 @@ use reqwest::{Certificate, Client, ClientBuilder, redirect};
 use tracing::{debug, info};
 
 use crate::http::request::HttpRequest;
-use crate::http::response::HttpResponse;
+use crate::http::response::{HttpResponse, is_redirect_status};
 
 #[derive(Debug, Clone)]
 pub struct HttpClientOptions {
@@ -282,8 +282,12 @@ impl RedirectHandler {
             return None;
         }
 
+        if !is_redirect_status(status_code) {
+            return None;
+        }
+
         match status_code {
-            301 => Some(RedirectAction::FollowKeepMethod),
+            300 | 301 => Some(RedirectAction::FollowKeepMethod),
             302 | 303 => Some(RedirectAction::FollowChangeToGet),
             307 | 308 => Some(RedirectAction::FollowKeepMethod),
             _ => None,
@@ -345,6 +349,12 @@ mod tests {
 
         let no_action = RedirectHandler::should_follow_redirect(301, "GET", 5, 5);
         assert!(no_action.is_none());
+    }
+
+    #[test]
+    fn test_should_follow_300() {
+        let action = RedirectHandler::should_follow_redirect(300, "GET", 0, 5);
+        assert!(matches!(action, Some(RedirectAction::FollowKeepMethod)));
     }
 
     #[test]

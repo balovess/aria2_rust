@@ -18,6 +18,7 @@
 | 2026-08-09 | 外部兼容优先：RPC/JSON-RPC/XML-RPC/WebSocket、CLI、配置、session、错误码和原版客户端可观察行为必须以 aria2_original 为契约；Rust 架构和性能优化只能发生在该契约之后 |
 | 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
 | 2026-08-12 | 产品身份统一为 `aria2-rust 0.2.9`；只兼容 aria2_original 的外部 CLI/RPC/协议行为，不复用原版版本报告文本或内部 C++ 结构 |
+| 2026-08-14 | RPC 生命周期提交顺序对齐 `aria2_original`：`forcePause` 在响应前提交 `paused`，reserved 的 `remove`/`forceRemove` 在响应前进入 stopped result，未知 GID 返回 execution error code 1；active 任务仍由 Rust `EngineCommand` 完成协议取消、checkpoint 与 completion 收口。RPC 定向测试 18 + 71 + 55 全通过；未修改配置、默认值、版本或 wire 结构，整体迁移仍为 PARTIAL |
 | 2026-08-12 | FTP 生产路径补齐协议错误边界、`550` 文件不存在映射和 `REST 0` 行为；本地 FTP E2E 通过，真实第三方 FTP/FTPS 和原版客户端互操作仍为 PARTIAL |
 | 2026-08-13 | BitTorrent 共享 TCP listener 与 info-hash 路由完成；MSE PadA/PadB、RC4/Plain negotiation、`bt-force-encryption`、`bt-require-crypto`、`bt-min-crypto-level` 和 listener shutdown 增加真实 socket 回归证据；整体迁移仍为 PARTIAL |
 | 2026-08-13 | 修正 `config::runtime` feature-aware 测试断言：启用 BitTorrent 时 Rust-only `enable-public-trackers` 会使 reserved-changeable 集合为 107，默认构建仍为 106；不是兼容行为回退 |
@@ -49,6 +50,67 @@
 | 2026-08-14 | DNS 候选耗尽刷新：新增 Rust-owned `DnsCache::resolve_with_refresh`，HTTP task spawner 与 FTP control retry 共用“全候选标坏后清除 endpoint 并重新解析”的 seam；新增 localhost 刷新回归，未修改配置、默认值、产品版本或 RPC wire 行为，HTTP/DNS 与整体迁移仍为 PARTIAL |
 | 2026-08-14 | 顺序 HTTP 认证重定向修复：认证重试后的 `3xx` 返回有界重定向动作，复用既有重定向计数、URI 跟踪和 cookie 路径；认证工厂在同一任务内保持激活状态，Basic 保护空间按请求目录限定；真实 `401 -> 302 -> 200` 下载回归与 `engine::download_command` `26 passed`、core Clippy 通过，未修改配置、默认值、产品版本或 RPC wire 行为，HTTP 与整体迁移仍为 PARTIAL |
 | 2026-08-14 | 修复 DNS 超时归因：RequestGroup 保留 peer 历史但 housekeeping 只标记最近活动 peer，避免并发/镜像任务把所有历史候选批量标坏；RequestGroup `95 passed`、engine loop `14 passed`、Clippy/fmt/diff check 通过，reqwest 连接建立失败仍无法精确暴露选定地址，DNS/HTTP 与整体迁移仍为 PARTIAL |
+
+## 2026-08-14 HTTP Redirect Contract Checkpoint
+
+The Rust protocol response seam now matches `aria2_original/src/HttpResponse.cc`
+for redirect classification: `HttpResponse::is_redirect()` returns true only
+for `300/301/302/303/307/308` responses that include `Location`, while `304`
+remains a conditional response. The standalone Rust redirect helper also now
+includes `300 Multiple Choices`. Core skip-response classification uses the
+shared status predicate so a recognized `3xx` without `Location` still reaches
+the original error path instead of being silently consumed.
+
+This is a Rust-owned protocol correction; it does not copy the C++ command
+state machine and does not change option names, defaults, user configuration,
+RPC/CLI wire behavior, or the `aria2-rust 0.2.9` product identity.
+
+Verification:
+
+~~~text
+cargo test -p aria2-protocol --tests --all-features -- --test-threads=1
+  829 library + 6 integration + 53 uTP tests passed, 0 failed
+cargo test -p aria2-core --lib http::skip_response --all-features -- --test-threads=1
+  35 passed, 0 failed
+cargo test -p aria2-core --test deep_e2e_http --all-features -- --test-threads=1
+  12 passed, 0 failed
+cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+The broader HTTP and original-client/browser interoperability matrix remains
+`PARTIAL`.
+
+## 2026-08-14 HTTP Transfer-Encoding Contract Checkpoint
+
+The Rust HTTP body-filter seam now validates `Transfer-Encoding` before any
+response body is consumed. It accepts only the original aria2-supported
+case-insensitive single value `chunked`; `gzip`, `deflate`, `bzip2`, `br`,
+`identity`, unknown values, and multi-token values are rejected with an HTTP
+protocol error. Transfer decoding runs before the independent
+`Content-Encoding` filters, matching the original response pipeline without
+copying its C++ command state machine.
+
+The empty-body path is validated as well, so a declared unsupported transfer
+encoding cannot bypass protocol checking. No option name, default, user
+configuration, RPC/CLI wire behavior, or `aria2-rust 0.2.9` product identity
+was changed.
+
+Verification:
+
+~~~text
+cargo test -p aria2-core --lib http::stream_filter_tests --all-features -- --test-threads=1
+  31 passed, 0 failed
+cargo test -p aria2-core --lib http::skip_response --all-features -- --test-threads=1
+  36 passed, 0 failed
+~~~
+
+The broader HTTP body-stream integration and original-client/browser
+interoperability matrix remains `PARTIAL`.
 
 ## 2026-08-14 Configuration and Validation Checkpoint
 
