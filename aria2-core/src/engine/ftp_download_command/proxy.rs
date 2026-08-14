@@ -91,6 +91,16 @@ impl FtpDownloadCommand {
 
         let body_length = response.head.content_length();
         let total_length = body_length.map(|length| length.saturating_add(write_offset));
+        let remote_modified_time = options
+            .remote_time
+            .then(|| response.head.header("last-modified"))
+            .flatten()
+            .and_then(crate::http::cookie::parsing::parse_http_date)
+            .and_then(|seconds| {
+                (seconds >= 0).then_some(
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds as u64),
+                )
+            });
         if options.dry_run {
             self.completed_bytes = total_length.unwrap_or_default();
             {
@@ -177,17 +187,24 @@ impl FtpDownloadCommand {
                 )));
             }
 
-            let bytes_read = response.read_body(&mut buffer).await.map_err(|error| {
-                FtpAttemptError::from(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!("FTP proxy body read failed: {}", error),
-                    },
-                ))
-            })?;
+            let bytes_read = match response.read_body(&mut buffer).await {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    self.finalize_partial_writer(&mut writer).await;
+                    return Err(FtpAttemptError::from(Aria2Error::Recoverable(
+                        RecoverableError::TemporaryNetworkFailure {
+                            message: format!("FTP proxy body read failed: {}", error),
+                        },
+                    )));
+                }
+            };
             if bytes_read == 0 {
                 break;
             }
-            writer.write(&buffer[..bytes_read]).await?;
+            if let Err(error) = writer.write(&buffer[..bytes_read]).await {
+                self.finalize_partial_writer(&mut writer).await;
+                return Err(FtpAttemptError::from(error));
+            }
             body_bytes = body_bytes.saturating_add(bytes_read as u64);
             self.completed_bytes = self.completed_bytes.saturating_add(bytes_read as u64);
             if let Some(checkpoint) = self.checkpoint.as_mut() {
@@ -206,7 +223,13 @@ impl FtpDownloadCommand {
             ))));
         }
 
-        let finalized_data = writer.finalize().await?;
+        let finalized_data = match writer.finalize().await {
+            Ok(data) => data,
+            Err(error) => {
+                self.flush_checkpoint().await;
+                return Err(FtpAttemptError::from(error));
+            }
+        };
         drop(writer);
 
         if let Some((algorithm, expected)) = options.checksum.clone() {
@@ -229,6 +252,8 @@ impl FtpDownloadCommand {
             }
             self.group.recover().set_checksum_verified(true);
         }
+
+        self.apply_remote_time(remote_modified_time, in_memory_download);
 
         if in_memory_download {
             let group = self.group.recover();
