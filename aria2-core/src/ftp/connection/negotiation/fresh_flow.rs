@@ -226,13 +226,10 @@ impl FtpNegotiator {
 
         let local_ip = local_addr.ip();
 
-        // Bind listener on the appropriate wildcard address for the address family
-        // C++ uses socket->getAddressFamily() to decide; we match the control socket.
-        let bind_addr = match local_ip {
-            std::net::IpAddr::V4(_) => "0.0.0.0:0",
-            std::net::IpAddr::V6(_) => "[::]:0",
-        };
-        let listener = tokio::net::TcpListener::bind(bind_addr)
+        // Keep the data listener on the control connection's interface. This
+        // matches the original active-mode socket binding and avoids
+        // advertising a wildcard interface on multi-homed hosts.
+        let listener = tokio::net::TcpListener::bind(super::active_data_bind_addr(local_addr))
             .await
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {

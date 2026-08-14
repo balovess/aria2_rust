@@ -1,7 +1,11 @@
 //! Tests for FTP download command.
 
-use super::control::{RawFtpControl, parse_epsv_response, parse_pasv_response, urlencoding_decode};
+use super::control::{
+    RawFtpControl, parse_epsv_response, parse_ftp_size_response, parse_pasv_response,
+    urlencoding_decode,
+};
 use super::types::FtpDownloadCommand;
+use crate::error::{Aria2Error, RecoverableError};
 use crate::request::request_group::{DownloadOptions, GroupId};
 
 #[test]
@@ -33,6 +37,24 @@ fn test_retry_policy_comes_from_download_options() {
 
     assert_eq!(command.retry_policy.max_tries(), 7);
     assert_eq!(command.retry_policy.base_wait_ms, 3000);
+}
+
+#[test]
+fn test_connect_timeout_comes_from_download_options() {
+    let options = DownloadOptions {
+        connect_timeout: Some(12),
+        ..DownloadOptions::default()
+    };
+    let command = FtpDownloadCommand::new(
+        GroupId::new(102),
+        "ftp://example.com/file.txt",
+        &options,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(command.connect_timeout, std::time::Duration::from_secs(12));
 }
 
 #[test]
@@ -126,6 +148,26 @@ fn test_parse_epsv_response_minimal() {
     let resp = "|||60000|";
     let result = parse_epsv_response(resp).unwrap();
     assert_eq!(result, 60000);
+}
+
+#[test]
+fn test_parse_ftp_size_response_accepts_signed_offset_limit() {
+    assert_eq!(
+        parse_ftp_size_response(" 9223372036854775807 ").unwrap(),
+        i64::MAX as u64
+    );
+}
+
+#[test]
+fn test_parse_ftp_size_response_rejects_values_above_signed_offset_limit() {
+    let error = parse_ftp_size_response("9223372036854775808")
+        .expect_err("SIZE above the local offset range must be rejected");
+
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::FtpProtocolError { .. })
+    ));
+    assert!(error.to_string().contains("too large"));
 }
 
 #[test]

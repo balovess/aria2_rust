@@ -1351,6 +1351,38 @@ mod tests {
         assert_eq!(status, DownloadStatus::Active);
     }
 
+    #[test]
+    fn test_paused_reserved_group_is_not_promoted_until_unpaused() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        // Reproduce the race window between the pause-flag check and the
+        // promotion status transition: the status is paused, but the flag
+        // has already been consumed by another lifecycle operation.
+        let group = man.find_group(gid).unwrap();
+        {
+            let mut group = group.recover_mut();
+            group.pause().unwrap();
+            group.control_flags.clear_pause();
+        }
+
+        let promoted = man.fill_from_reserver();
+        assert!(promoted.is_empty(), "paused group must remain reserved");
+        assert_eq!(man.reserved.len(), 1);
+        assert_eq!(man.active.len(), 0);
+        assert!(man.find_group(gid).unwrap().recover().status().is_paused());
+
+        man.unpause_group(gid).unwrap();
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1, "unpaused group should be promoted");
+        assert_eq!(man.active_count(), 1);
+    }
+
     /// A group paused by `reduce_to_limit()` carries the restart flag; when
     /// it is re-queued the flag must be consumed so the group auto-resumes
     /// (C++ `releaseRuntimeResource()` clears the pause request).

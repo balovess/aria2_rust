@@ -214,19 +214,26 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-13): the current focused evidence includes
-40 option-parser tests, 13 BitTorrent selector tests, 37 protocol picker tests,
-20 CLI/app tests, 105 CLI regression tests, and a previously completed 402-test
-RPC all-feature run, plus one additional targeted RPC default-visibility
-regression. The core all-feature library target currently reports 3335 passed,
-0 failed, and 1 ignored. Under the current `0.2.9`, the version entry point,
-app tests, Clippy, and the targeted parser/RPC regressions pass. `aria2c --version` reports
-`aria2-rust 0.2.9`,
-and the four Rust workspace members, SDK packages, Homebrew formula, and Scoop
-manifest resolve to product version `0.2.9`. The single workspace
-aggregate command is still a build-time timeout on this host, and the complete
-original-client and cross-protocol E2E matrix remains open; these results do
-not mean the migration is complete.
+Verification snapshot (2026-08-14): the current focused evidence includes
+the CLI, RPC, protocol, BitTorrent, Metalink, FTP/SFTP, Node.js, and Python
+regression/E2E suites recorded in
+[docs/compatibility-status.md](docs/compatibility-status.md). The workspace
+command `cargo test --workspace --all-targets --no-run` also compiles all Rust
+test and benchmark targets. Node.js reports 123 passed and Python reports 137
+passed on this host. Under the current `0.2.9`, the version entry point,
+application tests, Clippy, and the targeted parser/RPC regressions pass;
+`aria2c --version` reports `aria2-rust 0.2.9`, and all Rust members and SDK
+metadata resolve to that product version. Existing `check-certificate`,
+`ca-certificate`, `certificate`, and `private-key` configuration values are
+handled by the Rust HTTP transport across primary HTTP/HTTPS downloads,
+Metalink HTTP, production BitTorrent HTTP trackers, and web seeds; local
+Rustls HTTPS fixtures verify custom CA trust, disabled verification, separate
+PEM mutual TLS, legacy empty-password PKCS#12, and modern PBES2/AES-256
+single-file identities;
+aggregate runtime coverage,
+platform-specific binding runs, complete original-client/browser-extension
+interoperability, public C ABI compatibility, and the aria2 C performance
+comparison remain open; these results do not mean the migration is complete.
 
 The project is organized as a Cargo workspace with 4 crates:
 
@@ -474,8 +481,9 @@ path can still be `PARTIAL` or `UNVERIFIED` there.
 
 **Known gaps and verification status:**
 - This table is a capability inventory, not a release compatibility claim.
-- The migration is not currently all pass; optional features, ignored
-  network tests, binding E2E suites, and the public C ABI remain tracked work.
+- The migration is not currently all pass; optional features, ignored network
+  tests, platform-specific binding runs, original-client interoperability, and
+  the public C ABI remain tracked work.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.

@@ -811,7 +811,7 @@ async fn run_housekeeping(
         let man = ctx.group_man.read().await;
         for gid in timed_out {
             if let Some(group) = man.get_group(gid) {
-                let request_contexts = group.recover().connection_contexts();
+                let request_context = group.recover().latest_connection_context();
                 let uris = group.recover().get_all_uris();
                 if let Some(uri) = uris.first()
                     && let Ok(parsed) = reqwest::Url::parse(uri)
@@ -820,16 +820,11 @@ async fn run_housekeeping(
                     let protocol = parsed.scheme().to_ascii_lowercase();
                     ctx.server_stat_man
                         .mark_failure_with_protocol(host, &protocol, 408);
-                    if !request_contexts.is_empty() {
+                    if let Some(context) = request_context {
                         let mut dns = ctx.dns_cache.lock().await;
-                        for context in request_contexts {
-                            dns.mark_bad_context(&context);
-                            if !dns.has_good_address(&context.endpoint) {
-                                dns.remove_cached(
-                                    context.endpoint.hostname(),
-                                    context.endpoint.port(),
-                                );
-                            }
+                        dns.mark_bad_context(&context);
+                        if !dns.has_good_address(&context.endpoint) {
+                            dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());
                         }
                     }
                 }

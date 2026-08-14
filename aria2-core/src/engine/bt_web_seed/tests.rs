@@ -146,6 +146,26 @@ fn test_web_seed_client_creation() {
 }
 
 #[test]
+fn test_web_seed_manager_applies_custom_tls_configuration() {
+    let options = crate::request::request_group::DownloadOptions {
+        ca_certificate: Some("missing-web-seed-ca.pem".into()),
+        ..Default::default()
+    };
+    let tls = crate::http::client_identity::ClientTlsConfig::from_download_options(&options);
+    let error = match WebSeedManager::new_with_tls(
+        vec!["https://cdn.example.com/file.bin".into()],
+        16_384,
+        1_048_576,
+        &tls,
+    ) {
+        Ok(_) => panic!("invalid web-seed TLS configuration must reject client construction"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("Failed to read CA certificate"));
+}
+
+#[test]
 fn test_web_seed_manager_empty() {
     let manager = WebSeedManager::new(Vec::new(), 16384, 1048576);
 

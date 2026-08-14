@@ -34,6 +34,7 @@ use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::control_file::ControlFile;
+use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -537,11 +538,23 @@ impl Command for BtDownloadCommand {
                 "[BT] Initializing web seed manager with {} URL(s)",
                 self.web_seed_urls.len()
             );
-            Some(crate::engine::bt_web_seed::WebSeedManager::new(
-                self.web_seed_urls.clone(),
-                piece_length,
-                total_size,
-            ))
+            let web_seed_tls = {
+                let group = self.group.recover();
+                ClientTlsConfig::from_download_options(group.options())
+            };
+            Some(
+                crate::engine::bt_web_seed::WebSeedManager::new_with_tls(
+                    self.web_seed_urls.clone(),
+                    piece_length,
+                    total_size,
+                    &web_seed_tls,
+                )
+                .map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "Web-seed HTTP client configuration failed: {error}"
+                    )))
+                })?,
+            )
         } else {
             None
         };

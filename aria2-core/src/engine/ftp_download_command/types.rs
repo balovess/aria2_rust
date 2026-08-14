@@ -3,14 +3,20 @@
 //! Contains the `FtpDownloadCommand` struct definition, constructors,
 //! URI parsing, filename extraction, and FTP error classification.
 
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use tracing::info;
+use url::Url;
 
 use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::ftp::connection::{FtpsConfig, TlsVersion};
+use crate::ftp::connection::{FtpProxyConfig, FtpsConfig, ProxyMethod, TlsVersion};
+use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
 
 use crate::constants;
@@ -40,6 +46,8 @@ pub struct FtpDownloadCommand {
     pub(super) resume_offset: u64,
     /// Whether to use passive mode (true) or active mode (false)
     pub(super) passive_mode: bool,
+    /// Timeout for establishing and greeting the FTP control connection.
+    pub(super) connect_timeout: Duration,
     /// Unified retry contract for the download. `max_retries` in the policy
     /// means total attempts and `0` means unlimited.
     pub(super) retry_policy: RetryPolicy,
@@ -152,6 +160,11 @@ impl FtpDownloadCommand {
             ftps_implicit,
             resume_offset,
             passive_mode: options.ftp_pasv,
+            connect_timeout: Duration::from_secs(
+                options
+                    .connect_timeout
+                    .unwrap_or(constants::FTP_DEFAULT_CONNECT_TIMEOUT_SECS),
+            ),
             retry_policy: RetryPolicy::new(
                 options.max_retries,
                 options.retry_wait.saturating_mul(1000),
@@ -176,6 +189,90 @@ impl FtpDownloadCommand {
 
     pub fn set_dns_cache(&mut self, dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) {
         self.dns_cache = Some(dns_cache);
+    }
+
+    /// Resolve the configured FTP proxy without changing the public option
+    /// surface. The raw `proxy-method` value remains in the task snapshot so
+    /// this command can consume it without copying configuration into a new
+    /// public `DownloadOptions` field.
+    pub(super) fn ftp_proxy_config(&self) -> Result<Option<(FtpProxyConfig, ProxyMethod)>> {
+        let (options, snapshot) = {
+            let group = self.group.recover();
+            (group.options_arc(), group.effective_option_snapshot())
+        };
+
+        if let Some(no_proxy) = options.no_proxy.as_deref() {
+            let matcher = NoProxyMatcher::from_env_value(no_proxy);
+            let bypassed = self
+                .host
+                .parse::<IpAddr>()
+                .ok()
+                .map(|address| matcher.should_bypass(&SocketAddr::new(address, self.port)))
+                .unwrap_or_else(|| matcher.should_bypass_hostname(&self.host));
+            if bypassed {
+                return Ok(None);
+            }
+        }
+
+        let proxy_uri = options
+            .ftp_proxy
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                options
+                    .all_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+            });
+        let Some(proxy_uri) = proxy_uri else {
+            return Ok(None);
+        };
+
+        let proxy_url = Url::parse(proxy_uri).map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "Invalid FTP proxy URL '{}': {}",
+                proxy_uri, error
+            )))
+        })?;
+        if !proxy_url.scheme().eq_ignore_ascii_case("http") {
+            return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                "Unsupported FTP proxy scheme '{}'; expected http",
+                proxy_url.scheme()
+            ))));
+        }
+        let proxy_host = proxy_url.host_str().ok_or_else(|| {
+            Aria2Error::Fatal(FatalError::Config("FTP proxy URL has no host".to_string()))
+        })?;
+        let (username, password) = options.proxy_credentials_for_scheme("ftp");
+        let embedded_username =
+            (!proxy_url.username().is_empty()).then(|| proxy_url.username().to_string());
+        let embedded_password = proxy_url.password().map(str::to_string);
+        let proxy_username = username.or(embedded_username).unwrap_or_default();
+        let proxy_password = password.or(embedded_password).unwrap_or_default();
+
+        let explicit_method = snapshot
+            .as_ref()
+            .and_then(|values| values.get("proxy-method"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(ProxyMethod::parse);
+        let method = explicit_method.unwrap_or_default();
+
+        Ok(Some((
+            FtpProxyConfig {
+                proxy_host: proxy_host.to_string(),
+                proxy_port: proxy_url.port().unwrap_or(8080),
+                proxy_username,
+                proxy_password,
+                ftp_username: self.username.clone(),
+                connect_timeout: self.connect_timeout,
+                user_agent: options
+                    .user_agent
+                    .clone()
+                    .unwrap_or_else(|| constants::USER_AGENT.to_string()),
+                explicit_proxy_method: Some(method),
+            },
+            method,
+        )))
     }
 
     fn is_ftps_uri(uri: &str) -> bool {

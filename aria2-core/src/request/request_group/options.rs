@@ -208,6 +208,12 @@ pub struct DownloadOptions {
     pub check_certificate: bool,
     /// Custom CA certificate bundle used by HTTPS/FTPS TLS adapters.
     pub ca_certificate: Option<String>,
+    /// Client certificate used for HTTPS mutual TLS.
+    /// Corresponds to aria2_original's `certificate` option.
+    pub certificate: Option<String>,
+    /// Private key paired with the client certificate.
+    /// Corresponds to aria2_original's `private-key` option.
+    pub private_key: Option<String>,
     /// Minimum TLS version accepted by HTTPS/FTPS TLS adapters.
     pub min_tls_version: Option<String>,
 
@@ -446,6 +452,8 @@ impl Default for DownloadOptions {
             no_want_digest_header: false,
             check_certificate: true,
             ca_certificate: None,
+            certificate: None,
+            private_key: None,
             min_tls_version: None,
             // Metalink
             metalink_version: None,
@@ -823,6 +831,8 @@ impl DownloadOptions {
                 .map(|v| v != "false")
                 .unwrap_or(true),
             ca_certificate: options.get("ca-certificate").cloned(),
+            certificate: options.get("certificate").cloned(),
+            private_key: options.get("private-key").cloned(),
             min_tls_version: options.get("min-tls-version").cloned(),
             metalink_version: options.get("metalink-version").cloned(),
             metalink_language: options.get("metalink-language").cloned(),
@@ -973,6 +983,14 @@ impl DownloadOptions {
                 &self.http_proxy_user,
                 &self.http_proxy_passwd,
                 self.http_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
+            ),
+            "ftp" => (
+                &self.ftp_proxy_user,
+                &self.ftp_proxy_passwd,
+                self.ftp_proxy
                     .as_deref()
                     .filter(|value| !value.is_empty())
                     .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),

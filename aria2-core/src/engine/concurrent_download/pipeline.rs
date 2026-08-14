@@ -409,6 +409,7 @@ pub async fn execute_with_coordinator(
                     }
                     Err(e) => {
                         tracing::warn!(seg_idx, mirror_idx, error = %e, "Pooled segment download failed");
+                        let error_code = super::server_stat_error_code(&e);
                         let is_capacity_limited = matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::ServerError { code })
@@ -446,7 +447,7 @@ pub async fn execute_with_coordinator(
                             coordinator.on_segment_failed(
                                 mirror_idx,
                                 seg_idx,
-                                constants::HTTP_DEFAULT_ERROR_CODE,
+                                error_code,
                             );
                         }
                     }

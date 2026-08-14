@@ -1,5 +1,6 @@
 use super::ConcurrentSegmentManager;
 use super::types::SegmentStatus;
+use crate::selector::feedback_uri_selector::extract_host_and_protocol;
 
 impl ConcurrentSegmentManager {
     // ==================== Intelligent Mirror Selection Methods ====================
@@ -125,12 +126,12 @@ impl ConcurrentSegmentManager {
         if success {
             if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
                 && let Some(url) = self.mirror_urls.get(idx)
+                && let Some((host, protocol)) = extract_host_and_protocol(url)
             {
-                let host = extract_host_from_url(url);
-                stat_man.update(&host, bytes_per_sec, is_multi_connection);
+                stat_man.update_with_protocol(&host, &protocol, bytes_per_sec, is_multi_connection);
 
                 // Reset failure count on success
-                if let Some(stat) = stat_man.find_stat(&host) {
+                if let Some(stat) = stat_man.find_stat_by_protocol(&host, &protocol) {
                     stat.reset_status();
                 }
             }
@@ -172,14 +173,14 @@ impl ConcurrentSegmentManager {
         // Update server stats if available
         if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
             && let Some(url) = self.mirror_urls.get(idx)
+            && let Some((host, protocol)) = extract_host_and_protocol(url)
         {
-            let host = extract_host_from_url(url);
             // Ensure stat exists before marking failure
-            stat_man.get_or_create(&host);
-            stat_man.mark_failure(&host, error_code);
+            stat_man.get_or_create_with_protocol(&host, &protocol);
+            stat_man.mark_failure_with_protocol(&host, &protocol, error_code);
 
             // Check if mirror should be disabled
-            if let Some(stat) = stat_man.find_stat(&host)
+            if let Some(stat) = stat_man.find_stat_by_protocol(&host, &protocol)
                 && !stat.is_available()
             {
                 // Mirror is in cooldown, disable it temporarily
@@ -213,15 +214,7 @@ impl ConcurrentSegmentManager {
 
 /// Extract host from URL (helper function).
 pub(crate) fn extract_host_from_url(url: &str) -> String {
-    let url = url.trim();
-    if !url.contains("://") {
-        return url.to_string();
-    }
-    let after_scheme = &url[url.find("://").unwrap() + 3..];
-    let host_part = if let Some(slash_idx) = after_scheme.find('/') {
-        &after_scheme[..slash_idx]
-    } else {
-        after_scheme
-    };
-    host_part.to_string()
+    extract_host_and_protocol(url)
+        .map(|(host, _)| host)
+        .unwrap_or_else(|| url.trim().to_string())
 }

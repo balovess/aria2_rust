@@ -13,6 +13,11 @@ const LARGE_PATTERN: u8 = 0xCD;
 struct FtpSession {
     logged_in: bool,
     passive_listener: Option<TcpListener>,
+    passive_stream: Option<TcpStream>,
+    active_data_addr: Option<SocketAddr>,
+    active_only: bool,
+    requires_cwd: bool,
+    cwd_ready: bool,
     data_host: Option<String>,
     data_port: Option<u16>,
     pasv_advertised_host: [u8; 4],
@@ -29,7 +34,7 @@ pub struct MockFtpServer {
 
 impl MockFtpServer {
     pub async fn start() -> Self {
-        Self::start_with_options([127, 0, 0, 1], None).await
+        Self::start_with_options([127, 0, 0, 1], None, false).await
     }
 
     /// Start a server that emits transfer data in small delayed chunks.
@@ -37,16 +42,37 @@ impl MockFtpServer {
     /// The fixture is intentionally slow enough for lifecycle tests to issue
     /// pause/remove while a real FTP data connection is still active.
     pub async fn start_slow() -> Self {
-        Self::start_with_options([127, 0, 0, 1], Some(Duration::from_millis(5))).await
+        Self::start_with_options([127, 0, 0, 1], Some(Duration::from_millis(5)), false).await
     }
 
     pub async fn start_with_pasv_advertised_host(advertised_host: [u8; 4]) -> Self {
-        Self::start_with_options(advertised_host, None).await
+        Self::start_with_options(advertised_host, None, false).await
+    }
+
+    /// Start a server that rejects passive mode and requires EPRT/PORT.
+    pub async fn start_active() -> Self {
+        Self::start_with_options([127, 0, 0, 1], None, true).await
+    }
+
+    /// Start a server that rejects absolute file paths until the client has
+    /// followed the PWD/CWD negotiation sequence.
+    pub async fn start_requires_cwd() -> Self {
+        Self::start_with_options_and_cwd([127, 0, 0, 1], None, false, true).await
     }
 
     async fn start_with_options(
         advertised_host: [u8; 4],
         transfer_delay: Option<Duration>,
+        active_only: bool,
+    ) -> Self {
+        Self::start_with_options_and_cwd(advertised_host, transfer_delay, active_only, false).await
+    }
+
+    async fn start_with_options_and_cwd(
+        advertised_host: [u8; 4],
+        transfer_delay: Option<Duration>,
+        active_only: bool,
+        requires_cwd: bool,
     ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
@@ -64,6 +90,8 @@ impl MockFtpServer {
                                 let session = tokio::sync::Mutex::new(FtpSession {
                                     pasv_advertised_host: advertised_host,
                                     transfer_delay,
+                                    active_only,
+                                    requires_cwd,
                                     ..FtpSession::default()
                                 });
                                 use tokio::io::AsyncWriteExt;
@@ -160,7 +188,37 @@ impl MockFtpServer {
             sess.binary_mode = true;
             return Some("200 Type set to I\r\n".into());
         }
+        if verb == "EPRT" {
+            let mut fields = args.split('|');
+            let _empty = fields.next()?;
+            let protocol = fields.next()?;
+            let host = fields.next()?;
+            let port = fields.next()?.parse::<u16>().ok()?;
+            let trailing = fields.next()?;
+            if !trailing.is_empty() || fields.next().is_some() || protocol != "1" {
+                return Some("501 Invalid EPRT argument\r\n".into());
+            }
+            let host = host.parse().ok()?;
+            sess.active_data_addr = Some(SocketAddr::new(host, port));
+            return Some("200 EPRT command successful\r\n".into());
+        }
+        if verb == "PORT" {
+            let parts = args
+                .split(',')
+                .map(|part| part.parse::<u8>().ok())
+                .collect::<Option<Vec<_>>>()?;
+            if parts.len() != 6 {
+                return Some("501 Invalid PORT argument\r\n".into());
+            }
+            let host = std::net::Ipv4Addr::new(parts[0], parts[1], parts[2], parts[3]);
+            let port = u16::from(parts[4]) * 256 + u16::from(parts[5]);
+            sess.active_data_addr = Some(SocketAddr::new(host.into(), port));
+            return Some("200 PORT command successful\r\n".into());
+        }
         if verb == "PASV" {
+            if sess.active_only {
+                return Some("502 Passive mode disabled in this fixture\r\n".into());
+            }
             let pasv_listener = TcpListener::bind("127.0.0.1:0").await.ok()?;
             let pasv_addr = pasv_listener.local_addr().ok()?;
             let port = pasv_addr.port();
@@ -176,13 +234,34 @@ impl MockFtpServer {
             ));
         }
         if verb == "SIZE" {
-            if args.contains("notfound") {
+            if args.contains("notfound")
+                || (sess.requires_cwd && (!sess.cwd_ready || args.contains('/')))
+            {
                 return Some("550 File not found\r\n".into());
             }
             let size = Self::file_size(args);
             return Some(format!("213 {}\r\n", size));
         }
+        if verb == "MDTM" {
+            if args.contains("notfound")
+                || (sess.requires_cwd && (!sess.cwd_ready || args.contains('/')))
+            {
+                return Some("550 File not found\r\n".into());
+            }
+            return Some("213 20240115103000\r\n".into());
+        }
         if verb == "REST" {
+            if let Some(listener) = sess.passive_listener.as_ref() {
+                let accepted =
+                    { tokio::time::timeout(Duration::from_secs(1), listener.accept()).await };
+                match accepted {
+                    Ok(Ok((stream, _))) => sess.passive_stream = Some(stream),
+                    _ => return Some("425 Passive data connection is not ready\r\n".into()),
+                }
+            }
+            if sess.passive_stream.is_none() && sess.active_data_addr.is_none() {
+                return Some("503 Prepare a data connection first\r\n".into());
+            }
             if let Ok(offset) = args.parse::<u64>() {
                 sess.rest_offset = offset;
                 return Some("350 Restart position accepted\r\n".into());
@@ -190,16 +269,21 @@ impl MockFtpServer {
             return Some("501 Invalid REST argument\r\n".into());
         }
         if verb == "RETR" {
-            if args.contains("notfound") {
+            if args.contains("notfound")
+                || (sess.requires_cwd && (!sess.cwd_ready || args.contains('/')))
+            {
                 return Some("550 File not found\r\n".into());
             }
 
-            let (listener, _host, _port) = {
-                let l = sess.passive_listener.take()?;
-                let h = sess.data_host.take()?;
-                let p = sess.data_port.take()?;
-                (l, h, p)
-            };
+            let passive_listener = sess.passive_listener.take();
+            let passive_stream = sess.passive_stream.take();
+            sess.data_host.take();
+            sess.data_port.take();
+            let active_data_addr = sess.active_data_addr.take();
+            if passive_stream.is_none() && passive_listener.is_none() && active_data_addr.is_none()
+            {
+                return None;
+            }
 
             let content = Self::get_file_content(args);
             let rest = sess.rest_offset;
@@ -222,7 +306,15 @@ impl MockFtpServer {
             sess.transfer_complete = Some(done_rx);
 
             tokio::spawn(async move {
-                if let Ok((mut data_stream, _addr)) = listener.accept().await {
+                let data_stream = match (passive_stream, passive_listener, active_data_addr) {
+                    (Some(stream), _, None) => Ok(stream),
+                    (None, Some(listener), None) => {
+                        listener.accept().await.map(|(stream, _)| stream)
+                    }
+                    (None, None, Some(addr)) => TcpStream::connect(addr).await,
+                    _ => return,
+                };
+                if let Ok(mut data_stream) = data_stream {
                     if let Some(delay) = transfer_delay {
                         for chunk in actual_content.chunks(16 * 1024) {
                             if data_stream.write_all(chunk).await.is_err() {
@@ -245,6 +337,7 @@ impl MockFtpServer {
             return Some("150 Opening data connection\r\n".into());
         }
         if verb == "CWD" {
+            sess.cwd_ready = true;
             return Some("250 Directory changed\r\n".into());
         }
         if verb == "QUIT" {

@@ -21,6 +21,7 @@ use super::bt_announce::{BtAnnounce, is_udp_tracker};
 use super::types::AnnounceEvent;
 use crate::engine::udp_tracker_client::SharedUdpClient;
 use crate::engine::udp_tracker_manager::UdpTrackerManager;
+use crate::http::client_identity::ClientTlsConfig;
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerFailureKind};
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
 
@@ -68,6 +69,8 @@ pub struct TrackerAnnouncer {
     public_tracker_urls: HashSet<String>,
     /// Failure classification from the most recent announce attempt.
     last_failure_kind: Option<TrackerFailureKind>,
+    /// Existing download TLS settings used by HTTPS tracker announces.
+    http_tls: ClientTlsConfig,
 }
 
 impl TrackerAnnouncer {
@@ -82,6 +85,7 @@ impl TrackerAnnouncer {
             public_tracker_catalog: None,
             public_tracker_urls: HashSet::new(),
             last_failure_kind: None,
+            http_tls: ClientTlsConfig::default(),
         }
     }
 
@@ -96,12 +100,18 @@ impl TrackerAnnouncer {
             public_tracker_catalog: None,
             public_tracker_urls: HashSet::new(),
             last_failure_kind: None,
+            http_tls: ClientTlsConfig::default(),
         }
     }
 
     /// Set the shared UDP client for UDP tracker announces.
     pub fn set_udp_client(&mut self, client: SharedUdpClient) {
         self.udp_client = Some(client);
+    }
+
+    /// Apply the existing aria2-compatible TLS options to HTTP tracker calls.
+    pub(crate) fn set_http_tls_config(&mut self, config: ClientTlsConfig) {
+        self.http_tls = config;
     }
 
     /// Returns true if any announce is ready (stopped, completed, or periodic).
@@ -338,7 +348,7 @@ impl TrackerAnnouncer {
         );
 
         // Send HTTP request
-        match crate::engine::http_tracker_client::build_tracker_client(5) {
+        match crate::engine::http_tracker_client::build_tracker_client_with_tls(5, &self.http_tls) {
             Ok(client) => {
                 match client.get(&url).send().await {
                     Ok(resp) => {

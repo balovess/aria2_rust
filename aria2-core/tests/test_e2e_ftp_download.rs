@@ -150,6 +150,85 @@ async fn test_e2e_ftp_download_small_file() {
 }
 
 #[tokio::test]
+async fn test_e2e_ftp_remote_time_applies_mdtm_timestamp() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let options = DownloadOptions {
+        remote_time: true,
+        ..DownloadOptions::default()
+    };
+
+    let mut cmd =
+        FtpDownloadCommand::new(GroupId::new(102), &url, &options, dir.path().to_str(), None)
+            .expect("FTP remote-time command should construct");
+    cmd.execute()
+        .await
+        .expect("FTP remote-time download should succeed");
+
+    let actual = std::fs::metadata(dir.path().join("small.bin"))
+        .expect("FTP output should exist")
+        .modified()
+        .expect("FTP output should expose mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("FTP mtime should be after the Unix epoch")
+        .as_secs();
+    assert!(
+        actual.abs_diff(1_705_314_600) <= 1,
+        "FTP remote-time should apply MDTM timestamp, got {actual}"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_dry_run_stops_after_metadata_probe() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let options = DownloadOptions {
+        dry_run: true,
+        ..DownloadOptions::default()
+    };
+
+    let mut cmd =
+        FtpDownloadCommand::new(GroupId::new(103), &url, &options, dir.path().to_str(), None)
+            .expect("FTP dry-run command should construct");
+    cmd.execute().await.expect("FTP dry-run should succeed");
+
+    assert!(cmd.group().status().is_completed());
+    assert_eq!(cmd.group().get_total_length_atomic(), 4);
+    assert_eq!(cmd.group().get_completed_length(), 4);
+    assert!(!dir.path().join("small.bin").exists());
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_connect_timeout_applies_to_silent_control_peer() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accept_task = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let dir = tmp_dir();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let options = DownloadOptions {
+        connect_timeout: Some(1),
+        max_retries: 1,
+        ..DownloadOptions::default()
+    };
+    let mut cmd =
+        FtpDownloadCommand::new(GroupId::new(104), &url, &options, dir.path().to_str(), None)
+            .unwrap();
+
+    let result = tokio::time::timeout(Duration::from_secs(3), cmd.execute())
+        .await
+        .expect("FTP connect timeout should be bounded");
+    assert!(result.is_err());
+    accept_task.abort();
+}
+
+#[tokio::test]
 async fn test_e2e_ftp_checksum_mismatch_restarts_complete_local_file() {
     let server = start_server().await;
     let dir = tmp_dir();
@@ -420,6 +499,53 @@ async fn test_e2e_ftp_550_not_found() {
         err_msg.contains("FileNotFound") || err_msg.contains("not found"),
         "应为FileNotFound错误: {}",
         err_msg
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_active_mode_download() {
+    let server = MockFtpServer::start_active().await;
+    let dir = tmp_dir();
+    let options = DownloadOptions {
+        ftp_pasv: false,
+        ..DownloadOptions::default()
+    };
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", server.addr().port());
+    let mut command =
+        FtpDownloadCommand::new(GroupId::new(103), &url, &options, dir.path().to_str(), None)
+            .expect("active FTP command should construct");
+
+    command
+        .execute()
+        .await
+        .expect("active FTP download should complete");
+    assert_eq!(
+        std::fs::read(dir.path().join("small.bin")).unwrap(),
+        small_content()
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_download_uses_pwd_cwd_before_file_commands() {
+    let server = MockFtpServer::start_requires_cwd().await;
+    let dir = tmp_dir();
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin", server.addr().port());
+    let mut command = FtpDownloadCommand::new(
+        GroupId::new(107),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("FTP command should construct");
+
+    command
+        .execute()
+        .await
+        .expect("FTP download should use CWD before SIZE and RETR");
+    assert_eq!(
+        std::fs::read(dir.path().join("small.bin")).unwrap(),
+        small_content()
     );
 }
 

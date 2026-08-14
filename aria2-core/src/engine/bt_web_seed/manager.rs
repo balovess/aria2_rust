@@ -6,6 +6,7 @@ use tracing::{debug, warn};
 
 use super::client::WebSeedClient;
 use super::stats::WebSeedStats;
+use crate::http::client_identity::ClientTlsConfig;
 
 /// Manages multiple web-seed endpoints with automatic fallback.
 ///
@@ -45,6 +46,21 @@ impl WebSeedManager {
     /// );
     /// ```
     pub fn new(urls: Vec<String>, piece_length: u32, total_length: u64) -> Self {
+        Self::new_with_tls(
+            urls,
+            piece_length,
+            total_length,
+            &ClientTlsConfig::default(),
+        )
+        .expect("web-seed HTTP client configuration must be valid")
+    }
+
+    pub(crate) fn new_with_tls(
+        urls: Vec<String>,
+        piece_length: u32,
+        total_length: u64,
+        tls: &ClientTlsConfig,
+    ) -> Result<Self, String> {
         debug!(
             count = urls.len(),
             "Creating WebSeedManager with {} seed(s)",
@@ -55,15 +71,15 @@ impl WebSeedManager {
 
         let clients = urls
             .into_iter()
-            .map(|url| WebSeedClient::with_shared_stats(&url, stats.clone()))
-            .collect();
+            .map(|url| WebSeedClient::with_shared_stats_and_tls(&url, stats.clone(), tls))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        Self {
+        Ok(Self {
             clients,
             stats,
             piece_length,
             total_length,
-        }
+        })
     }
 
     /// Get the shared statistics.

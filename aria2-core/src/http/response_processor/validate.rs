@@ -17,6 +17,7 @@
 
 use crate::error::{Aria2Error, RecoverableError};
 use crate::http::header_processor::HttpResponseHead;
+use crate::http::response::is_redirect_status;
 use crate::http::response_processor::range::{parse_content_range, validate_response_range};
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ pub fn validate_response(
     match status {
         200 | 206 => validate_200_206(response_head, ctx, status),
         304 => validate_304(ctx),
-        300 | 301 | 302 | 303 | 307 | 308 => validate_redirect(response_head, status),
+        status if is_redirect_status(status) => validate_redirect(response_head, status),
         _ if status >= 400 => {
             // 4xx/5xx: accepted, handled by skip_response downstream.
             Ok(())

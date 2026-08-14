@@ -275,7 +275,11 @@ async fn create_command_for_uri(
         }
         cmd.set_dns_cache(Arc::clone(dns_cache));
         if let Some((hostname, port)) = direct_origin(uri)
-            && let Ok(addresses) = dns_cache.lock().await.resolve(&hostname, port).await
+            && let Ok(addresses) = dns_cache
+                .lock()
+                .await
+                .resolve_with_refresh(&hostname, port)
+                .await
         {
             cmd.set_resolved_addresses(addresses);
         }
@@ -287,7 +291,12 @@ async fn create_command_for_uri(
     let group_output_name = group.recover().output_name();
     let output_name = group_output_name.as_deref().or(options.out.as_deref());
     let resolved_addresses = if let Some((hostname, port)) = direct_origin(uri) {
-        dns_cache.lock().await.resolve(&hostname, port).await.ok()
+        dns_cache
+            .lock()
+            .await
+            .resolve_with_refresh(&hostname, port)
+            .await
+            .ok()
     } else {
         None
     };

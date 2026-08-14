@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
-use crate::error::Result;
+use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::http::AuthResolveOptions;
 use crate::http::HttpRequestPolicy;
@@ -17,6 +17,20 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 pub use pipeline::execute_with_coordinator;
 pub use segment::execute;
+
+/// Map a completed HTTP attempt to the status code recorded by mirror stats.
+///
+/// The download error remains the source of truth for callers. This helper
+/// only supplies the best structured status available to the internal mirror
+/// scheduler; errors without an HTTP status retain the existing 500 fallback.
+pub(crate) fn server_stat_error_code(error: &Aria2Error) -> u16 {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) => *code,
+        Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. }) => 416,
+        Aria2Error::Recoverable(RecoverableError::Timeout) => 408,
+        _ => crate::constants::HTTP_DEFAULT_ERROR_CODE,
+    }
+}
 
 /// Outcome of a concurrent download attempt.
 pub enum ConcurrentDownloadResult {
@@ -157,5 +171,45 @@ impl ConcurrentDownloader {
             )
             .await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_stat_error_code;
+    use crate::error::{Aria2Error, RecoverableError};
+
+    #[test]
+    fn server_stat_error_code_preserves_structured_http_statuses() {
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 429
+            })),
+            429
+        );
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(
+                RecoverableError::RangeNotSatisfiable {
+                    range: "bytes=0-99".to_string(),
+                }
+            )),
+            416
+        );
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(RecoverableError::Timeout)),
+            408
+        );
+    }
+
+    #[test]
+    fn server_stat_error_code_keeps_default_for_non_status_errors() {
+        assert_eq!(
+            server_stat_error_code(&Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "connection reset".to_string(),
+                }
+            )),
+            crate::constants::HTTP_DEFAULT_ERROR_CODE
+        );
     }
 }

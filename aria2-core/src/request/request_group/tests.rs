@@ -54,6 +54,14 @@ fn test_connection_contexts_are_deduplicated_and_reset() {
         second,
     ));
     assert_eq!(group.connection_contexts().len(), 2);
+    assert_eq!(group.latest_connection_context().unwrap().peer_addr, second);
+    group.set_connection_context(crate::network::ConnectionContext::new(
+        "example.test",
+        80,
+        first,
+    ));
+    assert_eq!(group.latest_connection_context().unwrap().peer_addr, first);
+    assert_eq!(group.connection_contexts().len(), 2);
     group.clear_connection_contexts();
     assert!(group.connection_contexts().is_empty());
 }

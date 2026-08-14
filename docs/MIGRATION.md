@@ -30,6 +30,11 @@
 | 2026-08-13 | Metalink 普通 payload 生命周期补齐：响应体流式写盘，暂停/移除 finalize writer 并强制保存 Rust `A2CF` checkpoint，恢复使用持久化前缀发出 Range，成功完成删除 checkpoint，整文件 hash 与 `<pieces>` 校验改为流式读取；`deep_e2e_cross_protocol` 为 `8 passed`，专用生命周期 E2E 为 `2 passed`，整体 Metalink 与迁移仍为 PARTIAL |
 | 2026-08-13 | Metalink torrent graph 增加真实 engine 生命周期证据：`EngineCommand::AddMetalinkGraph` 提交 metadata/payload graph，metadata 只请求一次，`BtDependency` 在 promotion 前安装 Rust torrent context 和 Metalink 输出映射，payload 通过 web-seed 完成；专用 E2E 为 `13 passed, 0 failed, 2 ignored`，整体 Metalink 与迁移仍为 PARTIAL |
 
+| 2026-08-14 | Client TLS transport increment: the existing `check-certificate`, `ca-certificate`, `certificate`, and `private-key` values now flow through one Rust-owned TLS helper in primary HTTP/HTTPS, Metalink HTTP, production BitTorrent HTTP tracker, and BT web-seed clients. Strict PEM parsing, multi-root CA loading, verification-disabled mode, separate PEM identity validation, legacy empty-password PKCS#12 mutual TLS, and PBES2/AES-256-CBC empty-password PFX construction are covered (`15 passed, 0 failed`). No option name, default, user configuration, RPC/CLI wire behavior, or product version changed. AES-128/192-CBC, AES-GCM, alternative PBKDF2 PRFs, plaintext keyBag, unsupported bag types, and the complete original-client HTTPS matrix remain open; the migration remains PARTIAL |
+| 2026-08-14 | FTP production path now performs the original `PWD` -> directory-level `CWD` -> file-name `SIZE`/`RETR` sequence through shared Rust path helpers, establishes passive data TCP before `REST`, prepares the active listener before `REST`, and sends `REST 0` for fresh downloads. Production FTP E2E is `32 passed, 0 failed, 2 ignored`; negotiation is `39 passed` and FTP integration is `13 passed`. No option, default, user configuration, product version, or original-client wire contract changed; third-party FTP/FTPS and multi-homed interoperability remain open. |
+| 2026-08-14 | FTP `remote-time` now follows the original production order: after `PWD`/`CWD` and before `SIZE`, the Rust command queries optional `MDTM`, parses the RFC 3659 timestamp through the shared FTP parser, and applies it after releasing the writer handle. FTP `dry-run` now stops after `SIZE` metadata discovery without `REST`/`RETR`; the existing `connect-timeout` value now bounds the control connection and greeting. The local FTP E2E is `35 passed, 0 failed, 2 ignored`; unsupported or malformed optional `MDTM` responses remain non-fatal. No option, default, user configuration, product version, or original-client wire contract changed; FTP/FTPS remains `PARTIAL` pending third-party and original-client interoperability. |
+| 2026-08-14 | 修复 reserved 下载的暂停竞态：promotion 现在在同一 Rust 写锁内检查状态并只允许 `Waiting` 进入 `Active`；即使 pause flag 已被消费，`Paused` group 也会保留在 reserved queue，必须显式 unpause 后重新 promotion。新增竞态回归，RequestGroupMan `31 passed`，C API 生命周期 `3 passed`，core all-features 并行 lib `3355 passed, 0 failed, 1 ignored`，未修改配置、默认值、产品版本或外部 wire 行为；整体迁移仍为 PARTIAL |
+
 | 2026-08-13 | BitTorrent promotion now validates external `DownloadContext` identity by torrent info-hash; mismatched session or dependency contexts are rebuilt from the current torrent, preventing stale piece hashes, paths, and mirror mappings. Constructor verification is `37 passed, 0 failed`; the migration remains PARTIAL |
 
 | 2026-08-14 | 清理未使用的旧 Rust `aria2-core::option::OptionHandler`：workspace、examples、bindings 和生产代码均无调用，仅有自身 8 个测试；删除重复默认表、自动类型推断和旧配置加载实现，保留 canonical `config::OptionRegistry`/`ConfigParser` 作为唯一配置 seam。当前 core all-features 复跑为 `3355 passed, 0 failed, 1 ignored`，RPC library `228 passed`，CLI all-features tests、相关 Clippy、fmt 和 diff check 通过；未修改用户配置、默认值、RPC/CLI wire 行为或产品版本，整体迁移仍为 PARTIAL |
@@ -40,6 +45,10 @@
 
 | 2026-08-14 | SFTP 完整性校验生命周期增量：对照 `SftpNegotiationCommand` 与 `ChecksumCheckIntegrityEntry`，Rust SFTP 现在在传输完成前验证 `checksum`，并对已有完整本地文件先校验；匹配时不重复读取远端，失败时回到远端下载路径，只有校验成功才完成 group 并清理 checkpoint；SFTP E2E `12 passed, 0 failed`，未修改配置、默认值、产品版本或外部 wire 行为，SFTP 与整体迁移仍为 PARTIAL |
 | 2026-08-14 | BitTorrent 多文件完整性校验增量：新增真实多文件 torrent E2E，验证横跨两个物理文件的 piece 在 `check-integrity` 后只重新请求损坏 piece，并保留最终文件映射；同时移除无 workspace 生产调用方的旧 FTP `file_preparation` 复制层，FTP 运行时仍由 Rust-owned command 直接完成 SIZE、resume、checksum 和 writer 生命周期，未修改配置或外部 wire 行为，整体迁移仍为 PARTIAL |
+| 2026-08-14 | 顺序 HTTP 条件 GET 修复：统一复用 Rust 内部精确重定向状态集合 `300/301/302/303/307/308`，排除 `304 Not Modified`，避免无 `Location` 的合法缓存响应被误判为重定向；无条件 `304` 按原版校验为 HTTP protocol error；新增本地 HTTP 下载回归，HTTP 响应/校验定向测试 `88 passed`、真实 `304` 行为回归 `2 passed`，未修改配置、默认值、产品版本或 RPC wire 行为，HTTP 与整体迁移仍为 PARTIAL |
+| 2026-08-14 | DNS 候选耗尽刷新：新增 Rust-owned `DnsCache::resolve_with_refresh`，HTTP task spawner 与 FTP control retry 共用“全候选标坏后清除 endpoint 并重新解析”的 seam；新增 localhost 刷新回归，未修改配置、默认值、产品版本或 RPC wire 行为，HTTP/DNS 与整体迁移仍为 PARTIAL |
+| 2026-08-14 | 顺序 HTTP 认证重定向修复：认证重试后的 `3xx` 返回有界重定向动作，复用既有重定向计数、URI 跟踪和 cookie 路径；认证工厂在同一任务内保持激活状态，Basic 保护空间按请求目录限定；真实 `401 -> 302 -> 200` 下载回归与 `engine::download_command` `26 passed`、core Clippy 通过，未修改配置、默认值、产品版本或 RPC wire 行为，HTTP 与整体迁移仍为 PARTIAL |
+| 2026-08-14 | 修复 DNS 超时归因：RequestGroup 保留 peer 历史但 housekeeping 只标记最近活动 peer，避免并发/镜像任务把所有历史候选批量标坏；RequestGroup `95 passed`、engine loop `14 passed`、Clippy/fmt/diff check 通过，reqwest 连接建立失败仍无法精确暴露选定地址，DNS/HTTP 与整体迁移仍为 PARTIAL |
 
 ## 2026-08-14 Configuration and Validation Checkpoint
 
@@ -59,6 +68,73 @@ with `-D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed
 on 2026-08-14. This checkpoint does not close the overall migration; the
 external-client, complete protocol, workspace E2E, and benchmark gates remain
 open.
+
+## 2026-08-14 Client TLS transport checkpoint
+
+The existing `check-certificate`, `ca-certificate`, `certificate`, and
+`private-key` values are now applied through one Rust-owned helper in the
+primary HTTP/HTTPS command, every Metalink HTTP client construction path, and
+the production BitTorrent HTTP tracker and web-seed clients. The helper
+validates the PEM CA bundle strictly, installs every parsed root, accepts both
+the explicit PEM certificate/private-key form and the original empty-password
+PKCS#12 single-file form, preserves the PFX certificate chain, and returns
+configuration errors at client construction. This is an internal Rust
+transport seam; it does not copy the C++ TLS context or alter the public
+configuration contract. A checked-in Rustls fixture now exercises the same
+seam against a live local HTTPS server: custom CA verification, disabled
+server-certificate verification, separate PEM mutual TLS, and legacy single-file
+PKCS#12 mutual TLS all complete successfully. A checked-in modern fixture also
+constructs a reqwest identity from PBES2/AES-256-CBC PFX data. AES-128/192-CBC,
+AES-GCM, alternative PBKDF2 PRFs, plaintext keyBag, unsupported bag types, and
+the broader original-client HTTPS matrix remain open.
+
+~~~text
+cargo test -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
+  15 passed, 0 failed
+cargo test -p aria2-core --lib engine::http_tracker_client --all-features -- --test-threads=1
+  13 passed, 0 failed
+cargo test -p aria2-core --lib engine::bt_tracker_comm::tracker_announce --features bittorrent -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --lib engine::download_command --all-features -- --test-threads=1
+  23 passed, 0 failed
+cargo test -p aria2-core --lib engine::bt_web_seed --all-features -- --test-threads=1
+  14 passed, 0 failed
+cargo test -p aria2-core --lib --all-features -j 1 -- --test-threads=1
+  3358 passed, 0 failed, 1 ignored
+cargo check -p aria2-core --all-features --tests -j 1
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+The empty-password PKCS#12 single-file client certificate form is implemented
+through a pure-Rust adapter. Legacy PFX mutual TLS and modern PBES2/AES-256-CBC
+identity construction are covered. AES-128/192-CBC, AES-GCM, alternative
+PBKDF2 PRFs, plaintext keyBag, unsupported bag types, and complete
+original-client HTTPS interoperability are still required before this area can
+move beyond `PARTIAL`.
+
+#### Retry policy internal seam checkpoint (2026-08-14)
+
+The Rust-owned retry policy now has one millisecond-preserving backoff
+implementation for both `compute_wait` and the direct `wait_duration` seam.
+Custom backoff factors and sub-second test policies no longer pass through a
+second-based truncating implementation. The public `max-tries` contract is
+unchanged: it counts total attempts and `0` remains unlimited. This is internal
+Rust cleanup and does not change option names, defaults, or wire behavior.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --lib engine::retry_policy --all-features -- --test-threads=1
+  16 passed, 0 failed
+cargo test -p aria2-core --test test_retry --all-features -- --test-threads=1
+  15 passed, 0 failed
+cargo test -p aria2-core --test test_error_network --all-features -- --test-threads=1
+  32 passed, 0 failed, 2 ignored
+~~~
 
 ## 对照范围
 
@@ -93,6 +169,76 @@ cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
 These results are focused local-server evidence. They do not close the full
 original-client matrix, third-party FTP/SFTP interoperability, public-key SFTP
 authentication, checksum-integrity callback parity, or workspace acceptance.
+
+## FTP Proxy Production Checkpoint (2026-08-14)
+
+FTP proxy options are now wired into the Rust-owned production FTP command
+without adding a compatibility layer around the C++ implementation. The
+existing option names and defaults remain unchanged:
+
+- `proxy-method=get` sends an absolute `ftp://` request target to an HTTP
+  forward proxy and consumes the response with the shared Rust HTTP header
+  parser.
+- `proxy-method=tunnel` uses HTTP CONNECT and then performs normal Rust FTP or
+  FTPS negotiation through the tunnel.
+- `ftp-proxy-*` credentials take precedence over `all-proxy-*`; `no-proxy`
+  bypasses the proxy at the target-host seam.
+- GET responses use the existing Rust writer, resume offset, checkpoint,
+  checksum, rate-limit, cancellation, and in-memory download paths.
+
+The implementation does not alter user configuration, registry defaults,
+CLI/RPC spellings, the `aria2-rust 0.2.9` version, or public protocol values.
+It also does not claim `.aria2` persistence or internal state compatibility
+with `aria2_original`; only the external compatibility seams are shared.
+
+Verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_ftp_proxy --all-features -- --test-threads=1
+  12 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test test_e2e_ftp_download --all-features -- --test-threads=1
+  35 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --lib ftp::connection::negotiation --all-features -- --test-threads=1
+  39 passed, 0 failed
+~~~
+
+This checkpoint remains focused local-fixture evidence. Third-party proxy
+authentication and routing, redirects, chunked proxy responses, FTPS through
+forward proxies, and the complete original-client/browser matrix still need
+independent interoperability tests before FTP or the overall migration can
+move beyond `PARTIAL`.
+
+## 2026-08-14 FTP remote-time, dry-run, and connect-timeout checkpoint
+
+The production FTP command now keeps the original `remote-time` contract while
+remaining Rust-native internally. After the existing `PWD`/directory-level
+`CWD` traversal, it sends `MDTM <file>` before `SIZE`; a valid
+`YYYYMMDDhhmmss` response is parsed by the shared FTP timestamp seam. Once the
+Rust disk writer has flushed and released its handle, the command applies the
+timestamp to the completed local file. Unsupported, malformed, or unavailable
+optional `MDTM` responses do not turn a valid download into a failure. When
+`dry-run=true`, the command stops after `SIZE`, marks the discovered length as
+complete, and does not create an output file or open a data transfer.
+The existing `connect-timeout` option is used for the control connection and
+greeting instead of a Rust-only fixed timeout; its original default remains
+the registry's 60 seconds.
+
+Verification:
+
+~~~text
+cargo test -p aria2-core --lib ftp::connection::negotiation --all-features -- --test-threads=1
+  39 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_ftp_download --all-features -- --test-threads=1
+  35 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test ftp_integration_test --all-features -- --test-threads=1
+  13 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+~~~
+
+This is a focused FTP behavior checkpoint, not a claim that FTP/FTPS or the
+overall migration is complete. Third-party server, multi-homed process, and
+original-client interoperability evidence remains open.
 
 ## 2026-08-13 BitTorrent MSE/listener checkpoint
 
@@ -613,6 +759,12 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
     - `download_command/mod.rs` × 2（`new_with_group` + `new_with_group_and_client`）
     - `concurrent_download/pipeline.rs` × 3（AdaptiveUriSelector、ConcurrentSegmentManager、MirrorCoordinator）
   - 修改文件：`server_stat_man.rs`、`download_command/mod.rs`、`concurrent_download/pipeline.rs`
+
+2026-08-14 进一步修正并发镜像反馈：成功速度、失败状态和连接数重平衡
+统一通过 `extract_host_and_protocol` 使用 `(hostname, protocol)` 键，避免
+HTTP/HTTPS 同 hostname 写入 host-only 统计后无法被协议化选择器读取。该轮
+`concurrent_segment_manager` 23 项、`mirror_coordinator` 11 项测试通过；DNS
+坏地址完整生命周期仍记录在当前兼容矩阵的 `部分` 状态中。
 
 ##### 5. 全局限速器接线（本轮完成）
 

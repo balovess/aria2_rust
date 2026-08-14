@@ -14,6 +14,7 @@ use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::peer_stats::PeerStats;
 use crate::engine::udp_tracker_client::UdpTrackerClient;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
@@ -109,6 +110,10 @@ impl BtDownloadCommand {
 
         let enable_public_trackers =
             { self.group.recover().options().enable_public_trackers } && !self.is_private;
+        let tracker_tls = {
+            let group = self.group.recover();
+            ClientTlsConfig::from_download_options(group.options())
+        };
         let public_tracker_catalog = self.public_trackers.clone();
         if enable_public_trackers && let Some(catalog) = public_tracker_catalog.as_ref() {
             let public_entries = catalog.available_snapshot().await;
@@ -134,6 +139,7 @@ impl BtDownloadCommand {
 
         tracker_tiers = super::deduplicate_tracker_tiers(tracker_tiers);
         let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &Some(meta.announce.clone()));
+        announcer.set_http_tls_config(tracker_tls);
         if let Some(catalog) = public_tracker_catalog {
             announcer.set_public_tracker_catalog(catalog, self.public_tracker_urls.clone());
         }

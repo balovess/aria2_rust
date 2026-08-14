@@ -370,6 +370,34 @@ fn test_output_path_accessor() {
     );
 }
 
+#[test]
+fn test_new_rejects_invalid_client_identity_configuration() {
+    let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <files>
+    <file name="payload.bin">
+      <size>1</size>
+      <url>http://mirror.example.com/payload.bin</url>
+    </file>
+  </files>
+</metalink>"#;
+    let options = DownloadOptions {
+        certificate: Some("missing-client.pem".to_string()),
+        private_key: Some("missing-client.key".to_string()),
+        ..DownloadOptions::default()
+    };
+
+    let error = match MetalinkDownloadCommand::new(GroupId::new(90), xml, &options, None) {
+        Ok(_) => panic!("invalid client identity must reject Metalink client construction"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Failed to read client certificate")
+    );
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn shared_metaurl_fallback_downloads_one_torrent_for_all_files() {

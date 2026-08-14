@@ -124,7 +124,7 @@ impl MetalinkDownloadCommand {
         let group = RequestGroup::new(gid, urls, options.clone());
         group.set_output_name(file.name.clone());
 
-        let client = build_http_client(options.http_accept_gzip)?;
+        let client = build_http_client(options)?;
 
         if doc.files.len() > 1 {
             info!(
@@ -230,7 +230,7 @@ impl MetalinkDownloadCommand {
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
 
-        let client = build_http_client(options.http_accept_gzip)?;
+        let client = build_http_client(options)?;
 
         let mut commands = Vec::with_capacity(doc.files.len());
 
@@ -336,7 +336,7 @@ impl MetalinkDownloadCommand {
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
 
-        let client = build_http_client(options.http_accept_gzip)?;
+        let client = build_http_client(options)?;
 
         let torrent_metaurls: Vec<_> = file
             .meta_urls
@@ -441,7 +441,7 @@ impl MetalinkDownloadCommand {
             .map(str::to_owned)
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
-        let client = build_http_client(options.http_accept_gzip)?;
+        let client = build_http_client(options)?;
         let mut entries = Vec::with_capacity(files.len());
         let mut grouped_file_infos = Vec::with_capacity(files.len());
         let mut offset = 0u64;
@@ -580,7 +580,7 @@ impl MetalinkDownloadCommand {
         };
         Ok(Self {
             group,
-            client: build_http_client(options.http_accept_gzip)?,
+            client: build_http_client(options)?,
             output_path: path,
             started: false,
             completed: false,
@@ -650,14 +650,16 @@ impl MetalinkDownloadCommand {
 }
 
 /// Build the shared HTTP client for Metalink downloads.
-pub(crate) fn build_http_client(accept_gzip: bool) -> Result<reqwest::Client> {
+pub(crate) fn build_http_client(options: &DownloadOptions) -> Result<reqwest::Client> {
     crate::http::client_pool::ensure_rustls_provider();
-    reqwest::Client::builder()
+    let client_tls = crate::http::client_identity::ClientTlsConfig::from_download_options(options);
+    let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
         .timeout(Duration::from_secs(300))
-        .gzip(accept_gzip)
+        .gzip(options.http_accept_gzip)
         .user_agent(crate::constants::USER_AGENT)
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::limited(5));
+    crate::http::client_identity::apply(builder, &client_tls)?
         .build()
         .map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!(

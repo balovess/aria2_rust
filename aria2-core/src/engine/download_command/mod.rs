@@ -242,6 +242,8 @@ impl DownloadCommand {
         // provider. The DNS-cache and proxy branches build custom clients
         // instead of reusing the global pool client.
         crate::http::client_pool::ensure_rustls_provider();
+        let client_tls =
+            crate::http::client_identity::ClientTlsConfig::from_download_options(options);
         let no_proxy = ![
             options.http_proxy.as_deref(),
             options.https_proxy.as_deref(),
@@ -250,6 +252,7 @@ impl DownloadCommand {
         .into_iter()
         .flatten()
         .any(|proxy| !proxy.is_empty());
+        let has_custom_tls = client_tls.requires_custom_client();
         let client = if no_proxy {
             if let Some(addresses) = resolved_addresses.as_deref()
                 && !addresses.is_empty()
@@ -259,51 +262,47 @@ impl DownloadCommand {
                         "Unable to extract HTTP hostname for DNS cache override".to_string(),
                     ))
                 })?;
-                Arc::new(
-                    reqwest::Client::builder()
-                        .connect_timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                        ))
-                        .timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                        ))
-                        .gzip(options.http_accept_gzip)
-                        .user_agent(constants::USER_AGENT)
-                        .redirect(reqwest::redirect::Policy::none())
-                        .resolve_to_addrs(&host, addresses)
-                        .build()
-                        .map_err(|e| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Failed to build HTTP client with DNS cache: {e}"
-                            )))
-                        })?,
-                )
-            } else if options.http_accept_gzip {
-                Arc::new(
-                    reqwest::Client::builder()
-                        .connect_timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                        ))
-                        .timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                        ))
-                        .gzip(true)
-                        .user_agent(constants::USER_AGENT)
-                        .redirect(reqwest::redirect::Policy::none())
-                        .pool_max_idle_per_host(constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
-                        .pool_idle_timeout(Some(Duration::from_secs(
-                            constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
-                        )))
-                        .tcp_keepalive(Some(Duration::from_secs(
-                            constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
-                        )))
-                        .build()
-                        .map_err(|error| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Failed to build gzip-enabled HTTP client: {error}"
-                            )))
-                        })?,
-                )
+                let builder = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                    ))
+                    .timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                    ))
+                    .gzip(options.http_accept_gzip)
+                    .user_agent(constants::USER_AGENT)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .resolve_to_addrs(&host, addresses);
+                let builder = crate::http::client_identity::apply(builder, &client_tls)?;
+                Arc::new(builder.build().map_err(|e| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Failed to build HTTP client with DNS cache: {e}"
+                    )))
+                })?)
+            } else if options.http_accept_gzip || has_custom_tls {
+                let builder = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                    ))
+                    .timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                    ))
+                    .gzip(options.http_accept_gzip)
+                    .user_agent(constants::USER_AGENT)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .pool_max_idle_per_host(constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
+                    .pool_idle_timeout(Some(Duration::from_secs(
+                        constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+                    )))
+                    .tcp_keepalive(Some(Duration::from_secs(
+                        constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+                    )));
+                let builder = crate::http::client_identity::apply(builder, &client_tls)?;
+                Arc::new(builder.build().map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Failed to build HTTP client: {error}"
+                    )))
+                })?)
             } else {
                 crate::http::client_pool::get_global_client()
             }
@@ -388,6 +387,7 @@ impl DownloadCommand {
                 }
             }
 
+            let builder = crate::http::client_identity::apply(builder, &client_tls)?;
             let client = builder.build().map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                     "Failed to build HTTP client: {}",

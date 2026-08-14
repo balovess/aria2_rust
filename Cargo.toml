@@ -45,6 +45,7 @@ rand = "0.8"
 tempfile = "3.8"
 rustls = { version = "0.23", default-features = false }
 rustls-pemfile = "2.1"
+p12_q3 = "0.8"
 
 [workspace.metadata.release]
 # Release workflow settings

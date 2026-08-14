@@ -21,8 +21,10 @@ const TRACKER_REQUEST_TIMEOUT_SECS: u64 = 5;
 /// Sends an HTTP/HTTPS GET request to the tracker with standard announce parameters
 /// and parses the response to extract peer information.
 ///
-/// This function automatically detects HTTPS URLs and uses TLS when required.
-/// reqwest supports HTTPS natively via its default features (native-tls).
+/// This function automatically detects HTTPS URLs and uses the Rustls
+/// transport when required. It is a standalone helper without a
+/// `DownloadOptions` owner, so the production command path uses
+/// `TrackerAnnouncer` when per-download TLS settings are available.
 ///
 /// # Arguments
 /// * `tracker_url` - The announce URL of the public tracker (http:// or https://)

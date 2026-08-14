@@ -51,14 +51,7 @@ pub(crate) fn percent_decode(s: &str) -> String {
 /// Percent-encoded sequences in the path are decoded before returning,
 /// matching the C++ `util::percentDecode()` applied before CWD commands.
 pub(super) fn extract_directory_part(remote_path: &str) -> String {
-    if remote_path.is_empty() {
-        return String::new();
-    }
-    let decoded = percent_decode(remote_path);
-    match decoded.rfind('/') {
-        Some(idx) => decoded[..idx].to_string(),
-        None => String::new(),
-    }
+    split_remote_path(remote_path).0
 }
 
 /// Extract the file name part of a remote path, with percent-decoding.
@@ -70,14 +63,58 @@ pub(super) fn extract_directory_part(remote_path: &str) -> String {
 /// Percent-encoded sequences in the file name are decoded before returning,
 /// matching the C++ `util::percentDecode()` applied before RETR commands.
 pub(super) fn extract_file_part(remote_path: &str) -> String {
+    split_remote_path(remote_path).1
+}
+
+/// Split a URL-encoded FTP path into decoded directory and file parts.
+pub(crate) fn split_remote_path(remote_path: &str) -> (String, String) {
+    split_decoded_remote_path(&percent_decode(remote_path))
+}
+
+/// Split an already-decoded FTP path into directory and file parts.
+///
+/// The production download command decodes its URI once while constructing
+/// the request. Keeping this variant explicit prevents a second percent
+/// decode when the command later switches to the FTP working directory.
+pub(crate) fn split_decoded_remote_path(remote_path: &str) -> (String, String) {
     if remote_path.is_empty() {
-        return String::new();
+        return (String::new(), String::new());
     }
-    let decoded = percent_decode(remote_path);
-    match decoded.rfind('/') {
-        Some(idx) => decoded[idx + 1..].to_string(),
-        None => decoded,
+
+    match remote_path.rfind('/') {
+        Some(idx) => (
+            remote_path[..idx].to_string(),
+            remote_path[idx + 1..].to_string(),
+        ),
+        None => (String::new(), remote_path.to_string()),
     }
+}
+
+/// Return the CWD commands required by the original FTP negotiation order.
+///
+/// The base working directory is one command, followed by each non-empty URI
+/// directory component. This preserves the original command sequence while
+/// keeping path traversal independent from any particular control adapter.
+pub(crate) fn cwd_targets(base_working_dir: &str, dir_path: &str) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if !base_working_dir.is_empty() {
+        dirs.push(base_working_dir.to_string());
+    }
+    dirs.extend(
+        dir_path
+            .split('/')
+            .filter(|component| !component.is_empty())
+            .map(str::to_owned),
+    );
+    dirs
+}
+
+/// Parse the quoted path from a successful FTP `PWD` response.
+pub(crate) fn parse_pwd_response(response: &str) -> Option<String> {
+    let message = response.trim();
+    let start = message.find('"')?;
+    let end = message.rfind('"')?;
+    (end > start).then(|| message[start + 1..end].to_string())
 }
 
 // =============================================================================
@@ -145,7 +182,7 @@ pub(super) fn parse_epsv_response(response: &str) -> Option<u16> {
 }
 
 /// Parse MDTM timestamp `YYYYMMDDhhmmss` to `SystemTime` (UTC).
-pub(super) fn parse_mdtm_timestamp(s: &str) -> Option<SystemTime> {
+pub(crate) fn parse_mdtm_timestamp(s: &str) -> Option<SystemTime> {
     if s.len() < 14 {
         return None;
     }
@@ -290,21 +327,12 @@ pub(super) async fn query_pwd(ctrl: &mut FreshControl) -> Result<String> {
         ));
     }
 
-    // Parse 257 "/path" current directory
-    let msg = resp.1.trim();
-    if let Some(start) = msg.find('"')
-        && let Some(end) = msg.rfind('"')
-        && end > start
-    {
-        Ok(msg[start + 1..end].to_string())
-    } else {
-        // C++ throws FTP_PROTOCOL_ERROR if no quotes found
-        Err(Aria2Error::Recoverable(
-            RecoverableError::FtpProtocolError {
-                message: format!("PWD response missing quoted path: {}", msg),
-            },
-        ))
-    }
+    // C++ throws FTP_PROTOCOL_ERROR if no quotes are found.
+    parse_pwd_response(&resp.1).ok_or_else(|| {
+        Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+            message: format!("PWD response missing quoted path: {}", resp.1.trim()),
+        })
+    })
 }
 
 /// CWD traversal on a fresh control connection.
@@ -321,20 +349,7 @@ pub(super) async fn cwd_traversal(
 ) -> Result<()> {
     use tracing::{debug, info};
 
-    // Build the CWD queue: baseWorkingDir first, then each dir component
-    let mut dirs: Vec<&str> = Vec::new();
-
-    // Add base working dir if not root
-    if base_working_dir != "/" && !base_working_dir.is_empty() {
-        dirs.push(base_working_dir);
-    }
-
-    // Split directory path into components (skip empty segments from //)
-    for component in dir_path.split('/') {
-        if !component.is_empty() {
-            dirs.push(component);
-        }
-    }
+    let dirs = cwd_targets(base_working_dir, dir_path);
 
     debug!("CWD traversal: {} directories to traverse", dirs.len());
 
@@ -514,15 +529,7 @@ pub(super) async fn cwd_traversal_pooled(
 ) -> Result<()> {
     use tracing::{debug, info};
 
-    let mut dirs: Vec<&str> = Vec::new();
-    if base_working_dir != "/" && !base_working_dir.is_empty() {
-        dirs.push(base_working_dir);
-    }
-    for component in dir_path.split('/') {
-        if !component.is_empty() {
-            dirs.push(component);
-        }
-    }
+    let dirs = cwd_targets(base_working_dir, dir_path);
 
     debug!("CWD traversal (pooled): {} directories", dirs.len());
     for dir in &dirs {

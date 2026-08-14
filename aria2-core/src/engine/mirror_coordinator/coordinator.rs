@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
+use crate::selector::feedback_uri_selector::extract_host_and_protocol;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 
 use super::config::MirrorConfig;
-use super::helpers::extract_host;
 
 /// High-level coordinator for multi-mirror downloads.
 ///
@@ -230,9 +230,9 @@ impl MirrorCoordinator {
         self.urls
             .iter()
             .filter_map(|url| {
-                let host = extract_host(url);
+                let (host, protocol) = extract_host_and_protocol(url)?;
                 self.stat_man
-                    .find_stat(&host)
+                    .find_stat_by_protocol(&host, &protocol)
                     .map(|stat| stat.get_avg_speed())
             })
             .max()
@@ -265,8 +265,11 @@ impl MirrorCoordinator {
             None => return self.config.max_connections_per_mirror,
         };
 
-        let host = extract_host(url);
-        let stat = match self.stat_man.find_stat(&host) {
+        let (host, protocol) = match extract_host_and_protocol(url) {
+            Some(endpoint) => endpoint,
+            None => return self.config.max_connections_per_mirror,
+        };
+        let stat = match self.stat_man.find_stat_by_protocol(&host, &protocol) {
             Some(s) => s,
             None => return self.config.max_connections_per_mirror,
         };

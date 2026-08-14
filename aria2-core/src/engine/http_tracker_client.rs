@@ -13,6 +13,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::http::client_identity::ClientTlsConfig;
 use tracing::{debug, info};
 
 /// Tracker announce events as defined in BEP 3 / BEP 15.
@@ -211,12 +212,29 @@ pub fn is_https_tracker(url: &str) -> bool {
 /// # Arguments
 /// * `timeout_secs` - Request timeout in seconds
 pub fn build_tracker_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    build_tracker_client_with_tls(timeout_secs, &ClientTlsConfig::default())
+}
+
+/// Build the HTTP tracker client with the download's existing TLS settings.
+///
+/// Tracker requests are an HTTP transport consumer of the same global
+/// `DownloadOptions` as payload requests. Keeping this function crate-private
+/// preserves the small public tracker helper while ensuring the production
+/// announce path cannot silently drop CA, verification, or client identity
+/// settings.
+pub(crate) fn build_tracker_client_with_tls(
+    timeout_secs: u64,
+    tls: &ClientTlsConfig,
+) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         // aria2 does not advertise compressed tracker responses by default.
         // Keep this independent client aligned with the download clients.
-        .gzip(false)
+        .gzip(false);
+    let builder =
+        crate::http::client_identity::apply(builder, tls).map_err(|error| error.to_string())?;
+    builder
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {}", e))
 }
@@ -344,6 +362,21 @@ mod tests {
     fn test_build_tracker_client_succeeds() {
         let client = build_tracker_client(30);
         assert!(client.is_ok(), "Should build client with valid timeout");
+    }
+
+    #[test]
+    fn test_tracker_client_applies_custom_tls_configuration() {
+        let options = crate::request::request_group::DownloadOptions {
+            ca_certificate: Some("missing-tracker-ca.pem".into()),
+            ..Default::default()
+        };
+        let tls = ClientTlsConfig::from_download_options(&options);
+        let client = build_tracker_client_with_tls(30, &tls);
+        assert!(
+            client
+                .expect_err("missing tracker CA must reject client construction")
+                .contains("Failed to read CA certificate")
+        );
     }
 
     #[test]

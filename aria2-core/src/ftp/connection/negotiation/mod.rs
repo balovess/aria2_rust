@@ -58,7 +58,10 @@ use crate::ftp::connection::types::FtpMode;
 pub use capabilities::ServerCapabilities;
 pub use control::RawFtpControl;
 pub(crate) use control::read_response_impl;
-pub(crate) use parsing::percent_decode;
+pub(crate) use parsing::{
+    cwd_targets, parse_mdtm_timestamp, parse_pwd_response, percent_decode,
+    split_decoded_remote_path,
+};
 
 /// FTP transfer type, matching C++ `PREF_FTP_TYPE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -69,6 +72,8 @@ pub enum FtpTransferType {
     /// ASCII mode - TYPE A. Used for text file transfers with line ending conversion.
     Ascii,
 }
+
+pub(super) use crate::ftp::connection::active_data_bind_addr;
 
 /// Configuration for proxying the PASV data channel through an HTTP CONNECT tunnel.
 ///

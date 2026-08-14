@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod auth_challenge_handler;
+pub(crate) mod client_identity;
 pub mod client_pool;
 pub mod conditional_get;
 pub mod connection;

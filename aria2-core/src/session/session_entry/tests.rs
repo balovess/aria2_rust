@@ -490,6 +490,8 @@ fn test_download_options_to_map_all_fields() {
         no_want_digest_header: true,
         check_certificate: false,
         ca_certificate: Some("/tmp/ca.pem".to_string()),
+        certificate: None,
+        private_key: None,
         min_tls_version: Some("TLSv1.3".to_string()),
         // Metalink
         metalink_version: None,

@@ -13,6 +13,13 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 use url::Url;
 
+pub(crate) fn request_directory(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(index) => &path[..=index],
+        None => "/",
+    }
+}
+
 use crate::http::request_response::basic_auth;
 
 // ---------------------------------------------------------------------------
@@ -421,18 +428,19 @@ impl AuthConfigFactory {
         if opts.http_auth_challenge {
             // Challenge mode: URL creds -> BasicCred cache -> null
             if !username.is_empty() {
+                let path = request_directory(url.path());
                 self.update_basic_cred(BasicCred::new(
                     username.to_string(),
                     password.to_string(),
                     host.to_string(),
                     port,
-                    url.path().to_string(),
+                    path.to_string(),
                     true,
                 ));
                 return AuthConfig::new(username.to_string(), password.to_string());
             }
             // Look up activated BasicCred
-            let cred = self.find_basic_cred(host, port, url.path());
+            let cred = self.find_basic_cred(host, port, request_directory(url.path()));
             match cred {
                 Some(bc) => AuthConfig::new(bc.user.clone(), bc.password.clone()),
                 None => None,
@@ -590,7 +598,7 @@ impl AuthConfigFactory {
                         ac.password().to_string(),
                         host.to_string(),
                         port,
-                        path.to_string(),
+                        "/".to_string(),
                         true,
                     ));
                     info!(

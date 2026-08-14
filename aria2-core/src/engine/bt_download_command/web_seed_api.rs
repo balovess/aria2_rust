@@ -1,6 +1,7 @@
 use tracing::info;
 
 use super::BtDownloadCommand;
+use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
     /// Initialize the web seed manager if web seeds are configured.
@@ -11,11 +12,24 @@ impl BtDownloadCommand {
                 "Initializing web seed manager with {} URL(s)",
                 self.web_seed_urls.len()
             );
-            self.web_seed_manager = Some(crate::engine::bt_web_seed::WebSeedManager::new(
+            let tls = {
+                let group = self.group.recover();
+                crate::http::client_identity::ClientTlsConfig::from_download_options(
+                    group.options(),
+                )
+            };
+            match crate::engine::bt_web_seed::WebSeedManager::new_with_tls(
                 self.web_seed_urls.clone(),
                 piece_length,
                 total_length,
-            ));
+                &tls,
+            ) {
+                Ok(manager) => self.web_seed_manager = Some(manager),
+                Err(error) => tracing::error!(
+                    error = %error,
+                    "Failed to configure web-seed HTTP clients"
+                ),
+            }
         }
     }
 

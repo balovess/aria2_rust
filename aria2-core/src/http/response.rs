@@ -9,6 +9,15 @@ use url::Url;
 use crate::error::{Aria2Error, Result};
 use crate::http::request::HttpMethod;
 
+/// Return whether an HTTP status is one of aria2's redirect statuses.
+///
+/// `304 Not Modified` is intentionally excluded even though it is a 3xx
+/// response. It is handled as a conditional-cache result and has no
+/// `Location` header requirement.
+pub(crate) fn is_redirect_status(status_code: u16) -> bool {
+    matches!(status_code, 300..=303 | 307 | 308)
+}
+
 /// HTTP response struct
 ///
 /// Represents a complete HTTP response, including status code, reason phrase, version, headers, and optional body.
@@ -168,8 +177,7 @@ impl HttpResponse {
     ///
     /// true if the status code is a recognized redirect code AND Location exists
     pub fn is_redirect(&self) -> bool {
-        matches!(self.status_code, 300 | 301 | 302 | 303 | 307 | 308)
-            && self.header("Location").is_some()
+        is_redirect_status(self.status_code) && self.header("Location").is_some()
     }
 
     /// Determine the HTTP method to use when following this redirect.
@@ -365,6 +373,26 @@ mod tests {
             HttpResponse::from_bytes("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
                 .unwrap();
         assert!(!error_resp.is_redirect());
+
+        let not_modified =
+            HttpResponse::from_bytes("HTTP/1.1 304 Not Modified\r\n\r\n".as_bytes()).unwrap();
+        assert!(!not_modified.is_redirect());
+    }
+
+    #[test]
+    fn test_redirect_status_set_matches_aria2() {
+        for status in [300, 301, 302, 303, 307, 308] {
+            assert!(
+                is_redirect_status(status),
+                "status {status} should redirect"
+            );
+        }
+        for status in [304, 305, 306, 309, 399] {
+            assert!(
+                !is_redirect_status(status),
+                "status {status} is not a redirect"
+            );
+        }
     }
 
     #[test]
