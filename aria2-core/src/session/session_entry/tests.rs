@@ -430,6 +430,8 @@ fn test_download_options_to_map_all_fields() {
         secure_falloc: true,
         check_integrity: false,
         hash_check_only: false,
+        bt_enable_hook_after_hash_check: true,
+        bt_hash_check_seed: true,
         bt_tracker: Some(vec![
             "https://tracker.example/announce".to_string(),
             "udp://tracker.example:6969".to_string(),

@@ -139,6 +139,18 @@ pub struct BtDownloadCommand {
     pub(crate) check_integrity: bool,
     /// Only perform the piece hash check and terminate without peer discovery.
     pub(crate) hash_check_only: bool,
+    /// Allow the BitTorrent completion hook/notification when an existing
+    /// payload passes `check-integrity`.
+    pub(crate) bt_enable_hook_after_hash_check: bool,
+    /// Continue into the BitTorrent peer/seed lifecycle after a complete
+    /// payload passes `check-integrity`.
+    pub(crate) bt_hash_check_seed: bool,
+    /// Whether the current command completed from an integrity check rather
+    /// than by downloading missing pieces.
+    pub(crate) hash_check_completed: bool,
+    /// Whether the BT completion event was already emitted at the integrity
+    /// check seam.
+    pub(crate) bt_complete_event_emitted: bool,
 
     // P1/P2 integration fields (all use Option for backward compatibility)
     /// BT progress persistence manager

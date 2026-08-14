@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use aria2_protocol::sftp::packet::{
@@ -26,6 +27,7 @@ const FILE_HANDLE: &[u8] = b"aria2-sftp-fixture";
 struct FixtureData {
     content: Arc<[u8]>,
     read_delay: Option<Duration>,
+    read_requests: Arc<AtomicUsize>,
 }
 
 /// A deterministic, protocol-level SFTP server for command E2E tests.
@@ -39,6 +41,7 @@ pub struct MockSftpServer {
     sha1_fingerprint: String,
     shutdown: Option<oneshot::Sender<()>>,
     accept_task: JoinHandle<()>,
+    read_requests: Arc<AtomicUsize>,
 }
 
 impl MockSftpServer {
@@ -62,6 +65,7 @@ impl MockSftpServer {
             .local_addr()
             .expect("mock SFTP listener should expose its address");
         let content: Arc<[u8]> = fixture_content().into();
+        let read_requests = Arc::new(AtomicUsize::new(0));
 
         let mut rng = OsRng;
         let host_key = PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
@@ -81,6 +85,7 @@ impl MockSftpServer {
         let fixture = Arc::new(FixtureData {
             content: Arc::clone(&content),
             read_delay,
+            read_requests: Arc::clone(&read_requests),
         });
         let (shutdown, mut shutdown_rx) = oneshot::channel();
         let accept_task = tokio::spawn(async move {
@@ -110,6 +115,7 @@ impl MockSftpServer {
             sha1_fingerprint,
             shutdown: Some(shutdown),
             accept_task,
+            read_requests,
         }
     }
 
@@ -131,6 +137,10 @@ impl MockSftpServer {
 
     pub fn content(&self) -> &[u8] {
         &self.content
+    }
+
+    pub fn read_requests(&self) -> usize {
+        self.read_requests.load(Ordering::Relaxed)
     }
 
     /// Uses the `aria2_original` `--ssh-host-key-md` SHA-1 wire format.
@@ -219,6 +229,7 @@ impl MockSftpHandler {
         offset: u64,
         length: u32,
     ) -> SftpPacket {
+        self.fixture.read_requests.fetch_add(1, Ordering::Relaxed);
         if handle != FILE_HANDLE {
             return status(request_id, SSH_FX_FAILURE, "Unknown file handle");
         }

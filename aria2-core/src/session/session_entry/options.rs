@@ -84,6 +84,15 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if opts.hash_check_only {
         map.insert("hash-check-only".to_string(), "true".to_string());
     }
+    if !opts.bt_enable_hook_after_hash_check {
+        map.insert(
+            "bt-enable-hook-after-hash-check".to_string(),
+            "false".to_string(),
+        );
+    }
+    if !opts.bt_hash_check_seed {
+        map.insert("bt-hash-check-seed".to_string(), "false".to_string());
+    }
     if let Some(ref v) = opts.metalink_version {
         map.insert("metalink-version".to_string(), v.clone());
     }

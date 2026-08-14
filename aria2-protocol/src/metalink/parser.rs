@@ -20,7 +20,9 @@ impl MetalinkVersion {
 pub enum HashAlgorithm {
     Md5,
     Sha1,
+    Sha224,
     Sha256,
+    Sha384,
     Sha512,
 }
 
@@ -29,7 +31,9 @@ impl HashAlgorithm {
         match s.to_lowercase().as_str() {
             "md5" | "md5sum" => Some(Self::Md5),
             "sha-1" | "sha1" | "sha1sum" => Some(Self::Sha1),
+            "sha-224" | "sha224" | "sha224sum" => Some(Self::Sha224),
             "sha-256" | "sha256" | "sha256sum" => Some(Self::Sha256),
+            "sha-384" | "sha384" | "sha384sum" => Some(Self::Sha384),
             "sha-512" | "sha512" | "sha512sum" => Some(Self::Sha512),
             _ => None,
         }
@@ -39,7 +43,9 @@ impl HashAlgorithm {
         match self {
             Self::Md5 => 32,
             Self::Sha1 => 40,
+            Self::Sha224 => 56,
             Self::Sha256 => 64,
+            Self::Sha384 => 96,
             Self::Sha512 => 128,
         }
     }
@@ -48,7 +54,9 @@ impl HashAlgorithm {
         match self {
             Self::Md5 => "md5",
             Self::Sha1 => "sha-1",
+            Self::Sha224 => "sha-224",
             Self::Sha256 => "sha-256",
+            Self::Sha384 => "sha-384",
             Self::Sha512 => "sha-512",
         }
     }
@@ -305,7 +313,9 @@ impl MetalinkFile {
     pub fn strongest_hash(&self) -> Option<&HashEntry> {
         const PRIORITY: &[HashAlgorithm] = &[
             HashAlgorithm::Sha512,
+            HashAlgorithm::Sha384,
             HashAlgorithm::Sha256,
+            HashAlgorithm::Sha224,
             HashAlgorithm::Sha1,
             HashAlgorithm::Md5,
         ];
@@ -1063,10 +1073,14 @@ mod tests {
     fn test_hash_algorithm_parsing() {
         assert_eq!(HashAlgorithm::parse("md5"), Some(HashAlgorithm::Md5));
         assert_eq!(HashAlgorithm::parse("SHA-256"), Some(HashAlgorithm::Sha256));
+        assert_eq!(HashAlgorithm::parse("sha224"), Some(HashAlgorithm::Sha224));
+        assert_eq!(HashAlgorithm::parse("SHA-384"), Some(HashAlgorithm::Sha384));
         assert_eq!(HashAlgorithm::parse("sha512"), Some(HashAlgorithm::Sha512));
         assert_eq!(HashAlgorithm::parse("unknown"), None);
         assert_eq!(HashAlgorithm::Md5.hash_len(), 32);
+        assert_eq!(HashAlgorithm::Sha224.hash_len(), 56);
         assert_eq!(HashAlgorithm::Sha256.hash_len(), 64);
+        assert_eq!(HashAlgorithm::Sha384.hash_len(), 96);
     }
 
     #[test]

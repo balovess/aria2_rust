@@ -548,7 +548,7 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
     let has_params = params.is_some_and(|encoded| !encoded.is_empty());
     let decoded_params = params.map(|encoded| {
         let decoded = aria2_core::util::uri::percent_decode(encoded);
-        decode_aria2_base64(&decoded)
+        crate::rpc_helpers::decode_aria2_base64(&decoded)
     });
 
     let body = match (method, id) {
@@ -586,54 +586,6 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
         // particular, it does not percent-decode or validate the callback.
         callback: callback.map(str::to_owned),
     }
-}
-
-/// Decode the permissive standard-Base64 stream used by aria2_original.
-/// Invalid alphabet bytes are skipped and malformed input becomes an empty
-/// or partial byte string; JSON parsing later produces the wire-level parse
-/// error. This is deliberately separate from strict RPC parameter decoding.
-fn decode_aria2_base64(input: &str) -> Vec<u8> {
-    use base64::Engine;
-
-    let filtered: Vec<u8> = input
-        .bytes()
-        .filter(|byte| {
-            matches!(
-                byte,
-                b'A'..=b'Z'
-                    | b'a'..=b'z'
-                    | b'0'..=b'9'
-                    | b'+'
-                    | b'/'
-                    | b'='
-            )
-        })
-        .collect();
-
-    if filtered.is_empty() {
-        return Vec::new();
-    }
-
-    let input = if let Some(eq_pos) = filtered.iter().position(|byte| *byte == b'=') {
-        let group_start = eq_pos / 4 * 4;
-        let group_end = group_start + 4;
-        if group_end > filtered.len()
-            || filtered[eq_pos..group_end].iter().any(|byte| *byte != b'=')
-        {
-            return Vec::new();
-        }
-        &filtered[..group_end]
-    } else if filtered.len() % 4 == 1 {
-        // A lone trailing alphabet byte is ignored by aria2_original after
-        // all complete quartets have been decoded.
-        &filtered[..filtered.len() - 1]
-    } else {
-        &filtered
-    };
-
-    base64::engine::general_purpose::STANDARD
-        .decode(input)
-        .unwrap_or_default()
 }
 
 struct JsonRpcHttpResponse {

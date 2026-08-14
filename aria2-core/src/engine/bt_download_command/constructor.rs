@@ -444,6 +444,10 @@ impl BtDownloadCommand {
             secure_falloc: options.secure_falloc,
             check_integrity: options.check_integrity,
             hash_check_only: options.hash_check_only,
+            bt_enable_hook_after_hash_check: options.bt_enable_hook_after_hash_check,
+            bt_hash_check_seed: options.bt_hash_check_seed,
+            hash_check_completed: false,
+            bt_complete_event_emitted: false,
 
             // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,

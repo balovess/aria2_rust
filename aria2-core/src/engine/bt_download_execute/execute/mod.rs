@@ -283,6 +283,24 @@ impl Command for BtDownloadCommand {
                 {
                     warn!(%error, "Failed to rewrite BT checkpoint after integrity checking");
                 }
+
+                // A complete integrity check is a distinct lifecycle from a
+                // normal piece download. The original public contract emits
+                // the BT completion hook at this seam and only continues
+                // into peer/seed setup when bt-hash-check-seed is enabled.
+                if verified_piece_indices.len() == num_pieces as usize && !self.hash_check_only {
+                    self.completed_bytes = total_size;
+                    self.progress.set_completed_length(total_size);
+                    self.hash_check_completed = true;
+                    self.bt_complete_event_emitted = true;
+                    if self.bt_enable_hook_after_hash_check {
+                        crate::engine::download_event_hooks::DownloadEventHooks::shared()
+                            .fire_event(
+                                crate::engine::download_event_hooks::DownloadEvent::BtComplete,
+                                &self.group.recover(),
+                            );
+                    }
+                }
             }
         }
 
@@ -301,6 +319,18 @@ impl Command for BtDownloadCommand {
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "hash-check-only: existing data failed torrent piece hash validation".into(),
             )));
+        }
+
+        // A successful integrity check with seeding disabled is already a
+        // complete download. Finish locally instead of discovering peers or
+        // announcing a new torrent session.
+        if self.hash_check_completed && !self.bt_hash_check_seed {
+            info!(
+                "Integrity check completed; bt-hash-check-seed disabled, stopping without seeding"
+            );
+            let started_at = self.started_at.unwrap_or_else(Instant::now);
+            self.finalize_download(started_at, &meta).await?;
+            return Ok(());
         }
 
         // File pre-allocation (mirrors C++ BtFileAllocationEntry queued into

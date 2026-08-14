@@ -32,6 +32,34 @@
 
 | 2026-08-13 | BitTorrent promotion now validates external `DownloadContext` identity by torrent info-hash; mismatched session or dependency contexts are rebuilt from the current torrent, preventing stale piece hashes, paths, and mirror mappings. Constructor verification is `37 passed, 0 failed`; the migration remains PARTIAL |
 
+| 2026-08-14 | 清理未使用的旧 Rust `aria2-core::option::OptionHandler`：workspace、examples、bindings 和生产代码均无调用，仅有自身 8 个测试；删除重复默认表、自动类型推断和旧配置加载实现，保留 canonical `config::OptionRegistry`/`ConfigParser` 作为唯一配置 seam。当前 core all-features 复跑为 `3355 passed, 0 failed, 1 ignored`，RPC library `228 passed`，CLI all-features tests、相关 Clippy、fmt 和 diff check 通过；未修改用户配置、默认值、RPC/CLI wire 行为或产品版本，整体迁移仍为 PARTIAL |
+
+| 2026-08-14 | RPC XML-RPC 兼容性增量：对照 `aria2_original/src/XmlRpcRequestParserStateImpl.cc` 和 `src/base64.h`，将 `<base64>` 解码收敛到 Rust-owned `rpc_helpers::decode_aria2_base64`，保留原版跳过非字母表字符、宽松输入和 padding 校验语义；新增 parser 回归，RPC XML/HTTP E2E `46 passed`、all-method `55 passed`、server `5 passed`，未修改配置、默认值、产品版本或内部下载架构，RPC 与整体迁移仍为 PARTIAL |
+
+| 2026-08-14 | BitTorrent 完整性校验生命周期增量：对照 `BtCheckIntegrityEntry` 的完成分支，在 Rust-owned command seam 支持 `bt-enable-hook-after-hash-check` 和 `bt-hash-check-seed`；完整 payload 校验成功时按选项触发 BT completion hook，按 seed 选项决定是否进入 tracker/peer 生命周期，并防止完成事件重复发送；新增真实 peer/tracker fixture，BitTorrent E2E `27 passed, 0 failed, 2 ignored`，未修改用户配置、默认值、产品版本或外部 RPC/CLI 名称，BitTorrent 与整体迁移仍为 PARTIAL |
+
+| 2026-08-14 | SFTP 完整性校验生命周期增量：对照 `SftpNegotiationCommand` 与 `ChecksumCheckIntegrityEntry`，Rust SFTP 现在在传输完成前验证 `checksum`，并对已有完整本地文件先校验；匹配时不重复读取远端，失败时回到远端下载路径，只有校验成功才完成 group 并清理 checkpoint；SFTP E2E `12 passed, 0 failed`，未修改配置、默认值、产品版本或外部 wire 行为，SFTP 与整体迁移仍为 PARTIAL |
+| 2026-08-14 | BitTorrent 多文件完整性校验增量：新增真实多文件 torrent E2E，验证横跨两个物理文件的 piece 在 `check-integrity` 后只重新请求损坏 piece，并保留最终文件映射；同时移除无 workspace 生产调用方的旧 FTP `file_preparation` 复制层，FTP 运行时仍由 Rust-owned command 直接完成 SIZE、resume、checksum 和 writer 生命周期，未修改配置或外部 wire 行为，整体迁移仍为 PARTIAL |
+
+## 2026-08-14 Configuration and Validation Checkpoint
+
+The configuration seam now treats `OptionDef::parse_value` as explicit input
+parsing only. Default injection remains an independent
+`ConfigParser::apply_defaults` stage through `parse_default_value`. Boolean
+values stay exact `true`/`false`, empty text enables only a boolean flag, and
+`rpc-secret` rejects an empty explicit value. CLI, config-file, and environment
+input reuse the same typed registry path. No user configuration, product
+default, or `aria2-rust 0.2.9` version surface was changed.
+
+Focused regressions remain green: 42 option tests, 30 parser tests, 48
+config-file tests, 105 CLI tests, 228 RPC library tests, 18 RPC integration
+tests, and 55 all-method RPC E2E tests. The RPC concurrent stress target ran
+10 tests with 0 failures. All-feature Clippy for core, protocol, RPC, and CLI
+with `-D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed
+on 2026-08-14. This checkpoint does not close the overall migration; the
+external-client, complete protocol, workspace E2E, and benchmark gates remain
+open.
+
 ## 对照范围
 
 - `aria2_original/src`：415 个 `.cc` + 115 个 header-only = **530 个对照单元**
@@ -269,7 +297,7 @@ Verification on 2026-08-13:
 
 ~~~text
 cargo test -p aria2 --test test_cli_options --all-features -- --test-threads=1  105 passed
-cargo test -p aria2-core --features 'bittorrent,metalink' --lib option::option_handler::tests::tests::test_to_download_options  PASS
+cargo test -p aria2-core --features 'bittorrent,metalink' --lib request::request_group::tests  PASS
 cargo test -p aria2-core --features 'bittorrent,metalink' --lib config::parser  27 passed
 cargo test -p aria2-core --features 'bittorrent,metalink' --lib metalink_download_command  16 passed
 cargo test -p aria2-rpc --all-features --lib handlers::handler_tests::test_get_version_uses_product_version  PASS
@@ -365,30 +393,32 @@ workspace、原版浏览器插件和完整端到端矩阵已经全部通过。
 **530 / 530 个 C++ 单元已完成逐项源码对照（2026-07-30）。**
 这只表示审计记录覆盖，不表示 Rust 已达到行为兼容、协议互操作或
 workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
+下表按当前 `docs/migration/*.md` 的状态行重算；HTTP 矩阵中的
+`RequestGroup lifecycle` 是一个跨模块补充记录，不计入 530 个 C++ 单元。
 
 | 模块 | 矩阵文件 | 单元数 | 完整 | 部分 | 缺失 | 不适用 |
 |---|---|---|---|---|---|---|
 | auth | migration/auth.md | 7 | 4 | 0 | 0 | 3 |
 | bt_core | migration/bt_core.md | 115 | 61 | 5 | 0 | 49 |
-| checksum | migration/checksum.md | 7 | 2 | 4 | 0 | 1 |
+| checksum | migration/checksum.md | 7 | 3 | 3 | 0 | 1 |
 | command_engine | migration/command_engine.md | 29 | 7 | 7 | 0 | 15 |
 | cookie | migration/cookie.md | 5 | 5 | 0 | 0 | 0 |
-| dht | migration/dht.md | 61 | 39 | 1 | 0 | 21 |
+| dht | migration/dht.md | 61 | 36 | 4 | 0 | 21 |
 | event_socket | migration/event_socket.md | 15 | 0 | 1 | 0 | 14 |
-| ftp | migration/ftp.md | 9 | 7 | 0 | 0 | 2 |
+| ftp | migration/ftp.md | 9 | 2 | 5 | 0 | 2 |
 | http | migration/http.md | 24 | 9 | 5 | 0 | 10 |
-| integrity_alloc | migration/integrity_alloc.md | 5 | 2 | 1 | 0 | 2 |
+| integrity_alloc | migration/integrity_alloc.md | 5 | 3 | 1 | 0 | 1 |
 | io_disk | migration/io_disk.md | 26 | 14 | 2 | 0 | 10 |
 | lpd | migration/lpd.md | 5 | 5 | 0 | 0 | 0 |
 | metalink | migration/metalink.md | 14 | 8 | 3 | 0 | 3 |
-| option | migration/option.md | 13 | 8 | 5 | 0 | 0 |
-| rpc | migration/rpc.md | 18 | 6 | 7 | 0 | 5 |
+| option | migration/option.md | 13 | 7 | 6 | 0 | 0 |
+| rpc | migration/rpc.md | 18 | 2 | 11 | 0 | 5 |
 | segment | migration/segment.md | 3 | 3 | 0 | 0 | 0 |
-| session_app | migration/session_app.md | 33 | 17 | 6 | 0 | 10 |
-| sftp | migration/sftp.md | 6 | 1 | 2 | 0 | 3 |
-| tls_crypto | migration/tls_crypto.md | 26 | 4 | 2 | 0 | 20 |
+| session_app | migration/session_app.md | 33 | 18 | 5 | 0 | 10 |
+| sftp | migration/sftp.md | 6 | 0 | 3 | 0 | 3 |
+| tls_crypto | migration/tls_crypto.md | 26 | 6 | 0 | 0 | 20 |
 | util | migration/util.md | 109 | 38 | 10 | 0 | 61 |
-| **合计** | | **530** | **238** | **63** | **0** | **229** |
+| **合计** | | **530** | **231** | **71** | **0** | **228** |
 
 > "不适用" 占比高（228/530，43%）属预期：C++ 侧大量单元是抽象基类、工厂类、
 > SharedHandle 包装、epoll/kqueue 事件循环封装与平台分支实现，
@@ -397,7 +427,7 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
 
 ### 台账中的 `缺失` 列
 
-台账当前将逐文件缺失列记为 **0 项**。这不是行为缺口为零的证明；
+当前逐文件矩阵将缺失列记为 **0 项**。这不是行为缺口为零的证明；
 例如 C ABI、完整完整性生命周期和部分 E2E 仍在当前状态矩阵中单独跟踪。
 2026-07-31 的历史记录曾处理最后 2 项（Sqlite3CookieParser / Sqlite3CookieParserImpl）——
 引入 `rusqlite`（`bundled` feature，静态编译 SQLite 进二进制，无系统依赖），
@@ -474,14 +504,14 @@ workspace all pass；当前状态请以 docs/compatibility-status.md 为准。
 - **`verify_pieces()` 实现**（aria2-core）：下载完成后按 `<pieces>` 长度逐块校验（md5/sha1/sha256/sha512），块数/摘要长度不匹配即失败；`FileDownloadInfo` 增 `pieces` 字段，单文件与多文件模式均接线；抽出公共 `digest_hex()`。1 个测试（成功/篡改首尾块/块数不匹配/错误长度/空列表 5 种情况）。
 - 全量验证：**4161 passed / 0 failed / 1 ignored**，无卡死。
 
-#### CheckIntegrityMan 队列（P1 #14 修复）
+#### CheckIntegrityMan 队列（P1 #14 修复，历史实现记录）
 
-- **现状**：`CheckIntegrityKind`/`StreamCheckIntegrity`/`BtCheckIntegrity` 校验器实现完整但**零调用方**——HTTP/BT 下载路径直接写文件，从不构建 `PieceStorage`，校验器依赖的抽象不存在（孤儿代码）。
+- **初始现状**：`CheckIntegrityKind`/`StreamCheckIntegrity`/`BtCheckIntegrity` 校验器实现完整但**零调用方**——HTTP/BT 下载路径直接写文件，从不构建 `PieceStorage`，校验器依赖的抽象不存在（孤儿代码）。这一段记录的是修复前审计结论，不是当前状态。
 - **实现**（`checksum/check_integrity/man.rs` 新增，5 测试全绿）：
   - `CheckIntegrityMan`：队列 + 后台 worker（C++ CheckIntegrityMan + Dispatcher + Command 语义），默认串行、分块 `validate_chunk` + `yield_now`、`oneshot` 结果通知、`cancel_all`
   - `CheckIntegrityTask` trait（`Send + Sync`）；`FileChunkValidator`：文件直读分块哈希（不依赖 PieceStorage），短读 → mismatch 而非 I/O 错误（对齐 C++ 不完整文件判失败重下）
   - 陷阱：`passed` 初始必须 true（曾误设 finished 导致正确路径也失败）；`Box<dyn Task>` 进静态共享需 `Send + Sync`；`tokio::fs::File::open` 需 async 包装
-- **接线**：`DownloadOptions.check_integrity` 新增字段 + `option_handler/apply.rs` / RPC `task.rs` / `session.rs` / 测试构造点解析 `--check-integrity`；BT 单文件（prepare_environment 后、预分配前，TorrentMeta sha-1 pieces）与 HTTP（DownloadContext 有 piece hashes 时，如 Metalink）均经 `ci_man::enqueue` 入队；多文件 BT 记录 TODO（需 piece 范围映射）
+- **当前接线**：`DownloadOptions.check_integrity` 通过 canonical `config::OptionRegistry`、RPC task/session 映射和测试构造点解析 `--check-integrity`；BT 单文件与多文件（跨物理文件边界的 piece）以及 HTTP（DownloadContext 有 piece hashes 时，如 Metalink）均经 Rust `ci_man` 入队。FTP/SFTP 使用各自 command 的 Rust checksum 生命周期；旧的无调用方 FTP `file_preparation` 复制层已删除。
 - 全量验证：**4166 passed / 0 failed / 1 ignored**（较上轮 +5），无卡死。
 
 #### Metalink metaurl 兜底（P1 #7 修复）+ initStorage 判定为架构差异

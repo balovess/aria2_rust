@@ -445,12 +445,9 @@ fn read_scalar(
         "dateTime.iso8601" => Ok(XmlRpcValue {
             inner: XmlRpcValueInner::DateTime(text),
         }),
-        "base64" => base64::engine::general_purpose::STANDARD
-            .decode(text.trim())
-            .map(|data| XmlRpcValue {
-                inner: XmlRpcValueInner::Base64(data),
-            })
-            .map_err(|e| XmlRpcError::InvalidParams(format!("invalid base64: {e}"))),
+        "base64" => Ok(XmlRpcValue {
+            inner: XmlRpcValueInner::Base64(crate::rpc_helpers::decode_aria2_base64(&text)),
+        }),
         _ => Err(XmlRpcError::ParseError(format!(
             "unknown XML-RPC type: {tag}"
         ))),
@@ -798,6 +795,21 @@ mod tests {
 
         assert_eq!(value["dir"], serde_json::json!("  /downloads  "));
         assert_eq!(value["seed-ratio"], serde_json::json!("0.99"));
+    }
+
+    #[test]
+    fn test_parse_base64_uses_original_permissive_wire_rules() {
+        let xml = r#"<methodCall><methodName>aria2.addTorrent</methodName><params>
+            <param><value><base64>aG Vs
+bG8g@d29ybGQ=</base64></value></param>
+        </params></methodCall>"#;
+
+        let request = parse_request(xml.as_bytes()).expect("XML-RPC request should parse");
+        let value = request.params[0]
+            .to_json_value()
+            .expect("base64 value should convert to JSON");
+
+        assert_eq!(value, serde_json::json!("aGVsbG8gd29ybGQ="));
     }
 
     #[test]

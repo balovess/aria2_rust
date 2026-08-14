@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
+use crate::checksum::checksum::Checksum;
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -149,14 +150,23 @@ impl Command for SftpDownloadCommand {
                 .unwrap_or(0)
         };
         let continue_download = self.group.recover().options().continue_download;
-        let resume_input_length =
+        let checksum_config = self.group.recover().options().checksum.clone();
+        let complete_local_checksum_candidate =
+            !in_memory_download && existing_length == total_length && checksum_config.is_some();
+        let resume_input_length = if complete_local_checksum_candidate {
+            // aria2_original routes a complete local file with a configured
+            // checksum through ChecksumCheckIntegrityEntry even without
+            // `--continue`; only a failed check returns to remote download.
+            existing_length
+        } else {
             crate::engine::progress_checkpoint::ProgressCheckpoint::resume_input_length(
                 &self.output_path,
                 existing_length,
                 continue_download,
                 total_length,
             )
-            .await;
+            .await
+        };
         Self::validate_resume_offset(resume_input_length, total_length)?;
         if in_memory_download {
             self.checkpoint = None;
@@ -180,6 +190,35 @@ impl Command for SftpDownloadCommand {
             let g = self.group.recover();
             g.set_total_length(total_length);
             g.update_progress(self.completed_bytes);
+        }
+
+        if complete_local_checksum_candidate && self.completed_bytes == total_length {
+            let (algorithm, expected) = checksum_config
+                .as_ref()
+                .expect("complete local checksum candidate has a checksum");
+            let checksum = Checksum::from_type_and_value(algorithm, expected)?;
+            if crate::checksum::checksum::verify_file(&self.output_path, &checksum).await? {
+                self.group.recover().set_checksum_verified(true);
+                self.group.recover().set_completed_length(total_length);
+                self.group.recover_mut().complete()?;
+                self.complete_checkpoint().await;
+                info!(
+                    path = %self.output_path.display(),
+                    size = total_length,
+                    "SFTP target already matches remote size and checksum"
+                );
+                let _ = conn.disconnect().await;
+                return Ok(());
+            }
+
+            warn!(
+                path = %self.output_path.display(),
+                "SFTP target checksum mismatch; restarting from byte zero"
+            );
+            self.completed_bytes = 0;
+            if let Some(checkpoint) = self.checkpoint.as_mut() {
+                checkpoint.update(0, true).await;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -359,6 +398,43 @@ impl Command for SftpDownloadCommand {
                 )));
             }
         };
+
+        // aria2_original schedules ChecksumCheckIntegrityEntry after the
+        // SFTP transfer, including when the local output was already complete.
+        // Keep that verification at the Rust-owned completion seam so the
+        // output is never marked complete before its configured checksum is
+        // known to match.
+        if let Some((algorithm, expected)) = checksum_config {
+            let checksum = match Checksum::from_type_and_value(&algorithm, &expected) {
+                Ok(checksum) => checksum,
+                Err(error) => {
+                    let _ = conn.disconnect().await;
+                    return Err(error);
+                }
+            };
+            let verified = if in_memory_download {
+                checksum.verify(&finalized_data)
+            } else {
+                match crate::checksum::checksum::verify_file(&self.output_path, &checksum).await {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        self.flush_checkpoint().await;
+                        let _ = conn.disconnect().await;
+                        return Err(error);
+                    }
+                }
+            };
+            if !verified {
+                self.flush_checkpoint().await;
+                let _ = conn.disconnect().await;
+                return Err(Aria2Error::Checksum(format!(
+                    "{} checksum mismatch for {}",
+                    algorithm,
+                    self.output_path.display()
+                )));
+            }
+            self.group.recover().set_checksum_verified(true);
+        }
 
         if in_memory_download {
             let group = self.group.recover();

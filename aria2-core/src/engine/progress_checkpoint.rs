@@ -187,7 +187,7 @@ impl ProgressCheckpoint {
         }
     }
 
-    /// Discard an invalid attempt and reset its output.
+    /// Discard an invalid attempt and remove its output.
     ///
     /// Protocol adapters use this only after an attempt has reached a
     /// terminal validation failure, such as a size or checksum mismatch.
@@ -205,28 +205,13 @@ impl ProgressCheckpoint {
             );
         }
 
-        let file = match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(output_path)
-            .await
+        if let Err(error) = tokio::fs::remove_file(output_path).await
+            && error.kind() != std::io::ErrorKind::NotFound
         {
-            Ok(file) => file,
-            Err(error) => {
-                tracing::debug!(
-                    path = %output_path.display(),
-                    %error,
-                    "Failed to reset invalid download output"
-                );
-                return;
-            }
-        };
-        if let Err(error) = file.sync_data().await {
             tracing::debug!(
                 path = %output_path.display(),
                 %error,
-                "Failed to flush reset download output"
+                "Failed to remove invalid download output"
             );
         }
     }
@@ -309,6 +294,23 @@ mod tests {
         let checkpoint = ProgressCheckpoint::open(&output, 0, 0).await;
         checkpoint.complete().await;
         assert!(!ControlFile::control_path_for(&output).exists());
+    }
+
+    #[cfg(feature = "metalink")]
+    #[tokio::test]
+    async fn discard_removes_invalid_output_and_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("invalid.bin");
+        tokio::fs::write(&output, b"invalid").await.unwrap();
+
+        let checkpoint = ProgressCheckpoint::open(&output, 7, 7).await;
+        let control_path = ControlFile::control_path_for(&output);
+        assert!(control_path.exists());
+
+        checkpoint.discard(&output).await;
+
+        assert!(!output.exists());
+        assert!(!control_path.exists());
     }
 
     #[tokio::test]

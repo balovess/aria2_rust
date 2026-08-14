@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 //! E2E integration tests for uTP protocol
 //!
 //! Simulates real UDP transmission scenarios including:

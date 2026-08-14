@@ -311,6 +311,14 @@ fn apply_rpc_option(
             }
             Ok(true)
         }
+        "bt-enable-hook-after-hash-check" => {
+            opts.bt_enable_hook_after_hash_check = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
+        "bt-hash-check-seed" => {
+            opts.bt_hash_check_seed = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
         "timeout" | "connect-timeout" | "bt-stop-timeout" => {
             let value = rpc_option_u64(value, key)?;
             match key {

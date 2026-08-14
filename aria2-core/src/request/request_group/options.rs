@@ -96,6 +96,12 @@ pub struct DownloadOptions {
     pub check_integrity: bool,
     /// Only validate existing piece hashes; never allocate or download.
     pub hash_check_only: bool,
+    /// Run the BitTorrent completion hook after a successful integrity check.
+    /// The aria2 default is `true`.
+    pub bt_enable_hook_after_hash_check: bool,
+    /// Continue into the BitTorrent seed lifecycle after a successful
+    /// integrity check of a complete payload. The aria2 default is `true`.
+    pub bt_hash_check_seed: bool,
     /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
     pub seed_time: Option<f64>,
     /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
@@ -365,8 +371,8 @@ pub struct DownloadOptions {
 }
 
 // Manual Default impl: `enable_dht` and `enable_public_trackers` default to
-// `true` (matching the load path in `option_handler.rs` and `task.rs` which
-// use `unwrap_or(true)`). All other fields use their type-level defaults.
+// `true`, matching the canonical config/task option conversion paths that use
+// `unwrap_or(true)`. All other fields use their type-level defaults.
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
@@ -387,6 +393,8 @@ impl Default for DownloadOptions {
             secure_falloc: false,
             check_integrity: false,
             hash_check_only: false,
+            bt_enable_hook_after_hash_check: true,
+            bt_hash_check_seed: true,
             seed_time: None,
             seed_ratio: Some(1.0),
             checksum: None,
@@ -655,6 +663,14 @@ impl DownloadOptions {
                 .get("hash-check-only")
                 .map(|v| v == "true")
                 .unwrap_or(false),
+            bt_enable_hook_after_hash_check: options
+                .get("bt-enable-hook-after-hash-check")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            bt_hash_check_seed: options
+                .get("bt-hash-check-seed")
+                .map(|v| v == "true")
+                .unwrap_or(true),
             seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
@@ -1063,5 +1079,22 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("continue".to_string(), "true".to_string());
         assert!(DownloadOptions::from_option_strings(&values).continue_download);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn hash_check_controls_survive_option_conversion() {
+        let values = HashMap::from([
+            (
+                "bt-enable-hook-after-hash-check".to_string(),
+                "false".to_string(),
+            ),
+            ("bt-hash-check-seed".to_string(), "false".to_string()),
+        ]);
+
+        let options = DownloadOptions::from_option_strings(&values);
+
+        assert!(!options.bt_enable_hook_after_hash_check);
+        assert!(!options.bt_hash_check_seed);
     }
 }

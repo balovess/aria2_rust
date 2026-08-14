@@ -58,6 +58,49 @@ pub fn build_test_torrent_with_web_seeds(
     bencode_dict(&torrent_entries)
 }
 
+/// Build a multi-file torrent whose files contain one contiguous generated
+/// byte stream. Keeping the piece hashes over that stream lets E2E tests
+/// exercise pieces that cross physical file boundaries.
+pub fn build_multi_file_test_torrent(
+    name: &str,
+    file_lengths: &[u64],
+    piece_length: u32,
+    tracker_url: &str,
+) -> Vec<u8> {
+    let total_size: u64 = file_lengths.iter().sum();
+    let file_data = generate_file_data(total_size);
+    let num_pieces = total_size.div_ceil(piece_length as u64) as usize;
+    let mut pieces_hash = Vec::with_capacity(num_pieces * 20);
+    for i in 0..num_pieces {
+        let start = i * piece_length as usize;
+        let end = (start + piece_length as usize).min(file_data.len());
+        let mut hasher = Sha1::new();
+        hasher.update(&file_data[start..end]);
+        pieces_hash.extend_from_slice(&hasher.finalize());
+    }
+
+    let mut files = Vec::with_capacity(file_lengths.len());
+    for (index, length) in file_lengths.iter().enumerate() {
+        let path = format!("part-{index}.bin");
+        let file_dict = vec![
+            (b"length".to_vec(), bencode_int(*length)),
+            (b"path".to_vec(), bencode_list(&[bencode_str(&path)])),
+        ];
+        files.push(bencode_dict(&file_dict));
+    }
+
+    let info_dict = vec![
+        (b"files".to_vec(), bencode_list(&files)),
+        (b"name".to_vec(), bencode_str(name)),
+        (b"piece length".to_vec(), bencode_int(piece_length as u64)),
+        (b"pieces".to_vec(), bencode_bytes(&pieces_hash)),
+    ];
+    bencode_dict(&[
+        (b"announce".to_vec(), bencode_str(tracker_url)),
+        (b"info".to_vec(), bencode_dict(&info_dict)),
+    ])
+}
+
 pub fn generate_file_data(size: u64) -> Vec<u8> {
     let mut data = Vec::with_capacity(size as usize);
     for i in 0..size {

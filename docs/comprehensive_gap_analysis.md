@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-12 (external-contract policy, product identity, FTP protocol errors, and CORS reconciliation)
+# Updated: 2026-08-14 (external-contract policy, product identity, checksum completion, and configuration cleanup)
 
 > This file is a historical deep-comparison audit, not the current completion
 > gate. The current external-compatibility status is maintained in
@@ -18,7 +18,43 @@ report text are autonomous Rust design choices. The FTP checkpoint on
 third-party FTP/FTPS or original-client interoperability, so FTP remains
 `PARTIAL`.
 
-## Executive Summary
+The obsolete Rust `aria2-core::option::OptionHandler` duplicate was removed on
+2026-08-14 after a workspace reference audit. The active configuration seam is
+`config::OptionRegistry` plus `ConfigParser`; the removed module had no
+production callers and its eight self-tests were replaced by the canonical
+option/parser coverage. This cleanup is internal and does not change user
+configuration, defaults, product identity, or external aria2-compatible wire
+behavior.
+
+The RPC XML-RPC parser also now uses a Rust-owned permissive Base64 helper
+matching `aria2_original/src/base64.h`: ignored non-alphabet bytes and padding
+validation are covered through the public parser seam. This is an external
+wire-compatibility work item behind the existing Rust dispatch module; the C++
+parser state-machine hierarchy was not copied into the workspace.
+
+## 2026-08-14 Validation Checkpoint
+
+The Rust configuration registry now separates explicit-value parsing from
+default injection. `ConfigParser::apply_defaults` is the only default stage;
+empty explicit input cannot silently select a default. Exact boolean parsing,
+the boolean-flag empty-value rule, and the non-empty `rpc-secret` rule are
+covered without changing user configuration or the Rust product defaults.
+
+Current focused evidence is 42 option tests, 30 parser tests, 48 config-file
+tests, 105 CLI tests, 228 RPC library tests, 18 RPC integration tests, 55
+all-method RPC E2E tests, and 10 RPC stress tests, all with zero failures in
+their recorded runs. All-feature Clippy for `aria2-core`, `aria2-protocol`,
+`aria2-rpc`, and `aria2`, workspace formatting, and `git diff --check` passed
+on 2026-08-14. The historical counts below remain audit history; the current
+completion gate is `docs/compatibility-status.md`, and the migration remains
+`PARTIAL`.
+
+## Historical Executive Summary (2026-08-01 snapshot)
+
+The counts and test totals in this section are preserved as the original
+2026-08-01 audit snapshot. They are not the current migration status; use
+`docs/compatibility-status.md` for current product, compatibility, and test
+evidence.
 
 This document consolidates findings from module-by-module deep-comparison audits of the
 aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
@@ -147,7 +183,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | `DNSCache` | Fixed | Engine-owned `Arc<Mutex<DnsCache>>`; positive/negative entries are keyed by `(hostname, port)`, candidates retain Good/Bad state, FTP and HTTP command creation resolve through the shared cache, and HTTP clients apply cached addresses with `resolve_to_addrs`. Exhausted-set refresh remains explicit via cache invalidation. |
 | `AuthConfigFactory` | Fixed | Centralized Rust `AuthConfigFactory` now covers HTTP/HTTPS, FTP/SFTP, URL credentials, activated BasicCred cache, Netrc/CLI precedence, HTTP `default`-entry exclusion, FTP anonymous defaults, and challenge activation. |
 | `CUIDCounter` | Architectural difference | Rust uses `GroupId` (auto-incrementing atomic) instead of C++'s `cuid_t` |
-| `CheckIntegrityMan` | Partial | Rust has a process-wide sequential async queue, chunked worker, cancellation, completion channels, live atomic current/total progress, and HTTP whole-file verification now marks `DownloadContext` as verified atomically before completion results are emitted. HTTP/stream download preflight routes failed validation back into a clean download path instead of terminating the request; remaining difference is full engine-level dispatcher/post-validation command wiring for every protocol. |
+| `CheckIntegrityMan` | Partial | Rust has a process-wide sequential async queue, chunked worker, cancellation, completion channels, live atomic current/total progress, HTTP whole-file verification, and BitTorrent single- and multi-file piece validation, including pieces crossing physical file boundaries. HTTP/stream download preflight routes failed validation back into a clean download path instead of terminating the request; remaining difference is full engine-level dispatcher/post-validation command wiring for every protocol. |
 | `StatCalc` | Partial | C++ has `ConsoleStatCalc` for terminal stats. Rust has `PerformanceMonitor` + `AtomicMetrics` |
 | `EventPoll` | N/A (architectural) | Rust uses tokio runtime instead of `select()`/`epoll`/`kqueue` |
 | `WebSocketSessionMan` | N/A | Handled by axum in RPC crate |
@@ -595,7 +631,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 1 | BT | Zero-copy Piece optimization | PARTIAL | Completed piece payloads use `Bytes` through the disk-writer/cache boundary; protocol block aggregation still uses mutable buffers. |
 | 2 | BT | addAllowedFastMessageToQueue() always empty | FIXED | BEP6 `send_allowed_fast_for_torrent()` computes the canonical address/info-hash fast set, queues messages, records peer state, and flushes after handshake. |
 | 3 | BT | createFastIndexBitfield() | FIXED | `DefaultPieceStorage::get_missing_fast_pieces()` intersects the peer bitfield with local missing/unused pieces and the peer AllowedFast set before selection. |
-| 4 | Checksum | Adler32 streaming | Partial |
+| 4 | Checksum | Adler32 streaming | FIXED | `MessageDigest` updates Adler32 incrementally and emits the original big-endian network-byte-order digest; known-vector and streaming regressions pass. |
 | 5 | Cookie | Per-domain cookie limit | FIXED | `CookieStorage` enforces the C++ 50-cookie domain limit, expires stale entries first, then replaces the least-recently-accessed cookie. |
 | 6 | Cookie | SQLite cookie parser | FIXED | `Sqlite3CookieParser` + Mozilla/Chromium schemas implemented in `http/sqlite_cookie_parser.rs` (rusqlite bundled); `CookieStorage::load_file` auto-detects SQLite magic vs Netscape |
 | 7 | Cookie | Duplicate Cookie/JarCookie structures | PARTIAL | HTTP download executors and session persistence now use canonical `CookieStorage`/Netscape storage; `JarCookie` remains only for legacy JSON/session/API compatibility, so full model unification remains open. |

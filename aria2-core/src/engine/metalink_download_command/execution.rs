@@ -83,11 +83,13 @@ impl MetalinkDownloadCommand {
     async fn discard_checkpoint(&mut self, output_path: &Path) {
         if let Some(checkpoint) = self.checkpoint.take() {
             checkpoint.discard(output_path).await;
-        } else if let Err(error) = truncate_output(output_path).await {
+        } else if let Err(error) = tokio::fs::remove_file(output_path).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
             warn!(
                 path = %output_path.display(),
                 %error,
-                "Failed to reset invalid Metalink output"
+                "Failed to remove invalid Metalink output"
             );
         }
     }
@@ -850,9 +852,7 @@ impl MetalinkDownloadCommand {
         if let Some(expected) = expected_size
             && self.completed_bytes != expected
         {
-            if let Some(checkpoint) = self.checkpoint.as_mut() {
-                checkpoint.update(self.completed_bytes, true).await;
-            }
+            self.discard_checkpoint(output_path).await;
             return Err(Aria2Error::Recoverable(
                 RecoverableError::TemporaryNetworkFailure {
                     message: format!(
@@ -1056,9 +1056,21 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
             hasher.update(data);
             format!("{:x}", hasher.finalize())
         }
+        HashAlgorithm::Sha224 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha224::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
+        }
         HashAlgorithm::Sha256 => {
             use sha2::Digest;
             let mut hasher = sha2::Sha256::new();
+            hasher.update(data);
+            format!("{:x}", hasher.finalize())
+        }
+        HashAlgorithm::Sha384 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha384::new();
             hasher.update(data);
             format!("{:x}", hasher.finalize())
         }

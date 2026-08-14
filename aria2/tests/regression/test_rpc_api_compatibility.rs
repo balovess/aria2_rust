@@ -948,6 +948,11 @@ async fn regression_get_version_format() {
     let version: serde_json::Value = resp.result.unwrap();
 
     assert!(version.get("version").is_some(), "version field required");
+    assert_eq!(
+        version.get("version").and_then(serde_json::Value::as_str),
+        Some(aria2_protocol::identity::PRODUCT_VERSION),
+        "getVersion must expose the independent Rust product version"
+    );
     assert!(
         version.get("enabledFeatures").is_some(),
         "enabledFeatures field required"

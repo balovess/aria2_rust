@@ -662,13 +662,19 @@ fn regression_v_triggers_version() {
     let result = CliArgs::try_parse_from(["aria2c", "-v"]);
     let error = result.expect_err("-v must trigger the CLI version action");
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    let version_output = error.to_string();
     assert!(
-        error.to_string().starts_with(&format!(
+        version_output.starts_with(&format!(
             "{} {}",
             aria2_protocol::identity::PRODUCT_NAME,
             aria2_protocol::identity::PRODUCT_VERSION
         )),
         "--version must use the product version number"
+    );
+    assert!(
+        !version_output.contains("Copyright (C) 2006")
+            && !version_output.contains("** Configuration **"),
+        "--version must not reintroduce the upstream C++ version report"
     );
 }
 

@@ -384,6 +384,101 @@ async fn test_standard_session_restores_metalink_graph() {
     );
 }
 
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_session_save_then_restart_restores_metalink_graph() {
+    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::request::request_group::{DownloadOptions, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let options = DownloadOptions {
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        out: Some("payload.bin".to_string()),
+        ..Default::default()
+    };
+    let graph = MetalinkRequestGraph::new_memory_with_fallback(
+        "https://example.test/payload.torrent",
+        "payload.bin",
+        &options,
+        GroupId::new(0x30),
+        GroupId::new(0x40),
+        vec!["https://mirror.example.test/payload.bin".to_string()],
+    )
+    .expect("graph should be constructible");
+
+    let app = App::new();
+    app.request_man
+        .read()
+        .await
+        .add_metalink_graph(graph)
+        .expect("graph should be queued");
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1),
+        "only the dependency-gated payload should be persisted"
+    );
+
+    let session_text = tokio::fs::read_to_string(&session_file)
+        .await
+        .expect("saved session should be readable");
+    assert!(session_text.contains("aria2-rust-payload-gid=0000000000000040"));
+    assert!(session_text.contains("aria2-rust-metadata-uri=https://example.test/payload.torrent"));
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        2,
+        "restart must rebuild both metadata and payload groups"
+    );
+    let groups = restarted.request_man.read().await.list_groups();
+    let metadata = groups
+        .iter()
+        .find(|group| group.recover().gid() == GroupId::new(0x30))
+        .expect("metadata group should be restored");
+    assert_eq!(
+        metadata.recover().belongs_to_gid(),
+        Some(GroupId::new(0x40))
+    );
+
+    let payload = groups
+        .iter()
+        .find(|group| group.recover().gid() == GroupId::new(0x40))
+        .expect("payload group should be restored");
+    assert_eq!(
+        payload.recover().output_name().as_deref(),
+        Some("payload.bin")
+    );
+    assert!(!payload.recover().is_dependency_resolved());
+}
+
 /// Test 1: Load entries from session file
 ///
 /// Verify that restore_session() correctly loads and restores entries from a mock session file

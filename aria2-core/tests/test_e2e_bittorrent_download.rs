@@ -6,6 +6,9 @@ mod fixtures;
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::bt_tracker_comm::TrackerAnnouncer;
 use aria2_core::engine::command::Command;
+use aria2_core::engine::download_event_hooks::{
+    DownloadEvent, DownloadEventHooks, DownloadEventListener,
+};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, HaltReason};
 use e2e_helpers::mock_http_server::MockHttpServer;
@@ -13,11 +16,34 @@ use fixtures::mock_bt_peer::MockBtPeerServer;
 use fixtures::mock_tracker::MockTrackerServer;
 use fixtures::mock_udp_tracker::MockUdpTracker;
 use fixtures::test_torrent_builder::{
-    build_test_torrent, build_test_torrent_with_web_seeds, expected_piece_data,
+    build_multi_file_test_torrent, build_test_torrent, build_test_torrent_with_web_seeds,
+    expected_piece_data,
 };
+use std::sync::{Arc, Mutex};
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
+}
+
+#[derive(Default)]
+struct RecordingBtEvents {
+    events: Mutex<Vec<(DownloadEvent, String)>>,
+}
+
+impl RecordingBtEvents {
+    fn saw(&self, event: DownloadEvent, gid: &str) -> bool {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(seen, seen_gid)| *seen == event && seen_gid == gid)
+    }
+}
+
+impl DownloadEventListener for RecordingBtEvents {
+    fn on_download_event(&self, event: DownloadEvent, gid: &str) {
+        self.events.lock().unwrap().push((event, gid.to_string()));
+    }
 }
 
 #[tokio::test]
@@ -308,6 +334,190 @@ async fn test_e2e_bt_check_integrity_redownloads_only_failed_piece() {
     assert!(
         !ControlFile::control_path_for(&output_path).exists(),
         "successful integrity repair must remove its checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_multi_file_integrity_repairs_piece_crossing_file_boundary() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_multi_file_test_torrent(
+        "multi-integrity",
+        &[4, 6],
+        6,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, 6, 10), expected_piece_data(1, 6, 10)],
+    )
+    .await;
+    drop(tracker_placeholder);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data =
+        build_multi_file_test_torrent("multi-integrity", &[4, 6], 6, &tracker.announce_url());
+    let output_dir = dir.path();
+    let first_path = output_dir.join("part-0.bin");
+    let second_path = output_dir.join("part-1.bin");
+    std::fs::write(&first_path, [0, 1, 2, 3]).unwrap();
+    std::fs::write(&second_path, [0xff, 5, 6, 7, 8, 9]).unwrap();
+
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        check_integrity: true,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9104),
+        &torrent_data,
+        &options,
+        Some(output_dir.to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("multi-file integrity check timed out")
+        .expect("multi-file integrity repair failed");
+
+    assert_eq!(peer.requested_pieces().await, vec![0]);
+    assert_eq!(std::fs::read(first_path).unwrap(), [0, 1, 2, 3]);
+    assert_eq!(std::fs::read(second_path).unwrap(), [4, 5, 6, 7, 8, 9]);
+}
+
+#[tokio::test]
+async fn test_e2e_bt_complete_integrity_honors_hash_check_controls() {
+    use aria2_core::util::rwlock_ext::RwLockRecover;
+
+    let listener = Arc::new(RecordingBtEvents::default());
+    DownloadEventHooks::shared().add_listener(listener.clone());
+
+    for (gid, hook_enabled) in [(9101, true), (9102, false)] {
+        let dir = tmp_dir();
+        let tracker = MockTrackerServer::start(0).await;
+        let torrent_data =
+            build_test_torrent("complete-integrity.bin", 1024, 512, &tracker.announce_url());
+        let output_path = dir.path().join("complete-integrity.bin");
+        std::fs::write(
+            &output_path,
+            [
+                expected_piece_data(0, 512, 1024),
+                expected_piece_data(1, 512, 1024),
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        let options = DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            check_integrity: true,
+            file_allocation: Some("none".to_string()),
+            bt_hash_check_seed: false,
+            bt_enable_hook_after_hash_check: hook_enabled,
+            ..DownloadOptions::default()
+        };
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(gid),
+            &torrent_data,
+            &options,
+            Some(dir.path().to_str().unwrap()),
+        )
+        .unwrap();
+        let group = command.group_handle();
+        tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+            .await
+            .expect("complete integrity check timed out")
+            .expect("complete integrity check failed");
+
+        assert!(group.recover().status().is_completed());
+        assert_eq!(std::fs::read(&output_path).unwrap().len(), 1024);
+        assert!(
+            tracker.captured_queries().await.is_empty(),
+            "bt-hash-check-seed=false must not enter tracker/peer lifecycle"
+        );
+
+        let gid_hex = GroupId::new(gid).to_hex_string();
+        assert_eq!(
+            listener.saw(DownloadEvent::BtComplete, &gid_hex),
+            hook_enabled,
+            "bt-enable-hook-after-hash-check must control the BT completion event"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "complete-integrity-seed.bin",
+        1024,
+        512,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ],
+    )
+    .await;
+    drop(tracker_placeholder);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent(
+        "complete-integrity-seed.bin",
+        1024,
+        512,
+        &tracker.announce_url(),
+    );
+    let output_path = dir.path().join("complete-integrity-seed.bin");
+    std::fs::write(
+        &output_path,
+        [
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        check_integrity: true,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9103),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("default hash-check seed path timed out")
+        .expect("default hash-check seed path failed");
+
+    assert!(
+        tracker
+            .captured_queries()
+            .await
+            .iter()
+            .any(|query| query.contains("event=started")),
+        "default bt-hash-check-seed=true must enter the tracker lifecycle"
     );
 }
 

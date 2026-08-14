@@ -1,3 +1,5 @@
+#![cfg(feature = "bittorrent")]
+
 //! Memory usage tests for Bitfield vs Vec<bool>
 //!
 //! This test verifies that Bitfield achieves the expected 8x memory reduction.

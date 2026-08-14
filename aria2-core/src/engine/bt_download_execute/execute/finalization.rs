@@ -23,7 +23,10 @@ impl BtDownloadCommand {
             .recover()
             .set_uploaded_length(self.total_uploaded);
 
-        DownloadEventHooks::shared().fire_event(DownloadEvent::BtComplete, &self.group.recover());
+        if !self.bt_complete_event_emitted {
+            DownloadEventHooks::shared()
+                .fire_event(DownloadEvent::BtComplete, &self.group.recover());
+        }
         self.group.recover_mut().complete()?;
 
         info!(

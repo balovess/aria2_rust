@@ -253,6 +253,102 @@ async fn e2e_sftp_resumes_from_an_existing_local_prefix() {
 }
 
 #[tokio::test]
+async fn e2e_sftp_verifies_an_existing_complete_file_checksum() {
+    let server = MockSftpServer::start().await;
+    let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
+    let output_path = output_dir.path().join("verified.bin");
+    std::fs::write(&output_path, server.content()).expect("complete SFTP output should be written");
+    let options = DownloadOptions {
+        checksum: Some((
+            "sha-256".to_string(),
+            "358f9c2f2bd9f0c38703ea6fdffc57414b0fdebd5c2edbd3d848a296d7e415a0".to_string(),
+        )),
+        ..DownloadOptions::default()
+    };
+    let mut command = command_for(
+        &server,
+        server.password(),
+        server.file_path(),
+        &options,
+        output_dir.path(),
+        "verified.bin",
+        809,
+    );
+
+    execute_with_deadline(&mut command)
+        .await
+        .expect("a complete SFTP output with a matching checksum should succeed");
+    assert_eq!(command.group().status(), DownloadStatus::Complete);
+    assert_eq!(
+        server.read_requests(),
+        0,
+        "a verified complete local file must not be downloaded again"
+    );
+}
+
+#[tokio::test]
+async fn e2e_sftp_verifies_checksum_after_transfer() {
+    let server = MockSftpServer::start().await;
+    let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
+    let options = DownloadOptions {
+        checksum: Some((
+            "sha-256".to_string(),
+            "358f9c2f2bd9f0c38703ea6fdffc57414b0fdebd5c2edbd3d848a296d7e415a0".to_string(),
+        )),
+        ..DownloadOptions::default()
+    };
+    let mut command = command_for(
+        &server,
+        server.password(),
+        server.file_path(),
+        &options,
+        output_dir.path(),
+        "transferred.bin",
+        811,
+    );
+
+    execute_with_deadline(&mut command)
+        .await
+        .expect("a transferred SFTP output with a matching checksum should succeed");
+    assert_eq!(command.group().status(), DownloadStatus::Complete);
+    assert_eq!(
+        std::fs::read(output_dir.path().join("transferred.bin")).unwrap(),
+        server.content()
+    );
+}
+
+#[tokio::test]
+async fn e2e_sftp_rejects_an_existing_complete_file_checksum_mismatch() {
+    let server = MockSftpServer::start().await;
+    let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
+    let output_path = output_dir.path().join("mismatch.bin");
+    std::fs::write(&output_path, server.content()).expect("complete SFTP output should be written");
+    let options = DownloadOptions {
+        checksum: Some(("sha-256".to_string(), "00".repeat(32))),
+        ..DownloadOptions::default()
+    };
+    let mut command = command_for(
+        &server,
+        server.password(),
+        server.file_path(),
+        &options,
+        output_dir.path(),
+        "mismatch.bin",
+        810,
+    );
+
+    let error = execute_with_deadline(&mut command)
+        .await
+        .expect_err("a complete SFTP output with a mismatched checksum must fail");
+    assert!(matches!(error, Aria2Error::Checksum(_)));
+    assert_eq!(command.group().status(), DownloadStatus::Active);
+    assert!(
+        server.read_requests() > 0,
+        "a checksum mismatch must return to the remote download path"
+    );
+}
+
+#[tokio::test]
 async fn e2e_engine_sftp_pause_unpause_preserves_control_file() {
     let server = MockSftpServer::start_slow().await;
     let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
