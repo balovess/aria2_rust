@@ -54,9 +54,10 @@ impl AllocationStrategy {
 
 /// Allocate file space using the specified strategy.
 /// This function provides cross-platform support for file preallocation:
-/// - On Unix: Uses posix_fallocate64 when available (for Prealloc/Falloc), falls back to set_len
-/// - On Windows: Uses SetEndOfFile via set_len() (works for all strategies)
-/// - On macOS: Uses set_len() as fallback (macOS doesn't have fallocate)
+/// - `prealloc`/`falloc`: use the platform-native allocation path with its
+///   Rust-owned fallback behavior
+/// - `trunc`: use `set_len()` without attempting physical allocation
+/// - `mmap`: use native allocation before the memory-mapped writer opens
 ///
 /// # Arguments
 /// * `adaptor` - Disk adaptor for file operations
@@ -75,8 +76,9 @@ pub async fn allocate_file<D: DiskAdaptor>(
 ) -> Result<()> {
     match strategy {
         AllocationStrategy::None => Ok(()),
-        AllocationStrategy::Prealloc => strategies::preallocate(adaptor, length).await,
-        AllocationStrategy::Falloc => falloc::fallocate(adaptor, length, secure).await,
+        AllocationStrategy::Prealloc | AllocationStrategy::Falloc => {
+            falloc::fallocate(adaptor, length, secure).await
+        }
         AllocationStrategy::Trunc => strategies::truncate(adaptor, length).await,
         // Mmap uses fallocate to ensure blocks are allocated before mapping;
         // the actual mmap is performed by MmapDiskWriter at open time.

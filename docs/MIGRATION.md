@@ -18,7 +18,7 @@
 | 2026-08-09 | 外部兼容优先：RPC/JSON-RPC/XML-RPC/WebSocket、CLI、配置、session、错误码和原版客户端可观察行为必须以 aria2_original 为契约；Rust 架构和性能优化只能发生在该契约之后 |
 | 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
 | 2026-08-12 | 产品身份统一为 `aria2-rust 0.2.9`；只兼容 aria2_original 的外部 CLI/RPC/协议行为，不复用原版版本报告文本或内部 C++ 结构 |
-| 2026-08-14 | RPC 生命周期提交顺序对齐 `aria2_original`：`forcePause` 在响应前提交 `paused`，reserved 的 `remove`/`forceRemove` 在响应前进入 stopped result，未知 GID 返回 execution error code 1；active 任务仍由 Rust `EngineCommand` 完成协议取消、checkpoint 与 completion 收口。RPC 定向测试 18 + 71 + 55 全通过；未修改配置、默认值、版本或 wire 结构，整体迁移仍为 PARTIAL |
+| 2026-08-14 | RPC 生命周期语义对齐 `aria2_original`：`forcePause` 在响应前提交 `paused`，reserved 的 `remove`/`forceRemove` 在响应前进入 stopped result，未知 GID 返回 execution error code 1；重复 `pause`/`forcePause` 和非法 `unpause` 状态不再静默成功。active 任务仍由 Rust `EngineCommand` 完成协议取消、checkpoint 与 completion 收口。RPC 测试 19 + 71 + 55、RequestGroupMan 31、engine loop 14 全通过；未修改配置、默认值、版本或 wire 结构，整体迁移仍为 PARTIAL |
 | 2026-08-12 | FTP 生产路径补齐协议错误边界、`550` 文件不存在映射和 `REST 0` 行为；本地 FTP E2E 通过，真实第三方 FTP/FTPS 和原版客户端互操作仍为 PARTIAL |
 | 2026-08-13 | BitTorrent 共享 TCP listener 与 info-hash 路由完成；MSE PadA/PadB、RC4/Plain negotiation、`bt-force-encryption`、`bt-require-crypto`、`bt-min-crypto-level` 和 listener shutdown 增加真实 socket 回归证据；整体迁移仍为 PARTIAL |
 | 2026-08-13 | 修正 `config::runtime` feature-aware 测试断言：启用 BitTorrent 时 Rust-only `enable-public-trackers` 会使 reserved-changeable 集合为 107，默认构建仍为 106；不是兼容行为回退 |
@@ -81,6 +81,60 @@ cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
   PASS
 ~~~
+
+#### Multi-file preallocation checkpoint (2026-08-14)
+
+`MultiFileAllocationIterator` and the production `FileAllocationMan` now
+share one Rust-owned allocation policy. `prealloc` performs the original
+adaptive fallocate probe and uses cooperative zero-fill only when needed;
+`falloc`, `trunc`, and `none` remain separate strategies. The `secure-falloc`
+setting reaches adaptive/native allocation, and all zero-fill fallbacks start
+at the current file length to preserve resumed data. No option, default,
+configuration format, crate version, product version, or public RPC/protocol
+contract was changed.
+
+The public `preallocate_file(..., "prealloc", ...)` entry point now reaches the
+same native allocation path as production allocation. The old Rust-only
+`prealloc` truncation shortcut was removed, so the public helper cannot drift
+from the download engine's resume-safe behavior.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core filesystem::file_allocation --lib
+  43 passed, 0 failed
+cargo test -p aria2-core filesystem::file_allocation_man --lib
+  16 passed, 0 failed
+cargo test -p aria2-core multi_file_allocation_iterator --lib
+  3 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+~~~
+
+This closes the multi-file allocation parity slice only. Platform-specific
+allocation evidence, full workspace tests, original-client interoperability,
+and overall migration acceptance remain open.
+
+#### Disk read cache hint checkpoint (2026-08-14)
+
+`DirectDiskAdaptor` and `MultiDiskAdaptor` now share one Rust-owned
+best-effort cache-advice helper for the original `readDataDropCache` behavior.
+POSIX builds issue `posix_fadvise(DONTNEED)` for the actual bytes read,
+including each segment of a cross-file read; non-POSIX builds remain no-op.
+The read result and error behavior are unchanged.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core multi_disk_adaptor --lib --all-features
+  44 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes the local disk cache-advice slice only. Platform-specific
+filesystem semantics, original-client interoperability, and workspace
+acceptance remain open.
 
 The broader HTTP and original-client/browser interoperability matrix remains
 `PARTIAL`.

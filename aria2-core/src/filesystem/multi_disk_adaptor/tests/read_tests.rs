@@ -52,6 +52,29 @@ async fn test_cross_file_read_spanning_files() {
 }
 
 #[tokio::test]
+async fn test_cross_file_read_drop_cache_preserves_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let entries = vec![
+        FileEntry::new(dir.path().join("file1.txt"), 15, 0, true),
+        FileEntry::new(dir.path().join("file2.txt"), 7, 15, true),
+    ];
+
+    let mut adaptor = MultiDiskAdaptor::new(2);
+    adaptor.set_file_entries(entries);
+    adaptor.open_file().await.unwrap();
+    adaptor
+        .write_data(0, b"1234567890ABCDEFGHIJKLM")
+        .await
+        .unwrap();
+    adaptor.flush_os_buffers().await.unwrap();
+
+    let data = adaptor.read_data_drop_cache(6, 10).await.unwrap();
+    assert_eq!(&data[..10], b"7890ABCDEF");
+
+    adaptor.close_file().await;
+}
+
+#[tokio::test]
 async fn test_cross_file_read_across_three_files() {
     let dir = tempfile::tempdir().unwrap();
     let entries = vec![

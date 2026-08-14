@@ -61,6 +61,22 @@ async fn test_preallocate_file_prealloc() {
 }
 
 #[tokio::test]
+async fn test_preallocate_file_prealloc_preserves_existing_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_prealloc_resume.bin");
+    let prefix = b"resume data must survive native allocation";
+    tokio::fs::write(&path, prefix).await.unwrap();
+
+    preallocate_file(&path, 1024 * 1024, "prealloc", false)
+        .await
+        .unwrap();
+
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&content[..prefix.len()], prefix);
+    assert_eq!(content.len(), 1024 * 1024);
+}
+
+#[tokio::test]
 async fn test_preallocate_zero_length() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_zero.bin");
@@ -368,6 +384,28 @@ async fn test_async_zero_fill() {
     // Verify content is all zeros
     let content = tokio::fs::read(&path).await.unwrap();
     assert!(content.iter().all(|&b| b == 0), "File should be all zeros");
+}
+
+/// A resumed allocation clears only the newly extended region.
+#[tokio::test]
+async fn test_async_zero_fill_from_preserves_existing_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test_zero_fill_resume.bin");
+
+    let prefix = vec![0x5Au8; 4096];
+    tokio::fs::write(&path, &prefix).await.unwrap();
+
+    let mut adaptor = DirectDiskAdaptor::new();
+    adaptor.open(&path).await.unwrap();
+    adaptor.truncate(8192).await.unwrap();
+    strategies::async_zero_fill_from(&mut adaptor, 4096, 8192)
+        .await
+        .unwrap();
+    adaptor.close().await.unwrap();
+
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&content[..prefix.len()], prefix.as_slice());
+    assert!(content[4096..].iter().all(|&b| b == 0));
 }
 
 /// Test that secure_falloc option defaults to false in DownloadOptions.

@@ -353,7 +353,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
 | 1 | FileAllocationMan queue missing | P0 | FIXED | `filesystem/file_allocation_man.rs` now has a real queue + background worker (chunked, cooperative allocation with `yield_now` between chunks), sequential by default (`max_concurrent=1`), completion notifications via `oneshot`, cancellation on engine halt. Dead `EngineCommand::FileAllocation{Request,Completed,Failed}` variants and their handlers were removed. HTTP `DownloadCommand` and BT `BtDownloadCommand`/magnet all enqueue through the process-wide `shared()` manager; `--file-allocation` now actually applies to BitTorrent downloads (previously BT files grew on demand) |
-| 2 | FileAllocationCommand loop missing | P0 | FIXED | Replaced by the worker loop inside `FileAllocationMan` (the async equivalent of C++'s per-tick `allocateChunk()`). `Falloc`/`Trunc` are atomic syscalls; only `Prealloc` zero-fill is chunked (256 KiB, matching C++ `SingleFileAllocationIterator`). The `secure` flag now reaches the fallocate path (the old `FallocFileAllocationIterator` hardcoded `secure=false`) |
+| 2 | FileAllocationCommand loop missing | P0 | FIXED | Replaced by the worker loop inside `FileAllocationMan` (the async equivalent of C++'s per-tick `allocateChunk()`). `Prealloc` now uses the C++-equivalent adaptive 4 KiB fallocate probe and chunked zero-fill fallback; `Falloc`/`Trunc` remain atomic syscalls. The `secure` flag reaches both the adaptive probe and native fallocate path, and fallback zero-fill preserves resumed prefixes. |
 
 #### Feature Gaps
 

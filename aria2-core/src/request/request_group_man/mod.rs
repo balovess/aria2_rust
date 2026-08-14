@@ -446,6 +446,15 @@ impl RequestGroupMan {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
         let mut group = group_lock.recover_mut();
+        if !matches!(
+            group.status(),
+            DownloadStatus::Active | DownloadStatus::Waiting
+        ) {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be paused now",
+                gid.to_hex_string()
+            )));
+        }
         group.pause()?;
         info!("Pausing download task #{}", gid.value());
         Ok(())
@@ -456,10 +465,14 @@ impl RequestGroupMan {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
         let mut group = group_lock.recover_mut();
-        if group.status().is_paused() {
-            group.resume()?;
-            info!("Resuming download task #{}", gid.value());
+        if !group.status().is_paused() {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be unpaused now",
+                gid.to_hex_string()
+            )));
         }
+        group.resume()?;
+        info!("Resuming download task #{}", gid.value());
         Ok(())
     }
 
@@ -468,6 +481,15 @@ impl RequestGroupMan {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
         let mut group = group_lock.recover_mut();
+        if !matches!(
+            group.status(),
+            DownloadStatus::Active | DownloadStatus::Waiting
+        ) {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be paused now",
+                gid.to_hex_string()
+            )));
+        }
         group.force_pause()?;
         Ok(())
     }

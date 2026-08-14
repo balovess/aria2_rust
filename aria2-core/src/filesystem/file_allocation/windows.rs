@@ -95,6 +95,7 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
     // The zero-fill (which may await) happens AFTER the handle goes out of
     // scope, using a boolean flag to carry the result across the scope
     // boundary.
+    let existing_length = adaptor.size().await?.min(length);
     adaptor.truncate(length).await?;
     // Attempt to enable SE_MANAGE_VOLUME_PRIVILEGE — this exists in the
     // token for admin processes but is disabled by default. Non-admin
@@ -148,7 +149,7 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
     // safe (no non-Send raw handle is live across the suspension point).
     if valid_data_succeeded {
         if secure {
-            strategies::async_zero_fill(adaptor, length).await
+            strategies::async_zero_fill_from(adaptor, existing_length, length).await
         } else {
             super::SECURE_FALLOC_WARN_ONCE.call_once(|| {
                 tracing::warn!(

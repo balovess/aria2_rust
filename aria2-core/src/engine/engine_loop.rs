@@ -390,14 +390,26 @@ async fn process_engine_commands(
 
             EngineCommand::Pause { gid } => {
                 let man = ctx.group_man.read().await;
-                if let Err(e) = man.pause_group(gid) {
+                let should_apply = man.find_group(gid).is_some_and(|group| {
+                    matches!(
+                        group.recover().status(),
+                        DownloadStatus::Active | DownloadStatus::Waiting
+                    )
+                });
+                if should_apply && let Err(e) = man.pause_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to pause download");
                 }
             }
 
             EngineCommand::ForcePause { gid } => {
                 let man = ctx.group_man.read().await;
-                if let Err(e) = man.force_pause_group(gid) {
+                let should_apply = man.find_group(gid).is_some_and(|group| {
+                    matches!(
+                        group.recover().status(),
+                        DownloadStatus::Active | DownloadStatus::Waiting
+                    )
+                });
+                if should_apply && let Err(e) = man.force_pause_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to force-pause download");
                 }
                 // NOTE: the running task is intentionally NOT aborted here.
@@ -410,7 +422,10 @@ async fn process_engine_commands(
 
             EngineCommand::Unpause { gid } => {
                 let man = ctx.group_man.read().await;
-                if let Err(e) = man.unpause_group(gid) {
+                let should_apply = man
+                    .find_group(gid)
+                    .is_some_and(|group| group.recover().status().is_paused());
+                if should_apply && let Err(e) = man.unpause_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to unpause download");
                 }
             }

@@ -254,6 +254,8 @@ impl MultiDiskAdaptor {
             while inner_rem > 0 {
                 let buf_start = total_read;
                 let buf_end = buf_start + inner_rem;
+                #[cfg(unix)]
+                let read_offset = file_offset;
                 let nread = self.disk_writer_entries[idx]
                     .read_at(file_offset, &mut result[buf_start..buf_end])
                     .await?;
@@ -268,11 +270,9 @@ impl MultiDiskAdaptor {
                 inner_rem -= nread;
                 file_offset += nread as u64;
 
-                // Cache drop is a no-op on most platforms; reserved for
-                // POSIX fadvise(DONTNEED) integration.
                 #[cfg(unix)]
                 if _drop_cache {
-                    // TODO: integrate posix_fadvise(DONTNEED) for cache drop.
+                    self.disk_writer_entries[idx].drop_cache(read_offset, nread as u64);
                 }
             }
 

@@ -51,6 +51,37 @@ async fn test_engine_pause_unpause_no_panic() {
 }
 
 #[tokio::test]
+async fn test_lifecycle_rejects_invalid_pause_transitions() {
+    let engine = RpcEngine::new();
+    let add_resp = engine
+        .handle_request(&make_add_req("add", "http://example.com/lifecycle.bin"))
+        .await;
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let pause = JsonRpcRequest::new("aria2.pause", serde_json::json!([&gid])).with_id(1);
+    assert!(engine.handle_request(&pause).await.is_success());
+
+    let repeat_pause = JsonRpcRequest::new("aria2.pause", serde_json::json!([&gid])).with_id(2);
+    let repeat_pause_resp = engine.handle_request(&repeat_pause).await;
+    assert!(repeat_pause_resp.is_error());
+    assert_eq!(repeat_pause_resp.error.unwrap().code, 1);
+
+    let repeat_force_pause =
+        JsonRpcRequest::new("aria2.forcePause", serde_json::json!([&gid])).with_id(3);
+    let repeat_force_pause_resp = engine.handle_request(&repeat_force_pause).await;
+    assert!(repeat_force_pause_resp.is_error());
+    assert_eq!(repeat_force_pause_resp.error.unwrap().code, 1);
+
+    let unpause = JsonRpcRequest::new("aria2.unpause", serde_json::json!([&gid])).with_id(4);
+    assert!(engine.handle_request(&unpause).await.is_success());
+
+    let repeat_unpause = JsonRpcRequest::new("aria2.unpause", serde_json::json!([&gid])).with_id(5);
+    let repeat_unpause_resp = engine.handle_request(&repeat_unpause).await;
+    assert!(repeat_unpause_resp.is_error());
+    assert_eq!(repeat_unpause_resp.error.unwrap().code, 1);
+}
+
+#[tokio::test]
 async fn test_engine_remove_nonexistent_is_error() {
     let engine = RpcEngine::new();
     let req = JsonRpcRequest {

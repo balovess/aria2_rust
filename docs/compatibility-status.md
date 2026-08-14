@@ -162,7 +162,10 @@ before returning, matching the synchronous observation point of
 `paused` immediately; `aria2.remove` and `aria2.forceRemove` validate the GID
 and remove reserved tasks into the stopped-result store immediately, while
 active tasks remain indexed until the engine drains their protocol command.
-Unknown `forceRemove` GIDs now return aria2 execution error code `1`.
+Unknown `forceRemove` GIDs now return aria2 execution error code `1`. Single
+task `pause` and `forcePause` now reject already-paused or terminal tasks, and
+`unpause` rejects waiting, active, and terminal tasks; these transitions return
+the original execution error code `1` instead of silently succeeding.
 
 The engine command channel remains responsible for protocol-specific
 cancellation, checkpoint finalization, and completion accounting. This is a
@@ -173,11 +176,17 @@ Verification on 2026-08-14:
 
 ~~~text
 cargo test -p aria2-rpc --test integration_rpc --all-features -- --test-threads=1
-  18 passed, 0 failed
+  19 passed, 0 failed
 cargo test -p aria2-rpc --lib handlers::handler_tests --all-features -- --test-threads=1
   71 passed, 0 failed
 cargo test -p aria2-rpc --test test_e2e_all_rpc_methods --all-features -- --test-threads=1
   55 passed, 0 failed
+cargo test -p aria2-core --lib request::request_group_man --all-features -- --test-threads=1
+  31 passed, 0 failed
+cargo test -p aria2-core --lib engine::engine_loop --all-features -- --test-threads=1
+  14 passed, 0 failed
+cargo clippy -p aria2-core -p aria2-rpc --all-targets --all-features -- -D warnings
+  PASS
 ~~~
 
 The broader original-client, browser-extension, XML-RPC, and WebSocket
@@ -1897,3 +1906,52 @@ The complete original-client FTP proxy matrix, third-party forward-proxy
 implementations, proxy redirect/chunked-response behavior, proxy FTPS
 interoperability, and workspace acceptance remain open. FTP and the overall
 migration remain `PARTIAL`.
+
+### Multi-file preallocation checkpoint (2026-08-14)
+
+`MultiFileAllocationIterator` and the production `FileAllocationMan` now use
+the same Rust-owned allocation policy: `prealloc` probes native fallocate and
+falls back to cooperative zero-fill, while `falloc`, `trunc`, and `none` keep
+their distinct semantics. `secure-falloc` reaches the adaptive and native
+paths, and fallback/security zero-fill starts at the existing file length so
+resume data is preserved. This changes no option name, default, configuration
+format, product version, or public wire contract.
+
+The public Rust allocation helper now uses that same native `prealloc` path;
+it no longer silently degrades `prealloc` to `set_len`. Existing file prefixes
+are covered by a regression test at the public entry point.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core filesystem::file_allocation --lib
+  43 passed, 0 failed
+cargo test -p aria2-core filesystem::file_allocation_man --lib
+  16 passed, 0 failed
+cargo test -p aria2-core multi_file_allocation_iterator --lib
+  3 passed, 0 failed
+~~~
+
+The broader filesystem matrix, platform-specific allocation behavior on
+macOS/Windows, and workspace migration acceptance remain `PARTIAL`.
+
+### Disk read cache hint checkpoint (2026-08-14)
+
+The Rust `DirectDiskAdaptor` and `MultiDiskAdaptor` now implement the
+original `readDataDropCache` behavior through one internal cache-advice
+helper. POSIX builds issue best-effort `posix_fadvise(DONTNEED)` for the
+actual bytes read, including each segment of a cross-file read; non-POSIX
+builds keep the operation as a no-op. Read data and error behavior are
+unchanged.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core multi_disk_adaptor --lib --all-features
+  44 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes the local cache-advice slice only; platform-specific filesystem
+semantics and full workspace acceptance remain `PARTIAL`.

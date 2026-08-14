@@ -102,6 +102,11 @@ impl<D: DiskAdaptor + Default> SingleFileAllocationIterator<D> {
     pub fn adaptor_mut(&mut self) -> &mut D {
         &mut self.adaptor
     }
+
+    /// Recover the owned adaptor after allocation has completed.
+    pub fn into_inner(self) -> D {
+        self.adaptor
+    }
 }
 
 #[async_trait]
@@ -155,6 +160,7 @@ pub struct FallocFileAllocationIterator<D: DiskAdaptor> {
     adaptor: D,
     offset: u64,
     total_length: u64,
+    secure_falloc: bool,
     done: bool,
 }
 
@@ -167,10 +173,22 @@ impl<D: DiskAdaptor> FallocFileAllocationIterator<D> {
     /// * `offset` — current file size
     /// * `total_length` — target file size
     pub fn new(adaptor: D, offset: u64, total_length: u64) -> Self {
+        Self::new_with_secure_falloc(adaptor, offset, total_length, false)
+    }
+
+    /// Create a fallocate iterator with the platform security policy used by
+    /// `--secure-falloc`.
+    pub fn new_with_secure_falloc(
+        adaptor: D,
+        offset: u64,
+        total_length: u64,
+        secure_falloc: bool,
+    ) -> Self {
         Self {
             adaptor,
             offset,
             total_length,
+            secure_falloc,
             done: false,
         }
     }
@@ -178,6 +196,11 @@ impl<D: DiskAdaptor> FallocFileAllocationIterator<D> {
     /// Get a mutable reference to the underlying adaptor.
     pub fn adaptor_mut(&mut self) -> &mut D {
         &mut self.adaptor
+    }
+
+    /// Recover the owned adaptor after allocation has completed.
+    pub fn into_inner(self) -> D {
+        self.adaptor
     }
 }
 
@@ -189,13 +212,12 @@ impl<D: DiskAdaptor> FileAllocationIterator for FallocFileAllocationIterator<D> 
             // We invoke the full allocate_file pipeline which handles
             // platform-specific fallocate with fallbacks.
             let length = self.total_length;
-            let secure = false; // Caller controls security at a higher level
             crate::filesystem::file_allocation::allocate_file(
                 &mut self.adaptor,
                 std::path::Path::new(""),
                 length,
                 crate::filesystem::file_allocation::AllocationStrategy::Falloc,
-                secure,
+                self.secure_falloc,
             )
             .await?;
             self.offset = self.total_length;
@@ -308,6 +330,7 @@ pub struct AdaptiveFileAllocationIterator<D: DiskAdaptor + Default> {
     adaptor: D,
     offset: u64,
     total_length: u64,
+    secure_falloc: bool,
     /// Inner iterator selected after the fallocate probe.
     inner: Option<AdaptiveInner<D>>,
 }
@@ -326,10 +349,22 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
     /// * `offset` — current file size
     /// * `total_length` — target file size
     pub fn new(adaptor: D, offset: u64, total_length: u64) -> Self {
+        Self::new_with_secure_falloc(adaptor, offset, total_length, false)
+    }
+
+    /// Create an adaptive iterator with the platform security policy used by
+    /// `--secure-falloc`.
+    pub fn new_with_secure_falloc(
+        adaptor: D,
+        offset: u64,
+        total_length: u64,
+        secure_falloc: bool,
+    ) -> Self {
         Self {
             adaptor,
             offset,
             total_length,
+            secure_falloc,
             inner: None,
         }
     }
@@ -362,7 +397,7 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
             std::path::Path::new(""),
             self.offset + probe_len,
             crate::filesystem::file_allocation::AllocationStrategy::Falloc,
-            false,
+            self.secure_falloc,
         )
         .await;
 
@@ -376,11 +411,14 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
                     return Ok(());
                 }
                 // Continue with fallocate for the remaining region.
-                self.inner = Some(AdaptiveInner::Falloc(FallocFileAllocationIterator::new(
-                    std::mem::take(&mut self.adaptor),
-                    self.offset,
-                    self.total_length,
-                )));
+                self.inner = Some(AdaptiveInner::Falloc(
+                    FallocFileAllocationIterator::new_with_secure_falloc(
+                        std::mem::take(&mut self.adaptor),
+                        self.offset,
+                        self.total_length,
+                        self.secure_falloc,
+                    ),
+                ));
             }
             Err(_) => {
                 // fallocate failed — fall back to zero-fill.
@@ -434,6 +472,26 @@ impl<D: DiskAdaptor + Default> FileAllocationIterator for AdaptiveFileAllocation
 
     fn total_length(&self) -> u64 {
         self.total_length
+    }
+}
+
+impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
+    /// Recover the owned adaptor after allocation has completed.
+    pub fn into_inner(self) -> D {
+        match self.inner {
+            Some(AdaptiveInner::Falloc(iterator)) => iterator.into_inner(),
+            Some(AdaptiveInner::Single(iterator)) => iterator.into_inner(),
+            None => self.adaptor,
+        }
+    }
+
+    /// Close the file held by the selected inner iterator.
+    pub async fn close(&mut self) -> Result<()> {
+        match &mut self.inner {
+            Some(AdaptiveInner::Falloc(iterator)) => iterator.adaptor_mut().close().await,
+            Some(AdaptiveInner::Single(iterator)) => iterator.adaptor_mut().close().await,
+            None => self.adaptor.close().await,
+        }
     }
 }
 

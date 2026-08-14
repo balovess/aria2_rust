@@ -222,6 +222,18 @@ impl DiskWriterEntry {
         }
     }
 
+    /// Advise the OS that a recently read file range is no longer needed.
+    ///
+    /// aria2_original treats this as a best-effort cache hint: failure to
+    /// evict pages must not change the bytes returned to the caller.
+    #[cfg(unix)]
+    pub(super) fn drop_cache(&self, offset: u64, length: u64) {
+        let Some(file) = self.file.as_ref() else {
+            return;
+        };
+        crate::filesystem::disk_adaptor::advise_drop_cache(file, offset, length);
+    }
+
     /// Truncate this file to `length` bytes.
     pub(super) async fn truncate(&mut self, length: u64) -> Result<()> {
         if let Some(ref mut file) = self.file {

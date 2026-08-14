@@ -75,9 +75,11 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                     "fallocate(2) not supported by filesystem; \
                      falling back to async zero-fill"
                 );
-                // Size the file first so writes land at correct offsets.
+                // Preserve an existing partial download and clear only the
+                // newly extended region when falling back to zero-fill.
+                let existing_length = adaptor.size().await?.min(length);
                 adaptor.truncate(length).await?;
-                return strategies::async_zero_fill(adaptor, length).await;
+                return strategies::async_zero_fill_from(adaptor, existing_length, length).await;
             }
             // Other errors: return as I/O error
             Err(Aria2Error::Io(
@@ -107,6 +109,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                     // F_PREALLOCATE does not change the file size; size it first
                     // via ftruncate so the file is correct even if preallocation
                     // is rejected by the filesystem.
+                    let existing_length = adaptor.size().await?.min(length);
                     adaptor.truncate(length).await?;
                     // F_ALLOCATEALL allocates all requested space;
                     // F_PEOFPOSMODE measures offset from physical end of file.
@@ -135,7 +138,7 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                     // allocated blocks. Zero-fill when secure is requested,
                     // otherwise emit a one-time warning about the trade-off.
                     if secure {
-                        strategies::async_zero_fill(adaptor, length).await
+                        strategies::async_zero_fill_from(adaptor, existing_length, length).await
                     } else {
                         super::SECURE_FALLOC_WARN_ONCE.call_once(|| {
                             tracing::warn!(
