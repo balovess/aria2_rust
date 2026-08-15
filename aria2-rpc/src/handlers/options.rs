@@ -306,7 +306,6 @@ impl RpcEngine {
         // this matches C++ getOption rather than exposing a queued value.
         let (group_option_state, stopped_result) = if let Some(group_man) = self.group_man.as_ref()
         {
-            let group_man = group_man.read().await;
             let group_option_state = group_man.group_by_hex(&gid).map(|group| {
                 let group = group.recover();
                 (group.effective_option_snapshot(), group.runtime_options())
@@ -387,7 +386,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let manager = group_man.read().await;
+        let manager = group_man;
         manager
             .change_group_options(&gid, changes)
             .map_err(JsonRpcError::RpcExecution)?;

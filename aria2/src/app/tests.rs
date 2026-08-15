@@ -345,7 +345,7 @@ async fn test_standard_session_restores_metalink_graph() {
     }
 
     assert_eq!(app.restore_session().await.expect("restore session"), 2);
-    let groups = app.request_man.read().await.list_groups();
+    let groups = app.request_man.list_groups();
     let metadata = groups
         .iter()
         .find(|group| {
@@ -409,8 +409,6 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
 
     let app = App::new();
     app.request_man
-        .read()
-        .await
         .add_metalink_graph(graph)
         .expect("graph should be queued");
     {
@@ -458,7 +456,7 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
         2,
         "restart must rebuild both metadata and payload groups"
     );
-    let groups = restarted.request_man.read().await.list_groups();
+    let groups = restarted.request_man.list_groups();
     let metadata = groups
         .iter()
         .find(|group| group.recover().gid() == GroupId::new(0x30))
@@ -559,7 +557,7 @@ ftp://server.com/bigfile.bin
     assert_eq!(count, 3, "Should restore 3 non-completed entries");
 
     // Verify RequestGroupMan has corresponding groups
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let group_count = man.count();
     assert_eq!(group_count, 3, "RequestGroupMan should have 3 groups");
     assert!(
@@ -657,7 +655,7 @@ http://example.com/paused4.iso
     // Should only restore 2 entries (active and paused), skip 2 complete
     assert_eq!(count, 2, "Should only restore 2 non-completed entries");
 
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let group_count = man.count();
     assert_eq!(group_count, 2, "RequestGroupMan should have 2 groups");
 }
@@ -693,7 +691,7 @@ async fn test_save_session_on_shutdown() {
     };
 
     {
-        let man = app.request_man.read().await;
+        let man = &app.request_man;
         man.add_group(
             vec!["http://example.com/file1.zip".to_string()],
             opts.clone(),
@@ -871,7 +869,7 @@ async fn test_bt_bitfield_preserved_on_restore() {
     assert_eq!(result.unwrap(), 1, "Should restore 1 BT task");
 
     // Verify bitfield is preserved in RequestGroup
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let groups = man.list_groups();
     assert_eq!(groups.len(), 1, "Should have 1 group");
 
@@ -978,7 +976,7 @@ http://example.com/new2.iso
         "C++ aria2 restores all non-finished entries including 0/0 progress"
     );
 
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let group_count = man.count();
     assert_eq!(group_count, 2, "Should restore both 0/0 progress groups");
 }

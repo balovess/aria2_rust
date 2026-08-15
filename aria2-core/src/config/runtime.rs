@@ -458,10 +458,13 @@ pub enum ChangeableKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChangeableKind, INITIAL_REQUEST_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
-        RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_global_option_changeable,
-        is_initial_option, is_option_changeable, project_initial_options,
+        ChangeableKind, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
+        is_global_option_changeable, is_initial_option, is_option_changeable,
+        project_initial_options,
     };
+    #[cfg(feature = "bittorrent")]
+    use super::{INITIAL_REQUEST_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS};
+    #[cfg(feature = "bittorrent")]
     use crate::config::OptionRegistry;
 
     #[test]
@@ -527,6 +530,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "bittorrent")]
     #[test]
     fn runtime_policy_names_are_registered_without_duplicates() {
         let registry = OptionRegistry::new();

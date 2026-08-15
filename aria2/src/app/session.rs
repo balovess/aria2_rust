@@ -124,7 +124,7 @@ impl App {
 
             // Add group through RequestGroupMan
             {
-                let man = self.request_man.read().await;
+                let man = &self.request_man;
                 let gid = GroupId::new(entry.gid);
                 match man.add_group_with_gid(gid, entry.uris.clone(), opts) {
                     Ok(()) => {
@@ -283,7 +283,7 @@ impl App {
                 .map_err(|error| error.to_string())?;
         }
 
-        let manager = self.request_man.read().await;
+        let manager = &self.request_man;
         if manager.find_group(metadata_gid).is_some() || manager.find_group(payload_gid).is_some() {
             return Err("Metalink graph GID already exists".to_string());
         }
@@ -323,10 +323,7 @@ impl App {
         // Snapshot group handles before the asynchronous file write. The
         // manager lock must not be held while session serialization performs
         // filesystem I/O, otherwise RPC mutations can be blocked at shutdown.
-        let groups = {
-            let man = self.request_man.read().await;
-            man.list_groups()
-        };
+        let groups = self.request_man.list_groups();
 
         if groups.is_empty() {
             info!("No active download tasks, skipping session save");

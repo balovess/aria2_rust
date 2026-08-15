@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 use tracing::{debug, info};
@@ -13,12 +12,12 @@ use crate::request::request_group_man::RequestGroupMan;
 
 pub struct SaveSessionCommand {
     path: PathBuf,
-    request_group_man: Arc<RwLock<RequestGroupMan>>,
+    request_group_man: Arc<RequestGroupMan>,
     status: CommandStatus,
 }
 
 impl SaveSessionCommand {
-    pub fn new(path: PathBuf, man: Arc<RwLock<RequestGroupMan>>) -> Self {
+    pub fn new(path: PathBuf, man: Arc<RequestGroupMan>) -> Self {
         SaveSessionCommand {
             path,
             request_group_man: man,
@@ -37,7 +36,7 @@ impl Command for SaveSessionCommand {
         self.status = CommandStatus::Running;
         debug!("Starting session save to {}", self.path.display());
 
-        let groups = self.request_group_man.read().await.list_groups();
+        let groups = self.request_group_man.list_groups();
         session_serializer::save_to_file(&self.path, &groups).await?;
 
         self.status = CommandStatus::Completed;
@@ -61,7 +60,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_session_command_creation() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let cmd = SaveSessionCommand::new(PathBuf::from("/tmp/test.sess"), man);
         assert_eq!(cmd.status(), CommandStatus::Pending);
         assert!(cmd.path().to_str().unwrap().contains("test.sess"));
@@ -69,17 +68,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_session_command_execute() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        man.write()
-            .await
-            .add_group(
-                vec!["http://example.com/file.zip".into()],
-                DownloadOptions {
-                    split: Some(4),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let man = Arc::new(RequestGroupMan::new());
+        man.add_group(
+            vec!["http://example.com/file.zip".into()],
+            DownloadOptions {
+                split: Some(4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_save_session_{}.sess", std::process::id()));
@@ -98,7 +95,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_session_empty_manager() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_save_empty_{}.sess", std::process::id()));
         let mut cmd = SaveSessionCommand::new(path.clone(), man);
@@ -114,14 +111,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_session_atomic_write() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        man.write()
-            .await
-            .add_group(
-                vec!["http://example.com/atomic.bin".into()],
-                DownloadOptions::default(),
-            )
-            .unwrap();
+        let man = Arc::new(RequestGroupMan::new());
+        man.add_group(
+            vec!["http://example.com/atomic.bin".into()],
+            DownloadOptions::default(),
+        )
+        .unwrap();
 
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_atomic_{}.sess", std::process::id()));

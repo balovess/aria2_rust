@@ -29,8 +29,8 @@ pub struct HttpSegmentRequest {
     pub offset: u64,
     pub length: u64,
     pub cookie_header: Option<String>,
-    pub progress_tx: mpsc::UnboundedSender<ProgressUpdate>,
-    pub write_tx: mpsc::UnboundedSender<WriteChunk>,
+    pub progress_tx: mpsc::Sender<ProgressUpdate>,
+    pub write_tx: mpsc::Sender<WriteChunk>,
     pub expected_entity_length: u64,
 }
 

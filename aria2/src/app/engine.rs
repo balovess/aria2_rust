@@ -140,10 +140,7 @@ impl App {
                 .try_fold(0usize, |total, count| {
                     count.map(|count| total.saturating_add(count))
                 })?;
-            let first_gid = {
-                let man = self.request_man.read().await;
-                man.next_available_gid().value()
-            };
+            let first_gid = { self.request_man.next_available_gid().value() };
             let mut gid_iter =
                 (0..gid_count).map(|offset| GroupId::new(first_gid.saturating_add(offset as u64)));
             for input in &self.detected_inputs {
@@ -287,9 +284,7 @@ impl App {
     /// constructs them with the default `forceHalt = false`.
     async fn spawn_halt_watchers(
         &self,
-        cmd_tx: tokio::sync::mpsc::UnboundedSender<
-            aria2_core::engine::engine_command::EngineCommand,
-        >,
+        cmd_tx: aria2_core::engine::engine_command::EngineCommandSender,
     ) {
         use aria2_core::engine::halt_watchers;
 

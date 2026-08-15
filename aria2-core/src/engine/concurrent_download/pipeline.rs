@@ -10,7 +10,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::constants;
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate, WRITE_CHANNEL_CAPACITY};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
 use crate::engine::http_segment_downloader::WriteChunk;
@@ -233,7 +233,7 @@ pub async fn execute_with_coordinator(
         &server_keys,
         max_conn,
     );
-    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
+    let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut active: HashMap<u32, (usize, Instant)> = HashMap::new();
     let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -289,7 +289,7 @@ pub async fn execute_with_coordinator(
             let key = authority_key(&mirror_url).unwrap_or_else(|| mirror_url.clone());
 
             let (seg_progress_tx, mut seg_progress_rx) =
-                mpsc::unbounded_channel::<ProgressUpdate>();
+                mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
             let progress_for_listener = Arc::clone(&dl.progress);
             let progress_handle = tokio::spawn(async move {
                 while let Some(update) = seg_progress_rx.recv().await {

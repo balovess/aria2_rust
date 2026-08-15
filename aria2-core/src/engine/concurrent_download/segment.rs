@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
 use crate::constants;
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate, WRITE_CHANNEL_CAPACITY};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
 use crate::engine::http_segment_downloader::WriteChunk;
@@ -150,7 +150,7 @@ pub async fn execute(
 
     // Write channel: segment futures send chunks as they arrive,
     // the main loop drains them to disk via tokio::select!
-    let (write_tx, mut write_rx) = mpsc::unbounded_channel::<WriteChunk>();
+    let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut executor = HttpSegmentRequestExecutor::new(
         &dl.client,
         dl.request_policy.clone(),
@@ -194,7 +194,7 @@ pub async fn execute(
                 Some((seg_idx, offset, length)) => {
                     // Create per-segment progress channel for real-time updates
                     let (seg_progress_tx, mut seg_progress_rx) =
-                        mpsc::unbounded_channel::<ProgressUpdate>();
+                        mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
                     let progress_for_listener = Arc::clone(&dl.progress);
                     let total_inflight = Arc::clone(&total_inflight_bytes);
                     let seg_offset = offset;
@@ -607,7 +607,7 @@ pub async fn execute(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn cancel_and_persist(
     executor: HttpSegmentRequestExecutor,
-    write_rx: &mut mpsc::UnboundedReceiver<WriteChunk>,
+    write_rx: &mut mpsc::Receiver<WriteChunk>,
     writer: &mut CachedDiskWriter,
     limiter: Option<&RateLimiter>,
     global_limiter: Option<&RateLimiter>,

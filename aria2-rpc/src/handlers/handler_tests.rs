@@ -1170,19 +1170,15 @@ async fn test_save_session_without_path_errors() {
 async fn test_save_session_with_group_man() {
     use aria2_core::request::request_group::DownloadOptions;
     use aria2_core::request::request_group_man::RequestGroupMan;
-    use tokio::sync::RwLock;
-
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    man.write()
-        .await
-        .add_group(
-            vec!["http://example.com/rpc-session.bin".into()],
-            DownloadOptions {
-                split: Some(3),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let man = Arc::new(RequestGroupMan::new());
+    man.add_group(
+        vec!["http://example.com/rpc-session.bin".into()],
+        DownloadOptions {
+            split: Some(3),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let path =
         std::env::temp_dir().join(format!("test_save_session_man_{}.sess", std::process::id()));
@@ -1579,13 +1575,12 @@ async fn test_get_servers_active_gid_returns_file_indexes_without_fake_servers()
 
     // `getServers` only accepts active groups. Promotion must not turn the
     // configured mirror list into fake in-flight server entries.
-    let manager = engine.group_man.as_ref().unwrap().read().await;
+    let manager = engine.group_man.as_ref().unwrap();
     assert_eq!(manager.fill_from_reserver().len(), 1);
     let group = manager.group_by_hex(&gid).expect("promoted group");
     group
         .recover()
         .set_download_context(Arc::new(DownloadContext::new(0, 0, "file.bin".to_string())));
-    drop(manager);
 
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;

@@ -53,7 +53,7 @@ mod tests;
 pub struct App {
     pub config: Arc<RwLock<ConfigManager>>,
     engine: Arc<Mutex<Option<aria2_core::engine::download_engine::DownloadEngine>>>,
-    request_man: Arc<RwLock<RequestGroupMan>>,
+    request_man: Arc<RequestGroupMan>,
     detected_inputs: Vec<DetectedInput>,
 }
 
@@ -61,7 +61,7 @@ impl App {
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
         let config = Arc::new(RwLock::new(ConfigManager::new()));
-        let request_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let request_man = Arc::new(RequestGroupMan::new());
 
         Self {
             config,
@@ -258,7 +258,7 @@ impl App {
         if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await
             && max > 0
         {
-            self.request_man.read().await.set_max_concurrent(max as u32);
+            self.request_man.set_max_concurrent(max as u32);
             info!("Max concurrent downloads set to {} (from config)", max);
         }
 
@@ -282,10 +282,7 @@ impl App {
         // manager guard scoped to this synchronous snapshot: `run` continues
         // through RPC startup and the engine lifetime, so retaining it here
         // would starve the first RPC write lock indefinitely.
-        let has_restored_tasks = {
-            let man = self.request_man.read().await;
-            man.count() > 0
-        };
+        let has_restored_tasks = { self.request_man.count() > 0 };
 
         // In daemon mode, we need RPC enabled to control the daemon
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);

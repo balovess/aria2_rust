@@ -8,7 +8,7 @@ use crate::request::request_group::AtomicProgress;
 use crate::util::perf_monitor::{AtomicMetrics, PerformanceMonitor};
 
 pub struct ProgressUpdater {
-    progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
+    progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
     global_net_stat: Option<Arc<GlobalNetStat>>,
     /// Direct access to progress counters — avoids `RwLock` on the hot path.
     progress: Arc<AtomicProgress>,
@@ -38,7 +38,7 @@ impl Clone for ProgressUpdater {
 
 impl ProgressUpdater {
     pub(crate) fn new(
-        progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
+        progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
         global_net_stat: Option<Arc<GlobalNetStat>>,
         progress: Arc<AtomicProgress>,
         atomic_metrics: Arc<AtomicMetrics>,
@@ -94,11 +94,13 @@ impl ProgressUpdater {
         };
 
         if let Some(ref sender) = self.progress_sender {
-            let _ = sender.send(ProgressUpdate {
-                completed_bytes,
-                download_speed: speed,
-                upload_speed: 0,
-            });
+            let _ = sender
+                .send(ProgressUpdate {
+                    completed_bytes,
+                    download_speed: speed,
+                    upload_speed: 0,
+                })
+                .await;
         } else {
             self.progress.set_completed_length(completed_bytes);
             if speed > 0 {

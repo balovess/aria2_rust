@@ -406,22 +406,25 @@ fn test_registry_identity_defaults_match_original_aria2() {
             .to_string(),
         aria2_protocol::identity::DEFAULT_USER_AGENT
     );
-    assert_eq!(
-        registry
-            .get("peer-agent")
-            .unwrap()
-            .default_value()
-            .to_string(),
-        aria2_protocol::identity::DEFAULT_PEER_AGENT
-    );
-    assert_eq!(
-        registry
-            .get("peer-id-prefix")
-            .unwrap()
-            .default_value()
-            .to_string(),
-        aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX
-    );
+    #[cfg(feature = "bittorrent")]
+    {
+        assert_eq!(
+            registry
+                .get("peer-agent")
+                .unwrap()
+                .default_value()
+                .to_string(),
+            aria2_protocol::identity::DEFAULT_PEER_AGENT
+        );
+        assert_eq!(
+            registry
+                .get("peer-id-prefix")
+                .unwrap()
+                .default_value()
+                .to_string(),
+            aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX
+        );
+    }
 }
 
 #[cfg(feature = "bittorrent")]

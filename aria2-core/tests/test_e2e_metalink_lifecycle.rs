@@ -179,7 +179,7 @@ async fn metalink_engine_promotes_torrent_payload_and_preserves_mapping() {
     let payload = Arc::clone(&graph.payload);
     let payload_gid = payload.recover().gid();
 
-    let group_man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let mut engine = DownloadEngine::new(5);
     engine.set_request_group_man(Arc::clone(&group_man));
     let command_tx = engine.engine_command_sender();

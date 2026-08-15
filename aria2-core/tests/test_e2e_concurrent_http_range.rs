@@ -512,9 +512,9 @@ async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
         options,
     )));
     let mut engine = DownloadEngine::new(5);
-    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(
+    engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
-    )));
+    ));
     let command_tx = engine.engine_command_sender();
     command_tx
         .send(EngineCommand::AddDownload {
@@ -578,9 +578,9 @@ async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
         options,
     )));
     let mut engine = DownloadEngine::new(5);
-    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(
+    engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
-    )));
+    ));
     let command_tx = engine.engine_command_sender();
     command_tx
         .send(EngineCommand::AddDownload {

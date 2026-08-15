@@ -851,9 +851,8 @@ async fn engine_bt_download_with_tracker() {
         Some(temp_dir.path().to_str().unwrap()),
     );
     let _bt_cmd = bt_result.expect("valid torrent metadata should construct a BT command");
-    let group_man = std::sync::Arc::new(tokio::sync::RwLock::new(
-        aria2_core::request::request_group_man::RequestGroupMan::new(),
-    ));
+    let group_man =
+        std::sync::Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
     let gid = group_man
         .read()
         .await
@@ -906,9 +905,8 @@ async fn engine_multi_task_parallel() {
     server.register_range_response("/file_b.bin", &data_b);
     server.register_range_response("/file_c.bin", &data_c);
 
-    let group_man = std::sync::Arc::new(tokio::sync::RwLock::new(
-        aria2_core::request::request_group_man::RequestGroupMan::new(),
-    ));
+    let group_man =
+        std::sync::Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
     let mut engine = DownloadEngine::new(50);
     engine.set_request_group_man(group_man.clone());
 
@@ -921,7 +919,7 @@ async fn engine_multi_task_parallel() {
     let path_c = temp_dir.path().join("file_c.bin");
 
     let gids = {
-        let man = group_man.read().await;
+        let man = &group_man;
         [
             man.add_group(vec![url_a], test_download_options(temp_dir.path())),
             man.add_group(vec![url_b], test_download_options(temp_dir.path())),
@@ -934,8 +932,6 @@ async fn engine_multi_task_parallel() {
         .map(|result| result.expect("group should be created"))
     {
         let group = group_man
-            .read()
-            .await
             .group_by_id(gid)
             .expect("group should be registered");
         engine_cmd_tx

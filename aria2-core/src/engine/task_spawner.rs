@@ -48,7 +48,7 @@ pub(crate) fn spawn_download_task(
     group: Arc<std::sync::RwLock<RequestGroup>>,
     dependencies: CommandDependencies,
     generation: u64,
-    completion_tx: tokio::sync::mpsc::UnboundedSender<(GroupId, u64, TaskResult)>,
+    completion_tx: tokio::sync::mpsc::Sender<(GroupId, u64, TaskResult)>,
 ) -> Option<(tokio::task::JoinHandle<()>, CancellationToken)> {
     let gid = group.recover().gid();
     let uris = group.recover().uris().to_vec();
@@ -118,7 +118,11 @@ pub(crate) fn spawn_download_task(
 
         // Send completion notification. If the channel is closed, the engine
         // has already shut down; just log and move on.
-        if completion_tx.send((gid, generation, task_result)).is_err() {
+        if completion_tx
+            .send((gid, generation, task_result))
+            .await
+            .is_err()
+        {
             debug!(
                 gid = gid.value(),
                 "Completion channel closed, engine likely shut down"

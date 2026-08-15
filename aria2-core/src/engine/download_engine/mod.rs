@@ -4,12 +4,14 @@ mod progress;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, oneshot};
 use tracing::info;
 
 #[cfg(feature = "bittorrent")]
 use super::bt_registry::BtRegistry;
-use super::engine_command::EngineCommand;
+use super::engine_command::{
+    EngineCommandQueueSnapshot, EngineCommandReceiver, EngineCommandSender, channel,
+};
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::ftp::FtpConnectionPool;
@@ -22,8 +24,8 @@ use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, Tracke
 
 pub struct DownloadEngine {
     /// Sender for structured engine communication commands.
-    pub(crate) engine_cmd_tx: mpsc::UnboundedSender<EngineCommand>,
-    pub(crate) engine_cmd_rx: Option<mpsc::UnboundedReceiver<EngineCommand>>,
+    pub(crate) engine_cmd_tx: EngineCommandSender,
+    pub(crate) engine_cmd_rx: Option<EngineCommandReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) shutdown_rx: Option<oneshot::Receiver<()>>,
     pub(crate) tick_interval: Duration,
@@ -32,7 +34,7 @@ pub struct DownloadEngine {
     pub(crate) global_limiter: Option<RateLimiter>,
     pub(crate) save_session_path: Option<PathBuf>,
     pub(crate) save_session_interval: Option<Duration>,
-    pub(crate) request_group_man: Option<Arc<RwLock<RequestGroupMan>>>,
+    pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
     pub(crate) auto_save: Option<Arc<Mutex<AutoSaveSession>>>,
     /// FTP connection pool for connection reuse across FTP downloads.
     /// Created during engine initialization and passed down via dependency injection.
@@ -71,7 +73,7 @@ impl DownloadEngine {
     }
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
-        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
+        let (engine_cmd_tx, engine_cmd_rx) = channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let max_tries = policy.max_tries();
@@ -128,7 +130,7 @@ impl DownloadEngine {
         self.global_limiter.take()
     }
 
-    pub fn set_request_group_man(&mut self, man: Arc<RwLock<RequestGroupMan>>) {
+    pub fn set_request_group_man(&mut self, man: Arc<RequestGroupMan>) {
         self.request_group_man = Some(man);
     }
 
@@ -136,7 +138,7 @@ impl DownloadEngine {
         &mut self,
         path: PathBuf,
         interval: Option<Duration>,
-        man: Arc<RwLock<RequestGroupMan>>,
+        man: Arc<RequestGroupMan>,
     ) {
         self.save_session_path = Some(path.clone());
         self.save_session_interval = interval;
@@ -233,8 +235,12 @@ impl DownloadEngine {
     ///
     /// This is the engine interface for download management
     /// (add/remove/pause/unpause/halt).
-    pub fn engine_command_sender(&self) -> mpsc::UnboundedSender<EngineCommand> {
+    pub fn engine_command_sender(&self) -> EngineCommandSender {
         self.engine_cmd_tx.clone()
+    }
+
+    pub fn engine_command_metrics(&self) -> EngineCommandQueueSnapshot {
+        self.engine_cmd_tx.snapshot()
     }
 
     /// Take the shutdown sender so an external task (e.g., Ctrl+C handler) can
@@ -245,7 +251,7 @@ impl DownloadEngine {
 
     /// Get a clone of the engine command sender for sending commands like
     /// `ForceHaltAll` from external tasks (e.g., second Ctrl+C handler).
-    pub fn engine_cmd_tx(&self) -> mpsc::UnboundedSender<EngineCommand> {
+    pub fn engine_cmd_tx(&self) -> EngineCommandSender {
         self.engine_cmd_tx.clone()
     }
 

@@ -21,7 +21,9 @@ impl DownloadCommand {
 
     fn send_progress_update(&self, update: ProgressUpdate) {
         if let Some(ref sender) = self.progress_sender {
-            let _ = sender.send(update);
+            sender
+                .try_send(update)
+                .expect("progress test channel should accept the update");
         } else {
             panic!("test called send_progress_update but no sender is set");
         }

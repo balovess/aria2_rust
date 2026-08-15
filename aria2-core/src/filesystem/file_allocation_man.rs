@@ -438,6 +438,39 @@ impl FileAllocationMan {
             meta.cancelled.store(true, Ordering::Relaxed);
         }
     }
+
+    /// Cancel queued or active allocations belonging to one request group.
+    ///
+    /// Queued entries can be completed immediately because their waiters are
+    /// owned by the manager. The active entry is owned by the worker, so only
+    /// its shared cancellation flag is set; the worker reports the result
+    /// after it reaches its next cancellation check.
+    ///
+    /// Returns the number of entries cancelled, including an active entry.
+    pub fn cancel_gid(&mut self, gid: u64) -> usize {
+        let mut cancelled = 0;
+        let mut retained = VecDeque::with_capacity(self.queue.len());
+
+        while let Some(entry) = self.queue.pop_front() {
+            if entry.gid == gid {
+                entry.mark_cancelled();
+                if let Some(tx) = entry.done_tx {
+                    let _ = tx.send(Err(cancelled_error()));
+                }
+                cancelled += 1;
+            } else {
+                retained.push_back(entry);
+            }
+        }
+        self.queue = retained;
+
+        if let Some(meta) = self.picked.as_ref().filter(|meta| meta.gid == gid) {
+            meta.cancelled.store(true, Ordering::Relaxed);
+            cancelled += 1;
+        }
+
+        cancelled
+    }
 }
 
 impl Default for FileAllocationMan {
@@ -779,6 +812,11 @@ pub async fn cancel_all(man: &SharedFileAllocationMan) {
     man.write().await.cancel_all();
 }
 
+/// Cancel pending allocations for one request group and wake its waiter(s).
+pub async fn cancel_gid(man: &SharedFileAllocationMan, gid: u64) -> usize {
+    man.write().await.cancel_gid(gid)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,6 +1006,54 @@ mod tests {
         // Both queued waiters must be woken with an error.
         assert!(rx1.blocking_recv().unwrap().is_err());
         assert!(rx2.blocking_recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn test_cancel_gid_only_notifies_matching_queued_waiters() {
+        let man = Arc::new(TokioRwLock::new(FileAllocationMan::new()));
+        let (target_tx, target_rx) = oneshot::channel();
+        let (other_tx, mut other_rx) = oneshot::channel();
+        let (target_again_tx, target_again_rx) = oneshot::channel();
+
+        {
+            let mut guard = man.blocking_write();
+            guard.push_entry(FileAllocationEntry::single(
+                11,
+                PathBuf::from("/tmp/target-a"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                target_tx,
+            ));
+            guard.push_entry(FileAllocationEntry::single(
+                12,
+                PathBuf::from("/tmp/other"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                other_tx,
+            ));
+            guard.push_entry(FileAllocationEntry::single(
+                11,
+                PathBuf::from("/tmp/target-b"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                target_again_tx,
+            ));
+        }
+
+        assert_eq!(man.blocking_write().cancel_gid(11), 2);
+        assert_eq!(man.blocking_read().count_in_queue(), 1);
+        assert!(target_rx.blocking_recv().unwrap().is_err());
+        assert!(target_again_rx.blocking_recv().unwrap().is_err());
+        assert!(other_rx.try_recv().is_err());
+
+        man.blocking_write().cancel_all();
+        assert!(other_rx.blocking_recv().unwrap().is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

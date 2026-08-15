@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
-use super::engine_command::{EngineCommand, TaskResult};
+use super::engine_command::{EngineCommand, EngineCommandReceiver, TaskResult};
 use super::task_spawner::{CommandDependencies, spawn_download_task};
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
@@ -46,7 +46,7 @@ const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 /// demotion, and periodic tasks.
 pub struct EngineLoopContext {
     /// The request group manager (active/reserved/stopped queues).
-    pub group_man: Arc<tokio::sync::RwLock<RequestGroupMan>>,
+    pub group_man: Arc<RequestGroupMan>,
 
     /// FTP connection pool for dependency injection into download commands.
     pub ftp_pool: Arc<FtpConnectionPool>,
@@ -133,8 +133,23 @@ fn mark_session_dirty(ctx: &EngineLoopContext) {
 /// The loop processes `EngineCommand`s from `cmd_rx`, task completion
 /// notifications from `completion_rx`, and runs periodic housekeeping.
 pub async fn run_engine_loop(
+    ctx: EngineLoopContext,
+    cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    tick_interval: Duration,
+) {
+    run_engine_loop_with_receiver(
+        ctx,
+        EngineCommandReceiver::from_unbounded(cmd_rx),
+        shutdown_rx,
+        tick_interval,
+    )
+    .await;
+}
+
+pub(crate) async fn run_engine_loop_with_receiver(
     mut ctx: EngineLoopContext,
-    mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
+    mut cmd_rx: EngineCommandReceiver,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     tick_interval: Duration,
 ) {
@@ -150,7 +165,7 @@ pub async fn run_engine_loop(
 
     // Completion channel: spawned tasks send (GID, TaskResult) here when done.
     let (completion_tx, mut completion_rx) =
-        mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        mpsc::channel::<(GroupId, CommandGeneration, TaskResult)>(128);
 
     let mut ticker = tokio::time::interval(tick_interval);
 
@@ -179,8 +194,7 @@ pub async fn run_engine_loop(
         let promoted = if halt_requested || force_halt_requested {
             Vec::new()
         } else {
-            let man = ctx.group_man.read().await;
-            man.fill_from_reserver()
+            ctx.group_man.fill_from_reserver()
         };
 
         for group in &promoted {
@@ -236,8 +250,8 @@ pub async fn run_engine_loop(
                     // (e.g. empty URI list or unsupported scheme). Remove it
                     // from active and record an error so it does not stay
                     // in the active list forever.
-                    let man = ctx.group_man.read().await;
-                    man.fail_spawned_group(gid, "Failed to spawn download task");
+                    ctx.group_man
+                        .fail_spawned_group(gid, "Failed to spawn download task");
                 }
             }
         }
@@ -260,10 +274,7 @@ pub async fn run_engine_loop(
 
         // ── 4. Demote stopped groups (active → stopped results) ──────────
         // Mirrors C++ `removeStoppedGroup()`.
-        let demoted_gids = {
-            let man = ctx.group_man.read().await;
-            man.remove_stopped_groups(Some(&ctx.event_hooks))
-        };
+        let demoted_gids = { ctx.group_man.remove_stopped_groups(Some(&ctx.event_hooks)) };
 
         if !demoted_gids.is_empty() {
             debug!("Demoted {} groups to stopped", demoted_gids.len());
@@ -278,9 +289,7 @@ pub async fn run_engine_loop(
         }
 
         // ── 6. Check exit condition ──────────────────────────────────────
-        let man = ctx.group_man.read().await;
-        let all_done = man.download_finished() && running_downloads.is_empty();
-        drop(man);
+        let all_done = ctx.group_man.download_finished() && running_downloads.is_empty();
 
         // A graceful halt must wind the engine down even in keep-alive (RPC)
         // mode. C++ achieves this because every routine command (RPC
@@ -312,9 +321,8 @@ pub async fn run_engine_loop(
                 shutdown_received = true;
                 info!("Shutdown signal received");
                 // Process graceful halt
-                let man = ctx.group_man.read().await;
-                man.halt_all(crate::request::request_group::HaltReason::UserRequest);
-                drop(man);
+                ctx.group_man
+                    .halt_all(crate::request::request_group::HaltReason::UserRequest);
                 halt_requested = true;
 
                 // Give running tasks a chance to finish gracefully.
@@ -334,7 +342,7 @@ pub async fn run_engine_loop(
 /// Process all pending `EngineCommand` messages from the channel.
 async fn process_engine_commands(
     ctx: &mut EngineLoopContext,
-    cmd_rx: &mut mpsc::UnboundedReceiver<EngineCommand>,
+    cmd_rx: &mut EngineCommandReceiver,
     running_downloads: &mut [(GroupId, RunningDownload)],
     halt_requested: &mut bool,
     force_halt_requested: &mut bool,
@@ -346,7 +354,7 @@ async fn process_engine_commands(
         mark_session_dirty(ctx);
         match cmd {
             EngineCommand::AddDownload { group } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 let gid = group.recover().gid();
                 // Add to reserved queue — promotion happens on next tick.
                 man.add_group_arc(group);
@@ -354,7 +362,7 @@ async fn process_engine_commands(
             }
             #[cfg(all(feature = "metalink", feature = "bittorrent"))]
             EngineCommand::AddMetalinkGraph { graph } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 match man.add_metalink_graph(graph) {
                     Ok((metadata_gid, payload_gid)) => info!(
                         metadata_gid = metadata_gid.value(),
@@ -366,7 +374,7 @@ async fn process_engine_commands(
             }
 
             EngineCommand::RemoveDownload { gid } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 if let Err(e) = man.remove_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to remove download");
                     continue;
@@ -378,7 +386,7 @@ async fn process_engine_commands(
             }
 
             EngineCommand::ForceRemoveDownload { gid } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 if let Err(e) = man.force_remove_group(gid) {
                     warn!(gid = gid.value(), error = %e, "Failed to force-remove download");
                     continue;
@@ -389,7 +397,7 @@ async fn process_engine_commands(
             }
 
             EngineCommand::Pause { gid } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 let should_apply = man.find_group(gid).is_some_and(|group| {
                     matches!(
                         group.recover().status(),
@@ -402,7 +410,7 @@ async fn process_engine_commands(
             }
 
             EngineCommand::ForcePause { gid } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 let should_apply = man.find_group(gid).is_some_and(|group| {
                     matches!(
                         group.recover().status(),
@@ -421,7 +429,7 @@ async fn process_engine_commands(
             }
 
             EngineCommand::Unpause { gid } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 let should_apply = man
                     .find_group(gid)
                     .is_some_and(|group| group.recover().status().is_paused());
@@ -445,12 +453,12 @@ async fn process_engine_commands(
             }
 
             EngineCommand::PauseAll => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 man.pause_all();
             }
 
             EngineCommand::ForcePauseAll => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 man.force_pause_all();
                 // Like ForcePause, tasks are left to terminate on their own
                 // via the Paused status so num_commands stays balanced and
@@ -458,18 +466,18 @@ async fn process_engine_commands(
             }
 
             EngineCommand::UnpauseAll => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 man.unpause_all();
             }
 
             EngineCommand::HaltAll { reason } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 man.halt_all(reason);
                 *halt_requested = true;
             }
 
             EngineCommand::ForceHaltAll { reason } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 man.force_halt_all(reason);
                 *force_halt_requested = true;
 
@@ -479,7 +487,7 @@ async fn process_engine_commands(
             }
 
             EngineCommand::SetMaxConcurrent { max } => {
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 let old_max = man.max_concurrent();
                 man.set_max_concurrent(max);
                 info!(
@@ -517,7 +525,7 @@ async fn process_engine_commands(
 
                 // Keep the manager's option snapshot aligned with the live
                 // limiter. This is also used by status/reporting code.
-                let man = ctx.group_man.read().await;
+                let man = &ctx.group_man;
                 man.set_global_speed_limit(download_limit, upload_limit);
                 info!(
                     download_limit = ?download_limit,
@@ -623,13 +631,29 @@ fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
     }
 }
 
-async fn process_task_completions(
+trait CompletionQueue {
+    fn try_completion(&mut self) -> Result<(GroupId, CommandGeneration, TaskResult), ()>;
+}
+
+impl CompletionQueue for mpsc::Receiver<(GroupId, CommandGeneration, TaskResult)> {
+    fn try_completion(&mut self) -> Result<(GroupId, CommandGeneration, TaskResult), ()> {
+        mpsc::Receiver::try_recv(self).map_err(|_| ())
+    }
+}
+
+impl CompletionQueue for mpsc::UnboundedReceiver<(GroupId, CommandGeneration, TaskResult)> {
+    fn try_completion(&mut self) -> Result<(GroupId, CommandGeneration, TaskResult), ()> {
+        mpsc::UnboundedReceiver::try_recv(self).map_err(|_| ())
+    }
+}
+
+async fn process_task_completions<R: CompletionQueue>(
     ctx: &EngineLoopContext,
-    completion_rx: &mut mpsc::UnboundedReceiver<(GroupId, CommandGeneration, TaskResult)>,
+    completion_rx: &mut R,
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
     completed_generations: &mut HashSet<CommandGeneration>,
 ) {
-    while let Ok((gid, generation, result)) = completion_rx.try_recv() {
+    while let Ok((gid, generation, result)) = completion_rx.try_completion() {
         // A task may race with force-remove/timeout cleanup and publish more
         // than one terminal notification. Account for exactly one completion.
         if !completed_generations.insert(generation) {
@@ -649,7 +673,7 @@ async fn process_task_completions(
         running_downloads.retain(|(id, running)| *id != gid || running.generation != generation);
 
         // Decrement num_commands and update group status.
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         if let Some(group) = man.find_group(gid) {
             let prev = group.recover().dec_commands();
             let last_command = prev == 1;
@@ -823,7 +847,7 @@ async fn run_housekeeping(
     }
 
     if !timed_out.is_empty() {
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         for gid in timed_out {
             if let Some(group) = man.get_group(gid) {
                 let request_context = group.recover().latest_connection_context();
@@ -872,7 +896,7 @@ async fn run_housekeeping(
 
     // ── Prune excess stopped results ─────────────────────────────────────
     {
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         let pruned = man.prune_stopped_results(MAX_STOPPED_RESULTS);
         if pruned > 0 {
             debug!("Pruned {} excess stopped results", pruned);
@@ -927,14 +951,27 @@ async fn on_end_of_run(
 ) {
     info!("Engine loop cleanup: removing stopped groups and saving state");
 
-    // Cancel any pending file allocations so commands waiting on the
-    // completion channel are woken with an error instead of hanging forever.
-    // Mirrors C++ where the engine's commands are all dropped at exit.
-    crate::filesystem::file_allocation_man::cancel_all(&ctx.file_alloc_man).await;
+    // Cancel only allocations owned by this engine. The allocation manager is
+    // process-wide, so cancelling every entry here would interrupt a
+    // download running in another engine.
+    let allocation_gids: Vec<u64> = running_downloads
+        .iter()
+        .map(|(gid, _)| gid.value())
+        .collect();
+    for gid in allocation_gids {
+        let cancelled =
+            crate::filesystem::file_allocation_man::cancel_gid(&ctx.file_alloc_man, gid).await;
+        if cancelled > 0 {
+            debug!(
+                gid,
+                cancelled, "Cancelled file allocations during engine cleanup"
+            );
+        }
+    }
 
     // Demote any remaining stopped groups.
     let demoted = {
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         man.remove_stopped_groups(Some(&ctx.event_hooks))
     };
     if !demoted.is_empty() {
@@ -967,7 +1004,7 @@ mod tests {
     /// `--enable-rpc`, which is where the halt semantics used to break.
     fn test_ctx(keep_alive: bool) -> EngineLoopContext {
         EngineLoopContext {
-            group_man: Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new())),
+            group_man: Arc::new(RequestGroupMan::new()),
             ftp_pool: Arc::new(FtpConnectionPool::new(1)),
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             auto_save: None,
@@ -1079,7 +1116,7 @@ mod tests {
         use crate::request::request_group::{GroupId, RequestGroup};
         use crate::session::auto_save_session::AutoSaveSession;
 
-        let man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_engine_autosave_{}.sess", std::process::id()));
         let _ = tokio::fs::remove_file(&path).await;
@@ -1115,13 +1152,14 @@ mod tests {
         };
 
         // Send an AddDownload command through the engine-command channel.
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             GroupId::new(42),
             vec!["http://example.com/engine-autosave.bin".to_string()],
             DownloadOptions::default(),
         )));
         tx.send(EngineCommand::AddDownload { group }).unwrap();
+        let mut rx = EngineCommandReceiver::from_unbounded(rx);
 
         let mut halt_requested = false;
         let mut force_halt_requested = false;
@@ -1155,12 +1193,13 @@ mod tests {
     #[tokio::test]
     async fn global_rate_limit_command_updates_shared_limiter_and_snapshot() {
         let mut ctx = test_ctx(false);
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         tx.send(EngineCommand::SetGlobalRateLimit {
             download_limit: Some(2_000),
             upload_limit: Some(1_000),
         })
         .unwrap();
+        let mut rx = EngineCommandReceiver::from_unbounded(rx);
 
         let mut running_downloads = Vec::new();
         let mut halt_requested = false;
@@ -1183,7 +1222,7 @@ mod tests {
         assert_eq!(config.download_rate(), Some(2_000));
         assert_eq!(config.upload_rate(), Some(1_000));
 
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         assert_eq!(man.global_download_limit(), Some(2_000));
         assert_eq!(man.global_upload_limit(), Some(1_000));
     }
@@ -1199,7 +1238,7 @@ mod tests {
         let ctx = test_ctx(false);
 
         let gid = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             man.add_group(
                 vec!["http://example.com/file.bin".to_string()],
                 DownloadOptions::default(),
@@ -1209,7 +1248,7 @@ mod tests {
 
         // Promote to active (fill_from_reserver calls start() → Active).
         {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let promoted = man.fill_from_reserver();
             assert_eq!(promoted.len(), 1);
             assert!(man.find_group(gid).is_some());
@@ -1217,7 +1256,7 @@ mod tests {
 
         // aria2.pause marks the group Paused.
         {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             man.pause_group(gid).unwrap();
             let g = man.find_group(gid).unwrap();
             assert!(g.recover().status().is_paused());
@@ -1247,7 +1286,7 @@ mod tests {
         .await;
 
         let status = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             man.find_group(gid).unwrap().recover().status()
         };
         assert_eq!(
@@ -1261,7 +1300,7 @@ mod tests {
     async fn user_removal_wins_over_paused_status_on_cancelled_task() {
         let ctx = test_ctx(false);
         let gid = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let gid = man
                 .add_group(
                     vec!["http://example.com/file.bin".to_string()],
@@ -1292,14 +1331,7 @@ mod tests {
         )
         .await;
 
-        let status = ctx
-            .group_man
-            .read()
-            .await
-            .find_group(gid)
-            .unwrap()
-            .recover()
-            .status();
+        let status = ctx.group_man.find_group(gid).unwrap().recover().status();
         assert_eq!(status, DownloadStatus::Removed);
     }
 
@@ -1307,7 +1339,7 @@ mod tests {
     async fn duplicate_completion_decrements_command_once() {
         let ctx = test_ctx(false);
         let gid = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let gid = man
                 .add_group(
                     vec!["http://example.com/file.bin".to_string()],
@@ -1343,7 +1375,7 @@ mod tests {
         )
         .await;
 
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         let group = man.find_group(gid).unwrap();
         assert_eq!(group.recover().num_commands(), 0);
         assert_eq!(completed_generations.len(), 1);
@@ -1353,7 +1385,7 @@ mod tests {
     async fn same_gid_commands_have_independent_completion_generations() {
         let ctx = test_ctx(false);
         let gid = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let gid = man
                 .add_group(
                     vec!["http://example.com/file.bin".to_string()],
@@ -1391,7 +1423,7 @@ mod tests {
         )
         .await;
 
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         assert_eq!(man.find_group(gid).unwrap().recover().num_commands(), 0);
         assert_eq!(completed_generations.len(), 2);
     }
@@ -1400,7 +1432,7 @@ mod tests {
     async fn non_final_command_failure_waits_for_final_completion() {
         let ctx = test_ctx(false);
         let gid = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let gid = man
                 .add_group(
                     vec!["http://example.com/file.bin".to_string()],
@@ -1433,7 +1465,7 @@ mod tests {
         .await;
 
         {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let group = man.find_group(gid).unwrap();
             assert_eq!(group.recover().num_commands(), 1);
             assert!(matches!(group.recover().status(), DownloadStatus::Active));
@@ -1448,7 +1480,7 @@ mod tests {
         )
         .await;
 
-        let man = ctx.group_man.read().await;
+        let man = &ctx.group_man;
         let group = man.find_group(gid).unwrap();
         assert_eq!(group.recover().num_commands(), 0);
         assert!(matches!(group.recover().status(), DownloadStatus::Error(_)));
@@ -1537,7 +1569,7 @@ mod tests {
         let ctx = test_ctx(false);
 
         let gid = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             man.add_group(
                 vec!["http://example.com/file.bin".to_string()],
                 DownloadOptions::default(),
@@ -1545,7 +1577,7 @@ mod tests {
             .unwrap()
         };
         {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             let promoted = man.fill_from_reserver();
             assert_eq!(promoted.len(), 1);
             let g = man.find_group(gid).unwrap();
@@ -1573,7 +1605,7 @@ mod tests {
         .await;
 
         let status = {
-            let man = ctx.group_man.read().await;
+            let man = &ctx.group_man;
             man.find_group(gid).unwrap().recover().status()
         };
         assert!(
@@ -1581,5 +1613,59 @@ mod tests {
             "a genuine network failure must still record an Error, got {:?}",
             status
         );
+    }
+
+    #[tokio::test]
+    async fn engine_cleanup_cancels_only_its_running_gids() {
+        use crate::filesystem::file_allocation::AllocationStrategy;
+        use crate::filesystem::file_allocation_man::{FileAllocationEntry, FileAllocationProtocol};
+        use tokio::sync::oneshot;
+
+        let mut ctx = test_ctx(false);
+        let file_alloc_man = Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new()));
+        let (target_tx, target_rx) = oneshot::channel();
+        let (other_tx, mut other_rx) = oneshot::channel();
+
+        {
+            let mut man = file_alloc_man.write().await;
+            man.push_entry(FileAllocationEntry::single(
+                701,
+                std::path::PathBuf::from("/tmp/engine-cleanup-target"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                target_tx,
+            ));
+            man.push_entry(FileAllocationEntry::single(
+                702,
+                std::path::PathBuf::from("/tmp/engine-cleanup-other"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                other_tx,
+            ));
+        }
+        ctx.file_alloc_man = Arc::clone(&file_alloc_man);
+
+        let handle = tokio::spawn(async {});
+        let mut running_downloads = vec![(
+            GroupId::new(701),
+            RunningDownload {
+                _handle: handle,
+                shutdown: Some(CancellationToken::new()),
+                generation: 1,
+                started: Instant::now(),
+                timeout: None,
+            },
+        )];
+
+        on_end_of_run(&ctx, &mut running_downloads).await;
+
+        assert!(target_rx.await.unwrap().is_err());
+        assert!(other_rx.try_recv().is_err());
+        file_alloc_man.write().await.cancel_all();
+        assert!(other_rx.await.unwrap().is_err());
     }
 }

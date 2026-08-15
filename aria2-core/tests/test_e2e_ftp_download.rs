@@ -688,7 +688,7 @@ async fn test_engine_ftp_pause_unpause_preserves_control_file() {
         options,
     )));
     let mut engine = DownloadEngine::new(5);
-    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new())));
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
         .send(EngineCommand::AddDownload {
@@ -765,7 +765,7 @@ async fn test_engine_ftp_remove_preserves_partial_control_file() {
         options,
     )));
     let mut engine = DownloadEngine::new(5);
-    engine.set_request_group_man(Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new())));
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
         .send(EngineCommand::AddDownload {

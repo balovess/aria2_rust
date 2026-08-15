@@ -53,7 +53,7 @@ impl DownloadEngine {
         #[cfg(feature = "bittorrent")]
         self.public_tracker_catalog.start_catalog_update();
 
-        super::super::engine_loop::run_engine_loop(
+        super::super::engine_loop::run_engine_loop_with_receiver(
             ctx,
             engine_cmd_rx,
             shutdown_rx,

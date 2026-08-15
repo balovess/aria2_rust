@@ -12,9 +12,8 @@ impl DownloadEngine {
     /// download commands and applies them to the shared [`RequestGroup`].
     ///
     /// This eliminates per-chunk write-lock contention on the download hot
-    /// path: each `DownloadCommand` performs a cheap lock-free
-    /// `mpsc::UnboundedSender::send` and this single aggregator task is the
-    /// only writer of the progress fields.
+    /// path: each `DownloadCommand` sends through a bounded `mpsc` queue and
+    /// this single aggregator task is the only writer of the progress fields.
     ///
     /// The aggregator deduplicates consecutive updates with identical
     /// `completed_bytes` values and only refreshes the speed fields when the
@@ -33,7 +32,7 @@ impl DownloadEngine {
     pub fn spawn_progress_aggregator(
         _group: Arc<std::sync::RwLock<RequestGroup>>,
         progress: Arc<crate::request::request_group::AtomicProgress>,
-        mut receiver: mpsc::UnboundedReceiver<ProgressUpdate>,
+        mut receiver: mpsc::Receiver<ProgressUpdate>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut last_bytes: u64 = 0;
@@ -94,7 +93,7 @@ mod tests {
     #[tokio::test]
     async fn test_progress_channel_updates_request_group() {
         let group = make_group();
-        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (tx, rx) = mpsc::channel::<ProgressUpdate>(16);
 
         let group_clone = Arc::clone(&group);
         let handle = DownloadEngine::spawn_progress_aggregator(
@@ -109,15 +108,17 @@ mod tests {
             download_speed: 0,
             upload_speed: 0,
         })
+        .await
         .unwrap();
         tx.send(ProgressUpdate {
             completed_bytes: 5000,
             download_speed: 0,
             upload_speed: 0,
         })
+        .await
         .unwrap();
 
-        // Drop the sender: the aggregator drains all queued messages (unbounded
+        // Drop the sender: the aggregator drains all queued messages (bounded
         // channel recv only returns None after the queue is empty and all
         // senders are gone), then exits. Awaiting the handle is therefore a
         // deterministic synchronization point -- no sleep-based polling needed.
@@ -138,7 +139,7 @@ mod tests {
     #[tokio::test]
     async fn test_progress_aggregator_dedupes_identical_bytes() {
         let group = make_group();
-        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (tx, rx) = mpsc::channel::<ProgressUpdate>(16);
 
         let group_clone = Arc::clone(&group);
         let handle = DownloadEngine::spawn_progress_aggregator(
@@ -153,6 +154,7 @@ mod tests {
             download_speed: 0,
             upload_speed: 0,
         })
+        .await
         .unwrap();
         // Several duplicates with the same completed_bytes (and a speed that
         // must NOT be applied because the dedup `continue`s before reaching
@@ -163,6 +165,7 @@ mod tests {
                 download_speed: 9999,
                 upload_speed: 0,
             })
+            .await
             .unwrap();
         }
         // A real advance with a speed sample that SHOULD be applied.
@@ -171,6 +174,7 @@ mod tests {
             download_speed: 1234,
             upload_speed: 0,
         })
+        .await
         .unwrap();
 
         // Deterministic drain: drop sender + await handle guarantees all
@@ -200,7 +204,7 @@ mod tests {
     #[tokio::test]
     async fn test_progress_aggregator_applies_smoothed_speed_on_delta() {
         let group = make_group();
-        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (tx, rx) = mpsc::channel::<ProgressUpdate>(16);
 
         // Seed the group with a known cached speed before starting the aggregator.
         {
@@ -221,6 +225,7 @@ mod tests {
             download_speed: 0,
             upload_speed: 0,
         })
+        .await
         .unwrap();
 
         // Deterministic drain.
@@ -243,7 +248,7 @@ mod tests {
     #[tokio::test]
     async fn test_progress_aggregator_exits_on_sender_drop() {
         let group = make_group();
-        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (tx, rx) = mpsc::channel::<ProgressUpdate>(16);
 
         let handle = DownloadEngine::spawn_progress_aggregator(
             group.clone(),
@@ -275,7 +280,7 @@ mod tests {
     #[tokio::test]
     async fn test_progress_aggregator_smooths_speed() {
         let group = make_group();
-        let (tx, rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (tx, rx) = mpsc::channel::<ProgressUpdate>(16);
 
         let group_clone = Arc::clone(&group);
         let handle = DownloadEngine::spawn_progress_aggregator(
@@ -298,6 +303,7 @@ mod tests {
                 download_speed: 0, // Ignored -- smoother computes from delta
                 upload_speed: 0,
             })
+            .await
             .unwrap();
 
             // Wait long enough for the smoother's SAMPLE_INTERVAL_MS to elapse

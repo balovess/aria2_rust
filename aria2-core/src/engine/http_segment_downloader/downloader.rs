@@ -373,7 +373,7 @@ impl HttpSegmentDownloader {
         length: u64,
         cookie_header: Option<&str>,
         headers: &[(String, String)],
-        progress_tx: Option<&mpsc::UnboundedSender<ProgressUpdate>>,
+        progress_tx: Option<&mpsc::Sender<ProgressUpdate>>,
         expected_entity_length: u64,
     ) -> Result<bytes::Bytes> {
         if length == 0 {
@@ -459,7 +459,9 @@ impl HttpSegmentDownloader {
                             download_speed: 0,
                             upload_speed: 0,
                         };
-                        let _ = tx.send(update);
+                        // Progress is advisory; avoid stalling the data path
+                        // when the bounded snapshot queue is temporarily full.
+                        let _ = tx.try_send(update);
                         last_reported_progress = downloaded;
                     }
                 }
@@ -507,8 +509,8 @@ impl HttpSegmentDownloader {
         length: u64,
         cookie_header: Option<&str>,
         headers: &[(String, String)],
-        progress_tx: Option<&mpsc::UnboundedSender<ProgressUpdate>>,
-        write_tx: &mpsc::UnboundedSender<WriteChunk>,
+        progress_tx: Option<&mpsc::Sender<ProgressUpdate>>,
+        write_tx: &mpsc::Sender<WriteChunk>,
         expected_entity_length: u64,
     ) -> Result<u64> {
         if length == 0 {
@@ -586,10 +588,18 @@ impl HttpSegmentDownloader {
             }
 
             // Send chunk to writer immediately — no accumulation
-            let _ = write_tx.send(WriteChunk {
-                offset: current_offset,
-                data: bytes,
-            });
+            if write_tx
+                .send(WriteChunk {
+                    offset: current_offset,
+                    data: bytes,
+                })
+                .await
+                .is_err()
+            {
+                return Err(Aria2Error::DownloadFailed(
+                    "download writer channel closed".into(),
+                ));
+            }
 
             current_offset += chunk_len;
             total_written += chunk_len;
@@ -603,7 +613,7 @@ impl HttpSegmentDownloader {
                     download_speed: 0,
                     upload_speed: 0,
                 };
-                let _ = tx.send(update);
+                let _ = tx.send(update).await;
                 last_reported_progress = total_written;
             }
         }
@@ -792,7 +802,7 @@ mod tests {
             .expect("client build should succeed");
         let dl = HttpSegmentDownloader::new(&client);
         let url = format!("http://{}", addr);
-        let (write_tx, _write_rx) = mpsc::unbounded_channel();
+        let (write_tx, _write_rx) = mpsc::channel(8);
 
         let result = dl
             .download_range_streaming(&url, 0, 10, None, &[], None, &write_tx, 20)
@@ -939,7 +949,7 @@ mod tests {
             .expect("client build should succeed");
         let dl = HttpSegmentDownloader::new(&client);
         let url = format!("http://{addr}/source");
-        let (write_tx, mut write_rx) = mpsc::unbounded_channel();
+        let (write_tx, mut write_rx) = mpsc::channel(8);
 
         let total = dl
             .download_range_streaming(&url, 0, 10, None, &[], None, &write_tx, 20)

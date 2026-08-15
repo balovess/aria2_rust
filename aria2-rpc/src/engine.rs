@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use super::rpc_helpers::split_auth_token;
@@ -8,6 +8,7 @@ use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, SessionInfo};
 use super::websocket::EventPublisher;
 use aria2_core::config::OptionRegistry;
+use aria2_core::engine::engine_command::EngineCommandSender;
 use aria2_core::request::request_group_man::RequestGroupMan;
 
 pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
@@ -20,9 +21,8 @@ pub struct RpcEngine {
     pub(crate) global_opts: GlobalOptions,
     pub event_publisher: Arc<EventPublisher>,
     pub(crate) auth_middleware: RpcAuthMiddleware,
-    pub(crate) group_man: Option<Arc<RwLock<RequestGroupMan>>>,
-    pub(crate) engine_cmd_tx:
-        Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
+    pub(crate) group_man: Option<Arc<RequestGroupMan>>,
+    pub(crate) engine_cmd_tx: Option<EngineCommandSender>,
     pub(crate) session_info: SessionInfo,
     pub(crate) save_session_path: Option<std::path::PathBuf>,
 }
@@ -31,14 +31,14 @@ impl RpcEngine {
     /// Create a new RpcEngine test fixture with private core dependencies.
     /// Production callers should wire shared dependencies with the builder methods.
     pub fn new() -> Self {
-        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
+        let (engine_cmd_tx, engine_cmd_rx) = aria2_core::engine::engine_command::channel();
         std::mem::forget(engine_cmd_rx);
-        Self::wired(Arc::new(RwLock::new(RequestGroupMan::new())), engine_cmd_tx)
+        Self::wired(Arc::new(RequestGroupMan::new()), engine_cmd_tx)
     }
 
-    pub fn wired(
-        group_man: Arc<RwLock<RequestGroupMan>>,
-        engine_cmd_tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
+    pub fn wired<T: Into<EngineCommandSender>>(
+        group_man: Arc<RequestGroupMan>,
+        engine_cmd_tx: T,
     ) -> Self {
         // Initialize global options from the registry.
         let registry = OptionRegistry::new();
@@ -60,7 +60,7 @@ impl RpcEngine {
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
             group_man: Some(group_man),
-            engine_cmd_tx: Some(engine_cmd_tx),
+            engine_cmd_tx: Some(engine_cmd_tx.into()),
             session_info: SessionInfo::new(),
             save_session_path: None,
         }
@@ -89,7 +89,7 @@ impl RpcEngine {
     /// Chainable builder method to set the shared RequestGroupMan.
     /// When set, RPC handlers read live progress from the group manager
     /// and `aria2.addUri` registers downloads there.
-    pub fn with_group_man(mut self, man: Arc<RwLock<RequestGroupMan>>) -> Self {
+    pub fn with_group_man(mut self, man: Arc<RequestGroupMan>) -> Self {
         self.group_man = Some(man);
         self
     }
@@ -97,11 +97,8 @@ impl RpcEngine {
     /// Chainable builder method to set the EngineCommand channel sender.
     /// When set, RPC handlers send structured lifecycle commands (AddDownload,
     /// RemoveDownload, Pause, etc.) to the engine loop.
-    pub fn with_engine_cmd_tx(
-        mut self,
-        tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
-    ) -> Self {
-        self.engine_cmd_tx = Some(tx);
+    pub fn with_engine_cmd_tx<T: Into<EngineCommandSender>>(mut self, tx: T) -> Self {
+        self.engine_cmd_tx = Some(tx.into());
         self
     }
 
@@ -148,7 +145,7 @@ impl RpcEngine {
     /// Get current number of active tasks.
     pub async fn task_count(&self) -> usize {
         match self.group_man.as_ref() {
-            Some(man) => man.read().await.count(),
+            Some(man) => man.count(),
             None => 0,
         }
     }

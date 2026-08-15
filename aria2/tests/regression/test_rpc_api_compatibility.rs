@@ -688,7 +688,7 @@ async fn regression_get_files_format() {
 /// Test: aria2.getServers returns array with server info.
 #[tokio::test]
 async fn regression_get_servers_format() {
-    let group_man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let (engine_cmd_tx, _engine_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let engine = RpcEngine::wired(group_man.clone(), engine_cmd_tx);
 
@@ -699,9 +699,8 @@ async fn regression_get_servers_format() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let manager = group_man.read().await;
+    let manager = &group_man;
     assert_eq!(manager.fill_from_reserver().len(), 1);
-    drop(manager);
 
     let req = make_request("aria2.getServers", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
@@ -1115,7 +1114,7 @@ async fn regression_purge_download_result_returns_ok() {
 async fn regression_remove_download_result_returns_ok() {
     let engine = RpcEngine::new();
 
-    // First add a task, then force-remove it to populate stopped_tasks
+    // First add a task, then remove it to populate stopped_tasks.
     let add_req = make_request(
         "aria2.addUri",
         serde_json::json!([["http://example.com/file"]]),
@@ -1127,12 +1126,14 @@ async fn regression_remove_download_result_returns_ok() {
     let remove_req = make_request("aria2.remove", serde_json::json!([gid]));
     engine.handle_request(&remove_req).await;
 
-    // `RpcEngine::new` does not run the core command loop, so remove is only
-    // queued and no stopped result exists yet. The wired E2E fixture verifies
-    // successful removal after the completion command is processed.
+    // Reserved tasks are removed synchronously from the shared manager, so the
+    // result is available even when this handler-only fixture has no engine
+    // loop consuming commands.
     let req = make_request("aria2.removeDownloadResult", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
-    assert_error_code(&resp, 1);
+    assert_success(&resp);
+    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert_eq!(result, "OK");
 }
 
 // =========================================================================

@@ -7,7 +7,6 @@ use aria2_core::session::session_serializer::{
     SessionEntry, deserialize, load_from_file, save_to_file,
 };
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[test]
 fn test_e2e_serialize_single_entry() {
@@ -119,19 +118,17 @@ fn test_e2e_pause_flag_serialization() {
 
 #[tokio::test]
 async fn test_e2e_atomic_write() {
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    man.write()
-        .await
-        .add_group(
-            vec!["http://example.com/atomic_test.bin".into()],
-            DownloadOptions::default(),
-        )
-        .unwrap();
+    let man = Arc::new(RequestGroupMan::new());
+    man.add_group(
+        vec!["http://example.com/atomic_test.bin".into()],
+        DownloadOptions::default(),
+    )
+    .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_atomic_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups();
+    let groups = man.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     assert!(path.exists());
@@ -147,7 +144,7 @@ async fn test_e2e_atomic_write() {
 
 #[tokio::test]
 async fn test_e2e_auto_save_interval_logic() {
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let man = Arc::new(RequestGroupMan::new());
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_interval_{}.sess", std::process::id()));
 
@@ -162,7 +159,7 @@ async fn test_e2e_auto_save_interval_logic() {
 
 #[tokio::test]
 async fn test_e2e_auto_save_dirty_flag() {
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let man = Arc::new(RequestGroupMan::new());
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_dirty_{}.sess", std::process::id()));
 
@@ -176,22 +173,20 @@ async fn test_e2e_auto_save_dirty_flag() {
 
 #[tokio::test]
 async fn test_e2e_full_roundtrip_file_io() {
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    man.write()
-        .await
-        .add_group(
-            vec!["http://example.com/roundtrip.bin".into()],
-            DownloadOptions {
-                split: Some(8),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let man = Arc::new(RequestGroupMan::new());
+    man.add_group(
+        vec!["http://example.com/roundtrip.bin".into()],
+        DownloadOptions {
+            split: Some(8),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_roundtrip_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups();
+    let groups = man.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     let loaded = load_from_file(&path).await.unwrap();
@@ -252,26 +247,24 @@ fn test_e2e_secure_falloc_roundtrip() {
 #[tokio::test]
 async fn test_e2e_full_options_roundtrip_file_io() {
     // Full file I/O round-trip with many non-default options
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    man.write()
-        .await
-        .add_group(
-            vec!["http://example.com/full-opts.bin".into()],
-            DownloadOptions {
-                secure_falloc: true,
-                file_allocation: Some("trunc".to_string()),
-                split: Some(4),
-                dir: Some("/tmp".to_string()),
-                max_retries: 5,
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let man = Arc::new(RequestGroupMan::new());
+    man.add_group(
+        vec!["http://example.com/full-opts.bin".into()],
+        DownloadOptions {
+            secure_falloc: true,
+            file_allocation: Some("trunc".to_string()),
+            split: Some(4),
+            dir: Some("/tmp".to_string()),
+            max_retries: 5,
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let dir = std::env::temp_dir();
     let path = dir.join(format!("e2e_full_opts_{}.sess", std::process::id()));
 
-    let groups = man.read().await.list_groups();
+    let groups = man.list_groups();
     save_to_file(&path, &groups).await.unwrap();
 
     let loaded = load_from_file(&path).await.unwrap();

@@ -16,7 +16,7 @@ impl RpcEngine {
         let Some(group_man) = &self.group_man else {
             return Vec::new();
         };
-        let man = group_man.read().await;
+        let man = group_man;
         man.all_groups()
             .into_iter()
             .map(|(_, group)| group.recover().gid().to_hex_string())
@@ -34,7 +34,7 @@ impl RpcEngine {
                 "aria2.removeDownloadResult is not supported by the core state model".into(),
             )
         })?;
-        let man = group_man.read().await;
+        let man = group_man;
         if man.remove_stopped_result(&gid).is_some() {
             Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
@@ -58,7 +58,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let group = man
             .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
@@ -94,7 +94,7 @@ impl RpcEngine {
     pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
         if let Some(group_man) = &self.group_man {
-            group_man.write().await.pause_all();
+            group_man.pause_all();
         }
         let result = self
             .engine_cmd_tx
@@ -129,7 +129,7 @@ impl RpcEngine {
     pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
         if let Some(group_man) = &self.group_man {
-            group_man.write().await.force_pause_all();
+            group_man.force_pause_all();
         }
         let result = self
             .engine_cmd_tx
@@ -164,7 +164,7 @@ impl RpcEngine {
     pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
         if let Some(group_man) = &self.group_man {
-            group_man.write().await.unpause_all();
+            group_man.unpause_all();
         }
         let result = self
             .engine_cmd_tx
@@ -205,7 +205,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let group = man
             .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
@@ -236,7 +236,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let files = if let Some(group) = man.group_by_hex(&gid) {
             let guard = group.recover();
             let completed = guard.get_completed_length();
@@ -266,7 +266,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let group = man.group_by_hex(&gid).ok_or_else(|| {
             JsonRpcError::RpcExecution(format!("No active download for GID#{}", gid))
         })?;
@@ -330,7 +330,7 @@ impl RpcEngine {
         })?;
         // The original method has no parameters and purges all retained
         // results. It intentionally ignores the request object entirely.
-        group_man.read().await.purge_stopped_results();
+        group_man.purge_stopped_results();
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             "OK",

@@ -120,7 +120,7 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let keys = status_keys_for_request(req, 0)?;
         let active: Vec<StatusInfo> = if let Some(group_man) = self.group_man.as_ref() {
-            let man = group_man.read().await;
+            let man = group_man;
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
                 let g = group_lock.recover();
@@ -156,7 +156,7 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let (offset, num, keys) = pagination_params(req)?;
         let waiting: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
+            let man = group_man;
             let mut result = Vec::new();
             for (gid, group_lock) in man.all_groups() {
                 let g = group_lock.recover();
@@ -195,7 +195,7 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let (offset, num, keys) = pagination_params(req)?;
         let stopped: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
-            let man = group_man.read().await;
+            let man = group_man;
             let results = paginate(man.get_stopped_results(0, usize::MAX), offset, num);
             results.iter().map(Self::build_status_from_result).collect()
         } else {
@@ -219,7 +219,7 @@ impl RpcEngine {
     pub async fn handle_global_stat(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let (dl_speed, ul_speed, active, waiting, stopped) =
             if let Some(group_man) = self.group_man.as_ref() {
-                let man = group_man.read().await;
+                let man = group_man;
                 let mut dl = 0u64;
                 let mut ul = 0u64;
                 let mut active_n = 0usize;

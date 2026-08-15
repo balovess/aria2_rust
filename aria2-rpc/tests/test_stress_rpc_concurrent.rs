@@ -426,7 +426,7 @@ async fn test_stress_task_lifecycle_operations() {
         }
     });
 
-    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let mut download_engine = DownloadEngine::new(1);
     download_engine.set_request_group_man(Arc::clone(&group_man));
     download_engine.set_keep_alive(true);

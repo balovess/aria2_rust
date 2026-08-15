@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::constants;
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate};
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::error::{Aria2Error, Result};
@@ -66,8 +66,8 @@ pub struct DownloadCommand {
     pub(super) perf_monitor: Option<Arc<PerformanceMonitor>>,
     pub(super) atomic_metrics: Arc<AtomicMetrics>,
     pub(super) request_policy: HttpRequestPolicy,
-    pub(super) progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
-    pub(super) progress_receiver: Option<mpsc::UnboundedReceiver<ProgressUpdate>>,
+    pub(super) progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    pub(super) progress_receiver: Option<mpsc::Receiver<ProgressUpdate>>,
     pub(super) progress_aggregator_handle: Option<tokio::task::JoinHandle<()>>,
 
     // ── Tail reclaim progress tracking ─────────────────────────────────
@@ -405,7 +405,7 @@ impl DownloadCommand {
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
 
         Ok(Self {
             group,
@@ -535,7 +535,7 @@ impl DownloadCommand {
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
 
         Ok(Self {
             group,
@@ -603,10 +603,7 @@ impl DownloadCommand {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn with_progress_sender(
-        mut self,
-        sender: mpsc::UnboundedSender<ProgressUpdate>,
-    ) -> Self {
+    pub(crate) fn with_progress_sender(mut self, sender: mpsc::Sender<ProgressUpdate>) -> Self {
         self.progress_sender = Some(sender);
         self.progress_receiver = None;
         self

@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use crate::config::{ConfigManager, OptionValue};
 use crate::engine::download_engine::DownloadEngine;
-use crate::engine::engine_command::EngineCommand;
+use crate::engine::engine_command::{EngineCommand, EngineCommandSender};
 use crate::error::Result;
 use crate::rate_limiter::RateLimiterConfig;
 use crate::request::request_group::{
@@ -77,8 +77,8 @@ pub struct Aria2RustGlobalStat {
 pub struct Aria2RustSession {
     runtime: Runtime,
     config: ConfigManager,
-    request_man: Arc<RwLock<RequestGroupMan>>,
-    command_tx: mpsc::UnboundedSender<EngineCommand>,
+    request_man: Arc<RequestGroupMan>,
+    command_tx: EngineCommandSender,
     shutdown_tx: Option<oneshot::Sender<()>>,
     engine_task: Option<JoinHandle<Result<()>>>,
     keep_running: bool,
@@ -178,7 +178,7 @@ impl Aria2RustSession {
             Ok::<_, String>((config, keep_running))
         })?;
 
-        let request_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let request_man = Arc::new(RequestGroupMan::new());
         let mut engine = DownloadEngine::new(100);
         #[cfg(feature = "bittorrent")]
         {
@@ -218,9 +218,7 @@ impl Aria2RustSession {
 
         let max_concurrent = runtime.block_on(config.get_global_i64("max-concurrent-downloads"));
         if let Some(max) = max_concurrent.filter(|value| *value >= 0) {
-            runtime.block_on(async {
-                request_man.read().await.set_max_concurrent(max as u32);
-            });
+            request_man.set_max_concurrent(max as u32);
         }
 
         let download_limit = runtime
@@ -231,12 +229,7 @@ impl Aria2RustSession {
             .and_then(non_zero_limit);
         if download_limit.is_some() || upload_limit.is_some() {
             engine.set_global_rate_limiter(RateLimiterConfig::new(download_limit, upload_limit));
-            runtime.block_on(async {
-                request_man
-                    .read()
-                    .await
-                    .set_global_speed_limit(download_limit, upload_limit);
-            });
+            request_man.set_global_speed_limit(download_limit, upload_limit);
         }
 
         let command_tx = engine.engine_command_sender();
@@ -300,8 +293,8 @@ impl Aria2RustSession {
             return Err("at least one non-empty URI is required".to_string());
         }
         let options = self.merged_options(overrides)?;
-        let gid = self.runtime.block_on(async {
-            let man = self.request_man.read().await;
+        let gid = {
+            let man = &self.request_man;
             let gid = man.next_available_gid();
             let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
                 gid,
@@ -319,7 +312,7 @@ impl Aria2RustSession {
             }
             man.add_group_arc(group);
             Ok::<_, String>(gid.value())
-        })?;
+        }?;
         Ok(gid)
     }
 
@@ -327,18 +320,18 @@ impl Aria2RustSession {
         let keep_running = self.keep_running;
         self.runtime.block_on(async {
             if mode == 1 {
-                if !keep_running && self.request_man.read().await.download_finished() {
+                if !keep_running && self.request_man.download_finished() {
                     return 0;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                return if keep_running || !self.request_man.read().await.download_finished() {
+                return if keep_running || !self.request_man.download_finished() {
                     1
                 } else {
                     0
                 };
             }
             loop {
-                if self.request_man.read().await.download_finished() {
+                if self.request_man.download_finished() {
                     return 0;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -461,7 +454,7 @@ impl Aria2RustSession {
             .map(|(name, value)| (name, serde_json::Value::String(value)))
             .collect();
         let result = {
-            let manager = self.runtime.block_on(self.request_man.read());
+            let manager = &self.request_man;
             manager.change_group_options(&GroupId::new(gid).to_hex_string(), changes)
         };
         match result {
@@ -471,7 +464,7 @@ impl Aria2RustSession {
     }
 
     fn get_info(&mut self, gid: u64) -> Option<Aria2RustDownloadInfo> {
-        let manager = self.runtime.block_on(self.request_man.read());
+        let manager = &self.request_man;
         if let Some(group) = manager.find_group(GroupId::new(gid)) {
             let group = group.recover();
             return Some(Aria2RustDownloadInfo {
@@ -491,7 +484,7 @@ impl Aria2RustSession {
     }
 
     fn global_stat(&mut self) -> Aria2RustGlobalStat {
-        let manager = self.runtime.block_on(self.request_man.read());
+        let manager = &self.request_man;
         let mut stat = Aria2RustGlobalStat {
             num_stopped: manager.stopped_count() as u64,
             ..Default::default()
@@ -695,7 +688,7 @@ pub unsafe extern "C" fn aria2_rust_remove(
         }
         let session = unsafe { &mut *session };
         let removal_result = {
-            let manager = session.runtime.block_on(session.request_man.read());
+            let manager = &session.request_man;
             if force != 0 {
                 manager.force_remove_group(GroupId::new(gid))
             } else {
@@ -739,8 +732,7 @@ pub unsafe extern "C" fn aria2_rust_pause(
         }
         let session = unsafe { &mut *session };
         let result = session
-            .runtime
-            .block_on(session.request_man.read())
+            .request_man
             .find_group(GroupId::new(gid))
             .ok_or_else(|| format!("GID {gid} not found"));
         let Some(group) = result.ok() else {
@@ -788,10 +780,7 @@ pub unsafe extern "C" fn aria2_rust_unpause(session: *mut Aria2RustSession, gid:
             return INVALID_ARGUMENT;
         }
         let session = unsafe { &mut *session };
-        let result = session
-            .runtime
-            .block_on(session.request_man.read())
-            .unpause_group(GroupId::new(gid));
+        let result = session.request_man.unpause_group(GroupId::new(gid));
         if let Err(error) = result {
             return session.fail(error.to_string(), INVALID_ARGUMENT);
         }
@@ -921,11 +910,7 @@ pub unsafe extern "C" fn aria2_rust_get_active_downloads(
         if session.is_null() || (capacity > 0 && output.is_null()) {
             return 0;
         }
-        let gids = unsafe {
-            (&mut *session)
-                .runtime
-                .block_on(async { (&*session).request_man.read().await.get_active_groups() })
-        };
+        let gids = unsafe { (&*session).request_man.get_active_groups() };
         let values = gids
             .iter()
             .map(|group| group.recover().gid().value())
@@ -1157,13 +1142,8 @@ mod tests {
             0
         );
 
-        let group = unsafe {
-            (&*session)
-                .runtime
-                .block_on((&*session).request_man.read())
-                .find_group(GroupId::new(gid))
-        }
-        .expect("C API option change should keep the group");
+        let group = unsafe { (&*session).request_man.find_group(GroupId::new(gid)) }
+            .expect("C API option change should keep the group");
         let group = group.read().unwrap();
         assert_eq!(group.options().dir.as_deref(), Some("reserved-dir"));
         assert_eq!(

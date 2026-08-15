@@ -6,7 +6,6 @@ use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::server::{AuthConfig, ServerConfig};
-use tokio::sync::RwLock;
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
     JsonRpcRequest {
@@ -339,17 +338,14 @@ async fn test_force_pause_all_empty_tasks() {
 /// Register a group in a fresh `RequestGroupMan` and return the hex GID
 /// plus the shared manager. The group is registered directly (not via
 /// `aria2.addUri`) so no download engine / command channel is required.
-async fn setup_group_man_with_group() -> (Arc<RwLock<RequestGroupMan>>, String) {
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    let gid = {
-        let guard = man.read().await;
-        guard
-            .add_group(
-                vec!["http://example.com/file.bin".to_string()],
-                DownloadOptions::default(),
-            )
-            .expect("add_group should succeed")
-    };
+async fn setup_group_man_with_group() -> (Arc<RequestGroupMan>, String) {
+    let man = Arc::new(RequestGroupMan::new());
+    let gid = man
+        .add_group(
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )
+        .expect("add_group should succeed");
     (man, gid.to_hex_string())
 }
 
@@ -388,11 +384,7 @@ async fn test_change_option_propagates_to_running_group() {
     // that update_group_options propagated the change to the live download.
     let gid = aria2_core::request::request_group::GroupId::from_hex_string(&gid_hex)
         .expect("GID hex should parse");
-    let group = man
-        .read()
-        .await
-        .group_by_id(gid)
-        .expect("group should still exist");
+    let group = man.group_by_id(gid).expect("group should still exist");
     let g = group.read().unwrap();
     assert_eq!(
         g.options().max_download_limit,
@@ -405,7 +397,7 @@ async fn test_change_option_propagates_to_running_group() {
 async fn test_change_option_active_reserved_value_applies_after_restart() {
     let (man, gid_hex) = setup_group_man_with_group().await;
     {
-        let manager = man.read().await;
+        let manager = &man;
         assert_eq!(manager.fill_from_reserver().len(), 1);
     }
 
@@ -424,11 +416,7 @@ async fn test_change_option_active_reserved_value_applies_after_restart() {
     let gid = aria2_core::request::request_group::GroupId::from_hex_string(&gid_hex)
         .expect("GID hex should parse");
     {
-        let group = man
-            .read()
-            .await
-            .group_by_id(gid)
-            .expect("group should still exist");
+        let group = man.group_by_id(gid).expect("group should still exist");
         let group = group.read().unwrap();
         assert!(group.status().is_paused());
         assert_eq!(
@@ -439,13 +427,11 @@ async fn test_change_option_active_reserved_value_applies_after_restart() {
     }
 
     {
-        let manager = man.read().await;
+        let manager = &man;
         assert_eq!(manager.requeue_non_terminal_groups(None), 1);
     }
 
     let group = man
-        .read()
-        .await
         .group_by_id(gid)
         .expect("requeued group should still exist");
     let group = group.read().unwrap();
@@ -482,7 +468,7 @@ async fn test_change_option_ignores_startup_only_with_group_man() {
 async fn test_change_option_unknown_gid_returns_execution_error() {
     // C++ aria2 resolves the GID before gathering options, so an unknown
     // download cannot be staged through changeOption.
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let man = Arc::new(RequestGroupMan::new());
     let engine = RpcEngine::new().with_group_man(man);
 
     let unknown_gid = "0000000000000001".to_string();
