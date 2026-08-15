@@ -1,5 +1,15 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-15 Test Baseline Boundary
+
+Compatibility regression tests are Rust-owned and self-contained. Checked-in
+fixtures and assertions are the only test inputs; the test process does not
+read, build, or link against `aria2_original`. The reference implementation
+remains audit evidence for public behavior, while `aria2-rust` owns its
+implementation, product identity, defaults, and extension aliases. This keeps
+external CLI/config/RPC/protocol compatibility separate from internal C++
+structure and does not change any user configuration.
+
 > 目标：以 **aria2_original** 为兼容基准，完成完整兼容且高性能的 Rust 现代下载引擎迁移。
 > aria2-next 增强项仅选择性采纳（日志轮转、tail reclaim 等小型项），ED2K 协议缓后。
 >

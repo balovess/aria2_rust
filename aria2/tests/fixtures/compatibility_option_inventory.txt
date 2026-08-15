@@ -1,3 +1,7 @@
+# Rust-owned compatibility baseline for the public option inventory.
+# This fixture is checked in with the Rust project and is not generated from
+# or read from aria2_original during tests.
+
 allow-overwrite
 allow-piece-length-change
 all-proxy
