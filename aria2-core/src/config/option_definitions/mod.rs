@@ -7,9 +7,9 @@
 //!
 //! # Original CLI Contract
 //!
-//! Original registry short names are copied from the active option handlers
-//! and usage definitions in `aria2_original`. They are public compatibility
-//! data, not an internal prioritization scheme:
+//! The registry keeps a Rust-owned baseline for the original public short
+//! options. They are compatibility data, not an internal prioritization
+//! scheme, and are intentionally independent of the Rust field layout:
 //!
 //! `-a file-allocation`, `-c continue`, `-d dir`, `-D daemon`,
 //! `-i input-file`, `-j max-concurrent-downloads`,
