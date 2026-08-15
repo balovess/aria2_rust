@@ -112,7 +112,6 @@ jobs:
     name: Publish crates.io packages
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
-    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -146,20 +145,30 @@ jobs:
             return 1
           }
 
-          cargo publish --dry-run -p aria2-protocol
-          cargo publish -p aria2-protocol --token "$CARGO_REGISTRY_TOKEN"
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+
+          publish_if_missing() {
+            local package="$1"
+            if cargo info "$package@$VERSION" >/dev/null 2>&1; then
+              echo "$package@$VERSION is already published; skipping."
+              return 0
+            fi
+            cargo publish --dry-run -p "$package"
+            cargo publish -p "$package" --token "$CARGO_REGISTRY_TOKEN"
+          }
+
+          publish_if_missing aria2-protocol
           sleep 30
           verify_dependent_package aria2-core
-          cargo publish -p aria2-core --token "$CARGO_REGISTRY_TOKEN"
+          publish_if_missing aria2-core
           sleep 30
           verify_dependent_package aria2-rpc
-          cargo publish -p aria2-rpc --token "$CARGO_REGISTRY_TOKEN"
+          publish_if_missing aria2-rpc
 
   publish-python:
     name: Publish Python SDK
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
-    continue-on-error: true
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -187,7 +196,6 @@ jobs:
     name: Publish Node.js SDK
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
-    continue-on-error: true
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -212,7 +220,6 @@ jobs:
     name: Publish Docker image
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
-    continue-on-error: true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -246,7 +253,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: [prepare, build]
+    needs: [prepare, build, publish-crates, publish-python, publish-nodejs, docker]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:

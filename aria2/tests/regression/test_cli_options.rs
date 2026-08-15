@@ -1137,8 +1137,8 @@ fn regression_registry_short_names() {
     );
 }
 
-/// The short-option table is an external CLI contract. These values are
-/// copied from aria2_original/src/usage_text.h and must not be inferred from
+/// The short-option table is a Rust-owned baseline for the public CLI
+/// contract. These values are checked in here and must not be inferred from
 /// the Rust field layout or from a convenient unused character.
 #[test]
 fn regression_original_short_option_contract() {
