@@ -41,8 +41,6 @@ async fn test_add_uri_preserves_memory_follow_mode_from_rpc_options() {
         .group_man
         .as_ref()
         .expect("test manager")
-        .read()
-        .await
         .group_by_hex(&gid)
         .expect("RPC group should be registered");
     assert_eq!(
@@ -149,12 +147,7 @@ async fn test_add_metalink_direct_only_applies_filters_and_priority() {
         "select-file must be applied before GID creation"
     );
 
-    let group_man = engine
-        .group_man
-        .as_ref()
-        .expect("test manager")
-        .read()
-        .await;
+    let group_man = engine.group_man.as_ref().expect("test manager");
     let group = group_man
         .group_by_hex(&gids[0])
         .expect("direct Metalink group should be registered");
@@ -189,12 +182,7 @@ async fn test_add_metalink_position_inserts_the_whole_result() {
     let gids: Vec<String> = serde_json::from_value(response.result.expect("RPC result")).unwrap();
     assert_eq!(gids.len(), 1);
 
-    let group_man = engine
-        .group_man
-        .as_ref()
-        .expect("test manager")
-        .read()
-        .await;
+    let group_man = engine.group_man.as_ref().expect("test manager");
     let waiting = group_man.get_waiting_groups();
     assert_eq!(waiting[0].recover().gid().to_hex_string(), gids[0]);
 }

@@ -40,5 +40,5 @@ pub use active_connection::{ActiveConnection, ConnectionPoolKey, ProxyInfo};
 pub use context::ConnectionContext;
 pub use happy_eyeballs::{HappyEyeballsResult, connect_with_happy_eyeballs, resolve_dual_stack};
 pub use manager::HttpConnectionManager;
-pub use pipeline::{HttpPipelineConnection, NtlmState, PendingRequest, PipelineResponse};
+pub use pipeline::{HttpPipelineConnection, PendingRequest, PipelineResponse};
 pub use types::{ConnectionState, HttpConfig, HttpResponse};

@@ -374,12 +374,14 @@ impl DownloadCommand {
                             Arc::clone(&self.progress),
                             self.global_limiter.clone(),
                         );
-                        return sequential_downloader.execute_with_gaps_with_retry(
+                        let result = sequential_downloader.execute_with_gaps_with_retry(
                             uri,
                             total_length,
                             &completed_ranges,
                             &retry_policy,
                         ).await;
+                        drop(sequential_downloader);
+                        return result;
                     }
                     Err(e) => return Err(e),
                 }
@@ -396,12 +398,14 @@ impl DownloadCommand {
                 Arc::clone(&self.progress),
                 self.global_limiter.clone(),
             );
-            sequential_downloader.execute_with_retry(
+            let result = sequential_downloader.execute_with_retry(
                 uri,
                 &resume_state,
                 total_length,
                 &retry_policy,
-            ).await
+            ).await;
+            drop(sequential_downloader);
+            result
         }
         .await;
 

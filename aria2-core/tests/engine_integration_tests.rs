@@ -50,7 +50,7 @@ fn test_download_options(output_dir: &std::path::Path) -> DownloadOptions {
         bt_piece_selection_strategy: "default".to_string(),
         bt_endgame_threshold: 10,
         max_retries: 3,
-        retry_wait: 1000,
+        retry_wait: 1,
         bt_max_upload_slots: None,
         bt_optimistic_unchoke_interval: None,
         bt_snubbed_timeout: None,
@@ -715,7 +715,14 @@ async fn engine_error_cleanup_on_failure() {
 
     // Build and attempt download
     let mut cmd = build_http_command(&url, &output_path).expect("Failed to build command");
-    let result: Result<(), _> = cmd.execute().await;
+    let result: Result<(), _> = tokio::time::timeout(Duration::from_secs(5), cmd.execute())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "404 download did not terminate within 5s; requests: {:?}",
+                server.take_request_log()
+            )
+        });
 
     // Should fail due to 404
     assert!(
@@ -754,7 +761,14 @@ async fn engine_error_cleanup_on_failure() {
 
     let mut cmd_500 =
         build_http_command(&url_500, &output_path_500).expect("Failed to build command");
-    let result_500: Result<(), _> = cmd_500.execute().await;
+    let result_500: Result<(), _> = tokio::time::timeout(Duration::from_secs(5), cmd_500.execute())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "500 download did not terminate within 5s; requests: {:?}",
+                server.take_request_log()
+            )
+        });
 
     assert!(
         result_500.is_err(),
@@ -854,13 +868,9 @@ async fn engine_bt_download_with_tracker() {
     let group_man =
         std::sync::Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
     let gid = group_man
-        .read()
-        .await
         .add_group(vec![tracker_url.to_string()], opts.clone())
         .expect("group should be created");
     let group = group_man
-        .read()
-        .await
         .group_by_id(gid)
         .expect("group should be registered");
     let command = EngineCommand::AddDownload { group };
