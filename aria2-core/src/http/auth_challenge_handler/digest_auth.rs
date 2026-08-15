@@ -55,18 +55,22 @@ pub fn handle_digest_challenge(
         let _ = url_for_resolve.set_password(Some(pwd));
     }
 
-    let auth_config = {
-        // First try challenge mode (which checks BasicCred cache)
-        let mut opts_challenge = auth_opts.clone();
-        opts_challenge.http_auth_challenge = true;
-        auth_factory.resolve(&url_for_resolve, false, &opts_challenge)
-    }
-    .or_else(|| {
-        // Fall back to non-challenge mode (Netrc / CLI options)
-        let mut opts_no_challenge = auth_opts.clone();
-        opts_no_challenge.http_auth_challenge = false;
-        auth_factory.resolve(&url_for_resolve, false, &opts_no_challenge)
-    });
+    let auth_config = if challenge.is_proxy {
+        auth_factory.resolve_proxy(auth_opts)
+    } else {
+        {
+            // First try challenge mode (which checks BasicCred cache)
+            let mut opts_challenge = auth_opts.clone();
+            opts_challenge.http_auth_challenge = true;
+            auth_factory.resolve(&url_for_resolve, false, &opts_challenge)
+        }
+        .or_else(|| {
+            // Fall back to non-challenge mode (Netrc / CLI options)
+            let mut opts_no_challenge = auth_opts.clone();
+            opts_no_challenge.http_auth_challenge = false;
+            auth_factory.resolve(&url_for_resolve, false, &opts_no_challenge)
+        })
+    };
 
     let ac = match auth_config {
         Some(ac) => ac,
@@ -76,7 +80,7 @@ pub fn handle_digest_challenge(
                 host, port, path
             );
             return AuthChallengeResult::NoCredentials {
-                status_code: 401,
+                status_code: if challenge.is_proxy { 407 } else { 401 },
                 message: "No credentials available for Digest authentication".to_string(),
             };
         }

@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub const PROGRESS_CHANNEL_CAPACITY: usize = 32;
+pub const WRITE_CHANNEL_CAPACITY: usize = 64;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandStatus {
     Pending,

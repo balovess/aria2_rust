@@ -6,7 +6,7 @@
 //! - `-h` → help (aria2_original)
 //! - `-v` → version (aria2_original)
 //! - `-V` → check-integrity (aria2_original)
-//! - `-L` → listen-port (additional non-conflicting alias)
+//! - `-L` → listen-port (Rust additive alias)
 //! - `--save-cookies` has no short form (matching aria2_original)
 //!
 //! # Boolean option semantics (`--opt[=true|false]`)
@@ -100,12 +100,13 @@ impl FromStr for HelpRequest {
 
 /// Command-line arguments for the aria2-compatible binary.
 ///
-/// `name = "aria2c"` and the explicit compatibility version preserve the
-/// upstream executable identity. The binary itself remains `aria2c` via
-/// `[[bin]]` in `aria2/Cargo.toml`.
+/// `name = "aria2c"` preserves the established executable entry point for
+/// existing clients. The displayed version still comes from this product's
+/// package metadata, and the binary remains `aria2c` via `[[bin]]` in
+/// `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
-    name = "aria2c",
+    name = aria2_protocol::identity::PRODUCT_NAME,
     version = aria2_protocol::identity::PRODUCT_VERSION,
     disable_help_flag = true,
     disable_version_flag = true,
@@ -134,7 +135,7 @@ pub struct CliArgs {
     #[command(flatten)]
     pub advanced: AdvancedArgs,
 
-    /// Original aria2 version action (`-v`, `--version`).
+    /// aria2-compatible version action using the aria2-rust product version.
     #[arg(short = 'v', long = "version", action = ArgAction::Version)]
     pub version: Option<bool>,
 
@@ -235,7 +236,9 @@ where
 /// filtering uses the CLI's explicit option headings and the original tag
 /// names that have a direct Rust representation.
 pub fn render_help(request: &HelpRequest) -> String {
-    let mut command = CliArgs::command();
+    // Keep the compatibility executable name in help usage while the version
+    // action itself is rendered with the independent product identity.
+    let mut command = CliArgs::command().name("aria2c");
 
     let filter = match request {
         HelpRequest::Basic => "#basic",
@@ -962,7 +965,7 @@ pub struct HttpFtpArgs {
     #[arg(long = "retry-wait")]
     pub retry_wait: Option<u64>,
 
-    /// Connections per download
+    /// Maximum concurrent segment requests per download
     #[arg(short = 's', long)]
     pub split: Option<u64>,
 
@@ -970,7 +973,7 @@ pub struct HttpFtpArgs {
     #[arg(short = 'k', long = "min-split-size")]
     pub min_split_size: Option<String>,
 
-    /// Max connections per server
+    /// HTTP max connections per server; adaptive download may lower it
     #[arg(short = 'x', long = "max-connection-per-server")]
     pub max_connection_per_server: Option<u64>,
 
@@ -1458,6 +1461,24 @@ pub struct BitTorrentArgs {
     #[arg(long = "bt-tracker")]
     pub bt_tracker: Option<String>,
 
+    /// Enable public trackers
+    #[arg(
+        long = "enable-public-trackers",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub enable_public_trackers: Option<bool>,
+
+    /// Remote public tracker list sources, comma or newline separated
+    #[arg(long = "bt-tracker-source")]
+    pub bt_tracker_source: Option<String>,
+
+    /// Public tracker list refresh interval in seconds
+    #[arg(long = "bt-tracker-update-interval")]
+    pub bt_tracker_update_interval: Option<u64>,
+
     /// Connect timeout for tracker in seconds
     #[arg(long = "bt-tracker-connect-timeout")]
     pub bt_tracker_connect_timeout: Option<u64>,
@@ -1716,23 +1737,40 @@ pub struct AdvancedArgs {
 // Banner display (kept here for colored output integration)
 // =========================================================================
 
+pub(crate) fn product_banner_title() -> String {
+    format!(
+        "{} version {}",
+        aria2_protocol::identity::PRODUCT_NAME,
+        aria2_protocol::identity::PRODUCT_VERSION
+    )
+}
+
 impl App {
-    /// Print the application banner using the upstream-compatible identity.
+    /// Print the application banner using the product identity.
     pub(super) fn print_banner(&self) {
-        println!(
-            "{}",
-            format!(
-                "aria2 version {}",
-                aria2_protocol::identity::PRODUCT_VERSION
-            )
-            .green()
-            .bold()
-        );
+        println!("{}", product_banner_title().green().bold());
         println!(
             "{} {}",
             "Copyright:".blue(),
-            "(C) 2006, 2019 Tatsuhiro Tsujikawa".white()
+            "(C) aria2-rust contributors".white()
         );
         println!();
+    }
+}
+
+#[cfg(test)]
+mod banner_tests {
+    use super::product_banner_title;
+
+    #[test]
+    fn banner_uses_product_identity() {
+        assert_eq!(
+            product_banner_title(),
+            format!(
+                "{} version {}",
+                aria2_protocol::identity::PRODUCT_NAME,
+                aria2_protocol::identity::PRODUCT_VERSION
+            )
+        );
     }
 }

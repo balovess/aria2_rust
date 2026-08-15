@@ -57,7 +57,6 @@ pub struct MultiFileAllocationIterator {
     /// Allocation strategy to use for each file.
     strategy: AllocationStrategy,
     /// Whether to zero-fill after fallocate on platforms that don't zero-fill.
-    #[allow(dead_code)]
     secure_falloc: bool,
 }
 
@@ -66,6 +65,11 @@ pub struct MultiFileAllocationIterator {
 /// a dedicated `DiskWriter` for each file to avoid reopen issues with
 /// `OpenedFileCounter`.
 enum PerFileIter {
+    Adaptive(
+        crate::filesystem::file_allocation_iterator::AdaptiveFileAllocationIterator<
+            DirectDiskAdaptor,
+        >,
+    ),
     Falloc(
         crate::filesystem::file_allocation_iterator::FallocFileAllocationIterator<
             DirectDiskAdaptor,
@@ -74,11 +78,7 @@ enum PerFileIter {
     Trunc(
         crate::filesystem::file_allocation_iterator::TruncFileAllocationIterator<DirectDiskAdaptor>,
     ),
-    Single(
-        crate::filesystem::file_allocation_iterator::SingleFileAllocationIterator<
-            DirectDiskAdaptor,
-        >,
-    ),
+    None,
 }
 
 impl MultiFileAllocationIterator {
@@ -86,7 +86,8 @@ impl MultiFileAllocationIterator {
     ///
     /// # Arguments
     /// * `multi_adaptor` — the `MultiDiskAdaptor` containing file entries
-    /// * `strategy` — allocation strategy (`Falloc`, `Trunc`, or `Adaptive`)
+    /// * `strategy` — allocation strategy (`Prealloc`, `Falloc`, `Trunc`, or
+    ///   `None`)
     /// * `secure_falloc` — zero-fill after fallocate on non-zeroing platforms
     pub fn new(
         multi_adaptor: MultiDiskAdaptor,
@@ -104,6 +105,11 @@ impl MultiFileAllocationIterator {
 
     /// Advance to the next file needing allocation and create its iterator.
     async fn advance_to_next_file(&mut self) -> Result<bool> {
+        if self.strategy == AllocationStrategy::None {
+            self.entry_index = self.multi_adaptor.get_disk_writer_entries().len();
+            return Ok(false);
+        }
+
         // Close any existing inner iterator's file handle.
         self.inner_iter = None;
 
@@ -179,10 +185,11 @@ impl MultiFileAllocationIterator {
     ) -> PerFileIter {
         match self.strategy {
             AllocationStrategy::Falloc | AllocationStrategy::Mmap => PerFileIter::Falloc(
-                crate::filesystem::file_allocation_iterator::FallocFileAllocationIterator::new(
+                crate::filesystem::file_allocation_iterator::FallocFileAllocationIterator::new_with_secure_falloc(
                     adaptor,
                     offset,
                     total_length,
+                    self.secure_falloc,
                 ),
             ),
             AllocationStrategy::Trunc => PerFileIter::Trunc(
@@ -192,22 +199,15 @@ impl MultiFileAllocationIterator {
                     total_length,
                 ),
             ),
-            // Prealloc and None both use zero-fill (Adaptive would try falloc
-            // first; we use Single here for simplicity — the fallocate probe
-            // is already handled at a higher level by AdaptiveFileAllocationIterator
-            // for single-file downloads. For multi-file, C++ also uses
-            // AdaptiveFileAllocationIterator as default, which falls back to
-            // SingleFileAllocationIterator).
-            AllocationStrategy::Prealloc | AllocationStrategy::None => {
-                let mut iter =
-                    crate::filesystem::file_allocation_iterator::SingleFileAllocationIterator::new(
-                        adaptor,
-                        offset,
-                        total_length,
-                    );
-                iter.init();
-                PerFileIter::Single(iter)
-            }
+            AllocationStrategy::Prealloc => PerFileIter::Adaptive(
+                crate::filesystem::file_allocation_iterator::AdaptiveFileAllocationIterator::new_with_secure_falloc(
+                    adaptor,
+                    offset,
+                    total_length,
+                    self.secure_falloc,
+                ),
+            ),
+            AllocationStrategy::None => PerFileIter::None,
         }
     }
 
@@ -228,6 +228,10 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
         // If we have an active inner iterator, use it.
         if let Some(inner) = &mut self.inner_iter {
             let done = match inner {
+                PerFileIter::Adaptive(a) => {
+                    a.allocate_chunk().await?;
+                    a.finished()
+                }
                 PerFileIter::Falloc(f) => {
                     f.allocate_chunk().await?;
                     f.finished()
@@ -236,10 +240,7 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
                     t.allocate_chunk().await?;
                     t.finished()
                 }
-                PerFileIter::Single(s) => {
-                    s.allocate_chunk().await?;
-                    s.finished()
-                }
+                PerFileIter::None => true,
             };
 
             if done {
@@ -250,15 +251,16 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
                 // so we must close explicitly to ensure data is persisted.
                 if let Some(inner) = self.inner_iter.take() {
                     match inner {
+                        PerFileIter::Adaptive(mut a) => {
+                            let _ = a.close().await;
+                        }
                         PerFileIter::Falloc(mut f) => {
                             let _ = f.adaptor_mut().close().await;
                         }
                         PerFileIter::Trunc(mut t) => {
                             let _ = t.adaptor_mut().close().await;
                         }
-                        PerFileIter::Single(mut s) => {
-                            let _ = s.adaptor_mut().close().await;
-                        }
+                        PerFileIter::None => {}
                     }
                     // Yield to allow the async file close to complete before
                     // any subsequent metadata checks (important on Windows).
@@ -280,6 +282,10 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
     }
 
     fn finished(&self) -> bool {
+        if self.strategy == AllocationStrategy::None {
+            return true;
+        }
+
         // Check if we've advanced past all entries AND have no active inner iter.
         // Note: if entry_index == 0 and inner_iter is None, we haven't started
         // advancing yet. In that case, we're not finished — allocate_chunk()
@@ -300,28 +306,29 @@ impl FileAllocationIterator for MultiFileAllocationIterator {
         let entries = self.multi_adaptor.get_disk_writer_entries();
         let all_done = self.entry_index >= entries.len();
         let inner_done = self.inner_iter.as_ref().is_none_or(|i| match i {
+            PerFileIter::Adaptive(a) => a.finished(),
             PerFileIter::Falloc(f) => f.finished(),
             PerFileIter::Trunc(t) => t.finished(),
-            PerFileIter::Single(s) => s.finished(),
+            PerFileIter::None => true,
         });
         all_done && inner_done
     }
 
     fn current_length(&self) -> u64 {
         match &self.inner_iter {
+            Some(PerFileIter::Adaptive(a)) => a.current_length(),
             Some(PerFileIter::Falloc(f)) => f.current_length(),
             Some(PerFileIter::Trunc(t)) => t.current_length(),
-            Some(PerFileIter::Single(s)) => s.current_length(),
-            None => 0,
+            Some(PerFileIter::None) | None => 0,
         }
     }
 
     fn total_length(&self) -> u64 {
         match &self.inner_iter {
+            Some(PerFileIter::Adaptive(a)) => a.total_length(),
             Some(PerFileIter::Falloc(f)) => f.total_length(),
             Some(PerFileIter::Trunc(t)) => t.total_length(),
-            Some(PerFileIter::Single(s)) => s.total_length(),
-            None => 0,
+            Some(PerFileIter::None) | None => 0,
         }
     }
 }

@@ -1,6 +1,6 @@
 # aria2_rust Comprehensive Gap Analysis
 # Deep-comparison audit against C++ aria2_original and aria2-next
-# Updated: 2026-08-09 (external-contract policy, FTPS status, retry, and CORS reconciliation)
+# Updated: 2026-08-14 (external-contract policy, product identity, checksum completion, configuration cleanup, and XML-RPC boundary coverage)
 
 > This file is a historical deep-comparison audit, not the current completion
 > gate. The current external-compatibility status is maintained in
@@ -10,7 +10,75 @@
 > the current RPC status remains `PARTIAL` until that interoperability matrix
 > is reproducibly green.
 
-## Executive Summary
+The product identity is `aria2-rust 0.2.9` throughout active Rust crates and
+user-visible version surfaces. Compatibility with `aria2_original` applies to
+the external CLI/RPC/protocol contract; internal implementation and version
+report text are autonomous Rust design choices. The FTP checkpoint on
+2026-08-12 covers local protocol and mock-server behavior but does not close
+third-party FTP/FTPS or original-client interoperability, so FTP remains
+`PARTIAL`.
+
+The obsolete Rust `aria2-core::option::OptionHandler` duplicate was removed on
+2026-08-14 after a workspace reference audit. The active configuration seam is
+`config::OptionRegistry` plus `ConfigParser`; the removed module had no
+production callers and its eight self-tests were replaced by the canonical
+option/parser coverage. This cleanup is internal and does not change user
+configuration, defaults, product identity, or external aria2-compatible wire
+behavior.
+
+The RPC XML-RPC parser also now uses a Rust-owned permissive Base64 helper
+matching `aria2_original/src/base64.h`: ignored non-alphabet bytes and padding
+validation are covered through the public parser seam. The value-state boundary
+now also matches the original omission behavior for invalid integer values and
+incomplete struct members, while the response adapter emits an array result as
+one XML-RPC parameter. This is external wire-compatibility work behind the
+existing Rust dispatch module; the C++ parser state-machine hierarchy was not
+copied into the workspace.
+
+## 2026-08-14 Validation Checkpoint
+
+The Rust configuration registry now separates explicit-value parsing from
+default injection. `ConfigParser::apply_defaults` is the only default stage;
+empty explicit input cannot silently select a default. Exact boolean parsing,
+the boolean-flag empty-value rule, and the non-empty `rpc-secret` rule are
+covered without changing user configuration or the Rust product defaults.
+
+Current focused evidence is 42 option tests, 30 parser tests, 48 config-file
+tests, 105 CLI tests, 232 RPC library tests, 18 RPC integration tests, 55
+all-method RPC E2E tests, 47 HTTP/WebSocket/XML-RPC route E2E tests, and 10 RPC
+stress tests, all with zero failures in
+their recorded runs. All-feature Clippy for `aria2-core`, `aria2-protocol`,
+`aria2-rpc`, and `aria2`, workspace formatting, and `git diff --check` passed
+on 2026-08-14. The historical counts below remain audit history; the current
+completion gate is `docs/compatibility-status.md`, and the migration remains
+`PARTIAL`.
+
+## 2026-08-14 Session Transfer Statistics Checkpoint
+
+The C++ `DownloadContext` comparison showed that its three network update
+methods also forward bytes through `RequestGroupMan::NetStat`. Rust previously
+updated only the per-download `NetStat` and left TODOs for that owner path.
+The Rust implementation now uses one manager-owned lock-free `GlobalNetStat`
+shared with registered groups through `Arc`; `DownloadContext` receives the
+same internal sink without copying C++ ownership or class structure. The
+progress updater accounts for monotonic deltas after the restored offset, and
+direct context update methods update the same aggregate when used by a
+protocol path.
+
+No option definitions, defaults, session configuration, product version, or
+RPC wire shape changed. `getGlobalStat` continues to expose its existing
+aria2-compatible fields and current per-group speed aggregation. Focused
+validation passed 42 `DownloadContext` tests, 97 request-group tests,
+all-feature core Clippy, and workspace formatting. A full core-library run
+had 2474 passes and two unrelated existing configuration-registry failures;
+those are recorded rather than hidden by changing user configuration.
+
+## Historical Executive Summary (2026-08-01 snapshot)
+
+The counts and test totals in this section are preserved as the original
+2026-08-01 audit snapshot. They are not the current migration status; use
+`docs/compatibility-status.md` for current product, compatibility, and test
+evidence.
 
 This document consolidates findings from module-by-module deep-comparison audits of the
 aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
@@ -120,6 +188,8 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | 37 | **Retry** | **`max-tries` semantics diverged across download paths** | `aria2_original` defaults to 5 total attempts and treats `0` as unlimited. Rust previously mixed retry-count and attempt-count interpretations and used a lower default. Fixed by making `RetryPolicy` the shared typed seam for sequential HTTP, concurrent segments, and FTP; added policy, executor, HTTP E2E, and FTP E2E coverage. |
 | 38 | **RPC/HTTP** | **CORS preflight cache lifetime differed from aria2_original** | The Rust server returned `Access-Control-Max-Age: 86400`; `aria2_original/src/HttpServerBodyCommand.cc` returns `1728000`. Fixed the shared `CORS_MAX_AGE` wire constant and added a live OPTIONS E2E assertion. |
 | 39 | **RPC/HTTP** | **CORS was enabled by default in Rust** | `aria2_original` only sets `Access-Control-Allow-Origin` when `rpc-allow-origin-all=true`; Rust `CorsConfig::default()` previously meant wildcard access. Fixed by making the default empty/disabled, adding an explicit `allow_all_origins()` constructor, and covering both branches at the live HTTP seam. |
+| 40 | **HTTP/Cookies** | **CookieStorage scanned every stored domain and used an inverse eviction lock order** | Canonical Rust CookieStorage now normalizes domain keys, walks only possible host suffixes for lookup, and uses the shared `domains -> lru` lock order for insertion, expiry, clearing, and domain eviction. Existing host-only/domain-cookie, secure, path-order, persistence, and deletion semantics remain covered; the legacy CookieJar/JarCookie pair is retained only as an API/session adapter. 35 focused tests pass. |
+| 41 | **Engine/Statistics** | **DownloadContext global network-stat TODOs** | Added manager-owned lock-free `GlobalNetStat` injection through `Arc`, direct `DownloadContext` forwarding, and monotonic progress-delta accounting that excludes restored resume offsets. This preserves the external RPC/config boundary while closing the internal owner-update gap; 42 context tests and 97 request-group tests pass. |
 
 ---
 
@@ -137,9 +207,9 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | `CookieStorage` | Present | Owned by engine in C++; separate `CookieStorage` in Rust HTTP module |
 | `BtRegistry` | Complete | `Arc<RwLock<BtRegistry>>` owned by engine, accessible via `bt_registry()` |
 | `DNSCache` | Fixed | Engine-owned `Arc<Mutex<DnsCache>>`; positive/negative entries are keyed by `(hostname, port)`, candidates retain Good/Bad state, FTP and HTTP command creation resolve through the shared cache, and HTTP clients apply cached addresses with `resolve_to_addrs`. Exhausted-set refresh remains explicit via cache invalidation. |
-| `AuthConfigFactory` | Fixed | Centralized Rust `AuthConfigFactory` now covers HTTP/HTTPS, FTP/SFTP, URL credentials, activated BasicCred cache, Netrc/CLI precedence, HTTP `default`-entry exclusion, FTP anonymous defaults, and challenge activation. |
+| `AuthConfigFactory` | Fixed | Centralized Rust `AuthConfigFactory` now covers HTTP/HTTPS, FTP/SFTP, URL credentials, activated BasicCred cache, preemptive HTTP Basic from URL/CLI/Netrc credentials, HTTP CLI-before-machine-Netrc precedence, HTTP `default`-entry exclusion, FTP anonymous defaults, and challenge activation; segmented Range and sequential DownloadCommand Digest E2E fixtures validate the response calculation. |
 | `CUIDCounter` | Architectural difference | Rust uses `GroupId` (auto-incrementing atomic) instead of C++'s `cuid_t` |
-| `CheckIntegrityMan` | Partial | Rust has a process-wide sequential async queue, chunked worker, cancellation, completion channels, live atomic current/total progress, and HTTP whole-file verification now marks `DownloadContext` as verified atomically before completion results are emitted. HTTP/stream download preflight routes failed validation back into a clean download path instead of terminating the request; remaining difference is full engine-level dispatcher/post-validation command wiring for every protocol. |
+| `CheckIntegrityMan` | Partial | Rust has a process-wide sequential async queue, chunked worker, cancellation, completion channels, live atomic current/total progress, HTTP whole-file verification, and BitTorrent single- and multi-file piece validation, including pieces crossing physical file boundaries. HTTP/stream download preflight routes failed validation back into a clean download path instead of terminating the request; remaining difference is full engine-level dispatcher/post-validation command wiring for every protocol. |
 | `StatCalc` | Partial | C++ has `ConsoleStatCalc` for terminal stats. Rust has `PerformanceMonitor` + `AtomicMetrics` |
 | `EventPoll` | N/A (architectural) | Rust uses tokio runtime instead of `select()`/`epoll`/`kqueue` |
 | `WebSocketSessionMan` | N/A | Handled by axum in RPC crate |
@@ -189,7 +259,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | DefaultBtMessageFactory | PARTIAL | `BtPeerInteractive` now owns a factory-equivalent domain validator and the primary receive loop validates messages at the connection boundary. Seeder upload sessions also configure and apply the same domain validator before serving requests. BEP 5 now exposes an injectable DHT port handler on `BtPeerInteractive`. Extension dispatch now also exposes an injectable update sink, allowing metadata/PEX consumers to be wired without coupling the interaction state machine to storage or DHT implementations; PeerStorage, PieceStorage and concrete extension-factory context injection remains distributed across specialized dispatch paths. |
 | Zero-copy Piece optimization | P2 | Currently copies Piece data; C++ uses zero-copy path |
 | `addAllowedFastMessageToQueue()` | DONE | Canonical BEP 6 `compute_fast_set` is now used by the production BT setup path; identity-keyed sent tracking prevents duplicate AllowedFast messages. |
-| Write Disk Cache (WrDiskCache) | PARTIAL | `CachedDiskWriter` is used by BT single-file random piece writes and flushes a snapshot through the positioned writer, marking entries clean only after writer success; concurrent replacement is protected by sequence checks. Completed BT and web-seed pieces now enter the writer through `Bytes` without an extra Vec-to-cache copy, and multi-file boundaries use zero-copy `Bytes::slice`. Remaining difference is C++ piece/segment-scoped cache aggregation and error propagation into piece state. |
+| Write Disk Cache (WrDiskCache) | PARTIAL | `CachedDiskWriter` is used by BT single-file random piece writes and flushes through the positioned writer, marking entries clean only after writer success. `WrDiskCache` now normalizes overlapping writes into disjoint ranges, assembles reads spanning adjacent fragments, and serializes cache mutation with external flush I/O so stale snapshots cannot overwrite newer bytes. Completed BT and web-seed pieces enter the writer through `Bytes` without an extra Vec-to-cache copy, and multi-file boundaries use zero-copy `Bytes::slice`. Remaining difference is C++ piece/segment-scoped cache aggregation and error propagation into piece state. Focused cache evidence: 20 passed, 0 failed; core Clippy passed. |
 | `createFastIndexBitfield()` | P2 | Proper fast-piece filtering |
 | Seed phase tracker communication | PARTIAL | `BtSeedManager` now emits `completed` on entry, interval-aware seeding announces, and `stopped` on exit with `downloaded=total`, `left=0`, cumulative `uploaded`, and the stable peer ID; seed criteria set a halt flag propagated to the request group. Full DownloadEngine command rescheduling and tracker event delivery under process-level shutdown still require integration testing. |
 
@@ -205,13 +275,13 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | HttpConnection | Architectural difference | No `HttpRequestEntry` queue (reqwest handles); no `eraseConfidentialInfo()` |
 | HttpDownloadCommand | Complete | Tail reclaim, stream filters, cookie management, proxy, checksum all working |
 | StreamFilter | Complete | GZipDecoder, BZip2Decoder, DeflateDecoder, ChunkedDecoder, NullSinkFilter with streaming |
-| AuthConfig/Auth | Partial | Has Basic, Digest, Netrc auth; missing centralized `AuthConfigFactory` |
+| AuthConfig/Auth | Fixed | `AuthConfigFactory` centralizes URL, CLI, `.netrc`, preemptive Basic, Basic challenge, Digest, FTP/SFTP, and proxy credential resolution. HTTP resolves URL credentials, then CLI options, then matching machine entries while excluding `.netrc` defaults; FTP/SFTP retain their default fallback. Segmented Range and sequential DownloadCommand Digest E2E fixtures validate RFC response calculation. Domain-suffix machine matching follows aria2's `.netrc` rules. |
 | CookieStorage | Partial | Rust now uses domain buckets plus a monotonic LRU tracker, SQLite/Netscape loading, per-domain/global eviction, and RFC matching; storage is process-shared across HTTP commands. Remaining difference is the C++ label tree and engine-level cookie lifecycle integration. |
 | Content-Disposition | Complete | RFC 6266 state-machine parser; accepts trailing `;` (diverges from C++ bug #1118); 110 tests |
 | Conditional GET | Complete | `conditional_get.rs` with If-Modified-Since / ETag |
 | SOCKS Connector | Complete | SOCKS4, SOCKS5, no-proxy matcher |
 | Happy Eyeballs | Complete | RFC 8305 dual-stack racing |
-| HTTP Proxy | Complete | Forward, tunnel, auth, I/O |
+| HTTP Proxy | Complete | Forward, tunnel, auth, I/O; explicit proxy options and proxy-URL userinfo both feed the production 407 retry path |
 | Splice/Zero-copy | Complete | Linux `splice(2)` |
 | Tail Reclaim | Complete | Policy + per-connection stall tracking |
 
@@ -283,7 +353,7 @@ aria2_rust project against the C++ original (`aria2_original`) and `aria2-next`.
 | # | Issue | Priority | Status | Details |
 |---|-------|----------|--------|---------|
 | 1 | FileAllocationMan queue missing | P0 | FIXED | `filesystem/file_allocation_man.rs` now has a real queue + background worker (chunked, cooperative allocation with `yield_now` between chunks), sequential by default (`max_concurrent=1`), completion notifications via `oneshot`, cancellation on engine halt. Dead `EngineCommand::FileAllocation{Request,Completed,Failed}` variants and their handlers were removed. HTTP `DownloadCommand` and BT `BtDownloadCommand`/magnet all enqueue through the process-wide `shared()` manager; `--file-allocation` now actually applies to BitTorrent downloads (previously BT files grew on demand) |
-| 2 | FileAllocationCommand loop missing | P0 | FIXED | Replaced by the worker loop inside `FileAllocationMan` (the async equivalent of C++'s per-tick `allocateChunk()`). `Falloc`/`Trunc` are atomic syscalls; only `Prealloc` zero-fill is chunked (256 KiB, matching C++ `SingleFileAllocationIterator`). The `secure` flag now reaches the fallocate path (the old `FallocFileAllocationIterator` hardcoded `secure=false`) |
+| 2 | FileAllocationCommand loop missing | P0 | FIXED | Replaced by the worker loop inside `FileAllocationMan` (the async equivalent of C++'s per-tick `allocateChunk()`). `Prealloc` now uses the C++-equivalent adaptive 4 KiB fallocate probe and chunked zero-fill fallback; `Falloc`/`Trunc` remain atomic syscalls. The `secure` flag reaches both the adaptive probe and native fallocate path, and fallback zero-fill preserves resumed prefixes. |
 
 #### Feature Gaps
 
@@ -411,30 +481,30 @@ interoperability matrix is reproducibly green.
 
 ### 11. DHT
 
-**Status:** Near-Complete -- full engine implemented; BT integration wiring needed
-**Rust files:** `aria2-core/src/dht/` (29 files)
+**Status:** Partial -- the canonical protocol engine is integrated; public-network,
+interoperability, and full BitTorrent lifecycle evidence remain open
+**Rust files:** `aria2-protocol/src/bittorrent/dht/` (22 files)
+The former `aria2-core/src/dht/` duplicate was removed on 2026-08-14 after a
+source/dependency audit confirmed that it was not declared or referenced by
+production code or tests.
 **C++ files:** ~60 DHT*.h/.cc files
 
 | C++ Component | Rust Equivalent | Status |
 |---------------|----------------|--------|
-| DHTConstants.h | constants.rs | Complete |
-| DHTNode.h/.cc | node.rs + node_id.rs | Complete |
-| DHTBucket.h/.cc | bucket.rs | Complete |
-| DHTBucketTree.h/.cc | bucket_tree.rs | Complete |
-| DHTRoutingTable.h/.cc | routing_table.rs | Complete |
-| DHTTokenTracker.h/.cc | token_tracker.rs | Complete |
-| DHTConnectionImpl.h/.cc | transport.rs | Complete |
-| DHTMessageTracker.h/.cc | tracker.rs | Complete |
-| DHTPeerAnnounceStorage.h/.cc | peer_announce.rs | Complete |
-| DHTMessageDispatcherImpl.h/.cc | dispatcher.rs | Complete |
-| DHTMessageReceiver.h/.cc | receiver.rs | Complete |
-| All DHT message types | message.rs + message_codec.rs + message_decode.rs | Complete |
-| DHTRoutingTableSerializer/Deserializer | routing_table_ser.rs | Complete |
-| DHTTask hierarchy | task/ (6 files) | Complete |
-| DHTSetup + DHTInteractionCommand | DhtEngine::new() + run() | Complete |
-| All periodic commands | Periodic in run() loop | Complete |
-| DHTRegistry.h | Owned by DhtEngine | Complete |
-| DHTGetPeersCommand | DhtEngine::lookup_peers() | Complete |
+| DHTConstants.h | constants and timing values in `mod.rs`, `task.rs`, and engine config | Partial |
+| DHTNode.h/.cc | `node.rs` | Complete |
+| DHTBucket.h/.cc | `bucket.rs` + `bucket_tree.rs` | Complete |
+| DHTRoutingTable.h/.cc | `routing_table.rs` | Complete |
+| DHTTokenTracker.h/.cc | `token_tracker.rs` | Complete |
+| DHTConnectionImpl.h/.cc | `socket.rs` | Complete |
+| DHTMessageTracker.h/.cc | `tracker.rs` + `transaction.rs` | Complete |
+| DHTPeerAnnounceStorage.h/.cc | `peer_storage.rs` | Partial |
+| DHTMessageDispatcher/Receiver | `handler.rs` + `socket.rs` | Complete |
+| All DHT message types | `message.rs` | Complete |
+| DHT routing-table persistence | `persistence.rs` | Partial |
+| DHT task hierarchy | `task.rs`, `task_impl.rs`, `task_peer.rs`, `replace_node.rs` | Partial |
+| DHT setup and interaction loop | `engine.rs` + `engine_inner.rs` | Partial |
+| DHT get-peers lookup | `client.rs` + `lookup.rs` | Partial |
 
 #### Remaining Gaps
 
@@ -573,7 +643,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 22 | aria2-next | Content-Disposition edge cases | FIXED | Strict parser state-machine parity tests |
 | 23 | aria2-next | SeedCheckCommand without btRuntime | DONE |
 | 24 | Engine | Output-file control file lifecycle | PARTIAL | Binary output `.aria2` is saved/removed by sequential and concurrent paths; streaming creation can degrade with warning, legacy concurrent creation errors propagate. `ControlFile::load` now rejects truncated headers, incomplete/unknown checksums, bitfield length mismatches, and completed lengths beyond total length without panicking. Pause/remove/fallback force progress saves; errored downloads retain the file. RequestGroup active remove now waits for command completion before terminal demotion, while timeout records a structured `TimeOut`; force remove/force halt and timeout inject a synthetic `Cancelled` completion before Tokio abort; completion processing de-duplicates by command generation rather than GID, so multiple commands under one RequestGroup each decrement `num_commands` independently; terminal Complete/Error/Removed state is deferred until the final command completion, while earlier failures only update the error snapshot; retry/promotion clears command_failure, and mapped codes preserve timeout/cannot-resume/404/checksum outcomes; HTTP 401/407 map to `HttpAuthFailed`, 502/503/504 map to `HttpServiceUnavailable`, ordinary HTTP failures map to `HttpProtocolError`, and redirect limits map to `HttpTooManyRedirects`; the numeric `DownloadResultCode` table now matches C++ (`ChecksumError=32`, `Removed=31`), with only Rust-local `Paused=33` beyond the wire table. Wired RPC stopped queries, status fallback, removal, purge, and stopped counts now use the core `RequestGroupMan` result store; full RPC/core result precedence and forced-termination end-to-end evidence remain incomplete; direct protocol/file classification is now covered for FTP/HTTP errors, 404/503, disk space, file I/O, and option errors; JSON, Metalink, Bencode, BitTorrent, and Magnet parse failures now carry dedicated structured variants. HTTP header/status 与 FTP PASV 错误已细分为 protocol error，主要 disk writer 的目录创建、文件创建/打开已细分，控制文件读写使用 FileIo；DNS cache 失败已统一返回结构化 `Aria2Error::NameResolve`，task spawner 对 HTTP/HTTPS/FTP/FTPS promotion 前解析失败会通过 generation completion 进入 `NameResolveError`；DNS cache 正负缓存按 `(hostname, port)` 隔离并保留 Good/Bad 候选状态；FTP control connect 在拨号前保存真实候选，首次失败可准确标坏，候选耗尽后重新解析，协议及 data-transfer 错误不会误淘汰 control 地址；raw HTTP manager 已有 direct-origin peer discard/idle eviction，但 reqwest 生产路径尚无 selected-peer callback；BT pool 使用独立 SocketAddr 身份，不参与 DNS 淘汰，piece-hash 责任 peer 回调仍缺失；io_uring 的 open/read/write/truncate/flush/close 已细分为 FileOpen/FileIo；file-lock acquire 已返回结构化 Aria2Error 并区分 FileCreate/DirCreate/FileIo；HTTP redirect/auth 分类和完整 RPC/core precedence remain incomplete. Download writer finalization now propagates errors across HTTP, Metalink, and SFTP, and the default sequential writer performs `sync_all` before close. Graceful sequential cancellation finalizes before saving progress, concurrent cancellation drains pending write chunks and flushes before saving, and the BitTorrent piece loop observes halt requests before selecting more work. Timeout now requests graceful halt instead of aborting the task, while explicit force halt and final engine teardown still use immediate abort by design; end-to-end force-abort flush/save and RPC/core stopped-result de-duplication still lack evidence. Session `{gid}.aria2` JSON persistence is a separate lifecycle and format. |
-| 25 | Engine | AuthConfigFactory centralized factory | DONE | `http/auth.rs` `AuthConfigFactory`, used by auth challenge handler + auth_retry |
+| 25 | Engine | AuthConfigFactory centralized factory | DONE | `http/auth.rs` `AuthConfigFactory`, used by preemptive request headers, auth challenge handler, and auth_retry; production Basic pre-send is covered by `engine_http_download_with_preemptive_auth`. |
 | 26 | Engine | poolSocket()/popPooledSocket() for FTP | N/A | `FtpConnectionPool` covers pooling; reqwest pool covers HTTP |
 | 27 | Engine | validateToken() HMAC token validation | FIXED | `server.rs` `verify_token` now uses `constant_time_eq` for token comparison (prevents timing side-channel). `RpcAuthMiddleware` present. Matches C++ security semantics |
 | 28 | Option | 48 C++ option handlers not registered | DONE | 232 `.register(` calls in option_definitions (>= C++ 212) |
@@ -587,13 +657,13 @@ Missing options include: various SFTP options, some advanced logging options, a 
 | 1 | BT | Zero-copy Piece optimization | PARTIAL | Completed piece payloads use `Bytes` through the disk-writer/cache boundary; protocol block aggregation still uses mutable buffers. |
 | 2 | BT | addAllowedFastMessageToQueue() always empty | FIXED | BEP6 `send_allowed_fast_for_torrent()` computes the canonical address/info-hash fast set, queues messages, records peer state, and flushes after handshake. |
 | 3 | BT | createFastIndexBitfield() | FIXED | `DefaultPieceStorage::get_missing_fast_pieces()` intersects the peer bitfield with local missing/unused pieces and the peer AllowedFast set before selection. |
-| 4 | Checksum | Adler32 streaming | Partial |
+| 4 | Checksum | Adler32 streaming | FIXED | `MessageDigest` updates Adler32 incrementally and emits the original big-endian network-byte-order digest; known-vector and streaming regressions pass. |
 | 5 | Cookie | Per-domain cookie limit | FIXED | `CookieStorage` enforces the C++ 50-cookie domain limit, expires stale entries first, then replaces the least-recently-accessed cookie. |
 | 6 | Cookie | SQLite cookie parser | FIXED | `Sqlite3CookieParser` + Mozilla/Chromium schemas implemented in `http/sqlite_cookie_parser.rs` (rusqlite bundled); `CookieStorage::load_file` auto-detects SQLite magic vs Netscape |
 | 7 | Cookie | Duplicate Cookie/JarCookie structures | PARTIAL | HTTP download executors and session persistence now use canonical `CookieStorage`/Netscape storage; `JarCookie` remains only for legacy JSON/session/API compatibility, so full model unification remains open. |
 | 8 | HTTP | eraseConfidentialInfo() | FIXED | `http::auth::erase_confidential_info()` masks Authorization, Proxy-Authorization, Cookie, and Set-Cookie values before logging, with pipeline regressions. |
 | 9 | LPD | Multicast interface config | FIXED | `LpdAnnouncer::with_interface()` joins the BEP14 group on the selected IPv4 interface and exposes the effective configuration through `interface()`. |
-| 10 | WebSocket | Extra onBtCacheChanged event type | Present |
+| 10 | WebSocket | Extra onBtCacheChanged event type | FIXED | Production event catalog exposes only the six original notification methods; Rust-only cache/error/resume events are excluded from the compatibility surface. |
 | 11 | FileAllocation | Allocation progress events | FIXED |
 | 12 | aria2-next | ED2K/eDonkey protocol | Missing |
 | 13 | aria2-next | Peer rename | NOT Adopted |
@@ -673,7 +743,7 @@ Missing options include: various SFTP options, some advanced logging options, a 
 6. ~~CookieStorage DomainNode tree~~ — DONE (pre-existing)
 7. Metalink chunk-level piece hash is complete; torrent metaurl handling remains PARTIAL (2026-08-05): metadata persistence and context injection are implemented, but the independent metadata RequestGroup dependency graph is not.
 8. ~~FTP active mode (PORT/EPRT)~~ — DONE (pre-existing)
-9. ~~Write Disk Cache integration~~ — FIXED 2026-07-31 (CachedDiskWriter write_at + 16MB cache)
+9. ~~Write Disk Cache integration~~ — FIXED 2026-07-31 (CachedDiskWriter write_at + 16MB cache); hardened 2026-08-14 for overlapping ranges and concurrent flush ordering
 10. ~~Seed phase tracker communication~~ — DONE (BtSeedManager re-announce)
 11. ~~AuthConfigFactory centralized factory~~ — DONE (pre-existing)
 12. ~~aria2-next: spdlog rotating logs~~ — FIXED 2026-08-05 (`SizeRotatingWriter`, `log-max-size`, `log-max-files`, and TRACE mapping)
@@ -702,3 +772,15 @@ Missing options include: various SFTP options, some advanced logging options, a 
 27. aria2-next: Hostname-based socket pooling
 28. aria2-next: ED2K protocol (large scope, low priority)
 29. Missing option handlers (48 remaining)
+
+### BitTorrent seeding lifecycle checkpoint (2026-08-14)
+
+The seeding manager now keeps the completed torrent alive when the active peer
+set becomes empty, drains the existing info-hash listener route during
+seeding, and admits later plain or MSE connections through one Rust-owned
+transport seam. `seed-time` follows the original fractional-minute to
+whole-second conversion, and uploaded bytes remain cumulative after peer
+removal. This closes the previously identified seed-time and no-peer lifecycle
+gaps, but does not close the broader BitTorrent `PARTIAL` status: complete
+scheduler parity, original-client interoperability, and full workspace E2E
+evidence remain open.

@@ -1,7 +1,8 @@
 //! Metalink Checksum Verification - Phase 15 H7
 //!
 //! Provides file integrity verification using hash algorithms specified in
-//! Metalink documents. Supports SHA-256, SHA-1, SHA-512, and MD5.
+//! Metalink documents. File reads are bounded and streamed through the hash
+//! state so verification does not scale memory usage with the payload size.
 //!
 //! # Architecture
 //!
@@ -14,13 +15,16 @@
 //!
 //! Dependencies:
 //!   parser.rs - MetalinkFile, HashEntry, HashAlgorithm structs
-//!   sha2 crate - SHA-256, SHA-512 implementation
+//!   sha2 crate - SHA-224, SHA-256, SHA-384, SHA-512 implementation
 //!   sha1 crate - SHA-1 implementation
 //!   md5 crate - MD5 implementation
 //! ```
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
+use digest::Digest;
 use tracing::{debug, info, warn};
 
 use crate::metalink::parser::{HashAlgorithm, HashEntry, MetalinkFile};
@@ -47,8 +51,8 @@ impl HashVerificationResult {
 
 /// Verify a file's checksum against an expected hash value
 ///
-/// Reads the entire file into memory, computes the hash using the specified
-/// algorithm, and compares it with the expected value.
+/// Streams the file through the specified hash algorithm and compares the
+/// result with the expected value.
 ///
 /// # Arguments
 ///
@@ -78,19 +82,18 @@ pub fn verify_checksum(
         return Err(format!("File does not exist: {}", file_path.display()));
     }
 
-    // Read file content
-    let data = std::fs::read(file_path)
-        .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?;
+    let file_size = std::fs::metadata(file_path)
+        .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?
+        .len();
 
     debug!(
         path = %file_path.display(),
-        size = data.len(),
+        size = file_size,
         algo = %expected.algo.as_standard_name(),
         "Computing file checksum"
     );
 
-    // Compute hash based on algorithm
-    let computed = compute_hash(&data, &expected.algo)?;
+    let computed = compute_file_hash(file_path, &expected.algo)?;
 
     // Compare case-insensitively (hashes are typically lowercase hex)
     let matches = computed.to_lowercase() == expected.value.to_lowercase();
@@ -206,34 +209,73 @@ pub fn verify_all_checksums(
 ///
 /// * `Ok(String)` - Lowercase hex-encoded hash string
 /// * `Err(String)` - Unsupported algorithm error
+#[cfg(test)]
 fn compute_hash(data: &[u8], algo: &HashAlgorithm) -> Result<String, String> {
-    use digest::Digest;
+    let mut state = HashState::new(algo);
+    state.update(data);
+    Ok(state.finalize_hex())
+}
 
-    match algo {
-        HashAlgorithm::Sha256 => {
-            use sha2::Sha256;
-            let mut hasher = Sha256::new();
-            hasher.update(data);
-            Ok(format!("{:x}", hasher.finalize()))
+/// Stream a file through one hash state with a fixed memory bound.
+fn compute_file_hash(file_path: &Path, algo: &HashAlgorithm) -> Result<String, String> {
+    let mut file = File::open(file_path)
+        .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?;
+    let mut state = HashState::new(algo);
+    let mut buffer = [0u8; 64 * 1024];
+
+    loop {
+        let bytes_read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("Failed to read file {}: {}", file_path.display(), e))?;
+        if bytes_read == 0 {
+            break;
         }
-        HashAlgorithm::Sha1 => {
-            use sha1::Sha1;
-            let mut hasher = Sha1::new();
-            hasher.update(data);
-            Ok(format!("{:x}", hasher.finalize()))
+        state.update(&buffer[..bytes_read]);
+    }
+
+    Ok(state.finalize_hex())
+}
+
+enum HashState {
+    Md5(md5::Md5),
+    Sha1(sha1::Sha1),
+    Sha224(sha2::Sha224),
+    Sha256(sha2::Sha256),
+    Sha384(sha2::Sha384),
+    Sha512(sha2::Sha512),
+}
+
+impl HashState {
+    fn new(algo: &HashAlgorithm) -> Self {
+        match algo {
+            HashAlgorithm::Md5 => Self::Md5(md5::Md5::new()),
+            HashAlgorithm::Sha1 => Self::Sha1(sha1::Sha1::new()),
+            HashAlgorithm::Sha224 => Self::Sha224(sha2::Sha224::new()),
+            HashAlgorithm::Sha256 => Self::Sha256(sha2::Sha256::new()),
+            HashAlgorithm::Sha384 => Self::Sha384(sha2::Sha384::new()),
+            HashAlgorithm::Sha512 => Self::Sha512(sha2::Sha512::new()),
         }
-        HashAlgorithm::Sha512 => {
-            use sha2::Sha512;
-            let mut hasher = Sha512::new();
-            hasher.update(data);
-            Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Md5(state) => state.update(data),
+            Self::Sha1(state) => state.update(data),
+            Self::Sha224(state) => state.update(data),
+            Self::Sha256(state) => state.update(data),
+            Self::Sha384(state) => state.update(data),
+            Self::Sha512(state) => state.update(data),
         }
-        HashAlgorithm::Md5 => {
-            use md5::Digest;
-            let mut hasher = md5::Md5::new();
-            hasher.update(data);
-            let digest = hasher.finalize();
-            Ok(format!("{:x}", digest))
+    }
+
+    fn finalize_hex(self) -> String {
+        match self {
+            Self::Md5(state) => format!("{:x}", state.finalize()),
+            Self::Sha1(state) => format!("{:x}", state.finalize()),
+            Self::Sha224(state) => format!("{:x}", state.finalize()),
+            Self::Sha256(state) => format!("{:x}", state.finalize()),
+            Self::Sha384(state) => format!("{:x}", state.finalize()),
+            Self::Sha512(state) => format!("{:x}", state.finalize()),
         }
     }
 }
@@ -411,6 +453,36 @@ mod tests {
     }
 
     #[test]
+    fn test_sha224_verification() {
+        let path = make_test_file(b"abc", "_sha224_test");
+        let expected = HashEntry::new(
+            HashAlgorithm::Sha224,
+            "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7",
+        );
+
+        let result = verify_checksum(&path, &expected).expect("SHA-224 verification should work");
+        assert!(result.is_valid(), "SHA-224 should match");
+        assert_eq!(result.algorithm, "sha-224");
+
+        cleanup_test_file(&path);
+    }
+
+    #[test]
+    fn test_sha384_verification() {
+        let path = make_test_file(b"abc", "_sha384_test");
+        let expected = HashEntry::new(
+            HashAlgorithm::Sha384,
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7",
+        );
+
+        let result = verify_checksum(&path, &expected).expect("SHA-384 verification should work");
+        assert!(result.is_valid(), "SHA-384 should match");
+        assert_eq!(result.algorithm, "sha-384");
+
+        cleanup_test_file(&path);
+    }
+
+    #[test]
     fn test_md5_verification() {
         // MD5 of "test": d8e8fca2dc0f896fd7cb4cb0031ba249
         let path = make_test_file(b"test", "_md5_test");
@@ -487,6 +559,22 @@ mod tests {
             "Hashing same data twice should produce same result"
         );
         assert_eq!(hash1.len(), 64, "SHA-256 output should be 64 hex chars");
+
+        cleanup_test_file(&path);
+    }
+
+    #[test]
+    fn test_verify_checksum_across_stream_buffer_boundaries() {
+        let content: Vec<u8> = (0..131_071).map(|index| (index % 251) as u8).collect();
+        let path = make_test_file(&content, "_streaming_sha256");
+        let expected = HashEntry::new(
+            HashAlgorithm::Sha256,
+            "de222739d6ef744c5fce51179ad6536d9d81e4f36c9694b4750336481f2a2b59",
+        );
+
+        let result = verify_checksum(&path, &expected).expect("streaming verification should work");
+        assert!(result.is_valid());
+        assert_eq!(result.computed, expected.value);
 
         cleanup_test_file(&path);
     }

@@ -149,8 +149,8 @@ mod tests {
         ];
 
         // Setup: fast mirror has 2MB/s, slow mirror has 500KB/s
-        stat_man.update("fast.com", 2_000_000, false);
-        stat_man.update("slow.com", 500_000, false);
+        stat_man.update_with_protocol("fast.com", "http", 2_000_000, false);
+        stat_man.update_with_protocol("slow.com", "http", 500_000, false);
 
         let selector = Box::new(AdaptiveUriSelector::new_with_uris(
             Arc::clone(&stat_man),
@@ -196,8 +196,8 @@ mod tests {
         ];
 
         // Setup different speeds
-        stat_man.update("mirror1.com", 1_500_000, false);
-        stat_man.update("mirror2.com", 500_000, false);
+        stat_man.update_with_protocol("mirror1.com", "http", 1_500_000, false);
+        stat_man.update_with_protocol("mirror2.com", "http", 500_000, false);
 
         let selector = Box::new(AdaptiveUriSelector::new_with_uris(
             Arc::clone(&stat_man),
@@ -319,9 +319,9 @@ mod tests {
         // Setup: mirror1=1MB/s, mirror2=2MB/s, mirror3=500KB/s
         // Use multiple updates to let EMA converge closer to target values
         for _ in 0..10 {
-            stat_man.update("mirror1.com", 1_000_000, false);
-            stat_man.update("mirror2.com", 2_000_000, false);
-            stat_man.update("mirror3.com", 500_000, false);
+            stat_man.update_with_protocol("mirror1.com", "http", 1_000_000, false);
+            stat_man.update_with_protocol("mirror2.com", "http", 2_000_000, false);
+            stat_man.update_with_protocol("mirror3.com", "http", 500_000, false);
         }
 
         let selector = Box::new(AdaptiveUriSelector::new_with_uris(

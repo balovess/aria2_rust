@@ -20,10 +20,122 @@
 
 use tracing::{debug, info, warn};
 
+use crate::config::PiecePriorityRule;
 use crate::constants;
+use crate::download::file_entry::FileEntry;
 
 /// Endgame mode threshold: enable when this many pieces remain
 pub const ENDGAME_THRESHOLD: u32 = constants::BT_ENDGAME_THRESHOLD as u32;
+
+/// Compute the piece indices selected by aria2's `bt-prioritize-piece` rules.
+///
+/// Each file contributes the pieces intersecting its first or last `SIZE`
+/// bytes. The result is sorted and deduplicated, matching
+/// `aria2_original::parsePrioritizePieceRange`; the protocol picker shuffles
+/// the final set when it installs it.
+pub fn prioritized_piece_indices(
+    rules: &[PiecePriorityRule],
+    file_entries: &[FileEntry],
+    piece_length: u64,
+) -> Result<Vec<u32>, String> {
+    if piece_length == 0 {
+        return Err("piece length must be greater than zero".to_string());
+    }
+
+    let mut indices = Vec::new();
+    for rule in rules {
+        for entry in file_entries {
+            let length = entry.length();
+            if length == 0 {
+                continue;
+            }
+            let end_offset = entry
+                .offset()
+                .checked_add(length)
+                .ok_or_else(|| "file offset exceeds u64::MAX".to_string())?;
+            let size = match rule {
+                PiecePriorityRule::Head { size } | PiecePriorityRule::Tail { size } => {
+                    (*size).min(length)
+                }
+            };
+            if size == 0 {
+                continue;
+            }
+
+            let (first_piece, last_piece) = match rule {
+                PiecePriorityRule::Head { .. } => (
+                    entry.offset() / piece_length,
+                    (entry.offset() + size - 1) / piece_length,
+                ),
+                PiecePriorityRule::Tail { .. } => (
+                    (end_offset - size) / piece_length,
+                    (end_offset - 1) / piece_length,
+                ),
+            };
+            indices.extend(first_piece..=last_piece);
+        }
+    }
+
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+        .into_iter()
+        .map(|index| {
+            u32::try_from(index)
+                .map_err(|_| format!("piece index {} exceeds the BitTorrent index range", index))
+        })
+        .collect()
+}
+
+/// Calculate the pieces intersecting the requested files in a torrent
+/// context.
+///
+/// A piece is selected when any byte of it belongs to a requested file. This
+/// preserves BitTorrent's piece-hash granularity: a piece spanning a selected
+/// and an unselected file is downloaded as one unit. `None` means that no
+/// selective filter is active; `Some(empty)` is a valid filter that selects no
+/// pieces.
+pub fn allowed_piece_indices(
+    context: &crate::download::DownloadContext,
+    piece_length: u64,
+    num_pieces: u32,
+) -> Option<Vec<u32>> {
+    let entries = context.get_file_entries();
+    if entries.len() <= 1 || entries.iter().all(|entry| entry.is_requested()) {
+        return None;
+    }
+
+    let mut allowed = vec![false; num_pieces as usize];
+    if piece_length == 0 || allowed.is_empty() {
+        return Some(Vec::new());
+    }
+
+    for entry in entries.iter().filter(|entry| entry.is_requested()) {
+        if entry.length() == 0 {
+            continue;
+        }
+        let start = usize::try_from(entry.offset() / piece_length).unwrap_or(allowed.len());
+        let end_offset = entry.offset().saturating_add(entry.length());
+        let end = end_offset
+            .saturating_sub(1)
+            .checked_div(piece_length)
+            .and_then(|index| usize::try_from(index).ok())
+            .unwrap_or(allowed.len().saturating_sub(1));
+        let start = start.min(allowed.len());
+        let end = end.min(allowed.len().saturating_sub(1));
+        if start <= end {
+            allowed[start..=end].fill(true);
+        }
+    }
+
+    Some(
+        allowed
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, allowed)| allowed.then_some(index as u32))
+            .collect(),
+    )
+}
 
 /// Piece selector configuration
 #[derive(Debug, Clone)]
@@ -156,7 +268,8 @@ impl BtPieceSelector {
 
             for &fast_idx in peer_conn.allowed_fast_set() {
                 // Check if piece is needed and peer has it
-                if let Some(info) = piece_picker.get_piece_info(fast_idx)
+                if piece_picker.is_allowed(fast_idx)
+                    && let Some(info) = piece_picker.get_piece_info(fast_idx)
                     && !info.completed
                     && !info.in_progress
                     && Self::is_bitfield_set(peer_bitfield, fast_idx)
@@ -304,6 +417,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::PiecePriorityRule;
+    use crate::download::file_entry::FileEntry;
 
     #[test]
     fn test_endgame_threshold_constant() {
@@ -378,5 +493,73 @@ mod tests {
         assert!(result.piece_index.is_none());
         assert!(!result.is_endgame);
         assert_eq!(result.remaining_count, 100);
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_match_head_and_tail_file_ranges() {
+        let entries = vec![FileEntry::new("a".into(), 4096, 0, Vec::new())];
+
+        assert_eq!(
+            prioritized_piece_indices(&[PiecePriorityRule::Head { size: 1025 }], &entries, 1024,)
+                .unwrap(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            prioritized_piece_indices(&[PiecePriorityRule::Tail { size: 1025 }], &entries, 1024,)
+                .unwrap(),
+            vec![2, 3]
+        );
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_deduplicates_file_boundaries() {
+        let entries = vec![
+            FileEntry::new("a".into(), 1500, 0, Vec::new()),
+            FileEntry::new("b".into(), 1500, 1500, Vec::new()),
+        ];
+
+        assert_eq!(
+            prioritized_piece_indices(
+                &[
+                    PiecePriorityRule::Head { size: 1024 },
+                    PiecePriorityRule::Tail { size: 1024 },
+                ],
+                &entries,
+                1024,
+            )
+            .unwrap(),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn test_prioritized_piece_indices_rejects_zero_piece_length() {
+        let entries = vec![FileEntry::new("a".into(), 1, 0, Vec::new())];
+        assert!(prioritized_piece_indices(&[], &entries, 0).is_err());
+    }
+
+    #[test]
+    fn test_allowed_piece_indices_follow_requested_files() {
+        let mut context = crate::download::DownloadContext::new_default();
+        context.set_file_entries(vec![
+            FileEntry::new("a".into(), 4, 0, Vec::new()),
+            FileEntry::new("b".into(), 4, 4, Vec::new()),
+            FileEntry::new("c".into(), 4, 8, Vec::new()),
+        ]);
+        context.set_file_filter(vec![2]);
+
+        assert_eq!(allowed_piece_indices(&context, 4, 3), Some(vec![1]));
+    }
+
+    #[test]
+    fn test_allowed_piece_indices_include_piece_spanning_file_boundary() {
+        let mut context = crate::download::DownloadContext::new_default();
+        context.set_file_entries(vec![
+            FileEntry::new("a".into(), 3, 0, Vec::new()),
+            FileEntry::new("b".into(), 3, 3, Vec::new()),
+        ]);
+        context.set_file_filter(vec![2]);
+
+        assert_eq!(allowed_piece_indices(&context, 4, 2), Some(vec![0, 1]));
     }
 }

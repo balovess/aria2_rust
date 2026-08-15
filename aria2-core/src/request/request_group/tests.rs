@@ -54,6 +54,14 @@ fn test_connection_contexts_are_deduplicated_and_reset() {
         second,
     ));
     assert_eq!(group.connection_contexts().len(), 2);
+    assert_eq!(group.latest_connection_context().unwrap().peer_addr, second);
+    group.set_connection_context(crate::network::ConnectionContext::new(
+        "example.test",
+        80,
+        first,
+    ));
+    assert_eq!(group.latest_connection_context().unwrap().peer_addr, first);
+    assert_eq!(group.connection_contexts().len(), 2);
     group.clear_connection_contexts();
     assert!(group.connection_contexts().is_empty());
 }
@@ -717,6 +725,19 @@ fn test_runtime_option_enum_validation_is_shared_with_registry() {
     assert!(
         RequestGroup::validate_option_update("ftp-type", &serde_json::json!("invalid")).is_err()
     );
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn test_option_map_distinguishes_omitted_and_explicit_zero_seed_time() {
+    let omitted = DownloadOptions::from_option_strings(&std::collections::HashMap::new());
+    assert_eq!(omitted.seed_time, None);
+
+    let explicit_zero = DownloadOptions::from_option_strings(&std::collections::HashMap::from([(
+        "seed-time".to_string(),
+        "0".to_string(),
+    )]));
+    assert_eq!(explicit_zero.seed_time, Some(0.0));
 }
 
 /// Verify that `is_removed()` correctly reflects the group's Removed

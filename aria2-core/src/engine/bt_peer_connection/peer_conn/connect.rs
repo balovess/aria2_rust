@@ -22,9 +22,10 @@ impl BtPeerConn {
     pub async fn connect_mse(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
-        require_encryption: bool,
+        force_encryption: bool,
+        prefer_encryption: bool,
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, require_encryption).await {
+        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, force_encryption, prefer_encryption).await {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
@@ -113,6 +114,35 @@ impl BtPeerConn {
         let peer_id = conn.remote_peer_id;
         Self {
             inner: InnerConnection::Plain(conn),
+            ip_addr: endpoint.ip().to_string(),
+            port: endpoint.port(),
+            peer_id,
+            incoming: true,
+            local_peer: endpoint.ip().is_loopback()
+                || matches!(endpoint.ip(), std::net::IpAddr::V4(address) if address.is_private()),
+            disconnected_gracefully: false,
+            seeder: false,
+            first_contact_time: now,
+            connection_type: ConnectionType::Tcp,
+            allowed_fast: HashSet::new(),
+            session_resource: None,
+            send_buffer: SendBuffer::new(),
+            last_keepalive_sent: now,
+            last_message_received: now,
+            stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
+            pending_pex_peers: Vec::new(),
+        }
+    }
+
+    /// Wrap an incoming peer after the shared listener completed MSE.
+    pub(crate) fn from_incoming_encrypted(
+        conn: aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection,
+        endpoint: std::net::SocketAddr,
+    ) -> Self {
+        let now = Instant::now();
+        let peer_id = conn.remote_peer_id().copied();
+        Self {
+            inner: InnerConnection::Encrypted(conn),
             ip_addr: endpoint.ip().to_string(),
             port: endpoint.port(),
             peer_id,

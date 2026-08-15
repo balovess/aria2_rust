@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tracing::{debug, warn};
 
 use super::stats::WebSeedStats;
+use crate::http::client_identity::ClientTlsConfig;
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
 ///
@@ -38,43 +39,47 @@ impl WebSeedClient {
     /// let client = WebSeedClient::new("http://cdn.example.com/torrent/");
     /// ```
     pub fn new(base_url: &str) -> Self {
+        Self::new_with_tls(base_url, &ClientTlsConfig::default())
+            .expect("web-seed HTTP client configuration must be valid")
+    }
+
+    pub(crate) fn new_with_tls(base_url: &str, tls: &ClientTlsConfig) -> Result<Self, String> {
         debug!(url = base_url, "Creating WebSeedClient");
         crate::http::client_pool::ensure_rustls_provider();
 
         // Build client with sensible defaults for large file downloads
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(4)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_client(tls)?;
 
-        Self {
+        Ok(Self {
             base_url: base_url.to_string(),
             client,
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats: Arc::new(WebSeedStats::new()),
-        }
+        })
     }
 
     /// Create a WebSeedClient with shared stats (for aggregated statistics).
     pub fn with_shared_stats(base_url: &str, stats: Arc<WebSeedStats>) -> Self {
+        Self::with_shared_stats_and_tls(base_url, stats, &ClientTlsConfig::default())
+            .expect("web-seed HTTP client configuration must be valid")
+    }
+
+    pub(crate) fn with_shared_stats_and_tls(
+        base_url: &str,
+        stats: Arc<WebSeedStats>,
+        tls: &ClientTlsConfig,
+    ) -> Result<Self, String> {
         debug!(url = base_url, "Creating WebSeedClient with shared stats");
         crate::http::client_pool::ensure_rustls_provider();
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .pool_max_idle_per_host(4)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = build_client(tls)?;
 
-        Self {
+        Ok(Self {
             base_url: base_url.to_string(),
             client,
             active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
-        }
+        })
     }
 
     /// Check if a piece can be requested (not already active).
@@ -255,4 +260,16 @@ impl WebSeedClient {
     pub fn url(&self) -> &str {
         &self.base_url
     }
+}
+
+fn build_client(tls: &ClientTlsConfig) -> Result<reqwest::Client, String> {
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(4)
+        .gzip(false);
+    crate::http::client_identity::apply(builder, tls)
+        .map_err(|error| error.to_string())?
+        .build()
+        .map_err(|error| format!("web-seed HTTP client build failed: {error}"))
 }

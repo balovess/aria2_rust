@@ -9,11 +9,13 @@ use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::filesystem::resume_helper::{ResumeHelper, ResumeState};
 use crate::http::conditional_get::SimpleDateTime;
+use crate::http::response::is_redirect_status;
 use crate::http::skip_response::{MAX_REDIRECT_COUNT, RedirectType};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
+use super::auth_retry::{AuthRetryOutcome, AuthRetryRequest};
 
 impl SequentialDownloader {
     /// Main entry point for sequential HTTP download.
@@ -31,6 +33,15 @@ impl SequentialDownloader {
         // CANNOT_RESUME. DownloadCommand owns the higher-level decision to
         // try another URI or restart from byte zero.
         let mut effective_resume_state = resume_state.clone();
+        let initial_scheme = reqwest::Url::parse(uri)
+            .ok()
+            .map(|url| url.scheme().to_owned())
+            .unwrap_or_else(|| "http".to_string());
+        let (mut auth_factory, auth_options) = self.auth_context(&initial_scheme);
+        let _has_preemptive_origin_auth = reqwest::Url::parse(uri)
+            .ok()
+            .and_then(|url| auth_factory.resolve_basic_authorization(&url, &auth_options))
+            .is_some();
 
         #[cfg(not(target_os = "linux"))]
         let _ = total_length;
@@ -46,8 +57,9 @@ impl SequentialDownloader {
                 && total_length > 0
                 && no_proxy
                 && !uri.starts_with("https://")
-                && self.headers.is_empty()
+                && !self.request_policy.has_custom_headers()
                 && self.cookie_helper.build_cookie_header(uri).is_none()
+                && !_has_preemptive_origin_auth
             {
                 match self.try_splice_sequential(uri, total_length).await {
                     Ok(()) => return Ok(()),
@@ -73,7 +85,10 @@ impl SequentialDownloader {
 
         loop {
             let url_parsed = reqwest::Url::parse(&current_uri).ok();
-            let mut request = if let Some(range_header) =
+            let authorization = url_parsed
+                .as_ref()
+                .and_then(|url| auth_factory.resolve_basic_authorization(url, &auth_options));
+            let base_request = if let Some(range_header) =
                 ResumeHelper::build_range_header(&effective_resume_state)
             {
                 tracing::debug!("Resume download: {}", range_header);
@@ -82,22 +97,12 @@ impl SequentialDownloader {
                 self.client.get(&current_uri)
             };
 
-            if let Some(ref url) = url_parsed {
-                let cookie_hdr = self.cookie_helper.build_cookie_header_from_url(url);
-                if !cookie_hdr.is_empty() {
-                    request = request.header("Cookie", &cookie_hdr);
-                }
-            }
-
-            for (name, value) in &self.headers {
-                request = request.header(name, value);
-            }
-
             // --- Conditional GET: If-Modified-Since header ---
             // Matches C++ HttpRequestCommand L141-171:
             // When `conditional_get` is enabled, protocol is HTTP/HTTPS,
             // the control file does NOT exist, and the output file DOES exist,
             // send the file's mtime as `If-Modified-Since`.
+            let mut extra_headers = Vec::new();
             {
                 let g = self.group.recover();
                 let opts = g.options();
@@ -120,10 +125,31 @@ impl SequentialDownloader {
                             "Conditional GET: sending If-Modified-Since: {}",
                             http_date
                         );
-                        request = request.header("If-Modified-Since", &http_date);
+                        extra_headers.push(("If-Modified-Since".to_string(), http_date));
                     }
                 }
             }
+
+            let cookie_header = url_parsed
+                .as_ref()
+                .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
+            let request = self.request_policy.apply_with_basic_auth(
+                base_request,
+                cookie_header.as_deref().filter(|value| !value.is_empty()),
+                &extra_headers,
+                authorization.as_deref(),
+            );
+            let conditional_request = self.request_policy.has_header("If-Modified-Since")
+                || self.request_policy.has_header("If-None-Match")
+                || extra_headers.iter().any(|(name, _)| {
+                    name.eq_ignore_ascii_case("If-Modified-Since")
+                        || name.eq_ignore_ascii_case("If-None-Match")
+                });
+            let authentication_used = authorization.is_some()
+                || self.request_policy.has_header("Authorization")
+                || extra_headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
 
             let response = tokio::select! {
                 result = request.send() => result.map_err(|e| {
@@ -147,7 +173,7 @@ impl SequentialDownloader {
             // C++ HttpSkipResponseCommand::processResponse() handles redirects
             // by extracting the Location header, resolving the URL, and
             // preparing a retry with the new URI.
-            if status.is_redirection() {
+            if is_redirect_status(status_code) {
                 redirect_count += 1;
                 if redirect_count > MAX_REDIRECT_COUNT {
                     return Err(Aria2Error::Recoverable(
@@ -226,17 +252,45 @@ impl SequentialDownloader {
             // attempt to resolve credentials and retry.
             if status_code == 401 || status_code == 407 {
                 if let Some(auth_response) = self
-                    .try_auth_retry(
-                        &response,
-                        &current_uri,
-                        &url_parsed,
+                    .try_auth_retry(AuthRetryRequest {
+                        response: &response,
+                        uri: &current_uri,
+                        url_parsed: &url_parsed,
                         status_code,
-                        false, // authentication_used = false (first attempt)
-                        &effective_resume_state,
-                    )
+                        authentication_used,
+                        resume_state: &effective_resume_state,
+                        auth_factory: &mut auth_factory,
+                        auth_opts: &auth_options,
+                    })
                     .await
                 {
-                    return auth_response;
+                    match auth_response {
+                        Ok(AuthRetryOutcome::Completed(result)) => return result,
+                        Ok(AuthRetryOutcome::Redirect(target_url)) => {
+                            redirect_count += 1;
+                            if redirect_count > MAX_REDIRECT_COUNT {
+                                return Err(Aria2Error::Recoverable(
+                                    RecoverableError::HttpTooManyRedirects {
+                                        count: redirect_count,
+                                    },
+                                ));
+                            }
+                            tracing::info!(
+                                status_code,
+                                redirect_count,
+                                from = %current_uri,
+                                to = %target_url,
+                                "HTTP redirect after authentication"
+                            );
+                            {
+                                let mut g = self.group.recover_mut();
+                                g.add_redirect_uri(&target_url);
+                            }
+                            current_uri = target_url;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
                 // If try_auth_retry returned None, fall through to error handling.
                 return Err(Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
@@ -248,6 +302,14 @@ impl SequentialDownloader {
             // When the server returns 304, the file is unchanged since last download.
             // Mark all pieces as done and complete without transferring data.
             if status_code == 304 {
+                if !conditional_request {
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::HttpProtocolError {
+                            message: "Got 304 without If-Modified-Since or If-None-Match"
+                                .to_string(),
+                        },
+                    ));
+                }
                 tracing::info!("HTTP 304 Not Modified — file unchanged, marking download complete");
                 {
                     let g = self.group.recover();

@@ -42,6 +42,9 @@ static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
         .timeout(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
         ))
+        // reqwest enables gzip negotiation by default when its gzip feature
+        // is compiled in. aria2 enables it only for --http-accept-gzip.
+        .gzip(false)
         .user_agent(crate::constants::USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(crate::constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
@@ -82,6 +85,7 @@ pub fn create_custom_client(
     let client = Client::builder()
         .connect_timeout(connect_timeout)
         .timeout(timeout)
+        .gzip(false)
         .user_agent(crate::constants::USER_AGENT)
         .redirect(reqwest::redirect::Policy::none())
         .pool_max_idle_per_host(pool_max_idle_per_host)

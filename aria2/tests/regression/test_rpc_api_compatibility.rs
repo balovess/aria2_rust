@@ -688,7 +688,7 @@ async fn regression_get_files_format() {
 /// Test: aria2.getServers returns array with server info.
 #[tokio::test]
 async fn regression_get_servers_format() {
-    let group_man = Arc::new(tokio::sync::RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let (engine_cmd_tx, _engine_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let engine = RpcEngine::wired(group_man.clone(), engine_cmd_tx);
 
@@ -699,9 +699,8 @@ async fn regression_get_servers_format() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let manager = group_man.read().await;
+    let manager = &group_man;
     assert_eq!(manager.fill_from_reserver().len(), 1);
-    drop(manager);
 
     let req = make_request("aria2.getServers", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
@@ -948,6 +947,11 @@ async fn regression_get_version_format() {
     let version: serde_json::Value = resp.result.unwrap();
 
     assert!(version.get("version").is_some(), "version field required");
+    assert_eq!(
+        version.get("version").and_then(serde_json::Value::as_str),
+        Some(aria2_protocol::identity::PRODUCT_VERSION),
+        "getVersion must expose the independent Rust product version"
+    );
     assert!(
         version.get("enabledFeatures").is_some(),
         "enabledFeatures field required"
@@ -1110,7 +1114,7 @@ async fn regression_purge_download_result_returns_ok() {
 async fn regression_remove_download_result_returns_ok() {
     let engine = RpcEngine::new();
 
-    // First add a task, then force-remove it to populate stopped_tasks
+    // First add a task, then remove it to populate stopped_tasks.
     let add_req = make_request(
         "aria2.addUri",
         serde_json::json!([["http://example.com/file"]]),
@@ -1122,12 +1126,14 @@ async fn regression_remove_download_result_returns_ok() {
     let remove_req = make_request("aria2.remove", serde_json::json!([gid]));
     engine.handle_request(&remove_req).await;
 
-    // `RpcEngine::new` does not run the core command loop, so remove is only
-    // queued and no stopped result exists yet. The wired E2E fixture verifies
-    // successful removal after the completion command is processed.
+    // Reserved tasks are removed synchronously from the shared manager, so the
+    // result is available even when this handler-only fixture has no engine
+    // loop consuming commands.
     let req = make_request("aria2.removeDownloadResult", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
-    assert_error_code(&resp, 1);
+    assert_success(&resp);
+    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert_eq!(result, "OK");
 }
 
 // =========================================================================
@@ -1652,10 +1658,10 @@ async fn regression_multicall_subcall_bad_token_isolated() {
     assert!(ok.get("version").is_some());
 }
 
-/// Test: a token supplied on the multicall envelope authorizes sub-calls that
-/// do not carry one of their own (the non-AriaNg client convention).
+/// Test: a token supplied on the multicall envelope is rejected like the C++
+/// implementation, which requires parameter zero to be the call list.
 #[tokio::test]
-async fn regression_multicall_envelope_token_authorizes_subcalls() {
+async fn regression_multicall_envelope_token_is_not_a_fallback() {
     let secret = "multicall-secret";
     let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
 
@@ -1670,21 +1676,11 @@ async fn regression_multicall_envelope_token_authorizes_subcalls() {
         ]),
     );
     let resp = engine.handle_request(&req).await;
-    assert_success(&resp);
-
-    assert!(
-        assert_multicall_ok(&resp, 0, "aria2.getVersion")
-            .get("version")
-            .is_some()
-    );
-    assert!(
-        assert_multicall_ok(&resp, 1, "aria2.getGlobalStat")
-            .get("downloadSpeed")
-            .is_some()
-    );
+    assert_error_code(&resp, 1);
 }
 
-/// Test: an invalid token on the multicall envelope is still rejected outright.
+/// Test: an invalid token-shaped first envelope parameter is still rejected as
+/// a wrong multicall parameter, rather than being treated as authentication.
 #[tokio::test]
 async fn regression_multicall_envelope_bad_token_rejected() {
     let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("real-secret"));

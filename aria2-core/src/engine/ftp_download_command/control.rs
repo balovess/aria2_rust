@@ -10,7 +10,9 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tracing::{debug, info, warn};
 
 use crate::ftp::connection::{
-    self, FtpControlStream, FtpDataStream, FtpsConfig, read_response_impl,
+    self, FtpControlStream, FtpDataStream, FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig,
+    FtpsConfig, active_data_bind_addr, cwd_targets, parse_mdtm_timestamp, parse_pwd_response,
+    read_response_impl, split_decoded_remote_path,
 };
 use crate::network::ConnectionContext;
 
@@ -89,11 +91,12 @@ impl RawFtpControl {
             .read_response(Duration::from_secs(constants::FTP_WELCOME_TIMEOUT_SECS))
             .await?;
 
-        if !(200..300).contains(&welcome.0) && !(100..200).contains(&welcome.0) {
-            return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                "FTP server rejected connection: {} {}",
-                welcome.0, welcome.1
-            ))));
+        if welcome.0 != 220 {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("FTP greeting rejected: {} {}", welcome.0, welcome.1),
+                },
+            ));
         }
 
         Ok(())
@@ -109,6 +112,95 @@ impl RawFtpControl {
         ctrl.read_welcome().await?;
 
         info!("Connected to FTP server {}:{}", host, port);
+        Ok(ctrl)
+    }
+
+    /// Connect to an FTP server through an HTTP CONNECT proxy.
+    ///
+    /// The proxy connection is established before the FTP greeting is read,
+    /// matching aria2's tunnel command chain while keeping the control state
+    /// owned by this Rust command.
+    pub(super) async fn connect_via_http_proxy(
+        host: &str,
+        port: u16,
+        proxy: &FtpProxyConfig,
+        ftps_config: Option<&FtpsConfig>,
+        ftps_implicit: bool,
+    ) -> Result<Self> {
+        let tunnel_config = FtpProxyTunnelConfig {
+            proxy_host: proxy.proxy_host.clone(),
+            proxy_port: proxy.proxy_port,
+            target_host: host.to_string(),
+            target_port: port,
+            proxy_username: proxy.proxy_username.clone(),
+            proxy_password: proxy.proxy_password.clone(),
+            connect_timeout: proxy.connect_timeout,
+            read_timeout: proxy.connect_timeout,
+            user_agent: proxy.user_agent.clone(),
+        };
+        let stream = FtpProxyTunnel::establish(&tunnel_config).await?;
+        let peer_addr = stream.peer_addr().map_err(|error| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("FTP proxy peer address unavailable: {}", error),
+            })
+        })?;
+        let connection = ConnectionContext::new(host, port, peer_addr);
+
+        if let Some(config) = ftps_config {
+            if ftps_implicit {
+                let tls_stream = connection::perform_tls_handshake(stream, host, config)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::Network(format!("FTPS proxy TLS handshake failed: {}", error))
+                    })?;
+                let mut ctrl = Self::from_stream(
+                    FtpControlStream::Tls(Box::new(tls_stream)),
+                    host,
+                    connection,
+                    Some(config.clone()),
+                );
+                ctrl.read_welcome().await?;
+                return Ok(ctrl);
+            }
+
+            let mut plain = Self::from_stream(
+                FtpControlStream::Plain(stream),
+                host,
+                connection.clone(),
+                None,
+            );
+            plain.read_welcome().await?;
+            let Self {
+                reader,
+                host,
+                connection,
+                ..
+            } = plain;
+            let stream = match reader.into_inner() {
+                FtpControlStream::Plain(stream) => stream,
+                FtpControlStream::Tls(_) => unreachable!("fresh FTPS proxy stream is plain"),
+            };
+            let tls_stream = connection::upgrade_control_stream(stream, &host, config)
+                .await
+                .map_err(|error| {
+                    Aria2Error::Network(format!("FTPS proxy control upgrade failed: {}", error))
+                })?;
+            let mut ctrl = Self::from_stream(
+                FtpControlStream::Tls(Box::new(tls_stream)),
+                &host,
+                connection,
+                Some(config.clone()),
+            );
+            ctrl.read_welcome().await?;
+            return Ok(ctrl);
+        }
+
+        let mut ctrl = Self::from_stream(FtpControlStream::Plain(stream), host, connection, None);
+        ctrl.read_welcome().await?;
+        info!(
+            "Connected to FTP server {}:{} through HTTP proxy {}:{}",
+            host, port, proxy.proxy_host, proxy.proxy_port
+        );
         Ok(ctrl)
     }
 
@@ -244,16 +336,20 @@ impl RawFtpControl {
                 debug!("Password required, sending PASS command");
                 let pass_resp = self.command(&format!("PASS {}", password)).await?;
                 if !(200..300).contains(&pass_resp.0) {
-                    return Err(Aria2Error::Fatal(FatalError::PermissionDenied {
-                        path: format!("Login failed: {} {}", pass_resp.0, pass_resp.1),
-                    }));
+                    return Err(Aria2Error::Recoverable(
+                        RecoverableError::FtpProtocolError {
+                            message: format!("Login failed: {} {}", pass_resp.0, pass_resp.1),
+                        },
+                    ));
                 }
                 info!("FTP login successful");
                 Ok(())
             }
-            _ => Err(Aria2Error::Fatal(FatalError::PermissionDenied {
-                path: format!("Unexpected USER response: {} {}", user_resp.0, user_resp.1),
-            })),
+            _ => Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("Unexpected USER response: {} {}", user_resp.0, user_resp.1),
+                },
+            )),
         }
     }
 
@@ -261,9 +357,9 @@ impl RawFtpControl {
     pub(super) async fn set_binary_mode(&mut self) -> Result<()> {
         debug!("Setting transfer mode to binary (TYPE I)");
         let resp = self.command("TYPE I").await?;
-        if !(200..300).contains(&resp.0) {
+        if resp.0 != 200 {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("TYPE I failed: {} {}", resp.0, resp.1),
                 },
             ));
@@ -271,11 +367,80 @@ impl RawFtpControl {
         Ok(())
     }
 
+    /// Select the remote directory before issuing file commands.
+    ///
+    /// aria2_original asks for PWD after TYPE, sends CWD for the base working
+    /// directory and each URI directory component, then addresses SIZE/RETR
+    /// with only the file name. The production engine owns its own async
+    /// control flow, so this small adapter keeps that wire contract without
+    /// importing the original state machine.
+    pub(super) async fn prepare_remote_path(&mut self, remote_path: &str) -> Result<String> {
+        let pwd = self.command("PWD").await?;
+        if pwd.0 != 257 {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::FtpProtocolError {
+                    message: format!("PWD failed: {} {}", pwd.0, pwd.1),
+                },
+            ));
+        }
+        let base_working_dir = parse_pwd_response(&pwd.1).ok_or_else(|| {
+            Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+                message: format!("PWD response missing quoted path: {}", pwd.1.trim()),
+            })
+        })?;
+        let (directory, file) = split_decoded_remote_path(remote_path);
+
+        for target in cwd_targets(&base_working_dir, &directory) {
+            let response = self.command(&format!("CWD {}", target)).await?;
+            if response.0 == 550 {
+                return Err(Aria2Error::Fatal(FatalError::FileNotFound { path: target }));
+            }
+            if response.0 != 250 {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::FtpProtocolError {
+                        message: format!("CWD failed: {} {}", response.0, response.1),
+                    },
+                ));
+            }
+        }
+
+        Ok(file)
+    }
+
+    /// Query the remote modification time after directory traversal.
+    ///
+    /// `aria2_original` treats MDTM as optional: a non-213 response is logged
+    /// and the download continues without applying a timestamp. Network and
+    /// malformed control responses still use the normal FTP error path.
+    pub(super) async fn get_modification_time(
+        &mut self,
+        remote_path: &str,
+    ) -> Result<Option<std::time::SystemTime>> {
+        let response = self.command(&format!("MDTM {}", remote_path)).await?;
+        if response.0 != 213 {
+            debug!(
+                code = response.0,
+                message = %response.1,
+                "FTP MDTM is unavailable for remote file"
+            );
+            return Ok(None);
+        }
+
+        let response_message = response.1.trim();
+        let timestamp = response_message
+            .strip_prefix("213")
+            .unwrap_or(response_message)
+            .trim()
+            .get(..14)
+            .and_then(parse_mdtm_timestamp);
+        if timestamp.is_none() {
+            warn!(response = %response.1, "FTP MDTM response has no valid timestamp");
+        }
+        Ok(timestamp)
+    }
+
     /// Set resume offset (REST command)
     pub(super) async fn set_resume_offset(&mut self, offset: u64) -> Result<bool> {
-        if offset == 0 {
-            return Ok(true);
-        }
         debug!("Setting resume offset: {} bytes", offset);
         let resp = self.command(&format!("REST {}", offset)).await?;
         if resp.0 != 350 {
@@ -283,7 +448,7 @@ impl RawFtpControl {
             // Some servers do not support REST. Report this to the caller so
             // it can restart from byte zero instead of appending at a stale
             // local offset while the server sends the complete object.
-            return Ok(false);
+            return Ok(offset == 0);
         }
         Ok(true)
     }
@@ -293,11 +458,7 @@ impl RawFtpControl {
         debug!("Querying file size: {}", remote_path);
         let resp = self.command(&format!("SIZE {}", remote_path)).await?;
         if resp.0 == 213 {
-            let size = resp.1.trim().parse::<u64>().map_err(|error| {
-                Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
-                    message: format!("Invalid FTP SIZE response {:?}: {}", resp.1, error),
-                })
-            })?;
+            let size = parse_ftp_size_response(&resp.1)?;
             debug!("File size: {} bytes", size);
             return Ok(Some(size));
         }
@@ -311,14 +472,15 @@ impl RawFtpControl {
         Ok(None)
     }
 
-    /// Enter passive mode (PASV/EPSV) and return the data port.
+    /// Enter passive mode (PASV/EPSV) and establish the data socket.
     ///
     /// aria2_original deliberately connects the data socket to the control
     /// connection's peer address. The host advertised in a PASV response is
     /// parsed for wire validation and diagnostics, but is not a connection
     /// target because NATed and misconfigured servers commonly advertise an
     /// unreachable address.
-    pub(super) async fn enter_passive_mode(&mut self) -> Result<u16> {
+    pub(super) async fn enter_passive_mode(&mut self) -> Result<tokio::net::TcpStream> {
+        let port;
         // Try EPSV first (supports IPv6), fallback to PASV
         debug!("Attempting extended passive mode (EPSV)");
         let epsv_resp = self.command("EPSV").await;
@@ -326,23 +488,44 @@ impl RawFtpControl {
         match epsv_resp {
             Ok(resp) if resp.0 == 229 => {
                 // Parse |||port| format
-                if let Some(port) = parse_epsv_response(&resp.1) {
-                    debug!("EPSV successful, using port: {}", port);
-                    return Ok(port);
+                if let Some(parsed_port) = parse_epsv_response(&resp.1) {
+                    debug!("EPSV successful, using port: {}", parsed_port);
+                    port = parsed_port;
+                } else {
+                    warn!("Failed to parse EPSV response, falling back to PASV");
+                    port = self.enter_passive_mode_pasv().await?;
                 }
-                warn!("Failed to parse EPSV response, falling back to PASV");
             }
             _ => {
                 debug!("EPSV not supported, trying PASV");
+                port = self.enter_passive_mode_pasv().await?;
             }
-        }
+        };
 
-        // Fallback to PASV
+        let data_addr = std::net::SocketAddr::new(self.connection.peer_addr.ip(), port);
+        tokio::time::timeout(
+            Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
+            tokio::net::TcpStream::connect(data_addr),
+        )
+        .await
+        .map_err(|_| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Data connection timeout via {}", data_addr),
+            })
+        })?
+        .map_err(|error| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("Data connection failed via {}: {}", data_addr, error),
+            })
+        })
+    }
+
+    async fn enter_passive_mode_pasv(&mut self) -> Result<u16> {
         debug!("Entering passive mode (PASV)");
         let pasv_resp = self.command("PASV").await?;
         if pasv_resp.0 != 227 {
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("PASV failed: {} {}", pasv_resp.0, pasv_resp.1),
                 },
             ));
@@ -359,7 +542,7 @@ impl RawFtpControl {
                 Ok(port)
             }
             None => Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: "Cannot parse PASV response".into(),
                 },
             )),
@@ -375,12 +558,9 @@ impl RawFtpControl {
             .ok_or_else(|| Aria2Error::Network("FTP local address unavailable".into()))?
             .local_addr()
             .map_err(|e| Aria2Error::Network(format!("FTP local address unavailable: {}", e)))?;
-        let listener = tokio::net::TcpListener::bind(match local_addr {
-            std::net::SocketAddr::V4(_) => "0.0.0.0:0",
-            std::net::SocketAddr::V6(_) => "[::]:0",
-        })
-        .await
-        .map_err(|e| Aria2Error::Network(format!("FTP active listener bind failed: {}", e)))?;
+        let listener = tokio::net::TcpListener::bind(active_data_bind_addr(local_addr))
+            .await
+            .map_err(|e| Aria2Error::Network(format!("FTP active listener bind failed: {}", e)))?;
         let port = listener
             .local_addr()
             .map_err(|e| {
@@ -410,7 +590,7 @@ impl RawFtpControl {
                 let port_response = self.command(&port_cmd).await?;
                 if !(200..300).contains(&port_response.0) {
                     return Err(Aria2Error::Recoverable(
-                        RecoverableError::TemporaryNetworkFailure {
+                        RecoverableError::FtpProtocolError {
                             message: format!(
                                 "PORT failed: {} {}",
                                 port_response.0, port_response.1
@@ -420,7 +600,7 @@ impl RawFtpControl {
                 }
             } else {
                 return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
+                    RecoverableError::FtpProtocolError {
                         message: format!("EPRT failed for IPv6: {} {}", response.0, response.1),
                     },
                 ));
@@ -434,8 +614,13 @@ impl RawFtpControl {
         debug!("Initiating file retrieval: {}", remote_path);
         let resp = self.command(&format!("RETR {}", remote_path)).await?;
         if resp.0 != 150 && resp.0 != 125 {
+            if resp.0 == 550 {
+                return Err(Aria2Error::Fatal(FatalError::FileNotFound {
+                    path: remote_path.to_string(),
+                }));
+            }
             return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
+                RecoverableError::FtpProtocolError {
                     message: format!("RETR unexpected response: {} {}", resp.0, resp.1),
                 },
             ));
@@ -467,12 +652,40 @@ impl RawFtpControl {
         }
     }
 
+    pub(super) async fn abort_transfer(&mut self) {
+        let _ = self.command("ABOR").await;
+    }
+
     /// Gracefully disconnect from server
     pub(super) async fn quit(mut self) -> Result<()> {
         debug!("Sending QUIT command");
         let _ = self.command("QUIT").await.ok(); // Ignore errors on quit
         Ok(())
     }
+}
+
+/// Parse a successful FTP `SIZE` response within the local file-offset range.
+///
+/// `aria2_original` parses the value as a signed 64-bit length and rejects
+/// values above `a2_off_t::max()`. The Rust download state uses `u64` for
+/// progress reporting, but allocation and file offsets still cannot safely
+/// represent values above the same signed limit.
+pub(super) fn parse_ftp_size_response(response: &str) -> Result<u64> {
+    let size = response.trim().parse::<u64>().map_err(|error| {
+        Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+            message: format!("Invalid FTP SIZE response {:?}: {}", response, error),
+        })
+    })?;
+
+    if size > i64::MAX as u64 {
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::FtpProtocolError {
+                message: format!("FTP SIZE response is too large: {}", size),
+            },
+        ));
+    }
+
+    Ok(size)
 }
 
 // ---------------------------------------------------------------------------

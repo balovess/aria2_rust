@@ -322,6 +322,21 @@ impl MseCryptoState {
         }
     }
 
+    /// Continue an MSE stream with the cipher positions reached by the
+    /// handshake. Reinitializing from raw keys here would replay the first
+    /// keystream bytes and corrupt the post-MSE BitTorrent handshake.
+    pub(crate) fn from_rc4_states(
+        send_cipher: Rc4State,
+        recv_cipher: Rc4State,
+        method: MseCryptoMethod,
+    ) -> Self {
+        Self {
+            send_cipher: Some(send_cipher),
+            recv_cipher: Some(recv_cipher),
+            method,
+        }
+    }
+
     /// Encrypt data in-place (send direction).
     pub fn encrypt(&mut self, data: &mut [u8]) {
         if let Some(ref mut cipher) = self.send_cipher {

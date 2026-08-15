@@ -427,6 +427,28 @@ async fn e2e_xmlrpc_execution_errors_use_aria2_fault_code_one() {
 }
 
 #[tokio::test]
+async fn e2e_xmlrpc_invalid_scalar_keeps_original_execution_fault_contract() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let body = r#"<?xml version="1.0"?><methodCall><methodName>aria2.addUri</methodName><params><param><value><int>not-an-int</int></value></param></params></methodCall>"#;
+
+    let response = client
+        .post(format!("{base}/rpc"))
+        .header("content-type", "text/xml")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    // The original XML parser drops an invalid integer from the parameter
+    // frame; the RPC method then returns its normal XML execution fault.
+    assert_eq!(response.status(), 200);
+    let text = response.text().await.unwrap();
+    assert!(text.contains("<name>faultCode</name>"));
+    assert!(text.contains("<int>1</int>"));
+}
+
+#[tokio::test]
 async fn e2e_xmlrpc_parse_errors_match_original_http_contract() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();

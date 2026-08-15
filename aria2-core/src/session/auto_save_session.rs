@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 use tracing::debug;
@@ -22,7 +21,7 @@ pub struct AutoSaveSession {
 }
 
 impl AutoSaveSession {
-    pub fn new(path: PathBuf, interval: Duration, man: Arc<RwLock<RequestGroupMan>>) -> Self {
+    pub fn new(path: PathBuf, interval: Duration, man: Arc<RequestGroupMan>) -> Self {
         AutoSaveSession {
             inner: SaveSessionCommand::new(path, man),
             interval,
@@ -112,7 +111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_save_creation() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let auto = AutoSaveSession::new(
             PathBuf::from("/tmp/auto.sess"),
             Duration::from_secs(10),
@@ -125,7 +124,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_save_dirty_flag() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let auto = AutoSaveSession::new(
             PathBuf::from("/tmp/auto.sess"),
             Duration::from_secs(10),
@@ -139,7 +138,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_save_skip_when_not_dirty() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_autosave_clean_{}.sess", std::process::id()));
 
@@ -153,7 +152,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_save_skip_when_interval_not_reached() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let dir = std::env::temp_dir();
         let path = dir.join(format!(
             "test_autosave_interval_{}.sess",
@@ -171,17 +170,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_save_triggers_on_both_conditions() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-        man.write()
-            .await
-            .add_group(
-                vec!["http://example.com/auto.bin".into()],
-                DownloadOptions {
-                    split: Some(2),
-                    ..Default::default()
-                },
-            )
-            .unwrap();
+        let man = Arc::new(RequestGroupMan::new());
+        man.add_group(
+            vec!["http://example.com/auto.bin".into()],
+            DownloadOptions {
+                split: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_autosave_trigger_{}.sess", std::process::id()));
@@ -200,7 +197,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_auto_save_resets_dirty_after_save() {
-        let man = Arc::new(RwLock::new(RequestGroupMan::new()));
+        let man = Arc::new(RequestGroupMan::new());
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_autosave_reset_{}.sess", std::process::id()));
 

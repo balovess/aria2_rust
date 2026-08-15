@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use super::rpc_helpers::split_auth_token;
@@ -8,6 +8,7 @@ use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, SessionInfo};
 use super::websocket::EventPublisher;
 use aria2_core::config::OptionRegistry;
+use aria2_core::engine::engine_command::EngineCommandSender;
 use aria2_core::request::request_group_man::RequestGroupMan;
 
 pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
@@ -20,9 +21,8 @@ pub struct RpcEngine {
     pub(crate) global_opts: GlobalOptions,
     pub event_publisher: Arc<EventPublisher>,
     pub(crate) auth_middleware: RpcAuthMiddleware,
-    pub(crate) group_man: Option<Arc<RwLock<RequestGroupMan>>>,
-    pub(crate) engine_cmd_tx:
-        Option<mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>>,
+    pub(crate) group_man: Option<Arc<RequestGroupMan>>,
+    pub(crate) engine_cmd_tx: Option<EngineCommandSender>,
     pub(crate) session_info: SessionInfo,
     pub(crate) save_session_path: Option<std::path::PathBuf>,
 }
@@ -31,14 +31,14 @@ impl RpcEngine {
     /// Create a new RpcEngine test fixture with private core dependencies.
     /// Production callers should wire shared dependencies with the builder methods.
     pub fn new() -> Self {
-        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
+        let (engine_cmd_tx, engine_cmd_rx) = aria2_core::engine::engine_command::channel();
         std::mem::forget(engine_cmd_rx);
-        Self::wired(Arc::new(RwLock::new(RequestGroupMan::new())), engine_cmd_tx)
+        Self::wired(Arc::new(RequestGroupMan::new()), engine_cmd_tx)
     }
 
-    pub fn wired(
-        group_man: Arc<RwLock<RequestGroupMan>>,
-        engine_cmd_tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
+    pub fn wired<T: Into<EngineCommandSender>>(
+        group_man: Arc<RequestGroupMan>,
+        engine_cmd_tx: T,
     ) -> Self {
         // Initialize global options from the registry.
         let registry = OptionRegistry::new();
@@ -60,7 +60,7 @@ impl RpcEngine {
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
             group_man: Some(group_man),
-            engine_cmd_tx: Some(engine_cmd_tx),
+            engine_cmd_tx: Some(engine_cmd_tx.into()),
             session_info: SessionInfo::new(),
             save_session_path: None,
         }
@@ -89,7 +89,7 @@ impl RpcEngine {
     /// Chainable builder method to set the shared RequestGroupMan.
     /// When set, RPC handlers read live progress from the group manager
     /// and `aria2.addUri` registers downloads there.
-    pub fn with_group_man(mut self, man: Arc<RwLock<RequestGroupMan>>) -> Self {
+    pub fn with_group_man(mut self, man: Arc<RequestGroupMan>) -> Self {
         self.group_man = Some(man);
         self
     }
@@ -97,11 +97,8 @@ impl RpcEngine {
     /// Chainable builder method to set the EngineCommand channel sender.
     /// When set, RPC handlers send structured lifecycle commands (AddDownload,
     /// RemoveDownload, Pause, etc.) to the engine loop.
-    pub fn with_engine_cmd_tx(
-        mut self,
-        tx: mpsc::UnboundedSender<aria2_core::engine::engine_command::EngineCommand>,
-    ) -> Self {
-        self.engine_cmd_tx = Some(tx);
+    pub fn with_engine_cmd_tx<T: Into<EngineCommandSender>>(mut self, tx: T) -> Self {
+        self.engine_cmd_tx = Some(tx.into());
         self
     }
 
@@ -148,7 +145,7 @@ impl RpcEngine {
     /// Get current number of active tasks.
     pub async fn task_count(&self) -> usize {
         match self.group_man.as_ref() {
-            Some(man) => man.read().await.count(),
+            Some(man) => man.count(),
             None => 0,
         }
     }
@@ -164,23 +161,27 @@ impl RpcEngine {
     ///    other method to [`RpcEngine::dispatch_single`].
     /// 3. Post-process the result into aria2's wire format.
     ///
-    /// `system.multicall` is deliberately exempt from step 1's *mandatory*
-    /// check: C++ aria2's `SystemMulticallRpcMethod::execute()` overrides the
-    /// base `RpcMethod::execute()` and therefore never calls `authorize()` on
-    /// the multicall envelope — each sub-call authorizes itself instead.
-    /// AriaNg / webui-aria2 depend on this, since they put the secret into
-    /// every sub-call's `params[0]` and never into the envelope. An envelope
-    /// token that *is* present is still validated here and additionally used
-    /// as the fallback secret for sub-calls that omit their own.
+    /// `system.multicall` is deliberately exempt from step 1: C++ aria2's
+    /// `SystemMulticallRpcMethod::execute()` overrides the base
+    /// `RpcMethod::execute()` and therefore never authorizes the multicall
+    /// envelope. Each sub-call authorizes itself instead. This matters for
+    /// AriaNg and webui-aria2, which put the secret into every sub-call's
+    /// `params[0]` and leave the envelope parameters as the call list.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let is_multicall = req.method == "system.multicall";
+
+        if is_multicall {
+            return self
+                .handle_multicall(req)
+                .await
+                .unwrap_or_else(|e| e.into_response(req.id.clone()));
+        }
 
         // Authenticate: extract token from params and validate.
         // Supports both array-style ("token:xxx" as first param element)
         // and object-style ({"token": "xxx"}) params for backward compatibility.
         let (token, stripped_params) = split_auth_token(&req.params);
         if rpc_method_requires_auth(&req.method)
-            && (!is_multicall || token.is_some())
             && let Err(auth_err) = self.auth_middleware.validate(token.as_deref())
         {
             return auth_err.into_response(req.id.clone());
@@ -203,13 +204,7 @@ impl RpcEngine {
             None => req,
         };
 
-        if is_multicall {
-            self.handle_multicall(dispatch_req, token.as_deref())
-                .await
-                .unwrap_or_else(|e| e.into_response(dispatch_req.id.clone()))
-        } else {
-            self.dispatch_single(dispatch_req).await
-        }
+        self.dispatch_single(dispatch_req).await
     }
 
     /// Dispatch one already-authenticated, token-stripped JSON-RPC request.

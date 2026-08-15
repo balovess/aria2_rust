@@ -205,6 +205,27 @@ fn test_netrc_to_auth_factory_ftp() {
 }
 
 #[test]
+fn test_netrc_domain_suffix_matches_http_subdomain() {
+    let mut factory = AuthConfigFactory::new();
+    factory
+        .load_netrc_str("machine .example.com\nlogin netrcuser\npassword netrcpass\n")
+        .unwrap();
+
+    let url = Url::parse("http://cdn.example.com/file").unwrap();
+    let ac = factory
+        .resolve(&url, false, &AuthResolveOptions::default())
+        .unwrap();
+    assert_eq!(ac.user(), "netrcuser");
+
+    let bare_domain = Url::parse("http://example.com/file").unwrap();
+    assert!(
+        factory
+            .resolve(&bare_domain, false, &AuthResolveOptions::default())
+            .is_none()
+    );
+}
+
+#[test]
 fn test_netrc_default_fallback_for_http() {
     let mut factory = AuthConfigFactory::new();
     factory
@@ -270,6 +291,26 @@ fn test_netrc_url_creds_take_priority() {
     // URL creds take priority over netrc
     assert_eq!(ac.user(), "urluser");
     assert_eq!(ac.password(), "urlpass");
+}
+
+#[test]
+fn test_netrc_http_cli_creds_take_priority_over_machine_entry() {
+    let mut factory = AuthConfigFactory::new();
+    factory
+        .load_netrc_str("machine example.com\nlogin netrcuser\npassword netrcpass\n")
+        .unwrap();
+
+    let url = Url::parse("http://example.com/file").unwrap();
+    let opts = AuthResolveOptions {
+        http_user: Some("cliuser".into()),
+        http_passwd: Some("clipass".into()),
+        ..Default::default()
+    };
+    let ac = factory.resolve(&url, false, &opts).unwrap();
+
+    // Explicit HTTP options take priority over ambient machine credentials.
+    assert_eq!(ac.user(), "cliuser");
+    assert_eq!(ac.password(), "clipass");
 }
 
 #[test]

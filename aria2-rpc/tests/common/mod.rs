@@ -17,8 +17,6 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
-
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::server::{RpcAuthMiddleware, RpcServer, ServerConfig};
 
@@ -80,9 +78,9 @@ pub async fn start_test_server_with_config(
 
     let config = config.with_host("127.0.0.1").with_port(port);
 
-    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let mut download_engine = DownloadEngine::new(1);
-    group_man.read().await.set_max_concurrent(max_concurrent);
+    group_man.set_max_concurrent(max_concurrent);
     download_engine.set_request_group_man(Arc::clone(&group_man));
     download_engine.set_keep_alive(true);
     let engine_cmd_tx = download_engine.engine_command_sender();

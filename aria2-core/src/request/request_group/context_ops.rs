@@ -54,6 +54,9 @@ impl super::RequestGroup {
     /// independently (e.g. by `BtDownloadCommand` after parsing torrent
     /// metadata), so we transfer URIs lazily at the point of attachment.
     pub fn set_download_context(&self, mut ctx: Arc<DownloadContext>) {
+        if let Some(stats) = self.global_net_stat() {
+            ctx.set_global_net_stat(stats);
+        }
         let mut guard = self.download_context.recover_mut();
 
         // Transfer initial URIs to the first FileEntry's remaining_uris.
@@ -316,9 +319,10 @@ impl super::RequestGroup {
     /// when a URI attempt completes (success or failure).
     /// Publish a real protocol connection for timeout/error handling.
     pub fn set_connection_context(&self, context: crate::network::ConnectionContext) {
-        if let Ok(mut contexts) = self.connection_contexts.write()
-            && !contexts.iter().any(|existing| existing == &context)
-        {
+        if let Ok(mut contexts) = self.connection_contexts.write() {
+            if let Some(index) = contexts.iter().position(|existing| existing == &context) {
+                contexts.remove(index);
+            }
             contexts.push(context);
         }
     }
@@ -336,6 +340,18 @@ impl super::RequestGroup {
             .read()
             .map(|contexts| contexts.clone())
             .unwrap_or_default()
+    }
+
+    /// Return the most recently observed peer for timeout attribution.
+    ///
+    /// The history remains available for diagnostics, but a timeout belongs
+    /// to the latest active connection rather than every peer seen by a
+    /// concurrent or mirror-aware command generation.
+    pub fn latest_connection_context(&self) -> Option<crate::network::ConnectionContext> {
+        self.connection_contexts
+            .read()
+            .ok()
+            .and_then(|contexts| contexts.last().cloned())
     }
 
     pub fn add_uri_result(&self, uri: String, result_code: u16) {

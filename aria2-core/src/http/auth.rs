@@ -13,6 +13,15 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 use url::Url;
 
+pub(crate) fn request_directory(path: &str) -> &str {
+    match path.rfind('/') {
+        Some(index) => &path[..=index],
+        None => "/",
+    }
+}
+
+use crate::http::request_response::basic_auth;
+
 // ---------------------------------------------------------------------------
 // AuthConfig — mirrors C++ AuthConfig
 // ---------------------------------------------------------------------------
@@ -159,8 +168,8 @@ const FTP_DEFAULT_PASSWD: &str = "ARIA2USER@";
 ///
 /// 1. URL-embedded credentials (`http://user:pass@host/...`)
 /// 2. Activated `BasicCred` cache (when `http_auth_challenge` is enabled)
-/// 3. Netrc lookup (when `netrc` is set and `no_netrc` is false)
-/// 4. CLI-option fallback (`http_user`/`http_passwd` or `ftp_user`/`ftp_passwd`)
+/// 3. HTTP CLI options, then HTTP machine-specific Netrc lookup
+/// 4. FTP machine/default Netrc lookup, then FTP CLI options
 /// 5. FTP anonymous default (`anonymous` / `ARIA2USER@`)
 ///
 /// # Example
@@ -185,7 +194,7 @@ pub struct AuthConfigFactory {
 ///
 /// Built from the full [`netrc::NetrcParser`] via conversion. Machine entries
 /// are stored in `entries`; the `default` entry (which matches any host) is
-/// stored separately so that [`find_with_fallback`] can first try an exact
+/// stored separately so that [`find_with_fallback`] can first try a machine
 /// match then fall back to the default, matching C++ `findAuthenticator()`.
 #[derive(Debug, Clone)]
 pub struct NetrcStore {
@@ -229,9 +238,14 @@ impl NetrcStore {
         }
     }
 
-    /// Look up credentials for a hostname (exact match only, no default fallback).
+    /// Look up credentials for a hostname (without default fallback).
+    ///
+    /// Machine names beginning with `.` match subdomains, but not the bare
+    /// domain or a numeric host, as in aria2's `.netrc` implementation.
     pub fn find(&self, host: &str) -> Option<&NetrcEntry> {
-        self.entries.iter().find(|e| e.host == host)
+        self.entries
+            .iter()
+            .find(|e| netrc::no_proxy_domain_match(host, &e.host))
     }
 
     /// Look up credentials for a hostname, falling back to the default entry.
@@ -318,6 +332,9 @@ pub struct AuthResolveOptions {
     pub ftp_user: Option<String>,
     /// CLI-specified FTP password (C++ `PREF_FTP_PASSWD`).
     pub ftp_passwd: Option<String>,
+    /// Credentials for an HTTP proxy protection space.
+    pub proxy_user: Option<String>,
+    pub proxy_passwd: Option<String>,
 }
 
 impl AuthConfigFactory {
@@ -352,6 +369,27 @@ impl AuthConfigFactory {
         let parser = netrc::NetrcParser::parse(content)?;
         self.netrc = Some(NetrcStore::from(parser));
         Ok(())
+    }
+
+    /// Resolve proxy credentials without consulting origin credentials.
+    pub fn resolve_proxy(&self, opts: &AuthResolveOptions) -> Option<AuthConfig> {
+        let user = opts.proxy_user.clone()?;
+        AuthConfig::new(user, opts.proxy_passwd.clone().unwrap_or_default())
+    }
+
+    /// Resolve the origin credentials that aria2 sends preemptively as Basic.
+    ///
+    /// Challenge mode intentionally returns None until URL credentials or an
+    /// activated BasicCred exists. Non-challenge mode follows the normal
+    /// URL/CLI/Netrc resolver chain. Digest remains challenge-driven and is
+    /// handled by the response path.
+    pub fn resolve_basic_authorization(
+        &mut self,
+        url: &Url,
+        opts: &AuthResolveOptions,
+    ) -> Option<String> {
+        self.resolve(url, url.password().is_some(), opts)
+            .map(|config| basic_auth(config.user(), config.password()))
     }
 
     /// Resolve the [`AuthConfig`] for the given request URL.
@@ -390,18 +428,19 @@ impl AuthConfigFactory {
         if opts.http_auth_challenge {
             // Challenge mode: URL creds -> BasicCred cache -> null
             if !username.is_empty() {
+                let path = request_directory(url.path());
                 self.update_basic_cred(BasicCred::new(
                     username.to_string(),
                     password.to_string(),
                     host.to_string(),
                     port,
-                    url.path().to_string(),
+                    path.to_string(),
                     true,
                 ));
                 return AuthConfig::new(username.to_string(), password.to_string());
             }
             // Look up activated BasicCred
-            let cred = self.find_basic_cred(host, port, url.path());
+            let cred = self.find_basic_cred(host, port, request_directory(url.path()));
             match cred {
                 Some(bc) => AuthConfig::new(bc.user.clone(), bc.password.clone()),
                 None => None,
@@ -415,8 +454,18 @@ impl AuthConfigFactory {
         }
     }
 
-    /// Resolve HTTP auth via Netrc / CLI-option chain (non-challenge mode).
+    /// Resolve HTTP auth via CLI-option / Netrc chain (non-challenge mode).
     fn resolve_http_via_chain(&self, host: &str, opts: &AuthResolveOptions) -> Option<AuthConfig> {
+        // Explicit HTTP options take precedence over machine entries. This
+        // keeps a task's explicit credentials from being shadowed by ambient
+        // process configuration in `.netrc`.
+        if let Some(ref user) = opts.http_user
+            && !user.is_empty()
+        {
+            debug!("Resolved HTTP auth for {} from CLI options", host);
+            return AuthConfig::new(user.clone(), opts.http_passwd.clone().unwrap_or_default());
+        }
+
         // HTTP auth intentionally ignores the .netrc `default` entry, matching
         // C++ createHttpAuthResolver()->ignoreDefault().
         if !opts.no_netrc
@@ -428,13 +477,6 @@ impl AuthConfigFactory {
                 host, entry.login
             );
             return AuthConfig::new(entry.login.clone(), entry.password.clone());
-        }
-        // CLI fallback
-        if let Some(ref user) = opts.http_user
-            && !user.is_empty()
-        {
-            debug!("Resolved HTTP auth for {} from CLI options", host);
-            return AuthConfig::new(user.clone(), opts.http_passwd.clone().unwrap_or_default());
         }
         None
     }
@@ -556,7 +598,7 @@ impl AuthConfigFactory {
                         ac.password().to_string(),
                         host.to_string(),
                         port,
-                        path.to_string(),
+                        "/".to_string(),
                         true,
                     ));
                     info!(

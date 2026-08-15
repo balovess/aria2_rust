@@ -19,6 +19,8 @@ pub enum OptionType {
     List,
     Enum,
     IndexOut,
+    /// aria2's `head[=SIZE],tail[=SIZE]` BitTorrent piece-priority syntax.
+    PiecePriority,
     Path,
     Size,
 }
@@ -34,10 +36,75 @@ impl fmt::Display for OptionType {
             Self::List => write!(f, "list"),
             Self::Enum => write!(f, "enum"),
             Self::IndexOut => write!(f, "index-out"),
+            Self::PiecePriority => write!(f, "piece-priority"),
             Self::Path => write!(f, "path"),
             Self::Size => write!(f, "size"),
         }
     }
+}
+
+/// One entry in aria2's `bt-prioritize-piece` option.
+///
+/// The size is the number of bytes at the head or tail of every file whose
+/// containing pieces receive priority. An omitted size is represented by the
+/// parser as one MiB, matching `aria2_original`'s default argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiecePriorityRule {
+    Head { size: u64 },
+    Tail { size: u64 },
+}
+
+const DEFAULT_PIECE_PRIORITY_SIZE: u64 = 1024 * 1024;
+
+/// Parse aria2's original `bt-prioritize-piece` wire syntax.
+///
+/// Empty comma-separated tokens are ignored, as they are by the original
+/// `splitIter` helper. Sizes intentionally support only the original `K`/`M`
+/// suffixes; accepting newer units here would change the compatibility seam.
+pub fn parse_piece_priority(value: &str) -> Result<Vec<PiecePriorityRule>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(parse_piece_priority_token)
+        .collect()
+}
+
+fn parse_piece_priority_token(token: &str) -> Result<PiecePriorityRule, String> {
+    let (keyword, size) = match token.split_once('=') {
+        Some((keyword, raw_size)) => (keyword, parse_piece_priority_size(raw_size, token)?),
+        None => (token, DEFAULT_PIECE_PRIORITY_SIZE),
+    };
+
+    match keyword {
+        "head" => Ok(PiecePriorityRule::Head { size }),
+        "tail" => Ok(PiecePriorityRule::Tail { size }),
+        _ => Err(format!("unrecognized piece-priority token '{}'", token)),
+    }
+}
+
+fn parse_piece_priority_size(raw_size: &str, token: &str) -> Result<u64, String> {
+    let raw_size = raw_size.trim();
+    if raw_size.is_empty() {
+        return Err(format!(
+            "piece-priority token '{}' has an empty size",
+            token
+        ));
+    }
+
+    let (number, multiplier) = match raw_size.as_bytes().last().copied() {
+        Some(b'K' | b'k') => (&raw_size[..raw_size.len() - 1], 1024u64),
+        Some(b'M' | b'm') => (&raw_size[..raw_size.len() - 1], 1024u64 * 1024),
+        _ => (raw_size, 1),
+    };
+    let number = number.trim();
+    let value = number
+        .parse::<u64>()
+        .map_err(|_| format!("invalid piece-priority size '{}'", raw_size))?;
+    value
+        .checked_mul(multiplier)
+        .filter(|&value| value <= i64::MAX as u64)
+        .ok_or_else(|| format!("piece-priority size '{}' is too large", raw_size))
 }
 
 /// Logical category/grouping for configuration options.
@@ -250,6 +317,11 @@ pub struct OptionDef {
     /// An empty slice keeps custom definitions backward-compatible and means
     /// that the enum is open-ended until its owner supplies a choice set.
     pub allowed_values: &'static [&'static str],
+    /// Whether an explicitly supplied empty string is a valid value.
+    ///
+    /// This is separate from default injection: most original string options
+    /// accept `name=`, while secret handlers such as `rpc-secret` reject it.
+    pub allow_empty: bool,
     pub deprecated: bool,
     pub hidden: bool,
     /// Whether this option belongs in `aria2.getGlobalOption`'s original
@@ -278,6 +350,7 @@ impl Default for OptionDef {
             min: None,
             max: None,
             allowed_values: &[],
+            allow_empty: true,
             deprecated: false,
             hidden: false,
             expose_in_aria2_rpc: true,
@@ -329,12 +402,25 @@ impl OptionDef {
         self.allowed_values
     }
 
+    /// Return the configured default without routing it through explicit-value
+    /// parsing. Defaults are injected by the configuration loader as a
+    /// separate phase, matching aria2's `parseDefaultValues` behavior.
+    pub fn parse_default_value(&self) -> Option<OptionValue> {
+        (!matches!(self.default_value, OptionValue::None)).then(|| self.default_value.clone())
+    }
+
+    /// Parse one explicitly supplied wire value.
+    ///
+    /// An empty string is still a value. It must not be confused with a
+    /// missing value or with the option's configured default.
     pub fn parse_value(&self, s: &str) -> Result<OptionValue, String> {
-        if s.is_empty() {
-            return Ok(self.default_value.clone());
-        }
         match self.opt_type {
-            OptionType::String | OptionType::Path => Ok(OptionValue::Str(s.to_string())),
+            OptionType::String | OptionType::Path => {
+                if !self.allow_empty && s.is_empty() {
+                    return Err("empty string is not allowed".to_string());
+                }
+                Ok(OptionValue::Str(s.to_string()))
+            }
             OptionType::IntegerRange => {
                 let max = self
                     .max
@@ -370,6 +456,9 @@ impl OptionDef {
                 })
                 .map_err(|e| format!("invalid integer '{}': {}", s, e))?,
             OptionType::IndexOut => parse_index_out(s).map(|_| OptionValue::Str(s.to_string())),
+            OptionType::PiecePriority => {
+                parse_piece_priority(s).map(|_| OptionValue::Str(s.to_string()))
+            }
             OptionType::Size => {
                 let value = OptionValue::parse_size_str_checked(s)?;
                 if value > i64::MAX as u64 {
@@ -397,9 +486,9 @@ impl OptionDef {
                 }
                 Ok(OptionValue::Float(value))
             }
-            OptionType::Boolean => match s.to_lowercase().as_str() {
-                "true" | "yes" | "1" | "on" => Ok(OptionValue::Bool(true)),
-                "false" | "no" | "0" | "off" => Ok(OptionValue::Bool(false)),
+            OptionType::Boolean => match s {
+                "true" | "" => Ok(OptionValue::Bool(true)),
+                "false" => Ok(OptionValue::Bool(false)),
                 _ => Err(format!("invalid boolean '{}'", s)),
             },
             OptionType::List => Ok(OptionValue::List(

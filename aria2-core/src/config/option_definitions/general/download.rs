@@ -253,7 +253,7 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
-            name: "optimize-concurrent-downloads-coeffa".into(),
+            name: "optimize-concurrent-downloads-coeffA".into(),
             opt_type: OptionType::Float,
             default_value: OptionValue::Float(5.0),
             description:
@@ -263,9 +263,9 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
-            name: "optimize-concurrent-downloads-coeffb".into(),
+            name: "optimize-concurrent-downloads-coeffB".into(),
             opt_type: OptionType::Float,
-            default_value: OptionValue::Float(5.0),
+            default_value: OptionValue::Float(25.0),
             description:
                 "Coefficient B for optimize-concurrent-downloads (linear decreasing factor)".into(),
             category: OptionCategory::General,

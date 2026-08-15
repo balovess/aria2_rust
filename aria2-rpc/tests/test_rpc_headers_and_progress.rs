@@ -14,7 +14,7 @@ use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 
 // =========================================================================
 // Test Helpers
@@ -24,10 +24,10 @@ use tokio::sync::{RwLock, mpsc};
 /// simulating the shared-state setup that the app uses in RPC mode.
 fn create_engine_with_shared_state() -> (
     RpcEngine,
-    Arc<RwLock<RequestGroupMan>>,
+    Arc<RequestGroupMan>,
     mpsc::UnboundedReceiver<EngineCommand>,
 ) {
-    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
     let engine = RpcEngine::new()
         .with_group_man(group_man.clone())
@@ -74,7 +74,7 @@ async fn test_add_uri_with_array_headers_stored_in_group() {
     assert!(matches!(command, EngineCommand::AddDownload { .. }));
 
     // Verify the RequestGroup has the correct options stored
-    let man = group_man.read().await;
+    let man = &group_man;
     let group_lock = man
         .group_by_hex(&gid)
         .expect("group should be registered in RequestGroupMan");
@@ -117,7 +117,7 @@ async fn test_add_uri_with_string_headers_stored_in_group() {
     assert!(resp.is_success());
     let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
 
-    let man = group_man.read().await;
+    let man = &group_man;
     let group_lock = man.group_by_hex(&gid).expect("group should exist");
     let g = group_lock.read().unwrap();
     let opts = g.options();
@@ -157,7 +157,7 @@ async fn test_tell_status_returns_live_progress() {
 
     // Simulate download progress: set total, completed, speed, and start
     {
-        let man = group_man.read().await;
+        let man = &group_man;
         let group_lock = man.group_by_hex(&gid).unwrap();
         let mut g = group_lock.write().unwrap();
         g.start().unwrap(); // Status → Active
@@ -207,7 +207,7 @@ async fn test_get_global_stat_aggregates_live_data() {
 
     // Set both to Active with different speeds
     {
-        let man = group_man.read().await;
+        let man = &group_man;
         let g1 = man.group_by_hex(&gid1).unwrap();
         let g2 = man.group_by_hex(&gid2).unwrap();
         let mut rg1 = g1.write().unwrap();
@@ -247,7 +247,7 @@ async fn test_tell_active_lists_active_downloads() {
 
     // Set first to Active, leave second as Waiting (default)
     {
-        let man = group_man.read().await;
+        let man = &group_man;
         let g1 = man.group_by_hex(&gid1).unwrap();
         let mut rg1 = g1.write().unwrap();
         rg1.start().unwrap();
@@ -285,7 +285,7 @@ async fn test_progress_changes_reflected_in_tell_status() {
 
     // Set initial progress
     {
-        let man = group_man.read().await;
+        let man = &group_man;
         let g = man.group_by_hex(&gid).unwrap();
         let mut rg = g.write().unwrap();
         rg.start().unwrap();
@@ -304,7 +304,7 @@ async fn test_progress_changes_reflected_in_tell_status() {
 
     // Simulate more progress
     {
-        let man = group_man.read().await;
+        let man = &group_man;
         let g = man.group_by_hex(&gid).unwrap();
         let rg = g.read().unwrap(); // atomic setters only need &self
         rg.set_completed_length(500_000);
@@ -345,7 +345,7 @@ async fn test_get_option_preserves_task_snapshot_after_global_change() {
 
     // Sanity check: the task really is in RequestGroupMan.
     assert!(
-        group_man.read().await.group_by_hex(&gid).is_some(),
+        group_man.group_by_hex(&gid).is_some(),
         "task should be registered in RequestGroupMan"
     );
 

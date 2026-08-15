@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpAction;
+use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{UdpAction, UdpError};
 
 use super::*;
 
@@ -149,6 +149,10 @@ async fn test_handle_error_response() {
         !client.conn_cache.contains_key(&addr),
         "Error should not create cache entry"
     );
+    assert_eq!(
+        client.completed_announce_error(),
+        Some(UdpError::TrackerError)
+    );
 }
 
 #[tokio::test]
@@ -177,6 +181,22 @@ async fn test_timeout_cleaning() {
             || !client.pending.is_empty()
             || !client.waiting_for_conn.is_empty(),
         "Timed-out request should be moved"
+    );
+
+    for _ in 0..MAX_RETRIES.saturating_sub(1) {
+        let mut req = client
+            .pending
+            .pop_front()
+            .expect("timeout retry should be queued");
+        req.dispatched_at = Some(Instant::now() - Duration::from_secs(REQUEST_TIMEOUT_SECS + 1));
+        client.inflight.push_back(req);
+        client.handle_timeouts().await;
+    }
+
+    assert_eq!(
+        client.completed_announce_error(),
+        Some(UdpError::Timeout),
+        "exhausted UDP retries should retain a timeout classification"
     );
 }
 

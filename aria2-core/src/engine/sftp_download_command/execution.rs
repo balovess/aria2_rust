@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tracing::{debug, error, info, warn};
 
+use crate::checksum::checksum::Checksum;
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -148,11 +149,76 @@ impl Command for SftpDownloadCommand {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0)
         };
-        self.completed_bytes = Self::validate_resume_offset(existing_length, total_length)?;
+        let continue_download = self.group.recover().options().continue_download;
+        let checksum_config = self.group.recover().options().checksum.clone();
+        let complete_local_checksum_candidate =
+            !in_memory_download && existing_length == total_length && checksum_config.is_some();
+        let resume_input_length = if complete_local_checksum_candidate {
+            // aria2_original routes a complete local file with a configured
+            // checksum through ChecksumCheckIntegrityEntry even without
+            // `--continue`; only a failed check returns to remote download.
+            existing_length
+        } else {
+            crate::engine::progress_checkpoint::ProgressCheckpoint::resume_input_length(
+                &self.output_path,
+                existing_length,
+                continue_download,
+                total_length,
+            )
+            .await
+        };
+        Self::validate_resume_offset(resume_input_length, total_length)?;
+        if in_memory_download {
+            self.checkpoint = None;
+            self.completed_bytes = 0;
+        } else {
+            self.checkpoint = Some(
+                crate::engine::progress_checkpoint::ProgressCheckpoint::open(
+                    &self.output_path,
+                    total_length,
+                    resume_input_length,
+                )
+                .await,
+            );
+            self.completed_bytes = self
+                .checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.resume_offset(resume_input_length))
+                .unwrap_or(resume_input_length);
+        }
         {
             let g = self.group.recover();
             g.set_total_length(total_length);
-            g.update_progress(existing_length);
+            g.update_progress(self.completed_bytes);
+        }
+
+        if complete_local_checksum_candidate && self.completed_bytes == total_length {
+            let (algorithm, expected) = checksum_config
+                .as_ref()
+                .expect("complete local checksum candidate has a checksum");
+            let checksum = Checksum::from_type_and_value(algorithm, expected)?;
+            if crate::checksum::checksum::verify_file(&self.output_path, &checksum).await? {
+                self.group.recover().set_checksum_verified(true);
+                self.group.recover().set_completed_length(total_length);
+                self.group.recover_mut().complete()?;
+                self.complete_checkpoint().await;
+                info!(
+                    path = %self.output_path.display(),
+                    size = total_length,
+                    "SFTP target already matches remote size and checksum"
+                );
+                let _ = conn.disconnect().await;
+                return Ok(());
+            }
+
+            warn!(
+                path = %self.output_path.display(),
+                "SFTP target checksum mismatch; restarting from byte zero"
+            );
+            self.completed_bytes = 0;
+            if let Some(checkpoint) = self.checkpoint.as_mut() {
+                checkpoint.update(0, true).await;
+            }
         }
 
         // -----------------------------------------------------------------
@@ -216,13 +282,24 @@ impl Command for SftpDownloadCommand {
         loop {
             let halted = {
                 let group = self.group.recover();
-                group.is_force_halt_requested() || group.is_halt_requested()
+                group.is_removed() || group.is_force_halt_requested() || group.is_halt_requested()
             };
             if halted {
+                let halt_error = {
+                    let group = self.group.recover();
+                    if group.is_removed() {
+                        "Download cancelled by user"
+                    } else if group.is_paused_flag() {
+                        "Download paused"
+                    } else {
+                        "SFTP download halted"
+                    }
+                };
                 let _ = remote_file.close().await;
-                let _ = writer.finalize().await;
+                self.finalize_partial_writer(&mut writer).await;
+                self.flush_checkpoint().await;
                 let _ = conn.disconnect().await;
-                return Err(Aria2Error::DownloadFailed("SFTP download halted".into()));
+                return Err(Aria2Error::DownloadFailed(halt_error.into()));
             }
 
             let remaining = total_length.saturating_sub(self.completed_bytes);
@@ -243,6 +320,9 @@ impl Command for SftpDownloadCommand {
                         "[SFTP-CMD] EOF at offset {} (expected {})",
                         self.completed_bytes, total_length
                     );
+                    let _ = remote_file.close().await;
+                    self.finalize_partial_writer(&mut writer).await;
+                    let _ = conn.disconnect().await;
                     return Err(Aria2Error::DownloadFailed(format!(
                         "SFTP remote file ended before the advertised length: {} < {}",
                         self.completed_bytes, total_length
@@ -255,6 +335,7 @@ impl Command for SftpDownloadCommand {
                         self.completed_bytes, e
                     );
                     let _ = remote_file.close().await;
+                    self.finalize_partial_writer(&mut writer).await;
                     let _ = conn.disconnect().await;
                     let err = FileOpError::from(e);
                     return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
@@ -266,6 +347,7 @@ impl Command for SftpDownloadCommand {
             if let Err(e) = writer.write(&data).await {
                 error!("[SFTP-CMD] Disk write error: {}", e);
                 let _ = remote_file.close().await;
+                self.finalize_partial_writer(&mut writer).await;
                 let _ = conn.disconnect().await;
                 return Err(Aria2Error::Fatal(FatalError::Config(format!(
                     "Disk write failed: {}",
@@ -274,6 +356,9 @@ impl Command for SftpDownloadCommand {
             }
 
             self.completed_bytes += n as u64;
+            if let Some(checkpoint) = self.checkpoint.as_mut() {
+                checkpoint.update(self.completed_bytes, false).await;
+            }
 
             // Update progress in RequestGroup
             {
@@ -303,11 +388,53 @@ impl Command for SftpDownloadCommand {
 
         // Finalize disk writer (flush, sync, etc.). Completion is not valid
         // unless the local bytes have been durably finalized.
-        let finalized_data = writer.finalize().await.map_err(|error| {
-            Aria2Error::FileIo(format!(
-                "[SFTP-CMD] Failed to finalize disk writer: {error}"
-            ))
-        })?;
+        let finalized_data = match writer.finalize().await {
+            Ok(data) => data,
+            Err(error) => {
+                self.flush_checkpoint().await;
+                let _ = conn.disconnect().await;
+                return Err(Aria2Error::FileIo(format!(
+                    "[SFTP-CMD] Failed to finalize disk writer: {error}"
+                )));
+            }
+        };
+
+        // aria2_original schedules ChecksumCheckIntegrityEntry after the
+        // SFTP transfer, including when the local output was already complete.
+        // Keep that verification at the Rust-owned completion seam so the
+        // output is never marked complete before its configured checksum is
+        // known to match.
+        if let Some((algorithm, expected)) = checksum_config {
+            let checksum = match Checksum::from_type_and_value(&algorithm, &expected) {
+                Ok(checksum) => checksum,
+                Err(error) => {
+                    let _ = conn.disconnect().await;
+                    return Err(error);
+                }
+            };
+            let verified = if in_memory_download {
+                checksum.verify(&finalized_data)
+            } else {
+                match crate::checksum::checksum::verify_file(&self.output_path, &checksum).await {
+                    Ok(verified) => verified,
+                    Err(error) => {
+                        self.flush_checkpoint().await;
+                        let _ = conn.disconnect().await;
+                        return Err(error);
+                    }
+                }
+            };
+            if !verified {
+                self.flush_checkpoint().await;
+                let _ = conn.disconnect().await;
+                return Err(Aria2Error::Checksum(format!(
+                    "{} checksum mismatch for {}",
+                    algorithm,
+                    self.output_path.display()
+                )));
+            }
+            self.group.recover().set_checksum_verified(true);
+        }
 
         if in_memory_download {
             let group = self.group.recover();
@@ -320,6 +447,8 @@ impl Command for SftpDownloadCommand {
         if let Err(e) = conn.disconnect().await {
             warn!("[SFTP-CMD] Warning during SSH disconnect: {}", e);
         }
+
+        self.complete_checkpoint().await;
 
         // Calculate final statistics
         let final_speed = {
@@ -374,5 +503,28 @@ impl Command for SftpDownloadCommand {
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
         Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))
+    }
+
+    async fn shutdown(&mut self) {
+        self.flush_checkpoint().await;
+    }
+}
+
+impl SftpDownloadCommand {
+    async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
+        let _ = writer.finalize().await;
+        self.flush_checkpoint().await;
+    }
+
+    async fn flush_checkpoint(&mut self) {
+        if let Some(checkpoint) = self.checkpoint.as_mut() {
+            checkpoint.update(self.completed_bytes, true).await;
+        }
+    }
+
+    async fn complete_checkpoint(&mut self) {
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.complete().await;
+        }
     }
 }

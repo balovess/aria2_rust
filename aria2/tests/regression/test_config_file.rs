@@ -255,7 +255,7 @@ fn regression_config_file_url_values() {
 #[test]
 fn regression_config_file_special_characters() {
     let mut parser = ConfigParser::new();
-    let content = "dir=/path with spaces\nuser-agent=aria2/1.0 (Linux)\n";
+    let content = "dir=/path with spaces\nuser-agent=test-client/1.0 (Linux)\n";
 
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("aria2.conf");
@@ -264,7 +264,10 @@ fn regression_config_file_special_characters() {
     parser.parse_file(config_path.to_str().unwrap());
 
     assert_eq!(parser.get_str("dir").unwrap(), "/path with spaces");
-    assert_eq!(parser.get_str("user-agent").unwrap(), "aria2/1.0 (Linux)");
+    assert_eq!(
+        parser.get_str("user-agent").unwrap(),
+        "test-client/1.0 (Linux)"
+    );
 }
 
 /// Test: Config file with unicode characters.
@@ -295,12 +298,10 @@ fn regression_config_file_empty_value() {
 
     parser.parse_file(config_path.to_str().unwrap());
 
-    // When an option has an empty value, parse_value returns the default value
-    // For rpc-secret, the default is OptionValue::None (no default)
-    // So contains() returns true (option was parsed), but get_str() returns None
-    assert!(parser.contains("rpc-secret"));
-    // The value is OptionValue::None, not a string, so get_str returns None
-    assert!(parser.get_str("rpc-secret").is_none());
+    // aria2_original rejects an empty RPC secret instead of treating it as a
+    // request to inject a default or silently disabling authentication.
+    assert!(!parser.contains("rpc-secret"));
+    assert!(parser.has_errors());
 }
 
 /// Test: Config file without equals sign is skipped.
@@ -852,13 +853,14 @@ fn regression_config_parser_error_invalid_integer() {
     assert_eq!(parser.errors()[0].option, "split");
 }
 
-/// Test: ConfigParser error on out of range.
+/// Test: ConfigParser accepts a split value above the default.
 #[test]
-fn regression_config_parser_error_out_of_range() {
+fn regression_config_parser_accepts_large_split() {
     let mut parser = ConfigParser::new();
-    parser.set_raw("split", "100"); // Max is 16
+    parser.set_raw("split", "100");
 
-    assert!(parser.has_errors());
+    assert!(!parser.has_errors());
+    assert_eq!(parser.get_i64("split"), Some(100));
 }
 
 /// Test: ConfigParser error on zero split.

@@ -70,27 +70,21 @@ impl RetryPolicy {
         if attempt == 0 {
             return None;
         }
-        let raw = (self.base_wait_ms as f64) * self.backoff_factor.powi(attempt as i32 - 1);
-        let ms = raw.min(self.max_wait_ms as f64) as u64;
-        Some(Duration::from_millis(ms))
+        Some(self.backoff_duration(attempt.saturating_sub(1)))
     }
 
     /// Compute wait duration using exponential backoff (Duration-based API).
     ///
-    /// This is equivalent to [`compute_wait`](Self::compute_wait) but returns
-    /// a `Duration` directly, clamped between `base_wait` and `max_wait`.
+    /// This is the direct-duration form of [`compute_wait`](Self::compute_wait)
+    /// for callers that need the initial wait as `attempt = 0`.
     pub fn wait_duration(&self, attempt: u32) -> Duration {
-        let base = Duration::from_millis(self.base_wait_ms);
-        let max = Duration::from_millis(self.max_wait_ms);
-        let secs = base.as_secs().saturating_mul(1 << attempt.min(20));
-        let dur = Duration::from_secs(secs);
-        if dur > max {
-            max
-        } else if dur < base {
-            base
-        } else {
-            dur
-        }
+        self.backoff_duration(attempt)
+    }
+
+    fn backoff_duration(&self, exponent: u32) -> Duration {
+        let raw = (self.base_wait_ms as f64) * self.backoff_factor.powi(exponent.min(20) as i32);
+        let millis = raw.max(0.0).min(self.max_wait_ms as f64) as u64;
+        Duration::from_millis(millis)
     }
 
     /// Check whether a retry should be attempted after a zero-based attempt.
@@ -223,6 +217,18 @@ mod tests {
     fn test_compute_wait_zero_attempts() {
         let p = RetryPolicy::default();
         assert_eq!(p.compute_wait(0), None, "attempt 0 should not wait");
+    }
+
+    #[test]
+    fn test_wait_duration_preserves_millisecond_precision_and_backoff_factor() {
+        let mut p = RetryPolicy::new(3, 5);
+        p.backoff_factor = 3.0;
+
+        assert_eq!(p.wait_duration(0), Duration::from_millis(5));
+        assert_eq!(p.wait_duration(1), Duration::from_millis(15));
+        assert_eq!(p.wait_duration(2), Duration::from_millis(45));
+        assert_eq!(p.compute_wait(1), Some(Duration::from_millis(5)));
+        assert_eq!(p.compute_wait(2), Some(Duration::from_millis(15)));
     }
 
     #[test]

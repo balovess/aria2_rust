@@ -2,6 +2,7 @@
 
 use url::Url;
 
+use crate::error::Aria2Error;
 use crate::http::request_response::HttpMethod;
 
 use super::handler::{HttpResponse, HttpSkipResponseHandler};
@@ -539,6 +540,22 @@ fn test_300_without_location_is_fatal() {
             result
         ),
     }
+}
+
+#[test]
+fn test_unsupported_transfer_encoding_is_http_protocol_error() {
+    let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT);
+    let mut response = HttpResponse::new(404, "Not Found".to_string());
+    response
+        .headers
+        .push(("Transfer-Encoding".to_string(), "gzip".to_string()));
+    let url = Url::parse("http://example.com/missing").unwrap();
+
+    let error = handler
+        .handle(&response, HttpMethod::Get, &url, 0)
+        .expect_err("unsupported transfer encoding must fail before status handling");
+
+    assert!(matches!(error, Aria2Error::HttpProtocol(message) if message.contains("gzip")));
 }
 
 // ==================== 413 Request Entity Too Large tests ====================

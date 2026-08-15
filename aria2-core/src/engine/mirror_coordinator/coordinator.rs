@@ -7,11 +7,11 @@
 use std::sync::Arc;
 
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
+use crate::selector::feedback_uri_selector::extract_host_and_protocol;
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::selector::uri_selector::UriSelector;
 
 use super::config::MirrorConfig;
-use super::helpers::extract_host;
 
 /// High-level coordinator for multi-mirror downloads.
 ///
@@ -126,7 +126,16 @@ impl MirrorCoordinator {
     /// * `Some((mirror_idx, mirror_url, segment_info))` - Selected mirror and segment info
     /// * `None` - No pending segments or no available mirrors
     pub fn select_mirror_for_segment(&mut self) -> Option<(usize, String, (u32, u64, u64))> {
-        let result = self.segment_manager.select_mirror_for_next_segment()?;
+        self.select_mirror_for_segment_excluding(&[])
+    }
+
+    pub fn select_mirror_for_segment_excluding(
+        &mut self,
+        excluded_mirrors: &[usize],
+    ) -> Option<(usize, String, (u32, u64, u64))> {
+        let result = self
+            .segment_manager
+            .select_mirror_for_next_segment_excluding(excluded_mirrors)?;
 
         let (mirror_idx, seg_info) = result;
         let mirror_url = self.urls.get(mirror_idx).cloned()?;
@@ -191,6 +200,25 @@ impl MirrorCoordinator {
             .report_segment_failed(seg_idx, error_code)
     }
 
+    /// Return a capacity-limited segment to the pending queue without using
+    /// the ordinary retry budget.
+    pub fn requeue_segment(&mut self, seg_idx: u32) -> bool {
+        self.segment_manager.requeue_segment(seg_idx)
+    }
+
+    /// Restore fully completed segments from a persisted control-file
+    /// bitfield and return the resulting byte count.
+    pub fn restore_completed_from_bitfield(&mut self, bitfield: &[u8]) -> u64 {
+        self.segment_manager
+            .restore_completed_from_bitfield(bitfield)
+    }
+
+    /// Restore the conservative completed prefix used when the persisted
+    /// control file has no compatible segment layout.
+    pub fn restore_completed_prefix(&mut self, length: u64) -> u64 {
+        self.segment_manager.restore_completed_prefix(length)
+    }
+
     /// Get the maximum download speed across all mirrors.
     ///
     /// This is used as a baseline for calculating optimal connections.
@@ -202,9 +230,9 @@ impl MirrorCoordinator {
         self.urls
             .iter()
             .filter_map(|url| {
-                let host = extract_host(url);
+                let (host, protocol) = extract_host_and_protocol(url)?;
                 self.stat_man
-                    .find_stat(&host)
+                    .find_stat_by_protocol(&host, &protocol)
                     .map(|stat| stat.get_avg_speed())
             })
             .max()
@@ -237,8 +265,11 @@ impl MirrorCoordinator {
             None => return self.config.max_connections_per_mirror,
         };
 
-        let host = extract_host(url);
-        let stat = match self.stat_man.find_stat(&host) {
+        let (host, protocol) = match extract_host_and_protocol(url) {
+            Some(endpoint) => endpoint,
+            None => return self.config.max_connections_per_mirror,
+        };
+        let stat = match self.stat_man.find_stat_by_protocol(&host, &protocol) {
             Some(s) => s,
             None => return self.config.max_connections_per_mirror,
         };

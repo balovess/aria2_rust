@@ -44,3 +44,24 @@ pub use error::NetrcError;
 pub use lookup::find_netrc_file;
 pub use parser::NetrcParser;
 pub use types::NetrcEntry;
+
+/// Match a `.netrc` machine name using aria2's host matching rules.
+///
+/// A leading dot matches subdomains but not the bare domain. Numeric hosts
+/// only match an identical machine name, so an IP address cannot be matched
+/// by a domain suffix.
+pub(crate) fn no_proxy_domain_match(hostname: &str, domain: &str) -> bool {
+    if domain.starts_with('.') && !is_numeric_host(hostname) {
+        hostname.ends_with(domain)
+    } else {
+        hostname == domain
+    }
+}
+
+fn is_numeric_host(hostname: &str) -> bool {
+    let normalized = hostname
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(hostname);
+    normalized.parse::<std::net::IpAddr>().is_ok()
+}

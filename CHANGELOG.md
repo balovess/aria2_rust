@@ -5,9 +5,32 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Compatibility and verification
+- Added production HTTP request-policy E2E coverage for GET/HEAD selection,
+  cache and digest headers, keep-alive, explicit header precedence, gzip, and
+  unknown-length chunked downloads.
+- Made gzip negotiation explicit across production HTTP clients: disabled by
+  default and enabled only by the http-accept-gzip option. Unknown-length
+  downloads, including explicit split requests, now start with one ordinary
+  GET instead of a synthetic Range probe; they remain on the original
+  single-connection unknown-length path.
+- Unified proxied HTTP clients with the direct and DNS-pinned clients by
+  disabling reqwest auto-redirects; redirects now always pass through the
+  download flow's canonical URI, cookie, retry, and error handling seam.
+- Unified concurrent HTTP Range requests with the same bounded manual
+  redirect seam. Buffered and streaming range downloads now preserve Range
+  validation after redirects, propagate redirect `Set-Cookie` values, and
+  classify 401/407 responses as HTTP authentication failures.
 - Updated the active output collision resolver to use aria2-compatible `.1`, `.2`, ... filename suffixes.
 - Corrected compatibility documentation for RPC method and notification counts.
 - Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.
+- Unified active Rust crate metadata, path dependency constraints, installer fallback, examples, and benchmarks on the `aria2-rust` 0.2.9 product version.
+- Synchronized Homebrew, Scoop, Python, and Node.js release metadata and test fixtures with the `aria2-rust` product version.
+- Removed upstream aria2 product-version literals from compatibility fixtures; external peer and generator inputs now use neutral test identities.
+- Removed the obsolete upstream C++ version-report text; all emitted product version values now identify `aria2-rust`.
+- CLI version output now identifies the product as `aria2-rust 0.2.9`; `aria2c` remains the compatible executable entry point.
+- CLI help and completion usage retain `aria2c` while version output remains product-owned.
+- Added shared streaming whole-file checksum verification to HTTP and FTP, including FTP existing-file revalidation and `SIZE`/`RETR` length checks.
+- Corrected `bt-prioritize-piece` to the original `head[=SIZE],tail[=SIZE]` grammar while keeping the implementation and product identity Rust-native.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).

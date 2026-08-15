@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, 'codex/*']
+    branches-ignore: [master]
   workflow_dispatch:
 
 env:
@@ -12,6 +12,7 @@ jobs:
   # ── Lint & format (fast, single platform) ─────────────────
   lint:
     name: Lint & Format
+    if: github.ref != 'refs/heads/master'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -27,6 +28,7 @@ jobs:
   # ── Library and integration test verification ─────────────
   test:
     name: Test (${{ matrix.os }})
+    if: github.ref != 'refs/heads/master'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

@@ -6,15 +6,21 @@
 use base64::Engine;
 use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "bittorrent")]
+use tokio::sync::mpsc;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::JsonRpcRequest;
+use crate::server::RpcAuthMiddleware;
 use crate::types::{SessionInfo, StatusInfo, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::download::download_context::DownloadContext;
 use aria2_core::download::file_entry::FileEntry;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
+
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::engine_command::EngineCommand;
 
 #[tokio::test]
 #[cfg(feature = "bittorrent")]
@@ -35,8 +41,6 @@ async fn test_add_uri_preserves_memory_follow_mode_from_rpc_options() {
         .group_man
         .as_ref()
         .expect("test manager")
-        .read()
-        .await
         .group_by_hex(&gid)
         .expect("RPC group should be registered");
     assert_eq!(
@@ -143,12 +147,7 @@ async fn test_add_metalink_direct_only_applies_filters_and_priority() {
         "select-file must be applied before GID creation"
     );
 
-    let group_man = engine
-        .group_man
-        .as_ref()
-        .expect("test manager")
-        .read()
-        .await;
+    let group_man = engine.group_man.as_ref().expect("test manager");
     let group = group_man
         .group_by_hex(&gids[0])
         .expect("direct Metalink group should be registered");
@@ -183,12 +182,7 @@ async fn test_add_metalink_position_inserts_the_whole_result() {
     let gids: Vec<String> = serde_json::from_value(response.result.expect("RPC result")).unwrap();
     assert_eq!(gids.len(), 1);
 
-    let group_man = engine
-        .group_man
-        .as_ref()
-        .expect("test manager")
-        .read()
-        .await;
+    let group_man = engine.group_man.as_ref().expect("test manager");
     let waiting = group_man.get_waiting_groups();
     assert_eq!(waiting[0].recover().gid().to_hex_string(), gids[0]);
 }
@@ -249,7 +243,7 @@ async fn test_tell_status_has_real_progress_data() {
     );
     assert_eq!(
         status_val["connections"].as_str(),
-        Some("5"),
+        Some("16"),
         "Connections reflect the configured split count"
     );
 }
@@ -314,7 +308,7 @@ async fn test_tell_status_includes_upload_fields() {
     );
     assert_eq!(
         status_val["connections"].as_str(),
-        Some("5"),
+        Some("16"),
         "Connections reflect the configured split count"
     );
 }
@@ -561,6 +555,133 @@ async fn test_change_global_option_matches_original_changeability_policy() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_change_global_tracker_options_updates_global_state_and_engine() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let engine = RpcEngine::new().with_engine_cmd_tx(tx);
+    let req = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{
+            "bt-tracker-source": ["https://one.example/list.txt", "https://two.example/list.txt"],
+            "bt-tracker-update-interval": "900",
+            "enable-public-trackers": "false"
+        }]),
+    )
+    .with_id(1);
+
+    assert!(engine.handle_request(&req).await.is_success());
+
+    let get = JsonRpcRequest::new("aria2.getGlobalOption", serde_json::json!([])).with_id(2);
+    let options = engine
+        .handle_request(&get)
+        .await
+        .result
+        .expect("global options response");
+    let options = options
+        .as_object()
+        .expect("global options must be an object");
+    assert!(!options.contains_key("bt-tracker-source"));
+    assert!(!options.contains_key("bt-tracker-update-interval"));
+    assert!(!options.contains_key("enable-public-trackers"));
+
+    let mut commands = Vec::new();
+    for _ in 0..3 {
+        commands.push(rx.recv().await.expect("engine command"));
+    }
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        EngineCommand::SetPublicTrackerSources { sources }
+            if sources == "https://one.example/list.txt\nhttps://two.example/list.txt"
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        EngineCommand::SetPublicTrackerUpdateInterval { seconds } if *seconds == 900
+    )));
+    assert!(commands.iter().any(|command| matches!(
+        command,
+        EngineCommand::SetPublicTrackersEnabled { enabled } if !enabled
+    )));
+
+    let add = JsonRpcRequest::new(
+        "aria2.addUri",
+        serde_json::json!([[
+            "http://example.test/file",
+        ], {
+            "enable-public-trackers": "false",
+            "bt-tracker-source": "https://three.example/list.txt",
+            "bt-tracker-update-interval": "1200"
+        }]),
+    )
+    .with_id(3);
+    let gid: String = serde_json::from_value(
+        engine
+            .handle_request(&add)
+            .await
+            .result
+            .expect("extension options should be accepted for task creation"),
+    )
+    .expect("task creation should return a GID");
+
+    let task_options = engine
+        .handle_request(
+            &JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid])).with_id(4),
+        )
+        .await
+        .result
+        .expect("task options response");
+    let task_options = task_options
+        .as_object()
+        .expect("task options must be an object");
+    assert!(!task_options.contains_key("enable-public-trackers"));
+    assert!(!task_options.contains_key("bt-tracker-source"));
+    assert!(!task_options.contains_key("bt-tracker-update-interval"));
+}
+
+#[tokio::test]
+async fn test_http_connection_limit_is_configurable_through_rpc() {
+    let engine = RpcEngine::new();
+
+    let global_change = JsonRpcRequest::new(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{ "max-connection-per-server": "7" }]),
+    )
+    .with_id(1);
+    assert!(engine.handle_request(&global_change).await.is_success());
+
+    let global_get = JsonRpcRequest::new("aria2.getGlobalOption", serde_json::json!([])).with_id(2);
+    let global_response = engine.handle_request(&global_get).await;
+    let global_options = global_response.result.expect("global options response");
+    assert_eq!(
+        global_options
+            .get("max-connection-per-server")
+            .and_then(|value| value.as_str()),
+        Some("7")
+    );
+
+    let add_request =
+        JsonRpcRequest::new("aria2.addUri", serde_json::json!([["http://x.com/file"]])).with_id(3);
+    let add_response = engine.handle_request(&add_request).await;
+    let gid: String = serde_json::from_value(add_response.result.unwrap()).unwrap();
+
+    let task_change = JsonRpcRequest::new(
+        "aria2.changeOption",
+        serde_json::json!([gid, { "max-connection-per-server": "5" }]),
+    )
+    .with_id(4);
+    assert!(engine.handle_request(&task_change).await.is_success());
+
+    let task_get = JsonRpcRequest::new("aria2.getOption", serde_json::json!([gid])).with_id(5);
+    let task_response = engine.handle_request(&task_get).await;
+    let task_options = task_response.result.expect("task options response");
+    assert_eq!(
+        task_options
+            .get("max-connection-per-server")
+            .and_then(|value| value.as_str()),
+        Some("5")
+    );
+}
+
 #[tokio::test]
 async fn test_get_global_option_uses_original_wire_visibility_not_help_visibility() {
     let engine = RpcEngine::new().with_global_opts(HashMap::from([
@@ -582,6 +703,10 @@ async fn test_get_global_option_uses_original_wire_visibility_not_help_visibilit
         .expect("global options must be an object");
 
     assert_eq!(options.get("dns-timeout"), Some(&serde_json::json!("30")));
+    assert!(
+        !options.contains_key("bt-prioritize-piece"),
+        "piece-priority has no original default and must stay absent until configured"
+    );
     assert_eq!(
         options.get("enable-async-dns6"),
         Some(&serde_json::json!("true")),
@@ -610,6 +735,7 @@ async fn test_change_option_accepts_valid_keys() {
         "max-download-limit": 1048576,
         "max-upload-limit": 512000,
         "bt-max-peers": 60,
+        "bt-remove-unselected-file": "true",
         "bt-force-encryption": "true",
         "allow-overwrite": "true"
     });
@@ -640,6 +766,11 @@ async fn test_change_option_accepts_valid_keys() {
     assert!(
         opts.contains_key("bt-max-peers"),
         "bt-max-peers should be stored"
+    );
+    assert_eq!(
+        opts.get("bt-remove-unselected-file")
+            .and_then(|value| value.as_str()),
+        Some("true")
     );
     assert_eq!(
         opts.get("bt-force-encryption")
@@ -857,6 +988,39 @@ async fn test_multicall_invalid_entries_match_cpp_errors_and_continue() {
 }
 
 #[tokio::test]
+async fn test_multicall_rejects_envelope_token_like_cpp() {
+    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("secret"));
+    let req = JsonRpcRequest::new(
+        "system.multicall",
+        serde_json::json!(["token:secret", [{"methodName": "aria2.getVersion"}]]),
+    )
+    .with_id(1);
+
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_error());
+    assert_eq!(resp.error.as_ref().map(|error| error.code), Some(1));
+}
+
+#[tokio::test]
+async fn test_multicall_treats_non_array_subcall_params_as_empty() {
+    let engine = RpcEngine::new();
+    let req = JsonRpcRequest::new(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.getVersion", "params": {"token": "ignored"}},
+            {"methodName": "aria2.getSessionInfo", "params": null}
+        ]]),
+    )
+    .with_id(1);
+
+    let resp = engine.handle_request(&req).await;
+    assert!(resp.is_success());
+    let results = resp.result.unwrap();
+    assert!(results[0][0].get("version").is_some());
+    assert!(results[1][0].get("sessionId").is_some());
+}
+
+#[tokio::test]
 async fn test_multicall_empty_calls_returns_empty_array() {
     let engine = RpcEngine::new();
 
@@ -994,19 +1158,15 @@ async fn test_save_session_without_path_errors() {
 async fn test_save_session_with_group_man() {
     use aria2_core::request::request_group::DownloadOptions;
     use aria2_core::request::request_group_man::RequestGroupMan;
-    use tokio::sync::RwLock;
-
-    let man = Arc::new(RwLock::new(RequestGroupMan::new()));
-    man.write()
-        .await
-        .add_group(
-            vec!["http://example.com/rpc-session.bin".into()],
-            DownloadOptions {
-                split: Some(3),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+    let man = Arc::new(RequestGroupMan::new());
+    man.add_group(
+        vec!["http://example.com/rpc-session.bin".into()],
+        DownloadOptions {
+            split: Some(3),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let path =
         std::env::temp_dir().join(format!("test_save_session_man_{}.sess", std::process::id()));
@@ -1157,8 +1317,8 @@ async fn test_force_remove_cancels_immediately() {
     let status_after_val = tell_resp2.result.unwrap();
     assert_eq!(
         status_after_val["status"].as_str(),
-        Some("waiting"),
-        "Without an engine loop, forceRemove remains queued"
+        Some("removed"),
+        "forceRemove must move a reserved task to stopped results synchronously"
     );
 }
 
@@ -1192,8 +1352,8 @@ async fn test_batch_gids_force_remove() {
         let status_val = tell_resp.result.unwrap();
         assert_eq!(
             status_val["status"].as_str(),
-            Some("waiting"),
-            "Without an engine loop, forceRemove remains queued for {}",
+            Some("removed"),
+            "forceRemove must remove reserved task {} synchronously",
             gid
         );
     }
@@ -1403,13 +1563,12 @@ async fn test_get_servers_active_gid_returns_file_indexes_without_fake_servers()
 
     // `getServers` only accepts active groups. Promotion must not turn the
     // configured mirror list into fake in-flight server entries.
-    let manager = engine.group_man.as_ref().unwrap().read().await;
+    let manager = engine.group_man.as_ref().unwrap();
     assert_eq!(manager.fill_from_reserver().len(), 1);
     let group = manager.group_by_hex(&gid).expect("promoted group");
     group
         .recover()
         .set_download_context(Arc::new(DownloadContext::new(0, 0, "file.bin".to_string())));
-    drop(manager);
 
     let req = JsonRpcRequest::new("aria2.getServers", serde_json::json!([gid])).with_id(2);
     let resp = engine.handle_request(&req).await;

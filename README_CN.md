@@ -90,12 +90,17 @@ aria2c -o output.dat -d /downloads -s 4 -x 8 http://example.com/large.bin
 | --------------------------------- | ----------- | ----- |
 | `-d, --dir`                       | 保存目录        | `.`   |
 | `-o, --out`                       | 输出文件名       | 自动    |
-| `-s, --split`                     | 每个服务器的连接数   | `1`   |
-| `-x, --max-connection-per-server` | 每个服务器的最大连接数 | `1`   |
+| `-s, --split`                     | 每个下载的并发分片请求数   | `16`   |
+| `-x, --max-connection-per-server` | 每个服务器的最大并发分片请求数 | `16`   |
 | `--max-download-limit`            | 最大下载速度      | 无限制   |
 | `--timeout`                       | 超时时间（秒）     | `60`  |
 | `-q, --quiet`                     | 安静模式        | false |
 
+对于支持 Range 的 HTTP 分段下载，`split` 是单个文件的总并发请求预算；
+`max-connection-per-server` 是每个 `scheme://host:port` 服务器的独立上限。
+多镜像下载时，不同服务器可以在 `split` 总预算内并行；属于同一服务器的
+不同镜像 URL 共享该服务器上限。HTTP 自适应并发从配置上限开始，只有返回
+`429` 或 `503` 的服务器会降低并发目标，其他镜像不受影响。
 ### BitTorrent 下载
 
 ```bash
@@ -108,7 +113,7 @@ aria2c file.torrent
 
 ```
   dir=/downloads
-  split=5
+  split=16
 http://mirror1.example.com/file.iso	http://mirror2.example.com/file.iso
 http://mirror3.example.com/file.iso
 ```

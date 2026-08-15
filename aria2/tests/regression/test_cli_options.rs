@@ -98,16 +98,16 @@ fn regression_short_option_continue() {
     assert_eq!(cli.http_ftp.continue_dl, Some(true));
 }
 
-/// Test: -e maps to "enable-rpc" boolean option.
+/// Test: -e is a Rust additive alias for "enable-rpc".
 #[test]
-fn regression_short_option_enable_rpc() {
+fn regression_rust_alias_short_option_enable_rpc() {
     let cli = parse(&["-e"]);
     assert_eq!(cli.rpc.enable_rpc, Some(true));
 }
 
-/// Test: -r maps to "rpc-listen-port" option.
+/// Test: -r is a Rust additive alias for "rpc-listen-port".
 #[test]
-fn regression_short_option_rpc_port() {
+fn regression_rust_alias_short_option_rpc_port() {
     let cli = parse(&["-r", "6801"]);
     assert_eq!(cli.rpc.rpc_listen_port, Some(6801));
 }
@@ -122,8 +122,8 @@ fn regression_short_option_max_concurrent() {
 /// Test: -U maps to "user-agent" option.
 #[test]
 fn regression_short_option_user_agent() {
-    let cli = parse(&["-U", "aria2/1.0"]);
-    assert_eq!(cli.http_ftp.user_agent.as_deref(), Some("aria2/1.0"));
+    let cli = parse(&["-U", "test-client/1.0"]);
+    assert_eq!(cli.http_ftp.user_agent.as_deref(), Some("test-client/1.0"));
 }
 
 /// Test: --header maps to "header" option (list, can be repeated).
@@ -188,23 +188,23 @@ fn regression_short_option_max_upload_limit() {
     assert_eq!(cli.advanced.max_upload_limit.as_deref(), Some("2M"));
 }
 
-/// Test: -g maps to "seed-ratio" option (float).
+/// Test: -g is a Rust additive alias for "seed-ratio".
 #[test]
-fn regression_short_option_seed_ratio() {
+fn regression_rust_alias_short_option_seed_ratio() {
     let cli = parse(&["-g", "2.0"]);
     assert_eq!(cli.bittorrent.seed_ratio, Some(2.0));
 }
 
-/// Test: -G maps to "seed-time" option (float).
+/// Test: -G is a Rust additive alias for "seed-time".
 #[test]
-fn regression_short_option_seed_time() {
+fn regression_rust_alias_short_option_seed_time() {
     let cli = parse(&["-G", "60"]);
     assert_eq!(cli.bittorrent.seed_time, Some(60.0));
 }
 
-/// Test: -B maps to "bt-max-peers" option.
+/// Test: -B is a Rust additive alias for "bt-max-peers".
 #[test]
-fn regression_short_option_bt_max_peers() {
+fn regression_rust_alias_short_option_bt_max_peers() {
     let cli = parse(&["-B", "55"]);
     assert_eq!(cli.bittorrent.bt_max_peers, Some(55));
 }
@@ -524,21 +524,28 @@ fn regression_long_option_auto_save_interval() {
 }
 
 // =========================================================================
-// New CLI Conflict Resolution Tests (clap-specific)
+// Original CLI Boundary Tests (clap-specific)
 // =========================================================================
 
-/// Test: -L is an additional listen-port alias.
+/// Test: -L is a Rust additive alias for "listen-port".
 #[test]
-fn regression_short_option_listen_port_alias() {
+fn regression_rust_alias_short_option_listen_port() {
     let cli = parse(&["-L", "6881"]);
     assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881"));
 }
 
-/// Test: -L with port range.
+/// Test: Rust-only short aliases preserve their long-option targets.
 #[test]
-fn regression_short_option_listen_port_range() {
-    let cli = parse(&["-L", "6881-6999"]);
-    assert_eq!(cli.bittorrent.listen_port.as_deref(), Some("6881-6999"));
+fn regression_rust_alias_short_option_bt_force_encryption() {
+    let cli = parse(&["-X"]);
+    assert_eq!(cli.bittorrent.bt_force_encryption, Some(true));
+}
+
+/// Test: Rust-only short alias for rpc-secret preserves its value.
+#[test]
+fn regression_rust_alias_short_option_rpc_secret() {
+    let cli = parse(&["-I", "secret"]);
+    assert_eq!(cli.rpc.rpc_secret.as_deref(), Some("secret"));
 }
 
 /// Test: -h preserves aria2's optional help argument semantics.
@@ -573,6 +580,7 @@ fn regression_help_selector() {
 #[test]
 fn regression_help_rendering_filters_options() {
     let timeout_help = render_help(&HelpRequest::Filter("timeout".to_string()));
+    assert!(timeout_help.contains("Usage: aria2c"));
     assert!(timeout_help.contains("--timeout"));
     assert!(!timeout_help.contains("--dir"));
 
@@ -661,12 +669,19 @@ fn regression_v_triggers_version() {
     let result = CliArgs::try_parse_from(["aria2c", "-v"]);
     let error = result.expect_err("-v must trigger the CLI version action");
     assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+    let version_output = error.to_string();
     assert!(
-        error.to_string().starts_with(&format!(
-            "aria2c {}",
+        version_output.starts_with(&format!(
+            "{} {}",
+            aria2_protocol::identity::PRODUCT_NAME,
             aria2_protocol::identity::PRODUCT_VERSION
         )),
         "--version must use the product version number"
+    );
+    assert!(
+        !version_output.contains("Copyright (C) 2006")
+            && !version_output.contains("** Configuration **"),
+        "--version must not reintroduce the upstream C++ version report"
     );
 }
 
@@ -744,7 +759,7 @@ fn regression_mixed_short_long_options() {
         "--split=8",
         "-q",
         "--enable-rpc",
-        "-r",
+        "--rpc-listen-port",
         "6801",
     ]);
 
@@ -845,6 +860,81 @@ fn regression_registry_contains_core_options() {
     assert!(registry.contains("summary-interval"));
     assert!(registry.contains("stop"));
     assert!(registry.contains("dry-run"));
+}
+
+/// The project-owned compatibility inventory is the source boundary for
+/// registry coverage. `help` and `version` are CLI actions, while the
+/// remaining differences must be explicit Rust extensions.
+#[cfg(feature = "bittorrent")]
+#[test]
+fn regression_registry_inventory_matches_compatibility_baseline_and_extensions() {
+    use std::collections::BTreeSet;
+
+    const COMPATIBILITY_OPTION_INVENTORY: &str =
+        include_str!("../fixtures/compatibility_option_inventory.txt");
+    const EXPECTED_RUST_EXTENSIONS: &[&str] = &[
+        "bt-enable-web-seed",
+        "bt-peer-blocklist",
+        "bt-tracker-source",
+        "bt-tracker-update-interval",
+        "dht-message-path",
+        "enable-lpd",
+        "enable-public-trackers",
+        "enable-utp",
+        "log-backup-count",
+        "log-max-files",
+        "log-max-size",
+        "lpd-listen-port",
+        "mmap-threshold",
+        "on-bt-download-error",
+        "pid-file",
+        "rpc-allow-origin",
+        "rpc-cors-domain",
+        "rpc-listen-address",
+        "save-server-stat-interval",
+        "secure-falloc",
+        "server-stat-file",
+        "utp-listen-port",
+    ];
+
+    let baseline = COMPATIBILITY_OPTION_INVENTORY
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.starts_with('#'))
+        .collect::<BTreeSet<_>>();
+    let registry = OptionRegistry::new();
+    let registered = registry
+        .all()
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let expected_extensions = EXPECTED_RUST_EXTENSIONS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(baseline.len(), 214, "compatibility inventory changed");
+    assert_eq!(
+        registered.len(),
+        234,
+        "all-features registry inventory changed"
+    );
+    assert_eq!(
+        baseline
+            .difference(&registered)
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["help", "version"]),
+        "only CLI actions may be absent from the registry"
+    );
+    assert_eq!(
+        registered
+            .difference(&baseline)
+            .copied()
+            .collect::<BTreeSet<_>>(),
+        expected_extensions,
+        "Rust-only registry names must remain explicitly enumerated"
+    );
 }
 
 /// Test: OptionRegistry has correct option types.
@@ -990,7 +1080,7 @@ fn regression_registry_default_values() {
     );
     assert_eq!(
         registry.get("split").unwrap().default_value(),
-        &OptionValue::Int(5)
+        &OptionValue::Int(16)
     );
     assert_eq!(
         registry.get("timeout").unwrap().default_value(),
@@ -1080,9 +1170,6 @@ fn regression_original_short_option_contract() {
         ("max-connection-per-server", Some('x')),
         ("min-split-size", Some('k')),
         ("quiet", Some('q')),
-        ("enable-rpc", Some('e')),
-        ("rpc-listen-port", Some('r')),
-        ("rpc-secret", Some('I')),
         ("summary-interval", None),
         ("log-level", None),
         ("dry-run", None),
@@ -1103,14 +1190,9 @@ fn regression_original_short_option_contract() {
         ("disk-cache", None),
         ("piece-length", None),
         ("stop", None),
-        ("seed-time", Some('G')),
-        ("seed-ratio", Some('g')),
-        ("bt-max-peers", Some('B')),
         ("bt-save-metadata", None),
-        ("bt-force-encryption", Some('X')),
         ("enable-dht", None),
         ("follow-torrent", None),
-        ("listen-port", None),
     ];
 
     for (name, short_name) in expected {
@@ -1137,6 +1219,69 @@ fn regression_original_short_option_contract() {
     }
 }
 
+/// Rust aliases remain separate from the original short-option contract.
+#[test]
+fn regression_rust_alias_short_options_are_not_original_contract() {
+    let registry = OptionRegistry::new();
+    let aliases = [
+        ("enable-rpc", 'e'),
+        ("rpc-listen-port", 'r'),
+        ("rpc-secret", 'I'),
+        ("seed-time", 'G'),
+        ("seed-ratio", 'g'),
+        ("bt-max-peers", 'B'),
+        ("bt-force-encryption", 'X'),
+        ("listen-port", 'L'),
+    ];
+
+    for (name, short_name) in aliases {
+        assert_eq!(
+            registry.get(name).unwrap().short_name(),
+            Some(short_name),
+            "Rust extension alias for {name} must remain explicit"
+        );
+    }
+}
+
+/// Rust additive aliases must use the same typed config parser as long names.
+#[test]
+fn regression_rust_aliases_parse_through_config_seam() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&[
+        "-L",
+        "6881-6999",
+        "-e",
+        "-r",
+        "6801",
+        "-I",
+        "secret",
+        "-G",
+        "60",
+        "-g",
+        "2.0",
+        "-B",
+        "55",
+        "-X",
+    ]);
+
+    assert!(
+        !parser.has_errors(),
+        "Rust aliases must parse without errors"
+    );
+    assert_eq!(
+        parser.get_str("listen-port"),
+        Some("6881-6999"),
+        "-L must target the original long option name"
+    );
+    assert_eq!(parser.get_bool("enable-rpc"), Some(true));
+    assert_eq!(parser.get_i64("rpc-listen-port"), Some(6801));
+    assert_eq!(parser.get_str("rpc-secret"), Some("secret"));
+    assert_eq!(parser.get("seed-time"), Some(&OptionValue::Float(60.0)));
+    assert_eq!(parser.get("seed-ratio"), Some(&OptionValue::Float(2.0)));
+    assert_eq!(parser.get_i64("bt-max-peers"), Some(55));
+    assert_eq!(parser.get_bool("bt-force-encryption"), Some(true));
+}
+
 /// Test: OptionRegistry count.
 #[test]
 fn regression_registry_count() {
@@ -1148,7 +1293,7 @@ fn regression_registry_count() {
 // ConfigParser Validation Tests (unchanged - test ConfigParser directly)
 // =========================================================================
 
-/// Test: split option range validation (1-16).
+/// Test: split option validation accepts values above the default.
 #[test]
 fn regression_split_range_validation() {
     let mut parser = ConfigParser::new();
@@ -1160,8 +1305,8 @@ fn regression_split_range_validation() {
     assert_eq!(parser2.get_i64("split").unwrap(), 1);
 
     let mut parser3 = ConfigParser::new();
-    parser3.parse_cli_args(&["--split=16"]);
-    assert_eq!(parser3.get_i64("split").unwrap(), 16);
+    parser3.parse_cli_args(&["--split=100"]);
+    assert_eq!(parser3.get_i64("split").unwrap(), 100);
 }
 
 /// Test: max-connection-per-server range validation (1-16).
@@ -1211,7 +1356,7 @@ fn regression_defaults_applied() {
     parser.apply_defaults();
 
     assert_eq!(parser.get_str("dir").unwrap(), ".");
-    assert_eq!(parser.get_i64("split").unwrap(), 5);
+    assert_eq!(parser.get_i64("split").unwrap(), 16);
     assert_eq!(parser.get_i64("timeout").unwrap(), 60);
     assert!(!parser.get_bool("quiet").unwrap());
     assert!(parser.get_bool("check-certificate").unwrap());

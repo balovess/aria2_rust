@@ -8,11 +8,14 @@ pub mod uri_list;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(feature = "bittorrent")]
+pub use aria2_protocol::bittorrent::tracker::public_list::TrackerCatalogConfig;
 pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
     ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
-    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, RangeValidator,
-    RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
+    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, PiecePriorityRule,
+    RangeValidator, RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
+    parse_piece_priority,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use runtime::{

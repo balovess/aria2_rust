@@ -25,10 +25,11 @@ pub use crate::engine::bt_peer_interaction::{
 pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 
 // Re-export sub-module public items
-pub(crate) use constructor::build_download_context_from_meta;
+pub(crate) use constructor::{
+    apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
+};
 pub use seed_api::SeedStats;
 
-pub(crate) const PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
 #[derive(Debug)]
@@ -83,9 +84,7 @@ impl BtRuntimeState {
 
 impl Drop for BtDownloadCommand {
     fn drop(&mut self) {
-        if let Some(listener_task) = self.incoming_peer_listener_task.take() {
-            listener_task.abort();
-        }
+        self.bt_peer_route.take();
 
         let mut storage = self
             .peer_storage
@@ -126,6 +125,8 @@ pub struct BtDownloadCommand {
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    /// Public catalog entries actually appended to this command's announce list.
+    pub(crate) public_tracker_urls: HashSet<String>,
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
     pub(crate) multi_file_layout: Option<MultiFileLayout>,
 
@@ -140,6 +141,18 @@ pub struct BtDownloadCommand {
     pub(crate) check_integrity: bool,
     /// Only perform the piece hash check and terminate without peer discovery.
     pub(crate) hash_check_only: bool,
+    /// Allow the BitTorrent completion hook/notification when an existing
+    /// payload passes `check-integrity`.
+    pub(crate) bt_enable_hook_after_hash_check: bool,
+    /// Continue into the BitTorrent peer/seed lifecycle after a complete
+    /// payload passes `check-integrity`.
+    pub(crate) bt_hash_check_seed: bool,
+    /// Whether the current command completed from an integrity check rather
+    /// than by downloading missing pieces.
+    pub(crate) hash_check_completed: bool,
+    /// Whether the BT completion event was already emitted at the integrity
+    /// check seam.
+    pub(crate) bt_complete_event_emitted: bool,
 
     // P1/P2 integration fields (all use Option for backward compatibility)
     /// BT progress persistence manager
@@ -189,8 +202,7 @@ pub struct BtDownloadCommand {
     /// C++: DHTGetPeersCommand runs as a per-torrent command that
     /// triggers DHT lookups at adaptive intervals (15min normal,
     /// 5min low peers, 1min zero peers, 5s retry).
-    /// TODO: Wire into BT download loop for periodic DHT peer discovery.
-    #[allow(dead_code)]
+    /// Periodic lookup state is polled from the BT piece loop.
     pub(crate) dht_periodic_lookup: super::bt_download_execute::execute::DhtPeriodicLookup,
 
     // File lock (J6): prevents concurrent aria2 instances from writing to same output dir
@@ -228,11 +240,15 @@ pub struct BtDownloadCommand {
     pub(crate) peer_storage:
         std::sync::Arc<std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>>,
 
-    /// Receiver for incoming peers accepted by the session-scoped listener.
+    /// Receiver for incoming peers routed by the engine-owned listener.
     pub(crate) incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
-    /// Owned listener task; aborting it closes the listener socket with the command.
-    pub(crate) incoming_peer_listener_task: Option<tokio::task::JoinHandle<()>>,
+    /// Process-level listener shared by all BitTorrent downloads.
+    pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
+    /// RAII registration for this torrent's info-hash route.
+    pub(crate) bt_peer_route: Option<crate::engine::bt_peer_listener::BtPeerRouteHandle>,
+    /// Rust-owned A2CF checkpoint for verified torrent pieces.
+    pub(crate) checkpoint: Option<crate::engine::bt_checkpoint::BtCheckpoint>,
 }
 
 impl BtDownloadCommand {
@@ -266,9 +282,7 @@ impl BtDownloadCommand {
                 )
                 .await;
         }
-        if let Some(listener_task) = self.incoming_peer_listener_task.take() {
-            listener_task.abort();
-        }
+        self.bt_peer_route.take();
     }
 
     /// Set the process-wide rate limiter (from `DownloadEngine::global_limiter`).
@@ -343,7 +357,7 @@ impl BtDownloadCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::BtRuntimeState;
+    use super::{BtDownloadCommand, BtRuntimeState};
 
     #[test]
     fn runtime_state_uses_the_same_min_peer_boundary_as_tracker_demand() {
@@ -369,5 +383,46 @@ mod tests {
         runtime.set_max_peers(8);
         assert!(!runtime.less_than_min_peers());
         assert_eq!(runtime.max_peers(), 8);
+    }
+
+    #[test]
+    fn explicit_zero_seed_time_overrides_the_default_seed_ratio() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions {
+            seed_time: Some(0.0),
+            ..Default::default()
+        };
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(10),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        assert!(!command.seed_enabled);
+    }
+
+    #[test]
+    fn positive_seed_options_enable_seeding() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions {
+            seed_time: Some(1.0),
+            ..Default::default()
+        };
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(11),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        assert!(command.seed_enabled);
+        assert_eq!(
+            command.seed_time,
+            Some(std::time::Duration::from_secs(60)),
+            "seed-time is expressed in fractional minutes"
+        );
     }
 }

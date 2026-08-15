@@ -21,6 +21,13 @@ pub struct MagnetDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// Carried through to the internally-created `BtDownloadCommand`.
     global_limiter: Option<RateLimiter>,
+    #[cfg(feature = "bittorrent")]
+    public_tracker_catalog:
+        Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
+    #[cfg(feature = "bittorrent")]
+    bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
+    #[cfg(feature = "bittorrent")]
+    bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>>,
 }
 
 impl MagnetDownloadCommand {
@@ -98,7 +105,37 @@ impl MagnetDownloadCommand {
             completed_bytes: 0,
             dht_engine: None,
             global_limiter: None,
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: None,
+            #[cfg(feature = "bittorrent")]
+            bt_listener: None,
+            #[cfg(feature = "bittorrent")]
+            bt_registry: None,
         })
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_public_tracker_catalog(
+        &mut self,
+        catalog: Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
+    ) {
+        self.public_tracker_catalog = Some(catalog);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_bt_listener(
+        &mut self,
+        listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    ) {
+        self.bt_listener = Some(listener);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_bt_registry(
+        &mut self,
+        registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+    ) {
+        self.bt_registry = Some(registry);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
@@ -277,6 +314,16 @@ impl Command for MagnetDownloadCommand {
         )?;
         if let Some(gl) = self.global_limiter.clone() {
             bt_cmd.set_global_limiter(gl);
+        }
+        #[cfg(feature = "bittorrent")]
+        if let Some(catalog) = self.public_tracker_catalog.clone() {
+            bt_cmd.set_public_tracker_catalog(catalog);
+        }
+        if let Some(listener) = self.bt_listener.clone() {
+            bt_cmd.set_bt_listener(listener);
+        }
+        if let Some(registry) = self.bt_registry.clone() {
+            bt_cmd.set_bt_registry(registry);
         }
 
         bt_cmd.execute().await?;

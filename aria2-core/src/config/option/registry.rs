@@ -163,6 +163,18 @@ mod tests {
         ]);
         #[cfg(feature = "bittorrent")]
         {
+            options.insert(
+                "bt-tracker-source".to_string(),
+                serde_json::json!("https://example.test/trackers.txt"),
+            );
+            options.insert(
+                "bt-tracker-update-interval".to_string(),
+                serde_json::json!(86400),
+            );
+            options.insert(
+                "enable-public-trackers".to_string(),
+                serde_json::json!(true),
+            );
             options.insert("enable-utp".to_string(), serde_json::json!(true));
             options.insert("utp-listen-port".to_string(), serde_json::json!(6882));
         }
@@ -176,6 +188,9 @@ mod tests {
         {
             assert!(!projected.contains_key("enable-utp"));
             assert!(!projected.contains_key("utp-listen-port"));
+            assert!(!projected.contains_key("bt-tracker-source"));
+            assert!(!projected.contains_key("bt-tracker-update-interval"));
+            assert!(!projected.contains_key("enable-public-trackers"));
         }
     }
 }

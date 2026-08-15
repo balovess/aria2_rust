@@ -30,10 +30,13 @@
 use std::fmt;
 use std::time::Duration;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tracing::debug;
 use url::Url;
 
-use crate::error::Result;
+use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::http::{HttpHeaderProcessor, HttpResponseHead};
 
 // ---------------------------------------------------------------------------
 // ProxyMethod — how to route FTP through an HTTP proxy
@@ -62,6 +65,20 @@ impl fmt::Display for ProxyMethod {
         match self {
             ProxyMethod::Get => write!(f, "GET"),
             ProxyMethod::Tunnel => write!(f, "TUNNEL"),
+        }
+    }
+}
+
+impl ProxyMethod {
+    /// Parse the wire spelling accepted by aria2's `proxy-method` option.
+    ///
+    /// Keeping this conversion next to the enum prevents each protocol
+    /// adapter from inventing a slightly different string policy.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "get" => Some(Self::Get),
+            "tunnel" => Some(Self::Tunnel),
+            _ => None,
         }
     }
 }
@@ -163,6 +180,127 @@ pub struct FtpProxyGetRequest {
     pub request_bytes: Vec<u8>,
     /// The full FTP URL used in the request line
     pub request_url: String,
+}
+
+/// HTTP response returned by an FTP-over-HTTP forward proxy.
+///
+/// The response head is parsed with the shared Rust HTTP parser. Bytes read
+/// together with the head are retained so the payload cannot be lost between
+/// header parsing and the FTP command's disk writer.
+pub struct FtpProxyGetResponse {
+    pub head: HttpResponseHead,
+    stream: TcpStream,
+    buffered_body: Vec<u8>,
+}
+
+impl FtpProxyGetResponse {
+    /// Read payload bytes after the HTTP response head.
+    pub async fn read_body(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if !self.buffered_body.is_empty() {
+            let count = buffer.len().min(self.buffered_body.len());
+            buffer[..count].copy_from_slice(&self.buffered_body[..count]);
+            self.buffered_body.drain(..count);
+            return Ok(count);
+        }
+        self.stream.read(buffer).await
+    }
+}
+
+/// Execute one HTTP forward-proxy GET request for an FTP URL.
+///
+/// This is the Rust equivalent of aria2's `V_GET` path. The proxy receives
+/// the absolute `ftp://` request target and returns the payload as an HTTP
+/// response; the FTP control channel is intentionally not opened in this
+/// mode.
+pub async fn execute_proxy_get(
+    ftp_url: Url,
+    proxy_config: &FtpProxyConfig,
+    range_start: u64,
+    no_cache: bool,
+) -> Result<FtpProxyGetResponse> {
+    let request = FtpProxyGetRequestBuilder::new(ftp_url, proxy_config.clone())
+        .range_start(range_start)
+        .no_cache(no_cache)
+        .build()?;
+
+    let mut stream = tokio::time::timeout(
+        proxy_config.connect_timeout,
+        TcpStream::connect((proxy_config.proxy_host.as_str(), proxy_config.proxy_port)),
+    )
+    .await
+    .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
+    .map_err(|error| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: format!(
+                "FTP proxy connection failed to {}:{}: {}",
+                proxy_config.proxy_host, proxy_config.proxy_port, error
+            ),
+        })
+    })?;
+    stream.set_nodelay(true).map_err(|error| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: format!("FTP proxy set_nodelay failed: {}", error),
+        })
+    })?;
+
+    tokio::time::timeout(
+        proxy_config.connect_timeout,
+        stream.write_all(&request.request_bytes),
+    )
+    .await
+    .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
+    .map_err(|error| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: format!("FTP proxy request failed: {}", error),
+        })
+    })?;
+    stream.flush().await.map_err(|error| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: format!("FTP proxy request flush failed: {}", error),
+        })
+    })?;
+
+    let mut processor = HttpHeaderProcessor::new();
+    let mut read_buffer = [0u8; 4096];
+    let mut body_prefix = Vec::new();
+    loop {
+        let bytes_read =
+            tokio::time::timeout(proxy_config.connect_timeout, stream.read(&mut read_buffer))
+                .await
+                .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
+                .map_err(|error| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("FTP proxy response failed: {}", error),
+                    })
+                })?;
+        if bytes_read == 0 {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "FTP proxy closed before response headers".into(),
+                },
+            ));
+        }
+
+        let state = processor.feed(&read_buffer[..bytes_read]).clone();
+        let header_bytes = processor.last_bytes_processed();
+        if state.is_complete() {
+            if header_bytes < bytes_read {
+                body_prefix.extend_from_slice(&read_buffer[header_bytes..bytes_read]);
+            }
+            let head = processor.get_result()?;
+            debug!(status = head.status_code, "Received FTP proxy GET response");
+            return Ok(FtpProxyGetResponse {
+                head,
+                stream,
+                buffered_body: body_prefix,
+            });
+        }
+        if state.is_error() {
+            return Err(Aria2Error::HttpProtocol(
+                "Invalid FTP proxy response headers".into(),
+            ));
+        }
+    }
 }
 
 /// Builder for FTP-over-proxy GET requests.
@@ -468,13 +606,13 @@ mod tests {
         let proxy_config = FtpProxyConfig {
             proxy_host: "proxy.example.com".to_string(),
             proxy_port: 8080,
-            user_agent: "aria2-rust/1.0".to_string(),
+            user_agent: "test-client/1.0".to_string(),
             ..Default::default()
         };
         let s = build_request_string(ftp_url, proxy_config);
         assert!(s.starts_with("GET ftp://ftp.example.com/pub/file.tar.gz HTTP/1.1\r\n"));
         assert!(s.contains("Host: ftp.example.com\r\n"));
-        assert!(s.contains("User-Agent: aria2-rust/1.0\r\n"));
+        assert!(s.contains("User-Agent: test-client/1.0\r\n"));
         assert!(s.contains("Connection: Keep-Alive\r\n"));
         assert!(!s.contains("Proxy-Authorization"));
         assert!(!s.contains("Range:"));
@@ -566,7 +704,7 @@ mod tests {
             proxy_username: "puser".to_string(),
             proxy_password: "ppass".to_string(),
             ftp_username: "anonymous".to_string(),
-            user_agent: "aria2-rust/2.0".to_string(),
+            user_agent: "test-client/2.0".to_string(),
             ..Default::default()
         };
 
@@ -581,7 +719,7 @@ mod tests {
             s.contains("GET ftp://anonymous@ftp.example.com/pub/linux/file.tar.gz HTTP/1.1\r\n")
         );
         assert!(s.contains("Host: ftp.example.com\r\n"));
-        assert!(s.contains("User-Agent: aria2-rust/2.0\r\n"));
+        assert!(s.contains("User-Agent: test-client/2.0\r\n"));
         assert!(s.contains("Pragma: no-cache\r\n"));
         assert!(s.contains("Connection: Keep-Alive\r\n"));
         assert!(s.contains("Range: bytes=4096-\r\n"));

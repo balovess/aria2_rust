@@ -2,18 +2,6 @@ use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_adaptor::DiskAdaptor;
 use std::path::Path;
 
-/// Preallocate file space using truncation (set_len).
-/// This is the simplest allocation method that works on all platforms:
-/// - Unix: Uses ftruncate via set_len
-/// - Windows: Uses SetEndOfFile via set_len
-/// - macOS: Uses set_len
-///
-/// Note: This method does not guarantee contiguous disk space allocation,
-/// but it ensures the file has the specified size.
-pub(crate) async fn preallocate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
-    adaptor.truncate(length).await
-}
-
 /// Truncate file to the specified length.
 /// Works identically on all platforms using set_len:
 /// - Unix: ftruncate system call
@@ -31,16 +19,30 @@ pub(crate) async fn truncate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Re
 ///
 /// Uses `tokio::task::yield_now()` between chunks to avoid blocking the
 /// reactor. The zero buffer is allocated once and reused.
+#[cfg(test)]
 pub(crate) async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
+    async_zero_fill_from(adaptor, 0, length).await
+}
+
+/// Zero-fill only the newly allocated region `[offset, length)`.
+///
+/// Existing bytes must remain untouched when allocation resumes a partial
+/// download. This is also the correct security behavior after a platform
+/// preallocation call that does not clear newly allocated blocks.
+pub(crate) async fn async_zero_fill_from<D: DiskAdaptor>(
+    adaptor: &mut D,
+    offset: u64,
+    length: u64,
+) -> Result<()> {
     const CHUNK_SIZE: usize = 1024 * 1024; // 1 MiB
     let zero_chunk = vec![0u8; CHUNK_SIZE];
-    let mut remaining = length;
-    let mut offset: u64 = 0;
+    let mut position = offset.min(length);
+    let mut remaining = length.saturating_sub(position);
 
     while remaining > 0 {
         let write_len = remaining.min(CHUNK_SIZE as u64) as usize;
-        adaptor.write(offset, &zero_chunk[..write_len]).await?;
-        offset += write_len as u64;
+        adaptor.write(position, &zero_chunk[..write_len]).await?;
+        position += write_len as u64;
         remaining -= write_len as u64;
 
         // Cooperative yield to avoid starving other tasks

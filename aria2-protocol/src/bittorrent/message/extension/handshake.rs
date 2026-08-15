@@ -439,10 +439,10 @@ mod tests {
     #[test]
     fn test_handshake_version_roundtrip() {
         let mut hs = ExtensionHandshake::new();
-        hs.with_version("aria2/1.37.0");
+        hs.with_version("test-peer/1.0");
         let bytes = hs.to_bytes();
         let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.v(), Some("aria2/1.37.0"));
+        assert_eq!(parsed.v(), Some("test-peer/1.0"));
     }
 
     #[test]
@@ -596,7 +596,7 @@ mod tests {
     fn test_handshake_all_fields_roundtrip() {
         // Full handshake with all fields set — mirrors real C++ aria2 output
         let mut hs = ExtensionHandshake::new();
-        hs.with_version("aria2/1.37.0")
+        hs.with_version("test-peer/1.0")
             .with_port(6881)
             .with_metadata_size(45678)
             .with_reqq(1000)
@@ -606,7 +606,7 @@ mod tests {
         let bytes = hs.to_bytes();
         let parsed = ExtensionHandshake::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.v(), Some("aria2/1.37.0"));
+        assert_eq!(parsed.v(), Some("test-peer/1.0"));
         assert_eq!(parsed.port(), Some(6881));
         assert_eq!(parsed.metadata_size(), Some(45678));
         assert_eq!(parsed.reqq(), 1000);

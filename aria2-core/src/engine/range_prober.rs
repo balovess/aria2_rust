@@ -4,19 +4,20 @@ use std::time::Duration;
 use reqwest;
 
 use crate::constants;
+use crate::http::HttpRequestPolicy;
 
 pub struct RangeProber {
     client: Arc<reqwest::Client>,
-    headers: Vec<(String, String)>,
     cookie_header: Option<String>,
+    request_policy: HttpRequestPolicy,
 }
 
 impl RangeProber {
-    pub fn new(client: Arc<reqwest::Client>, headers: Vec<(String, String)>) -> Self {
+    pub fn new(client: Arc<reqwest::Client>, request_policy: HttpRequestPolicy) -> Self {
         Self {
             client,
-            headers,
             cookie_header: None,
+            request_policy,
         }
     }
 
@@ -67,19 +68,16 @@ impl RangeProber {
     }
 
     pub async fn probe_single_range(&self, uri: &str, range_header: &str) -> bool {
-        let mut req =
+        let req = self.request_policy.apply(
             self.client
                 .get(uri)
                 .header("Range", range_header)
                 .timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                ));
-        if let Some(cookie_header) = &self.cookie_header {
-            req = req.header("Cookie", cookie_header);
-        }
-        for (name, value) in &self.headers {
-            req = req.header(name, value);
-        }
+                )),
+            self.cookie_header.as_deref(),
+            &[],
+        );
         match req.send().await {
             Ok(resp) => {
                 let status = resp.status().as_u16();

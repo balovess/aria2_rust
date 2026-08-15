@@ -16,6 +16,52 @@
 
 use aria2_core::request::request_group::option_value_to_string;
 
+/// Decode the permissive Base64 stream used by aria2_original's wire
+/// adapters. The original decoder skips bytes outside the Base64 alphabet and
+/// returns an empty result for malformed padding or incomplete groups.
+pub(crate) fn decode_aria2_base64(input: &str) -> Vec<u8> {
+    use base64::Engine;
+
+    let filtered: Vec<u8> = input
+        .bytes()
+        .filter(|byte| {
+            matches!(
+                byte,
+                b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'+'
+                    | b'/'
+                    | b'='
+            )
+        })
+        .collect();
+
+    if filtered.is_empty() {
+        return Vec::new();
+    }
+
+    let input = if let Some(eq_pos) = filtered.iter().position(|byte| *byte == b'=') {
+        let group_start = eq_pos / 4 * 4;
+        let group_end = group_start + 4;
+        if group_end > filtered.len()
+            || filtered[eq_pos..group_end].iter().any(|byte| *byte != b'=')
+        {
+            return Vec::new();
+        }
+        &filtered[..group_end]
+    } else if filtered.len() % 4 == 1 {
+        // The original decoder ignores one incomplete trailing alphabet byte.
+        &filtered[..filtered.len() - 1]
+    } else {
+        &filtered
+    };
+
+    base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .unwrap_or_default()
+}
+
 /// Normalize a map of RPC options to the string-valued map returned by aria2.
 pub fn normalize_rpc_options(
     options: &std::collections::HashMap<String, serde_json::Value>,

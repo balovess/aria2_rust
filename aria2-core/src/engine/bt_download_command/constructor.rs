@@ -1,16 +1,17 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
-use crate::config::parse_index_out;
+use crate::config::{parse_index_out, parse_integer_segments};
 use crate::constants;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::BtDownloadCommand;
@@ -86,6 +87,94 @@ pub(crate) fn build_download_context_from_meta(
     Ok(ctx)
 }
 
+/// Apply Metalink-selected paths and mirrors to a parsed torrent context.
+///
+/// The torrent parser owns the canonical file order and byte offsets. This
+/// helper only changes the selected entries' destination and URI metadata, so
+/// both dependency resolution and command fallback use the same mapping rule.
+pub(crate) fn apply_file_mappings(
+    context: &mut crate::download::DownloadContext,
+    mappings: &[BtFileMapping],
+) -> Result<()> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let entries = context.get_file_entries_mut();
+    if entries.len() == 1 && mappings.len() == 1 && mappings[0].original_name.is_empty() {
+        apply_file_mapping(&mut entries[0], &mappings[0]);
+        return Ok(());
+    }
+
+    for entry in entries.iter_mut() {
+        entry.set_requested(false);
+    }
+
+    for mapping in mappings {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.original_name() == mapping.original_name)
+            .ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "No entry '{}' in torrent metadata",
+                    mapping.original_name
+                )))
+            })?;
+        apply_file_mapping(entry, mapping);
+    }
+    Ok(())
+}
+
+fn apply_file_mapping(entry: &mut crate::download::file_entry::FileEntry, mapping: &BtFileMapping) {
+    entry.set_requested(true);
+    entry.set_path(mapping.path.clone());
+    entry.set_uris(&mapping.uris);
+    entry.set_max_connection_per_server(mapping.max_connection_per_server);
+    entry.set_unique_protocol(mapping.unique_protocol);
+}
+
+/// Apply the user-facing `select-file` syntax to a torrent context.
+///
+/// The parser is shared with the rest of the configuration system. File
+/// indices remain 1-based at this seam, while the context owns the mapping to
+/// requested file entries. An empty value has the same meaning as an omitted
+/// filter: request every file.
+pub(crate) fn apply_select_file_filter(
+    context: &mut crate::download::DownloadContext,
+    select_file: Option<&str>,
+) -> Result<()> {
+    let Some(select_file) = select_file else {
+        return Ok(());
+    };
+
+    if select_file.trim().is_empty() {
+        context.set_file_filter(Vec::new());
+        return Ok(());
+    }
+
+    let max_index = i64::try_from(usize::MAX).unwrap_or(i64::MAX);
+    let ranges = parse_integer_segments(select_file, 1, max_index)
+        .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
+        .into_iter()
+        .map(|range| -> Result<_> {
+            let start = usize::try_from(*range.start()).map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "select-file index does not fit the current platform".to_string(),
+                ))
+            })?;
+            let end = usize::try_from(*range.end()).map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "select-file index does not fit the current platform".to_string(),
+                ))
+            })?;
+            Ok(start..=end)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    context.set_file_filter_ranges(&ranges);
+    Ok(())
+}
+
 fn apply_index_out_paths(
     context: &mut crate::download::DownloadContext,
     index_out: Option<&str>,
@@ -115,9 +204,62 @@ impl BtDownloadCommand {
         options: &DownloadOptions,
         output_dir: Option<&str>,
     ) -> Result<Self> {
+        Self::new_with_group_and_mappings(group, torrent_bytes, options, output_dir, &[])
+    }
+
+    /// Construct a command for an externally owned group and remap selected
+    /// torrent entries to Metalink output paths and mirrors.
+    pub(crate) fn new_with_group_and_mappings(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+    ) -> Result<Self> {
         let gid = group.recover().gid();
         let mut command = Self::new(gid, torrent_bytes, options, output_dir)?;
-        let parsed_context = command.group.recover().get_download_context();
+        let current_info_hash = command.group.recover().get_bt_info_hash_hex();
+        let existing_context = group.recover().get_download_context();
+        let parsed_context = if existing_context.as_ref().is_some_and(|context| {
+            context.get_bt_info_hash_hex().is_some_and(|info_hash| {
+                current_info_hash
+                    .as_deref()
+                    .is_some_and(|current| info_hash.eq_ignore_ascii_case(current))
+            })
+        }) {
+            // A dependency may have already installed a context carrying
+            // Metalink-selected paths and mirrors. Reuse it only when it
+            // belongs to this exact torrent; a stale session context must not
+            // leak piece hashes or output mappings into a new torrent.
+            existing_context
+        } else if file_mappings.is_empty() {
+            command.group.recover().get_download_context()
+        } else {
+            let meta =
+                aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+                    .map_err(|error| {
+                        Aria2Error::Fatal(FatalError::Config(format!(
+                            "Torrent parse failed: {error}"
+                        )))
+                    })?;
+            let dir = output_dir
+                .map(str::to_owned)
+                .or_else(|| options.dir.clone())
+                .unwrap_or_else(|| ".".to_string());
+            let context_path = if meta.is_single_file() {
+                command.output_path.to_string_lossy().into_owned()
+            } else {
+                std::path::Path::new(&dir)
+                    .join(&meta.info.name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let mut context = build_download_context_from_meta(&meta, context_path)?;
+            apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
+            apply_file_mappings(&mut context, file_mappings)?;
+            apply_select_file_filter(&mut context, options.select_file.as_deref())?;
+            Some(std::sync::Arc::new(context))
+        };
         let (piece_count, piece_length, info_hash) = {
             let temporary = command.group.recover();
             (
@@ -222,13 +364,16 @@ impl BtDownloadCommand {
         // metadata fields. We replicate this here.
         let mut ctx = build_download_context_from_meta(&meta, path.to_string_lossy().to_string())?;
         apply_index_out_paths(&mut ctx, options.index_out.as_deref(), &dir)?;
+        apply_select_file_filter(&mut ctx, options.select_file.as_deref())?;
         group.set_download_context(std::sync::Arc::new(ctx));
 
         let seed_time = options.seed_time.and_then(|t| {
-            if t == 0.0 {
+            if t <= 0.0 || !t.is_finite() {
                 None
             } else {
-                Some(std::time::Duration::from_secs_f64(t))
+                // aria2_original treats seed-time as fractional minutes and
+                // truncates the converted value to whole seconds.
+                Some(std::time::Duration::from_secs((t * 60.0).floor() as u64))
             }
         });
         let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);
@@ -317,8 +462,11 @@ impl BtDownloadCommand {
             started_at: None,
             completed_bytes: 0,
             torrent_data: torrent_bytes.to_vec(),
-            seed_enabled: options.seed_time.unwrap_or(0.0) > 0.0
-                || options.seed_ratio.unwrap_or(0.0) > 0.0,
+            // An explicit seed-time=0 is the original way to disable
+            // seeding, even though seed-ratio has a positive default.
+            seed_enabled: options.seed_time != Some(0.0)
+                && (options.seed_time.unwrap_or(0.0) > 0.0
+                    || options.seed_ratio.unwrap_or(0.0) > 0.0),
             seed_time,
             seed_ratio,
             total_uploaded: 0,
@@ -332,6 +480,7 @@ impl BtDownloadCommand {
             ),
             dht_engine: None,
             public_trackers: None,
+            public_tracker_urls: HashSet::new(),
             choking_algo,
             multi_file_layout,
             file_allocation: options
@@ -341,6 +490,10 @@ impl BtDownloadCommand {
             secure_falloc: options.secure_falloc,
             check_integrity: options.check_integrity,
             hash_check_only: options.hash_check_only,
+            bt_enable_hook_after_hash_check: options.bt_enable_hook_after_hash_check,
+            bt_hash_check_seed: options.bt_hash_check_seed,
+            hash_check_completed: false,
+            bt_complete_event_emitted: false,
 
             // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,
@@ -392,7 +545,15 @@ impl BtDownloadCommand {
                 crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
             )),
             incoming_peers: None,
-            incoming_peer_listener_task: None,
+            // Direct command users do not pass through DownloadEngine's
+            // dependency injector. Give that public construction path a
+            // listener manager; the engine replaces it with its shared
+            // process-level manager before execution.
+            bt_listener: Some(std::sync::Arc::new(
+                crate::engine::bt_peer_listener::BtPeerListenerManager::new(),
+            )),
+            bt_peer_route: None,
+            checkpoint: None,
         };
         command.apply_context_paths()?;
         Ok(command)

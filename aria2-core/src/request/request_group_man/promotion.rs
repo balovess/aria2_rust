@@ -105,24 +105,33 @@ impl super::RequestGroupMan {
             // No-op for now: URI selector logic lives in mirror_coordinator.
 
             // Transition: set status Active, move to active DashMap.
-            {
+            // Keep the status check and transition under one write lock. A
+            // pause can arrive after the pause-flag check above; a paused
+            // group must remain reserved until an explicit unpause makes it
+            // Waiting again.
+            let paused = {
                 let mut g = group.recover_mut();
-                // Only promote groups that are in Waiting or Paused status.
                 match g.status() {
-                    DownloadStatus::Waiting | DownloadStatus::Paused => {
+                    DownloadStatus::Waiting => {
                         g.clear_command_failure();
                         g.start().ok(); // Sets status to Active
                         g.control_flags.clear_pause();
+                        false
                     }
+                    DownloadStatus::Paused => true,
                     other => {
                         warn!(
                             gid = gid.value(),
                             ?other,
                             "Unexpected status in reserved queue, skipping"
                         );
-                        continue;
+                        false
                     }
                 }
+            };
+            if paused {
+                pending.push(group);
+                continue;
             }
 
             // Insert into active DashMap.

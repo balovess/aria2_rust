@@ -8,8 +8,9 @@ use super::parsing::{
     days_from_civil, extract_directory_part, extract_file_part, parse_epsv_response,
     parse_mdtm_timestamp, parse_pasv_response, percent_decode,
 };
-use super::{FtpNegotiationConfig, FtpTransferType};
+use super::{FtpNegotiationConfig, FtpTransferType, active_data_bind_addr};
 use crate::ftp::connection::types::FtpMode;
+use crate::{error::Aria2Error, error::RecoverableError};
 
 #[tokio::test]
 async fn test_read_response_preserves_multiline_response() {
@@ -38,6 +39,61 @@ async fn test_read_response_rejects_oversized_response() {
         .expect_err("oversized FTP response must be rejected");
 
     assert!(error.to_string().contains("Max FTP recv buffer reached"));
+}
+
+#[tokio::test]
+async fn test_read_response_classifies_eof_as_temporary_network_failure() {
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(Vec::<u8>::new()));
+
+    let error = read_response_impl(&mut reader, Duration::from_secs(1))
+        .await
+        .expect_err("EOF before a response must be an error");
+
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+    ));
+}
+
+#[tokio::test]
+async fn test_read_response_rejects_truncated_and_malformed_first_lines() {
+    for response in [
+        b"220 Welcome".as_slice(),
+        b"hello\r\n".as_slice(),
+        b"220x Welcome\r\n".as_slice(),
+    ] {
+        let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(response.to_vec()));
+        let error = read_response_impl(&mut reader, Duration::from_secs(1))
+            .await
+            .expect_err("invalid FTP response must be rejected");
+
+        if response.ends_with(b"\r\n") {
+            assert!(matches!(
+                error,
+                Aria2Error::Recoverable(RecoverableError::FtpProtocolError { .. })
+            ));
+        } else {
+            assert!(matches!(
+                error,
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_read_response_rejects_incomplete_multiline_response() {
+    let response = b"211-Features:\r\n UTF8\r\n".to_vec();
+    let mut reader = tokio::io::BufReader::new(std::io::Cursor::new(response));
+
+    let error = read_response_impl(&mut reader, Duration::from_secs(1))
+        .await
+        .expect_err("multiline response without its terminator must be rejected");
+
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+    ));
 }
 
 #[test]
@@ -178,6 +234,26 @@ fn test_cwd_traversal_splitting() {
 }
 
 #[test]
+fn test_cwd_targets_preserve_base_and_skip_empty_uri_components() {
+    assert_eq!(
+        super::parsing::cwd_targets("/", "/pub//linux"),
+        vec!["/", "pub", "linux"]
+    );
+}
+
+#[test]
+fn test_split_decoded_remote_path_does_not_decode_again() {
+    assert_eq!(
+        super::parsing::split_decoded_remote_path("/pub/my%20file.txt"),
+        ("/pub".to_string(), "my%20file.txt".to_string())
+    );
+    assert_eq!(
+        super::parsing::split_decoded_remote_path("/pub/my file.txt"),
+        ("/pub".to_string(), "my file.txt".to_string())
+    );
+}
+
+#[test]
 fn test_ftp_negotiation_config_defaults() {
     let config = FtpNegotiationConfig {
         host: "example.com".to_string(),
@@ -198,6 +274,18 @@ fn test_ftp_negotiation_config_defaults() {
     assert_eq!(config.host, "example.com");
     assert_eq!(config.port, 21);
     assert!(!config.is_pooled);
+}
+
+#[test]
+fn active_data_listener_keeps_the_control_interface() {
+    let ipv4: std::net::SocketAddr = "192.0.2.10:43123".parse().unwrap();
+    assert_eq!(active_data_bind_addr(ipv4), "192.0.2.10:0".parse().unwrap());
+
+    let ipv6: std::net::SocketAddr = "[2001:db8::10]:43123".parse().unwrap();
+    assert_eq!(
+        active_data_bind_addr(ipv6),
+        "[2001:db8::10]:0".parse().unwrap()
+    );
 }
 
 // =============================================================================

@@ -350,6 +350,83 @@ impl MockHttpServer {
         );
     }
 
+    /// Register a Range-capable response that emits fixed-size chunks slowly.
+    /// This lets lifecycle E2E tests issue pause/remove while a segment is in
+    /// flight, instead of racing a single buffered response to completion.
+    pub fn register_slow_range_response(
+        &self,
+        path: &str,
+        body: &[u8],
+        chunk_size: usize,
+        delay_ms: u64,
+    ) {
+        let body = body.to_vec();
+        let path = path.to_string();
+        let chunk_size = chunk_size.max(1);
+        self.on_get(
+            path.as_str(),
+            move |req: &Request<Incoming>| -> Response<Body> {
+                if req.method() == hyper::Method::HEAD {
+                    return Response::builder()
+                        .status(StatusCode::OK)
+                        .header("Accept-Ranges", "bytes")
+                        .header("Content-Length", body.len())
+                        .body(empty_body())
+                        .unwrap();
+                }
+
+                let Some((start, end)) = req
+                    .headers()
+                    .get("Range")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("bytes="))
+                    .and_then(|value| value.split_once('-'))
+                    .and_then(|(start, end)| {
+                        let start = start.parse::<usize>().ok()?;
+                        let end = end.parse::<usize>().ok()?.min(body.len().saturating_sub(1));
+                        (start <= end && start < body.len()).then_some((start, end))
+                    })
+                else {
+                    return Response::builder()
+                        .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header("Content-Range", format!("bytes=*/{}", body.len()))
+                        .body(empty_body())
+                        .unwrap();
+                };
+
+                let range = Arc::new(body[start..=end].to_vec());
+                let total_length = body.len();
+                let stream = futures::stream::unfold(0usize, move |offset| {
+                    let range = Arc::clone(&range);
+                    async move {
+                        if offset >= range.len() {
+                            return None;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        let end = (offset + chunk_size).min(range.len());
+                        Some((
+                            Ok::<_, Infallible>(Frame::data(Bytes::copy_from_slice(
+                                &range[offset..end],
+                            ))),
+                            end,
+                        ))
+                    }
+                });
+
+                Response::builder()
+                    .status(StatusCode::PARTIAL_CONTENT)
+                    .header("Accept-Ranges", "bytes")
+                    .header(
+                        "Content-Range",
+                        format!("bytes={}-{}/{}", start, end, total_length),
+                    )
+                    .header("Content-Length", end - start + 1)
+                    .body(StreamBody::new(stream).boxed())
+                    .unwrap()
+            },
+        );
+    }
+
     /// Register a slow response handler that delays before responding (simulates slow server)
     ///
     /// # Arguments

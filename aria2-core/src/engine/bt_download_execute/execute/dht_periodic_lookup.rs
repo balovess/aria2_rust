@@ -16,9 +16,14 @@
 //! integrate the periodic DHT lookup directly into the download loop via
 //! [`DhtPeriodicLookup`], which tracks timing and peer counts.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, trace};
+
+type DhtLookupTask = tokio::task::JoinHandle<
+    std::io::Result<aria2_protocol::bittorrent::dht::engine::FindPeersResult>,
+>;
 
 // ── Intervals (matching C++ DHTGetPeersCommand.cc) ─────────────────────
 
@@ -56,6 +61,12 @@ pub struct DhtPeriodicLookup {
     min_peers: usize,
     /// Maximum number of peers (0 = unlimited).
     max_peers: usize,
+    /// Background lookup task. The piece loop only polls its completion so a
+    /// slow DHT query never blocks piece selection or cancellation checks.
+    lookup_task: Option<DhtLookupTask>,
+    /// A completed result still needs to pass through PeerStorage admission
+    /// before the retry counter can observe the final tracked-peer count.
+    lookup_completion_pending: bool,
 }
 
 impl DhtPeriodicLookup {
@@ -67,6 +78,8 @@ impl DhtPeriodicLookup {
             lookup_in_progress: false,
             min_peers: 30, // C++ uses btRuntime->lessThanMinPeers()
             max_peers: 55, // C++ uses btRuntime->getMaxPeers()
+            lookup_task: None,
+            lookup_completion_pending: false,
         }
     }
 
@@ -78,7 +91,18 @@ impl DhtPeriodicLookup {
             lookup_in_progress: false,
             min_peers,
             max_peers,
+            lookup_task: None,
+            lookup_completion_pending: false,
         }
+    }
+
+    /// Update the live peer limits used by the adaptive interval policy.
+    ///
+    /// `BtRuntimeState` is the source of truth for runtime option changes;
+    /// this tracker keeps only the small snapshot needed for scheduling.
+    pub fn set_peer_limits(&mut self, min_peers: usize, max_peers: usize) {
+        self.min_peers = min_peers;
+        self.max_peers = max_peers;
     }
 
     /// Check if a DHT get_peers lookup should be initiated now.
@@ -89,7 +113,7 @@ impl DhtPeriodicLookup {
     ///
     /// C++: `DHTGetPeersCommand::execute()` — the interval logic
     pub fn should_lookup(&self, current_peer_count: usize) -> bool {
-        if self.lookup_in_progress {
+        if self.lookup_in_progress || self.lookup_completion_pending {
             return false;
         }
 
@@ -98,10 +122,24 @@ impl DhtPeriodicLookup {
             None => Duration::from_secs(u64::MAX), // never looked up → do it now
         };
 
-        // Determine the appropriate interval based on peer count
-        let interval = if current_peer_count == 0 {
-            GET_PEER_INTERVAL_ZERO
-        } else if current_peer_count < self.min_peers {
+        elapsed >= self.interval_for(current_peer_count)
+    }
+
+    /// Select the interval from the live connection count.
+    ///
+    /// The original `BtRuntime::lessThanMinPeers()` treats a zero minimum as
+    /// permanently below the minimum. The explicit branch preserves that
+    /// edge case instead of conflating it with the normal peer-limit path.
+    fn interval_for(&self, active_connection_count: usize) -> Duration {
+        let below_minimum = self.min_peers == 0 || active_connection_count < self.min_peers;
+
+        if active_connection_count == 0 {
+            if self.num_retry > 0 {
+                GET_PEER_INTERVAL_RETRY
+            } else {
+                GET_PEER_INTERVAL_ZERO
+            }
+        } else if below_minimum {
             if self.num_retry > 0 {
                 GET_PEER_INTERVAL_RETRY
             } else {
@@ -109,9 +147,7 @@ impl DhtPeriodicLookup {
             }
         } else {
             GET_PEER_INTERVAL
-        };
-
-        elapsed >= interval
+        }
     }
 
     /// Mark that a DHT lookup has been initiated.
@@ -132,6 +168,8 @@ impl DhtPeriodicLookup {
     /// C++: `DHTGetPeersCommand::execute()` — task finished handling
     pub fn on_lookup_completed(&mut self, current_peer_count: usize) {
         self.lookup_in_progress = false;
+        self.lookup_completion_pending = false;
+        self.last_lookup_time = Some(Instant::now());
 
         // If we still don't have enough peers, increment retry for faster
         // next lookup. Otherwise, reset retry count.
@@ -152,6 +190,15 @@ impl DhtPeriodicLookup {
         }
     }
 
+    /// Record a lookup performed by the initial peer-discovery phase.
+    ///
+    /// The initial discovery is intentionally awaited during setup. Recording
+    /// it here prevents the periodic scheduler from immediately issuing the
+    /// same lookup again once piece downloading starts.
+    pub fn record_lookup_completed(&mut self, current_peer_count: usize) {
+        self.on_lookup_completed(current_peer_count);
+    }
+
     /// Get the current retry count.
     pub fn retry_count(&self) -> u32 {
         self.num_retry
@@ -162,15 +209,129 @@ impl DhtPeriodicLookup {
         self.lookup_in_progress
     }
 
+    /// Whether a finished result is waiting for PeerStorage admission.
+    pub fn is_lookup_completion_pending(&self) -> bool {
+        self.lookup_completion_pending
+    }
+
     /// Get the time elapsed since the last lookup.
     pub fn time_since_last_lookup(&self) -> Option<Duration> {
         self.last_lookup_time.map(|t| t.elapsed())
+    }
+
+    /// Start a lookup in the background when the adaptive interval allows it.
+    ///
+    /// The task owns its `Arc<DhtEngine>` and copied info-hash, so the command
+    /// can continue processing pieces while the network lookup is pending.
+    pub fn start_lookup(
+        &mut self,
+        dht_engine: Option<&Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        info_hash: [u8; 20],
+        active_connection_count: usize,
+    ) -> bool {
+        if !self.should_lookup(active_connection_count) {
+            return false;
+        }
+        let Some(engine) = dht_engine else {
+            return false;
+        };
+
+        debug!(
+            info_hash = %hex::encode(info_hash),
+            peers = active_connection_count,
+            retry = self.retry_count(),
+            "Scheduling periodic DHT get_peers lookup"
+        );
+        self.on_lookup_started();
+        let engine = Arc::clone(engine);
+        self.lookup_task = Some(tokio::spawn(
+            async move { engine.find_peers(&info_hash).await },
+        ));
+        true
+    }
+
+    /// Poll a finished background lookup and append newly discovered peers.
+    ///
+    /// Returns `true` only when a task completed. An unfinished lookup returns
+    /// immediately, preserving the download loop's cancellation and piece
+    /// scheduling cadence.
+    pub async fn poll_lookup(
+        &mut self,
+        new_peers: &mut Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    ) -> bool {
+        let Some(task) = self.lookup_task.as_ref() else {
+            return false;
+        };
+        if !task.is_finished() {
+            return false;
+        }
+
+        let task = self
+            .lookup_task
+            .take()
+            .expect("lookup task exists after completion check");
+        match task.await {
+            Ok(Ok(result)) => {
+                let before = new_peers.len();
+                for addr in result.peers {
+                    let peer = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                        &addr.ip().to_string(),
+                        addr.port(),
+                    );
+                    if !new_peers
+                        .iter()
+                        .any(|known| known.ip == peer.ip && known.port == peer.port)
+                    {
+                        new_peers.push(peer);
+                    }
+                }
+                let added = new_peers.len() - before;
+                if added > 0 {
+                    debug!(
+                        added,
+                        total = new_peers.len(),
+                        "Periodic DHT lookup discovered new peers"
+                    );
+                }
+            }
+            Ok(Err(error)) => {
+                debug!(error = %error, "Periodic DHT lookup failed");
+            }
+            Err(error) => {
+                debug!(error = %error, "Periodic DHT lookup task cancelled");
+            }
+        }
+        self.lookup_in_progress = false;
+        self.lookup_completion_pending = true;
+        true
+    }
+
+    /// Cancel and join a pending lookup during command shutdown.
+    ///
+    /// `Drop` still aborts as a synchronous fallback, but normal command
+    /// teardown awaits the aborted task so its engine reference and any local
+    /// lookup state are released before the command lifecycle ends.
+    pub async fn cancel_pending_lookup(&mut self) {
+        if let Some(task) = self.lookup_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        self.lookup_in_progress = false;
+        self.lookup_completion_pending = false;
     }
 }
 
 impl Default for DhtPeriodicLookup {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for DhtPeriodicLookup {
+    fn drop(&mut self) {
+        if let Some(task) = self.lookup_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -184,79 +345,22 @@ impl Default for DhtPeriodicLookup {
 /// 2. If so, trigger the DHT engine's find_peers
 /// 3. If a previous lookup completed, update state and handle retries
 ///
-/// Returns `true` if a new DHT lookup was initiated this call.
+/// Returns `true` if a lookup was started or a previous result was collected.
+/// The caller must invoke [`DhtPeriodicLookup::on_lookup_completed`] after it
+/// admits the returned peers so retry decisions use the final tracked count.
 pub async fn check_periodic_dht_lookup(
     dht_lookup: &mut DhtPeriodicLookup,
     dht_engine: Option<&std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     info_hash: &[u8; 20],
-    current_peer_count: usize,
+    active_connection_count: usize,
     new_peers: &mut Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
 ) -> bool {
-    // Check if previous lookup completed
-    if dht_lookup.is_lookup_in_progress() {
-        // In a real implementation, we would check if the async lookup
-        // has completed via a oneshot channel or JoinHandle.
-        // For now, we use a synchronous model where lookups are
-        // initiated and completed in the same call.
-        return false;
+    let completed = dht_lookup.poll_lookup(new_peers).await;
+    if completed {
+        return true;
     }
-
-    // Check if we should initiate a new lookup
-    if !dht_lookup.should_lookup(current_peer_count) {
-        return false;
-    }
-
-    let Some(engine) = dht_engine else {
-        return false;
-    };
-
-    debug!(
-        info_hash = %hex::encode(info_hash),
-        peers = current_peer_count,
-        retry = dht_lookup.retry_count(),
-        "Initiating periodic DHT get_peers lookup"
-    );
-
-    dht_lookup.on_lookup_started();
-
-    // Perform the DHT lookup
-    match engine.find_peers(info_hash).await {
-        Ok(result) => {
-            let before = new_peers.len();
-            for addr in &result.peers {
-                let ip_str = addr.ip().to_string();
-                let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                    &ip_str,
-                    addr.port(),
-                );
-                if !new_peers
-                    .iter()
-                    .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                {
-                    new_peers.push(paddr);
-                }
-            }
-            let added = new_peers.len() - before;
-            if added > 0 {
-                debug!(
-                    info_hash = %hex::encode(info_hash),
-                    added,
-                    total = new_peers.len(),
-                    "Periodic DHT lookup discovered new peers"
-                );
-            }
-        }
-        Err(e) => {
-            debug!(
-                info_hash = %hex::encode(info_hash),
-                error = %e,
-                "Periodic DHT lookup failed"
-            );
-        }
-    }
-
-    dht_lookup.on_lookup_completed(current_peer_count);
-    true
+    let started = dht_lookup.start_lookup(dht_engine, *info_hash, active_connection_count);
+    completed || started
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────
@@ -360,5 +464,59 @@ mod tests {
         let lookup = DhtPeriodicLookup::with_peer_limits(10, 20);
         assert_eq!(lookup.min_peers, 10);
         assert_eq!(lookup.max_peers, 20);
+    }
+
+    #[test]
+    fn interval_matches_original_connection_count_branches() {
+        let lookup = DhtPeriodicLookup::with_peer_limits(10, 20);
+        assert_eq!(lookup.interval_for(0), GET_PEER_INTERVAL_ZERO);
+        assert_eq!(lookup.interval_for(5), GET_PEER_INTERVAL_LOW);
+        assert_eq!(lookup.interval_for(10), GET_PEER_INTERVAL);
+
+        let unlimited = DhtPeriodicLookup::with_peer_limits(0, 0);
+        assert_eq!(unlimited.interval_for(0), GET_PEER_INTERVAL_ZERO);
+        assert_eq!(unlimited.interval_for(1), GET_PEER_INTERVAL_LOW);
+    }
+
+    #[tokio::test]
+    async fn background_lookup_can_be_polled_without_public_bootstrap() {
+        let engine = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+        )
+        .await
+        .expect("local DHT engine should start");
+        let mut lookup = DhtPeriodicLookup::with_peer_limits(1, 2);
+        let mut peers = Vec::new();
+
+        assert!(lookup.start_lookup(Some(&engine), [0x42; 20], 0));
+        assert!(lookup.is_lookup_in_progress());
+
+        tokio::task::yield_now().await;
+        assert!(lookup.poll_lookup(&mut peers).await);
+        assert!(!lookup.is_lookup_in_progress());
+        assert!(lookup.is_lookup_completion_pending());
+        assert!(peers.is_empty());
+
+        lookup.on_lookup_completed(0);
+        assert!(!lookup.is_lookup_completion_pending());
+
+        engine.shutdown();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_pending_lookup() {
+        let engine = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+        )
+        .await
+        .expect("local DHT engine should start");
+        let mut lookup = DhtPeriodicLookup::new();
+
+        assert!(lookup.start_lookup(Some(&engine), [0x24; 20], 0));
+        lookup.cancel_pending_lookup().await;
+
+        assert!(!lookup.is_lookup_in_progress());
+        assert!(!lookup.is_lookup_completion_pending());
+        engine.shutdown();
     }
 }

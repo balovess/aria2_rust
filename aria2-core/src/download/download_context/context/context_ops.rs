@@ -166,7 +166,9 @@ impl DownloadContext {
     /// when the back-pointer mechanism is connected.
     pub fn update_download(&mut self, bytes: u64) {
         self.net_stat.update_download(bytes);
-        // TODO: wire global RequestGroupMan net stat update
+        if let Some(global) = self.global_net_stat.get() {
+            global.update_download(bytes);
+        }
     }
 
     /// Update the upload byte counter.
@@ -174,12 +176,24 @@ impl DownloadContext {
     /// Same dual-update pattern as `update_download`.
     pub fn update_upload_length(&mut self, bytes: u64) {
         self.net_stat.update_upload_length(bytes);
-        // TODO: wire global RequestGroupMan net stat update
+        if let Some(global) = self.global_net_stat.get() {
+            global.update_upload_length(bytes);
+        }
     }
 
     /// Update the upload speed.
     pub fn update_upload_speed(&mut self, bytes: u64) {
         self.net_stat.update_upload_speed(bytes);
-        // TODO: wire global RequestGroupMan net stat update
+        if let Some(global) = self.global_net_stat.get() {
+            global.update_upload_speed(bytes);
+        }
+    }
+
+    /// Attach manager-owned aggregate statistics without a raw owner pointer.
+    pub(crate) fn set_global_net_stat(
+        &self,
+        global: std::sync::Arc<crate::request::global_net_stat::GlobalNetStat>,
+    ) {
+        let _ = self.global_net_stat.set(global);
     }
 }

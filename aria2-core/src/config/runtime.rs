@@ -1,9 +1,9 @@
 //! Runtime option policy shared by every external adapter.
 //!
-//! The option names in this module mirror
-//! `aria2_original/src/OptionHandlerFactory.cc`. Keeping this metadata in
-//! core prevents JSON-RPC, XML-RPC, the C API, and future adapters from
-//! drifting into different interpretations of the same wire contract.
+//! The option names in this module define one compatibility policy shared by
+//! every external adapter. Keeping this metadata in core prevents JSON-RPC,
+//! XML-RPC, the C API, and future adapters from drifting into different
+//! interpretations of the same wire contract.
 
 use std::collections::HashMap;
 
@@ -119,6 +119,12 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "bt-save-metadata",
     "bt-stop-timeout",
     "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "enable-public-trackers",
+    #[cfg(feature = "bittorrent")]
+    "bt-tracker-source",
+    #[cfg(feature = "bittorrent")]
+    "bt-tracker-update-interval",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
@@ -410,6 +416,8 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "bt-save-metadata",
     "bt-stop-timeout",
     "bt-tracker",
+    #[cfg(feature = "bittorrent")]
+    "enable-public-trackers",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
@@ -454,7 +462,6 @@ mod tests {
         is_global_option_changeable, is_initial_option, is_option_changeable,
         project_initial_options,
     };
-
     #[test]
     fn policy_matches_original_wire_names() {
         assert!(is_global_option_changeable("dir"));
@@ -487,6 +494,9 @@ mod tests {
     #[test]
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
+        #[cfg(feature = "bittorrent")]
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 107);
+        #[cfg(not(feature = "bittorrent"))]
         assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 106);
         assert_eq!(
             is_option_changeable("max-download-limit", true),

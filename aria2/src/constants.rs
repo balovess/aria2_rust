@@ -41,7 +41,6 @@ pub const DEFAULT_MAX_RETRIES: u32 = 5;
 pub const DEFAULT_RETRY_WAIT_SECS: u64 = 1;
 pub const DEFAULT_MAX_UPLOAD_SLOTS: usize = 4;
 pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";
-pub const DEFAULT_PIECE_PRIORITY: &str = "rarest";
 pub const DEFAULT_FILE_ALLOCATION: &str = "falloc";
 
 // Session defaults

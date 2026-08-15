@@ -21,7 +21,7 @@
 
 use tracing::warn;
 
-use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
+use crate::http::auth::{AuthConfigFactory, AuthResolveOptions, request_directory};
 use crate::http::request_response::HttpMethod;
 use crate::http::skip_response::{AuthScheme, HttpAuthChallenge};
 
@@ -81,7 +81,7 @@ pub fn handle_auth_challenge(
     let port = url
         .port_or_known_default()
         .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
-    let path = url.path();
+    let path = request_directory(url.path());
 
     match challenge.scheme {
         AuthScheme::Basic => handle_basic_challenge(

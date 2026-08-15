@@ -4,12 +4,14 @@ mod progress;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, oneshot};
 use tracing::info;
 
 #[cfg(feature = "bittorrent")]
 use super::bt_registry::BtRegistry;
-use super::engine_command::EngineCommand;
+use super::engine_command::{
+    EngineCommandQueueSnapshot, EngineCommandReceiver, EngineCommandSender, channel,
+};
 use crate::constants;
 use crate::dns::dns_cache::DnsCache;
 use crate::ftp::FtpConnectionPool;
@@ -17,11 +19,13 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
 use crate::session::auto_save_session::AutoSaveSession;
+#[cfg(feature = "bittorrent")]
+use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerCatalogConfig};
 
 pub struct DownloadEngine {
     /// Sender for structured engine communication commands.
-    pub(crate) engine_cmd_tx: mpsc::UnboundedSender<EngineCommand>,
-    pub(crate) engine_cmd_rx: Option<mpsc::UnboundedReceiver<EngineCommand>>,
+    pub(crate) engine_cmd_tx: EngineCommandSender,
+    pub(crate) engine_cmd_rx: Option<EngineCommandReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) shutdown_rx: Option<oneshot::Receiver<()>>,
     pub(crate) tick_interval: Duration,
@@ -30,7 +34,7 @@ pub struct DownloadEngine {
     pub(crate) global_limiter: Option<RateLimiter>,
     pub(crate) save_session_path: Option<PathBuf>,
     pub(crate) save_session_interval: Option<Duration>,
-    pub(crate) request_group_man: Option<Arc<RwLock<RequestGroupMan>>>,
+    pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
     pub(crate) auto_save: Option<Arc<Mutex<AutoSaveSession>>>,
     /// FTP connection pool for connection reuse across FTP downloads.
     /// Created during engine initialization and passed down via dependency injection.
@@ -48,6 +52,12 @@ pub struct DownloadEngine {
     /// coordination across all active downloads.
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_registry: Arc<std::sync::RwLock<BtRegistry>>,
+    /// Process-wide public tracker catalog shared by all BT downloads.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) public_tracker_catalog: Arc<PublicTrackerList>,
+    /// Process-wide BitTorrent TCP listener and info-hash router.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -63,7 +73,7 @@ impl DownloadEngine {
     }
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
-        let (engine_cmd_tx, engine_cmd_rx) = mpsc::unbounded_channel();
+        let (engine_cmd_tx, engine_cmd_rx) = channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let max_tries = policy.max_tries();
@@ -88,6 +98,10 @@ impl DownloadEngine {
             keep_alive: false,
             #[cfg(feature = "bittorrent")]
             bt_registry: Arc::new(std::sync::RwLock::new(BtRegistry::new())),
+            #[cfg(feature = "bittorrent")]
+            public_tracker_catalog: Arc::new(PublicTrackerList::new()),
+            #[cfg(feature = "bittorrent")]
+            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
@@ -116,7 +130,7 @@ impl DownloadEngine {
         self.global_limiter.take()
     }
 
-    pub fn set_request_group_man(&mut self, man: Arc<RwLock<RequestGroupMan>>) {
+    pub fn set_request_group_man(&mut self, man: Arc<RequestGroupMan>) {
         self.request_group_man = Some(man);
     }
 
@@ -124,7 +138,7 @@ impl DownloadEngine {
         &mut self,
         path: PathBuf,
         interval: Option<Duration>,
-        man: Arc<RwLock<RequestGroupMan>>,
+        man: Arc<RequestGroupMan>,
     ) {
         self.save_session_path = Some(path.clone());
         self.save_session_interval = interval;
@@ -197,6 +211,18 @@ impl DownloadEngine {
         &self.bt_registry
     }
 
+    /// Configure the process-wide public tracker catalog before `run()`.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_public_tracker_config(&mut self, config: TrackerCatalogConfig) {
+        self.public_tracker_catalog.set_config_now(config);
+    }
+
+    /// Get the shared public tracker catalog.
+    #[cfg(feature = "bittorrent")]
+    pub fn public_tracker_catalog(&self) -> &Arc<PublicTrackerList> {
+        &self.public_tracker_catalog
+    }
+
     /// Enable/disable keep-alive mode. When true, the engine stays alive even
     /// with no pending/running commands (used for RPC listen mode). The loop
     /// only exits on shutdown signal.
@@ -209,8 +235,12 @@ impl DownloadEngine {
     ///
     /// This is the engine interface for download management
     /// (add/remove/pause/unpause/halt).
-    pub fn engine_command_sender(&self) -> mpsc::UnboundedSender<EngineCommand> {
+    pub fn engine_command_sender(&self) -> EngineCommandSender {
         self.engine_cmd_tx.clone()
+    }
+
+    pub fn engine_command_metrics(&self) -> EngineCommandQueueSnapshot {
+        self.engine_cmd_tx.snapshot()
     }
 
     /// Take the shutdown sender so an external task (e.g., Ctrl+C handler) can
@@ -221,7 +251,7 @@ impl DownloadEngine {
 
     /// Get a clone of the engine command sender for sending commands like
     /// `ForceHaltAll` from external tasks (e.g., second Ctrl+C handler).
-    pub fn engine_cmd_tx(&self) -> mpsc::UnboundedSender<EngineCommand> {
+    pub fn engine_cmd_tx(&self) -> EngineCommandSender {
         self.engine_cmd_tx.clone()
     }
 

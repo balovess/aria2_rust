@@ -23,6 +23,34 @@ pub trait DiskAdaptor: Send + Sync {
     fn windows_raw_handle(&self) -> Option<std::os::windows::io::RawHandle>;
 }
 
+/// Best-effort POSIX page-cache eviction for a file range.
+///
+/// This is an advisory hint: failure to evict pages must not change the bytes
+/// returned to the caller. Non-POSIX callers simply omit the call.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
+pub(crate) fn advise_drop_cache(file: &tokio::fs::File, offset: u64, length: u64) {
+    use std::os::fd::AsRawFd;
+
+    let Ok(offset) = libc::off_t::try_from(offset) else {
+        return;
+    };
+    let Ok(length) = libc::off_t::try_from(length) else {
+        return;
+    };
+
+    // SAFETY: `file` owns a live descriptor for this synchronous advisory
+    // call. Both range values were checked to fit the platform's `off_t`.
+    let _ =
+        unsafe { libc::posix_fadvise(file.as_raw_fd(), offset, length, libc::POSIX_FADV_DONTNEED) };
+}
+
+// Apple libc does not expose the file-descriptor based `posix_fadvise` API.
+// `posix_madvise` is not equivalent: it operates on a mapped memory range,
+// not on a file descriptor. Cache eviction is only an advisory optimization,
+// so preserve the read contract with a no-op on Apple Unix.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub(crate) fn advise_drop_cache(_file: &tokio::fs::File, _offset: u64, _length: u64) {}
+
 pub struct DirectDiskAdaptor {
     file: Option<tokio::fs::File>,
     path: std::path::PathBuf,
@@ -34,6 +62,17 @@ impl DirectDiskAdaptor {
             file: None,
             path: std::path::PathBuf::new(),
         }
+    }
+
+    /// Read a range and ask the OS to drop the corresponding page-cache
+    /// entries, matching aria2_original's `readDataDropCache` behavior.
+    pub async fn read_data_drop_cache(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
+        let data = self.read(offset, length).await?;
+        #[cfg(unix)]
+        if let Some(file) = self.file.as_ref() {
+            advise_drop_cache(file, offset, data.len() as u64);
+        }
+        Ok(data)
     }
 }
 
@@ -155,5 +194,23 @@ impl DiskAdaptor for DirectDiskAdaptor {
     fn windows_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
         use std::os::windows::io::AsRawHandle;
         self.file.as_ref().map(|f| f.as_raw_handle())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_read_data_drop_cache_preserves_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drop-cache.bin");
+        tokio::fs::write(&path, b"drop cache data").await.unwrap();
+
+        let mut adaptor = DirectDiskAdaptor::new();
+        adaptor.open(&path).await.unwrap();
+        let data = adaptor.read_data_drop_cache(5, 5).await.unwrap();
+        assert_eq!(&data, b"cache");
+        adaptor.close().await.unwrap();
     }
 }

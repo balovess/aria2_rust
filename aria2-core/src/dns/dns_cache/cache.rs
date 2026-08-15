@@ -229,6 +229,26 @@ impl DnsCache {
         }
     }
 
+    /// Resolve an endpoint and refresh it when every cached candidate is bad.
+    ///
+    /// The original connection path removes an exhausted DNS cache entry
+    /// before starting the next resolution. Keeping that transition here
+    /// gives protocol callers one small seam instead of duplicating the empty
+    /// candidate fallback.
+    pub async fn resolve_with_refresh(
+        &mut self,
+        hostname: &str,
+        port: u16,
+    ) -> Result<Vec<SocketAddr>, Aria2Error> {
+        let addresses = self.resolve(hostname, port).await?;
+        if !addresses.is_empty() {
+            return Ok(addresses);
+        }
+
+        self.remove_cached(hostname, port);
+        self.resolve(hostname, port).await
+    }
+
     /// Force refresh a specific hostname, bypassing any cached entry.
     ///
     /// This removes any existing cache entry for the hostname and performs

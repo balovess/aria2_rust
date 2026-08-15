@@ -5,7 +5,7 @@ use reqwest::{Certificate, Client, ClientBuilder, redirect};
 use tracing::{debug, info};
 
 use crate::http::request::HttpRequest;
-use crate::http::response::HttpResponse;
+use crate::http::response::{HttpResponse, is_redirect_status};
 
 #[derive(Debug, Clone)]
 pub struct HttpClientOptions {
@@ -25,7 +25,10 @@ impl Default for HttpClientOptions {
             timeout: Duration::from_secs(300),
             max_redirects: 5,
             user_agent: crate::identity::DEFAULT_USER_AGENT.to_string(),
-            accept_gzip: true,
+            // aria2_original advertises compressed HTTP responses only when
+            // --http-accept-gzip is enabled. Keep the protocol client safe
+            // by default; callers can opt in explicitly.
+            accept_gzip: false,
             verify_tls: true,
             ca_cert_path: None,
         }
@@ -45,7 +48,7 @@ pub struct HttpClient {
 /// Note: `install_default()` returns Err if a provider is already installed
 /// (e.g., by test helpers' `ensure_crypto_provider()`). That is fine — we
 /// only need to ensure a provider is present, not that we installed it.
-fn ensure_ring_provider() {
+pub(crate) fn ensure_ring_provider() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -63,9 +66,7 @@ impl HttpClient {
             .user_agent(&options.user_agent)
             .redirect(redirect::Policy::limited(options.max_redirects));
 
-        if options.accept_gzip {
-            builder = builder.gzip(true);
-        }
+        builder = builder.gzip(options.accept_gzip);
 
         if !options.verify_tls {
             builder = builder.danger_accept_invalid_certs(true);
@@ -281,8 +282,12 @@ impl RedirectHandler {
             return None;
         }
 
+        if !is_redirect_status(status_code) {
+            return None;
+        }
+
         match status_code {
-            301 => Some(RedirectAction::FollowKeepMethod),
+            300 | 301 => Some(RedirectAction::FollowKeepMethod),
             302 | 303 => Some(RedirectAction::FollowChangeToGet),
             307 | 308 => Some(RedirectAction::FollowKeepMethod),
             _ => None,
@@ -333,12 +338,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn default_options_do_not_advertise_gzip() {
+        assert!(!HttpClientOptions::default().accept_gzip);
+    }
+
+    #[test]
     fn test_should_follow_301() {
         let action = RedirectHandler::should_follow_redirect(301, "GET", 0, 5);
         assert!(action.is_some());
 
         let no_action = RedirectHandler::should_follow_redirect(301, "GET", 5, 5);
         assert!(no_action.is_none());
+    }
+
+    #[test]
+    fn test_should_follow_300() {
+        let action = RedirectHandler::should_follow_redirect(300, "GET", 0, 5);
+        assert!(matches!(action, Some(RedirectAction::FollowKeepMethod)));
     }
 
     #[test]

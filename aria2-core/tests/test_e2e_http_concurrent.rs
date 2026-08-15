@@ -31,7 +31,7 @@ fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> 
         bt_max_upload_slots: None,
         bt_optimistic_unchoke_interval: None,
         bt_snubbed_timeout: None,
-        bt_prioritize_piece: "rarest".to_string(),
+        bt_prioritize_piece: String::new(),
         all_proxy: None,
         https_proxy: None,
         ftp_proxy: None,
@@ -114,6 +114,7 @@ fn test_concurrent_segment_manager_fail_marks_failed() {
 
 #[tokio::test]
 async fn test_http_segment_downloader_zero_length() {
+    aria2_core::http::client_pool::ensure_rustls_provider();
     let client = reqwest::Client::new();
     let dl = HttpSegmentDownloader::new(&client);
     let result = dl
@@ -160,7 +161,7 @@ fn test_download_options_with_values() {
         bt_max_upload_slots: None,
         bt_optimistic_unchoke_interval: None,
         bt_snubbed_timeout: None,
-        bt_prioritize_piece: "rarest".to_string(),
+        bt_prioritize_piece: String::new(),
         all_proxy: None,
         https_proxy: None,
         ftp_proxy: None,

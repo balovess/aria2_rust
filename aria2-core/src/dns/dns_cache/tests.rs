@@ -252,6 +252,39 @@ async fn test_resolve_caches_result() {
     assert_eq!(cache.len(), 1);
 }
 
+/// Exhausted cached candidates must be discarded before the next resolution.
+#[tokio::test]
+async fn test_resolve_with_refresh_replaces_exhausted_candidates() {
+    let mut cache = create_test_cache();
+    let initial = cache
+        .resolve("localhost", 80)
+        .await
+        .expect("localhost should resolve");
+    assert!(!initial.is_empty());
+
+    for address in &initial {
+        cache.mark_bad("localhost", *address);
+    }
+    assert!(
+        cache
+            .resolve_no_network("localhost", 80)
+            .expect("the exhausted entry should still be cached")
+            .is_empty()
+    );
+
+    let refreshed = cache
+        .resolve_with_refresh("localhost", 80)
+        .await
+        .expect("refresh should resolve localhost again");
+    assert!(!refreshed.is_empty());
+    assert_eq!(
+        cache
+            .resolve_no_network("localhost", 80)
+            .expect("the refreshed entry should be cached"),
+        refreshed
+    );
+}
+
 /// Test J3.4 #2: Failed lookup blocks retry for negative_ttl duration.
 ///
 /// We inject a negative cache entry directly (without network DNS)

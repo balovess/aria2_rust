@@ -20,11 +20,11 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use super::engine_command::EngineCommand;
+use super::engine_command::EngineCommandSender;
 use crate::request::request_group::HaltReason;
 
 /// Poll interval for [`spawn_process_watch`].
@@ -37,7 +37,7 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// Send the appropriate halt command, returning `false` if the engine channel
 /// is already closed (which means the engine is gone and the watcher should
 /// stop).
-fn send_halt(tx: &UnboundedSender<EngineCommand>, force: bool, reason: HaltReason) -> bool {
+fn send_halt(tx: &EngineCommandSender, force: bool, reason: HaltReason) -> bool {
     let cmd = if force {
         EngineCommand::ForceHaltAll { reason }
     } else {
@@ -53,11 +53,12 @@ fn send_halt(tx: &UnboundedSender<EngineCommand>, force: bool, reason: HaltReaso
 ///
 /// The returned [`JoinHandle`] can be dropped; the task is fully detached and
 /// self-terminating.
-pub fn spawn_timed_halt(
-    cmd_tx: UnboundedSender<EngineCommand>,
+pub fn spawn_timed_halt<T: Into<EngineCommandSender>>(
+    cmd_tx: T,
     duration: Duration,
     force: bool,
 ) -> JoinHandle<()> {
+    let cmd_tx = cmd_tx.into();
     tokio::spawn(async move {
         debug!(?duration, force, "Timed halt watcher armed");
 
@@ -87,11 +88,12 @@ pub fn spawn_timed_halt(
 /// an already-dead PID shuts the engine down without a spurious one-second
 /// delay (C++ `TimeBasedCommand` is constructed with `routine = true`, which
 /// also runs `process()` on the first tick).
-pub fn spawn_process_watch(
-    cmd_tx: UnboundedSender<EngineCommand>,
+pub fn spawn_process_watch<T: Into<EngineCommandSender>>(
+    cmd_tx: T,
     pid: u32,
     force: bool,
 ) -> JoinHandle<()> {
+    let cmd_tx = cmd_tx.into();
     tokio::spawn(async move {
         debug!(pid, force, "Process watcher armed");
 

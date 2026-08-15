@@ -7,16 +7,62 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
 use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
+use crate::http::response::is_redirect_status;
 use crate::http::skip_response::AuthScheme;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
 
+pub(super) enum AuthRetryOutcome {
+    Completed(Result<()>),
+    Redirect(String),
+}
+
+pub(super) struct AuthRetryRequest<'a> {
+    pub response: &'a reqwest::Response,
+    pub uri: &'a str,
+    pub url_parsed: &'a Option<reqwest::Url>,
+    pub status_code: u16,
+    pub authentication_used: bool,
+    pub resume_state: &'a ResumeState,
+    pub auth_factory: &'a mut AuthConfigFactory,
+    pub auth_opts: &'a AuthResolveOptions,
+}
+
 impl SequentialDownloader {
+    pub(super) fn auth_context(&self, scheme: &str) -> (AuthConfigFactory, AuthResolveOptions) {
+        let (auth_opts, netrc_path) = {
+            let group = self.group.recover();
+            let options = group.options();
+            let (proxy_user, proxy_passwd) = options.proxy_credentials_for_scheme(scheme);
+            (
+                AuthResolveOptions {
+                    http_auth_challenge: options.http_auth_challenge,
+                    no_netrc: options.no_netrc,
+                    http_user: options.http_user.clone(),
+                    http_passwd: options.http_passwd.clone(),
+                    ftp_user: options.ftp_user.clone(),
+                    ftp_passwd: options.ftp_passwd.clone(),
+                    proxy_user,
+                    proxy_passwd,
+                },
+                options.netrc_path.clone(),
+            )
+        };
+
+        let mut auth_factory = AuthConfigFactory::new();
+        if let Some(netrc_path) = netrc_path
+            && let Err(error) = auth_factory.load_netrc_file(std::path::Path::new(&netrc_path))
+        {
+            tracing::debug!("Failed to load netrc file {}: {}", netrc_path, error);
+        }
+        (auth_factory, auth_opts)
+    }
+
     /// Attempt an authentication retry when a 401/407 response is received.
     ///
-    /// Returns `Some(Ok(()))` if the auth retry succeeded and the download
-    /// completed. Returns `Some(Err(...))` if the auth retry failed.
+    /// Returns a completed result or a redirect target after the auth retry.
+    /// Returns `Some(Err(...))` if the auth retry failed.
     /// Returns `None` if auth retry is not possible (no credentials,
     /// unsupported scheme, auth already used).
     ///
@@ -24,13 +70,18 @@ impl SequentialDownloader {
     /// for the 401 case: activate BasicCred → prepareForRetry.
     pub(in crate::engine::sequential_download) async fn try_auth_retry(
         &mut self,
-        response: &reqwest::Response,
-        uri: &str,
-        url_parsed: &Option<reqwest::Url>,
-        status_code: u16,
-        authentication_used: bool,
-        resume_state: &ResumeState,
-    ) -> Option<Result<()>> {
+        request: AuthRetryRequest<'_>,
+    ) -> Option<Result<AuthRetryOutcome>> {
+        let AuthRetryRequest {
+            response,
+            uri,
+            url_parsed,
+            status_code,
+            authentication_used,
+            resume_state,
+            auth_factory,
+            auth_opts,
+        } = request;
         let is_proxy = status_code == 407;
         let header_name = if is_proxy {
             "proxy-authenticate"
@@ -87,22 +138,9 @@ impl SequentialDownloader {
             },
         };
 
-        // Resolve auth options from the RequestGroup
-        let auth_opts = {
-            let g = self.group.recover();
-            let opts = g.options();
-            AuthResolveOptions {
-                http_auth_challenge: opts.http_auth_challenge,
-                no_netrc: opts.no_netrc,
-                http_user: opts.http_user.clone(),
-                http_passwd: opts.http_passwd.clone(),
-                ftp_user: opts.ftp_user.clone(),
-                ftp_passwd: opts.ftp_passwd.clone(),
-            }
-        };
-
-        // Only attempt auth if http_auth_challenge is enabled (matches C++ behavior)
-        if !auth_opts.http_auth_challenge && scheme != AuthScheme::Digest {
+        // Origin 401 retries are opt-in. Proxy credentials are an explicit
+        // proxy contract and must work independently of that origin option.
+        if !is_proxy && !auth_opts.http_auth_challenge {
             tracing::debug!(
                 status_code,
                 "Auth challenge received but http_auth_challenge not enabled"
@@ -116,24 +154,11 @@ impl SequentialDownloader {
             None => return None,
         };
 
-        // Resolve credentials via AuthConfigFactory
-        let mut auth_factory = AuthConfigFactory::new();
-        // Pre-populate from netrc if available
-        {
-            let g = self.group.recover();
-            let opts = g.options();
-            if let Some(ref netrc_path) = opts.netrc_path
-                && let Err(e) = auth_factory.load_netrc_file(std::path::Path::new(netrc_path))
-            {
-                tracing::debug!("Failed to load netrc file {}: {}", netrc_path, e);
-            }
-        }
-
         let result = auth_challenge_handler::handle_auth_challenge(
             &challenge,
-            &mut auth_factory,
+            auth_factory,
             &url,
-            &auth_opts,
+            auth_opts,
             crate::http::request_response::HttpMethod::Get,
             authentication_used,
             1, // nc
@@ -146,7 +171,7 @@ impl SequentialDownloader {
             } => {
                 // Build the retry request with Authorization header
                 // Re-apply the same Range header if we had a resume
-                let mut retry_request = if let Some(range_header) =
+                let retry_request = if let Some(range_header) =
                     crate::filesystem::resume_helper::ResumeHelper::build_range_header(resume_state)
                 {
                     tracing::debug!("Auth retry: re-applying Range header: {}", range_header);
@@ -154,15 +179,6 @@ impl SequentialDownloader {
                 } else {
                     self.client.get(uri)
                 };
-                if let Some(url) = url_parsed {
-                    let cookie_hdr = self.cookie_helper.build_cookie_header_from_url(url);
-                    if !cookie_hdr.is_empty() {
-                        retry_request = retry_request.header("Cookie", &cookie_hdr);
-                    }
-                }
-                for (name, value) in &self.headers {
-                    retry_request = retry_request.header(name, value);
-                }
 
                 // Add the Authorization or Proxy-Authorization header
                 let header_name = if is_proxy {
@@ -170,7 +186,14 @@ impl SequentialDownloader {
                 } else {
                     "Authorization"
                 };
-                retry_request = retry_request.header(header_name, &authorization_header);
+                let cookie_header = url_parsed
+                    .as_ref()
+                    .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
+                let retry_request = self.request_policy.apply(
+                    retry_request,
+                    cookie_header.as_deref().filter(|value| !value.is_empty()),
+                    &[(header_name.to_string(), authorization_header.clone())],
+                );
 
                 tracing::info!(
                     status_code,
@@ -208,10 +231,45 @@ impl SequentialDownloader {
                 if retry_status.is_success() || retry_status.as_u16() == 206 {
                     // Auth retry succeeded — proceed with the download using
                     // the retry response
-                    return Some(
+                    return Some(Ok(AuthRetryOutcome::Completed(
                         self.download_response_body(retry_response, uri, &effective_resume_state)
                             .await,
-                    );
+                    )));
+                }
+
+                if is_redirect_status(retry_status.as_u16()) {
+                    let location = retry_response
+                        .headers()
+                        .get("location")
+                        .and_then(|value| value.to_str().ok());
+                    let location = match location {
+                        Some(location) => location,
+                        None => {
+                            return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                                format!(
+                                    "HTTP {} redirect without Location header",
+                                    retry_status.as_u16()
+                                ),
+                            ))));
+                        }
+                    };
+                    let base_url = match url_parsed {
+                        Some(url) => url,
+                        None => {
+                            return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                                format!("Cannot resolve HTTP redirect from invalid URL: {uri}"),
+                            ))));
+                        }
+                    };
+                    let target_url = match base_url.join(location) {
+                        Ok(url) => url.to_string(),
+                        Err(error) => {
+                            return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                                format!("Failed to resolve redirect URL '{location}': {error}"),
+                            ))));
+                        }
+                    };
+                    return Some(Ok(AuthRetryOutcome::Redirect(target_url)));
                 }
 
                 // Auth retry still failed
@@ -220,9 +278,11 @@ impl SequentialDownloader {
                         status_code = retry_status.as_u16(),
                         "Auth retry still failed — credentials may be incorrect"
                     );
-                    return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                        "Authentication failed".to_string(),
-                    ))));
+                    return Some(Err(Aria2Error::Recoverable(
+                        RecoverableError::HttpAuthFailed {
+                            message: format!("Authentication failed: HTTP {}", retry_status),
+                        },
+                    )));
                 }
 
                 Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(

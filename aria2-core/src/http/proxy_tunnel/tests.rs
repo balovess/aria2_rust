@@ -1,4 +1,4 @@
-﻿//! Tests for the proxy_tunnel module
+//! Tests for the proxy_tunnel module
 
 use std::time::Duration;
 
@@ -22,7 +22,7 @@ fn test_config() -> HttpProxyTunnelConfig {
         connect_timeout: Duration::from_secs(5),
         read_timeout: Duration::from_secs(5),
         write_timeout: Duration::from_secs(5),
-        user_agent: "aria2/rust".to_string(),
+        user_agent: crate::constants::USER_AGENT.to_string(),
     }
 }
 
@@ -31,7 +31,7 @@ fn test_connect_request_without_auth() {
     let config = test_config();
     let request = HttpProxyTunnel::build_connect_request(&config, None);
     assert!(request.starts_with("CONNECT target.example.com:443 HTTP/1.1\r\n"));
-    assert!(request.contains("User-Agent: aria2/rust\r\n"));
+    assert!(request.contains(&format!("User-Agent: {}\r\n", crate::constants::USER_AGENT)));
     assert!(request.contains("Host: target.example.com:443\r\n"));
     assert!(!request.contains("Proxy-Authorization"));
     assert!(request.ends_with("\r\n\r\n"));
@@ -168,7 +168,7 @@ fn config_for_mock(port: u16) -> HttpProxyTunnelConfig {
         connect_timeout: Duration::from_secs(5),
         read_timeout: Duration::from_secs(5),
         write_timeout: Duration::from_secs(5),
-        user_agent: "aria2/rust-test".to_string(),
+        user_agent: "test-proxy-client/1.0".to_string(),
         ..Default::default()
     }
 }

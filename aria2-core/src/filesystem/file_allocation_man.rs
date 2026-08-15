@@ -52,6 +52,9 @@ use tracing::{debug, info, warn};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
 use crate::filesystem::file_allocation::{self, AllocationStrategy};
+use crate::filesystem::file_allocation_iterator::{
+    AdaptiveFileAllocationIterator, FileAllocationIterator,
+};
 
 /// How long the worker sleeps when the queue is empty before polling again.
 const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
@@ -435,6 +438,39 @@ impl FileAllocationMan {
             meta.cancelled.store(true, Ordering::Relaxed);
         }
     }
+
+    /// Cancel queued or active allocations belonging to one request group.
+    ///
+    /// Queued entries can be completed immediately because their waiters are
+    /// owned by the manager. The active entry is owned by the worker, so only
+    /// its shared cancellation flag is set; the worker reports the result
+    /// after it reaches its next cancellation check.
+    ///
+    /// Returns the number of entries cancelled, including an active entry.
+    pub fn cancel_gid(&mut self, gid: u64) -> usize {
+        let mut cancelled = 0;
+        let mut retained = VecDeque::with_capacity(self.queue.len());
+
+        while let Some(entry) = self.queue.pop_front() {
+            if entry.gid == gid {
+                entry.mark_cancelled();
+                if let Some(tx) = entry.done_tx {
+                    let _ = tx.send(Err(cancelled_error()));
+                }
+                cancelled += 1;
+            } else {
+                retained.push_back(entry);
+            }
+        }
+        self.queue = retained;
+
+        if let Some(meta) = self.picked.as_ref().filter(|meta| meta.gid == gid) {
+            meta.cancelled.store(true, Ordering::Relaxed);
+            cancelled += 1;
+        }
+
+        cancelled
+    }
 }
 
 impl Default for FileAllocationMan {
@@ -603,18 +639,13 @@ async fn current_size(path: &Path) -> u64 {
     }
 }
 
-/// Zero-fill chunk size, matching C++ `SingleFileAllocationIterator` and the
-/// Rust `file_allocation_iterator::BUF_SIZE` (256 KiB per `allocateChunk`).
-const ZERO_FILL_CHUNK: usize = 256 * 1024;
-
 /// Allocate one file up to `length` using the entry's strategy. Files that
 /// already reach the target length are skipped (resume / already-allocated).
 ///
-/// Chunking matters only for zero-fill (`Prealloc`): it mirrors C++ where
-/// `SingleFileAllocationIterator::allocateChunk()` runs once per event-loop
-/// tick. `Falloc` and `Trunc` are atomic system calls and need no chunking;
-/// the `secure` flag is honoured only for fallocate (zero-fill on platforms
-/// that don't, e.g. macOS `F_PREALLOCATE` / Windows `SetFileValidData`).
+/// `Prealloc` follows aria2's adaptive iterator: it probes native fallocate
+/// and uses chunked zero-fill only when native allocation is unavailable.
+/// `Falloc` and `Trunc` remain one-shot operations; the `secure` flag is
+/// honoured by fallocate on platforms whose native call does not clear data.
 async fn allocate_single_file(
     path: &Path,
     length: u64,
@@ -633,32 +664,48 @@ async fn allocate_single_file(
 
     let mut adaptor = DirectDiskAdaptor::new();
     adaptor.open(path).await?;
+    let mut adaptor = Some(adaptor);
 
     let alloc_result: Result<()> = async {
         match entry.strategy {
             AllocationStrategy::Prealloc => {
-                // Chunked zero-fill with cooperative yields between chunks,
-                // so a huge file never hogs a worker thread (the async
-                // equivalent of C++'s per-tick `allocateChunk()`).
-                let buf = vec![0u8; ZERO_FILL_CHUNK];
-                let mut pos = offset;
-                while pos < length {
+                let mut iterator = AdaptiveFileAllocationIterator::new_with_secure_falloc(
+                    adaptor.take().expect("open adaptor is present"),
+                    offset,
+                    length,
+                    entry.secure_falloc,
+                );
+                let mut allocation_error = None;
+                while !iterator.finished() {
                     if entry.is_cancelled() {
-                        return Err(cancelled_error());
+                        allocation_error = Some(cancelled_error());
+                        break;
                     }
-                    let n = ((length - pos) as usize).min(ZERO_FILL_CHUNK);
-                    adaptor.write(pos, &buf[..n]).await?;
-                    pos += n as u64;
-                    entry.progress.store(progress_base + pos, Ordering::Relaxed);
+                    if let Err(error) = iterator.allocate_chunk().await {
+                        allocation_error = Some(error);
+                        break;
+                    }
+                    entry.progress.store(
+                        progress_base + iterator.current_length().min(length),
+                        Ordering::Relaxed,
+                    );
                     tokio::task::yield_now().await;
                 }
-                if pos > length {
-                    adaptor.truncate(length).await?;
+                adaptor = Some(iterator.into_inner());
+                if let Some(error) = allocation_error {
+                    return Err(error);
                 }
+                entry
+                    .progress
+                    .store(progress_base + length, Ordering::Relaxed);
                 Ok(())
             }
             AllocationStrategy::Trunc => {
-                adaptor.truncate(length).await?;
+                adaptor
+                    .as_mut()
+                    .expect("open adaptor is present")
+                    .truncate(length)
+                    .await?;
                 entry
                     .progress
                     .store(progress_base + length, Ordering::Relaxed);
@@ -668,7 +715,7 @@ async fn allocate_single_file(
                 // One-shot fallocate; `secure` zero-fills on platforms whose
                 // fallocate does not (macOS / Windows).
                 file_allocation::allocate_file(
-                    &mut adaptor,
+                    adaptor.as_mut().expect("open adaptor is present"),
                     path,
                     length,
                     AllocationStrategy::Falloc,
@@ -686,7 +733,10 @@ async fn allocate_single_file(
     .await;
 
     // Close the file (best-effort; report the allocation error if any).
-    let close_result = adaptor.close().await;
+    let close_result = match adaptor.as_mut() {
+        Some(adaptor) => adaptor.close().await,
+        None => Ok(()),
+    };
     match (alloc_result, close_result) {
         (Err(e), _) => Err(e),
         (Ok(()), Err(e)) => Err(e),
@@ -760,6 +810,11 @@ pub async fn enqueue_multi(
 /// that will never run.
 pub async fn cancel_all(man: &SharedFileAllocationMan) {
     man.write().await.cancel_all();
+}
+
+/// Cancel pending allocations for one request group and wake its waiter(s).
+pub async fn cancel_gid(man: &SharedFileAllocationMan, gid: u64) -> usize {
+    man.write().await.cancel_gid(gid)
 }
 
 #[cfg(test)]
@@ -953,6 +1008,54 @@ mod tests {
         assert!(rx2.blocking_recv().unwrap().is_err());
     }
 
+    #[test]
+    fn test_cancel_gid_only_notifies_matching_queued_waiters() {
+        let man = Arc::new(TokioRwLock::new(FileAllocationMan::new()));
+        let (target_tx, target_rx) = oneshot::channel();
+        let (other_tx, mut other_rx) = oneshot::channel();
+        let (target_again_tx, target_again_rx) = oneshot::channel();
+
+        {
+            let mut guard = man.blocking_write();
+            guard.push_entry(FileAllocationEntry::single(
+                11,
+                PathBuf::from("/tmp/target-a"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                target_tx,
+            ));
+            guard.push_entry(FileAllocationEntry::single(
+                12,
+                PathBuf::from("/tmp/other"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                other_tx,
+            ));
+            guard.push_entry(FileAllocationEntry::single(
+                11,
+                PathBuf::from("/tmp/target-b"),
+                100,
+                AllocationStrategy::Trunc,
+                false,
+                FileAllocationProtocol::Http,
+                target_again_tx,
+            ));
+        }
+
+        assert_eq!(man.blocking_write().cancel_gid(11), 2);
+        assert_eq!(man.blocking_read().count_in_queue(), 1);
+        assert!(target_rx.blocking_recv().unwrap().is_err());
+        assert!(target_again_rx.blocking_recv().unwrap().is_err());
+        assert!(other_rx.try_recv().is_err());
+
+        man.blocking_write().cancel_all();
+        assert!(other_rx.blocking_recv().unwrap().is_err());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_enqueue_path_trunc() {
         let dir = std::env::temp_dir().join(format!("aria2_alloc_trunc_{}", std::process::id()));
@@ -990,6 +1093,32 @@ mod tests {
         assert_eq!(tokio::fs::metadata(&files[1].0).await.unwrap().len(), 4096);
         // Zero-length file: skipped, but the directory must not fail.
         assert!(!files[2].0.exists() || tokio::fs::metadata(&files[2].0).await.unwrap().len() == 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_enqueue_multi_prealloc_preserves_existing_prefix() {
+        let dir =
+            std::env::temp_dir().join(format!("aria2_alloc_multi_prealloc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = dir.join("first.bin");
+        let second = dir.join("nested/second.bin");
+        let prefix = vec![0xA5u8; 4096];
+        std::fs::write(&first, &prefix).unwrap();
+
+        let files = vec![(first.clone(), 8192u64), (second.clone(), 4096u64)];
+        let man = shared_file_allocation_man_with_concurrency(1);
+        enqueue_multi(&man, files, AllocationStrategy::Prealloc, false, 10)
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::metadata(&first).await.unwrap().len(), 8192);
+        assert_eq!(tokio::fs::metadata(&second).await.unwrap().len(), 4096);
+        let first_data = tokio::fs::read(&first).await.unwrap();
+        assert_eq!(&first_data[..prefix.len()], prefix.as_slice());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

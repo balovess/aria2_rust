@@ -128,23 +128,21 @@ impl SeedExitCondition {
     /// Check if the seed time condition has been met.
     ///
     /// Returns `true` when pure seeding duration exceeds the limit:
-    /// - If `seed_time_secs == 0`, returns `false` (infinite seeding)
+    /// - A zero duration is immediately met; callers represent infinite
+    ///   seeding by omitting the time criterion (`None`)
     /// - If not in pure seeding phase (`is_pure_seeding == false`), returns `false`
     /// - Otherwise, checks if elapsed seconds since `seeding_started_at >= seed_time_secs`
     ///
     /// # Arguments
     ///
     /// * `seeding_started_at` - Instant when pure seeding phase began
-    /// * `seed_time_secs` - Maximum allowed seeding duration in seconds (0 = infinite)
+    /// * `seed_time_secs` - Maximum allowed seeding duration in seconds
     /// * `is_pure_seeding` - Whether all pieces are complete (true = in seeding phase)
     pub fn check_seed_time(
         seeding_started_at: Instant,
         seed_time_secs: u64,
         is_pure_seeding: bool,
     ) -> bool {
-        if seed_time_secs == 0 {
-            return false; // Infinite seeding
-        }
         if !is_pure_seeding {
             return false; // Still downloading, haven't entered pure seeding yet
         }

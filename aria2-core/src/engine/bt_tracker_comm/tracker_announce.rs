@@ -12,6 +12,7 @@
 //! uses the `BtAnnounce` state machine to decide *when* and *what* to
 //! announce, then routes to the correct backend based on URL scheme.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -20,6 +21,9 @@ use super::bt_announce::{BtAnnounce, is_udp_tracker};
 use super::types::AnnounceEvent;
 use crate::engine::udp_tracker_client::SharedUdpClient;
 use crate::engine::udp_tracker_manager::UdpTrackerManager;
+use crate::http::client_identity::ClientTlsConfig;
+use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerFailureKind};
+use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
 
 /// Result of a tracker announce operation (HTTP or UDP).
 #[derive(Debug, Clone)]
@@ -57,6 +61,16 @@ pub struct TrackerAnnouncer {
     udp_manager: Option<UdpTrackerManager>,
     /// Shared UDP client for the UDP tracker manager.
     udp_client: Option<SharedUdpClient>,
+    /// URL selected for the most recent announce attempt, including failures.
+    last_attempt_tracker_url: Option<String>,
+    /// Shared process-wide catalog for public tracker health feedback.
+    public_tracker_catalog: Option<Arc<PublicTrackerList>>,
+    /// Public URLs appended to this command's announce list.
+    public_tracker_urls: HashSet<String>,
+    /// Failure classification from the most recent announce attempt.
+    last_failure_kind: Option<TrackerFailureKind>,
+    /// Existing download TLS settings used by HTTPS tracker announces.
+    http_tls: ClientTlsConfig,
 }
 
 impl TrackerAnnouncer {
@@ -67,6 +81,11 @@ impl TrackerAnnouncer {
             stopped_sent: false,
             udp_manager: None,
             udp_client: None,
+            last_attempt_tracker_url: None,
+            public_tracker_catalog: None,
+            public_tracker_urls: HashSet::new(),
+            last_failure_kind: None,
+            http_tls: ClientTlsConfig::default(),
         }
     }
 
@@ -77,12 +96,22 @@ impl TrackerAnnouncer {
             stopped_sent: false,
             udp_manager: None,
             udp_client,
+            last_attempt_tracker_url: None,
+            public_tracker_catalog: None,
+            public_tracker_urls: HashSet::new(),
+            last_failure_kind: None,
+            http_tls: ClientTlsConfig::default(),
         }
     }
 
     /// Set the shared UDP client for UDP tracker announces.
     pub fn set_udp_client(&mut self, client: SharedUdpClient) {
         self.udp_client = Some(client);
+    }
+
+    /// Apply the existing aria2-compatible TLS options to HTTP tracker calls.
+    pub(crate) fn set_http_tls_config(&mut self, config: ClientTlsConfig) {
+        self.http_tls = config;
     }
 
     /// Returns true if any announce is ready (stopped, completed, or periodic).
@@ -93,6 +122,26 @@ impl TrackerAnnouncer {
     /// Returns true if a periodic announce is ready.
     pub fn is_default_announce_ready(&self) -> bool {
         self.announce.is_default_announce_ready()
+    }
+
+    /// Return the tracker selected for the next announce attempt.
+    pub fn current_tracker_url(&self) -> Option<&str> {
+        self.announce.announce_list().get_announce()
+    }
+
+    /// Return the URL used by the most recent announce attempt.
+    pub fn last_attempt_tracker_url(&self) -> Option<&str> {
+        self.last_attempt_tracker_url.as_deref()
+    }
+
+    /// Attach the shared catalog and the public URLs owned by this command.
+    pub fn set_public_tracker_catalog(
+        &mut self,
+        catalog: Arc<PublicTrackerList>,
+        public_tracker_urls: HashSet<String>,
+    ) {
+        self.public_tracker_catalog = Some(catalog);
+        self.public_tracker_urls = public_tracker_urls;
     }
 
     /// Execute a tracker announce, dispatching to HTTP or UDP as appropriate.
@@ -123,11 +172,13 @@ impl TrackerAnnouncer {
         }
 
         let tracker_url = self.announce.announce_list().get_announce()?.to_string();
+        self.last_attempt_tracker_url = Some(tracker_url.clone());
+        self.last_failure_kind = None;
         let is_udp = is_udp_tracker(&tracker_url);
         let event = self.announce.announce_list().get_event();
 
         // Determine if this is a UDP or HTTP tracker
-        if is_udp {
+        let result = if is_udp {
             self.announce_udp(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
                 .await
         } else {
@@ -142,7 +193,24 @@ impl TrackerAnnouncer {
                 &tracker_url,
             )
             .await
+        };
+
+        if self.public_tracker_urls.contains(&tracker_url)
+            && let Some(catalog) = self.public_tracker_catalog.as_ref()
+        {
+            if result.is_some() {
+                catalog.record_success(&tracker_url).await;
+            } else {
+                catalog
+                    .record_failure_kind(
+                        &tracker_url,
+                        self.last_failure_kind
+                            .unwrap_or(TrackerFailureKind::MalformedResponse),
+                    )
+                    .await;
+            }
         }
+        result
     }
 
     /// Execute a UDP tracker announce.
@@ -174,6 +242,7 @@ impl TrackerAnnouncer {
                     }
                     Err(e) => {
                         warn!("[BT] Failed to create UDP tracker client: {}", e);
+                        self.last_failure_kind = Some(TrackerFailureKind::Network);
                         self.announce.announce_failure();
                         return None;
                     }
@@ -183,11 +252,10 @@ impl TrackerAnnouncer {
 
         let mgr = self.udp_manager.as_mut()?;
 
-        // Parse the tracker URL into an endpoint if not already tracked
-        if mgr.endpoint_count() == 0 {
-            let urls = vec![tracker_url.to_string()];
-            mgr.parse_tracker_urls(&urls);
-        }
+        // The state machine selects one URL per attempt. Keep the UDP manager
+        // scoped to that URL so responses cannot be attributed to a different
+        // public tracker accumulated by an earlier attempt.
+        mgr.use_tracker_url(tracker_url).await;
 
         // Signal announce start
         self.announce.announce_start();
@@ -214,6 +282,15 @@ impl TrackerAnnouncer {
 
         if responses.is_empty() {
             warn!("[BT] UDP tracker {} returned no response", tracker_url);
+            self.last_failure_kind = Some(match mgr.last_announce_error().await {
+                Some(UdpError::TrackerError) => TrackerFailureKind::TrackerRejected,
+                Some(UdpError::MalformedResponse) => TrackerFailureKind::MalformedResponse,
+                Some(UdpError::Network) => TrackerFailureKind::Network,
+                Some(UdpError::Timeout) | None => TrackerFailureKind::Timeout,
+                Some(UdpError::Success | UdpError::Shutdown) => {
+                    TrackerFailureKind::MalformedResponse
+                }
+            });
             self.announce.announce_failure();
             return None;
         }
@@ -271,7 +348,7 @@ impl TrackerAnnouncer {
         );
 
         // Send HTTP request
-        match crate::engine::http_tracker_client::build_tracker_client(5) {
+        match crate::engine::http_tracker_client::build_tracker_client_with_tls(5, &self.http_tls) {
             Ok(client) => {
                 match client.get(&url).send().await {
                     Ok(resp) => {
@@ -280,6 +357,15 @@ impl TrackerAnnouncer {
                                 "[BT] HTTP tracker {} returned status {}",
                                 tracker_url,
                                 resp.status()
+                            );
+                            self.last_failure_kind = Some(
+                                if resp.status().is_server_error()
+                                    || matches!(resp.status().as_u16(), 408 | 425 | 429)
+                                {
+                                    TrackerFailureKind::RemoteTemporary
+                                } else {
+                                    TrackerFailureKind::TrackerRejected
+                                },
                             );
                             self.announce.announce_failure();
                             return None;
@@ -293,6 +379,8 @@ impl TrackerAnnouncer {
                                             let reason = tracker_resp.failure_reason
                                                 .unwrap_or_else(|| "tracker failure".to_string());
                                             warn!("[BT] HTTP tracker {} failure: {}", tracker_url, reason);
+                                            self.last_failure_kind =
+                                                Some(TrackerFailureKind::TrackerRejected);
                                             self.announce.announce_failure();
                                             return None;
                                         }
@@ -318,6 +406,8 @@ impl TrackerAnnouncer {
                                                     "[BT] HTTP tracker {} response processing failed: {}",
                                                     tracker_url, e
                                                 );
+                                                self.last_failure_kind =
+                                                    Some(TrackerFailureKind::MalformedResponse);
                                                 self.announce.announce_failure();
                                                 None
                                             }
@@ -328,6 +418,8 @@ impl TrackerAnnouncer {
                                             "[BT] HTTP tracker {} response parse failed: {}",
                                             tracker_url, e
                                         );
+                                        self.last_failure_kind =
+                                            Some(TrackerFailureKind::MalformedResponse);
                                         self.announce.announce_failure();
                                         None
                                     }
@@ -335,6 +427,11 @@ impl TrackerAnnouncer {
                             }
                             Err(e) => {
                                 warn!("[BT] HTTP tracker {} body read failed: {}", tracker_url, e);
+                                self.last_failure_kind = Some(if e.is_timeout() {
+                                    TrackerFailureKind::Timeout
+                                } else {
+                                    TrackerFailureKind::Network
+                                });
                                 self.announce.announce_failure();
                                 None
                             }
@@ -342,6 +439,11 @@ impl TrackerAnnouncer {
                     }
                     Err(e) => {
                         warn!("[BT] HTTP tracker {} request failed: {}", tracker_url, e);
+                        self.last_failure_kind = Some(if e.is_timeout() {
+                            TrackerFailureKind::Timeout
+                        } else {
+                            TrackerFailureKind::Network
+                        });
                         self.announce.announce_failure();
                         None
                     }
@@ -352,6 +454,7 @@ impl TrackerAnnouncer {
                     "[BT] Failed to build HTTP tracker client for {}: {}",
                     tracker_url, e
                 );
+                self.last_failure_kind = Some(TrackerFailureKind::Network);
                 self.announce.announce_failure();
                 None
             }

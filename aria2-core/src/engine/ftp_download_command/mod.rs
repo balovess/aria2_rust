@@ -5,6 +5,7 @@
 
 mod control;
 mod execution;
+mod proxy;
 #[cfg(test)]
 mod tests;
 mod types;

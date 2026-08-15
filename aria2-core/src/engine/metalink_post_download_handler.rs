@@ -147,16 +147,11 @@ impl MetalinkPostDownloadHandler {
             "Metalink post-download handler: creating request groups"
         );
 
-        let file_infos = MetalinkDownloadCommand::create_multi_file_with_base_uri(
-            metalink_data,
-            options,
-            options.dir.as_deref(),
-            base_uri,
-            1, // GID start
-        )?;
-
-        let commands: Vec<MetalinkDownloadCommand> =
-            file_infos.into_iter().map(|fi| fi.command).collect();
+        let mut converter = MetalinkToRequestGroup::new();
+        if let Some(base_uri) = base_uri {
+            converter = converter.with_base_uri(base_uri);
+        }
+        let commands = converter.generate_from_bytes(metalink_data, options)?;
 
         tracing::info!(
             count = commands.len(),

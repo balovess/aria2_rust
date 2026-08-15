@@ -2,10 +2,9 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::Checksum;
+use crate::checksum::checksum::{Checksum, verify_file};
 use crate::checksum::message_digest::HashType;
 use crate::constants;
 use crate::engine::active_output_registry::{OutputPathPolicy, global_registry};
@@ -62,14 +61,19 @@ impl DownloadCommand {
         } else {
             String::new()
         };
-        let mut head_req = self.client.head(uri);
-        if !cookie_hdr_head.is_empty() {
-            head_req = head_req.header("Cookie", &cookie_hdr_head);
-        }
-        for (name, value) in &self.headers {
-            head_req = head_req.header(name, value);
-        }
-        let head_resp = head_req.send().await.ok();
+        let options = self.group.recover().options_arc();
+        let known_total_length = self.group.recover().total_length();
+        let should_head = options.dry_run || (options.use_head && known_total_length == 0);
+        let head_resp = if should_head {
+            let head_req = self.request_policy.apply(
+                self.client.head(uri),
+                (!cookie_hdr_head.is_empty()).then_some(cookie_hdr_head.as_str()),
+                &[],
+            );
+            head_req.send().await.ok()
+        } else {
+            None
+        };
         let (total_length, head_supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp
                 .headers()
@@ -84,13 +88,13 @@ impl DownloadCommand {
                 .is_some_and(|v| v.to_lowercase().contains("bytes"));
             (tl, sr)
         } else {
-            (0, false)
+            (known_total_length, false)
         };
 
         let supports_range = if head_supports_range {
             true
         } else if total_length > constants::CONCURRENT_MIN_FILE_SIZE as u64 {
-            let prober = RangeProber::new(Arc::clone(&self.client), self.headers.clone())
+            let prober = RangeProber::new(Arc::clone(&self.client), self.request_policy.clone())
                 .with_cookie_header(
                     url_for_head
                         .as_ref()
@@ -105,7 +109,6 @@ impl DownloadCommand {
             false
         };
 
-        let options = self.group.recover().options_arc();
         let original_path = self.output_path.clone();
         if options.remove_control_file {
             let control_path =
@@ -122,18 +125,27 @@ impl DownloadCommand {
                 }
             }
         }
-        self.output_path = global_registry()
-            .resolve_with_policy(
-                &original_path,
-                OutputPathPolicy {
-                    allow_overwrite: options.allow_overwrite,
-                    auto_file_renaming: options.auto_file_renaming,
-                    continue_download: options.continue_download,
-                    check_integrity: self.check_integrity,
-                    total_length: (total_length > 0).then_some(total_length),
-                },
-            )
-            .await?;
+        if !self.output_path_resolved {
+            self.output_path = global_registry()
+                .resolve_with_policy(
+                    &original_path,
+                    OutputPathPolicy {
+                        allow_overwrite: options.allow_overwrite,
+                        auto_file_renaming: options.auto_file_renaming,
+                        continue_download: options.continue_download,
+                        check_integrity: self.check_integrity,
+                        total_length: (total_length > 0).then_some(total_length),
+                    },
+                )
+                .await?;
+            self.output_path_resolved = true;
+        } else {
+            // A mirror failover re-enters this attempt with the same command.
+            // Reclaim the already-resolved path instead of applying the
+            // filesystem collision policy a second time and renaming the
+            // partial/preallocated output.
+            self.output_path = global_registry().resolve(&self.output_path).await;
+        }
         if self.output_path != original_path {
             info!(
                 "Filename collision resolved: '{}' -> '{}'",
@@ -297,7 +309,9 @@ impl DownloadCommand {
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();
 
-            if self.should_use_concurrent(total_length, supports_range, split) {
+            if self.should_use_concurrent(total_length, supports_range, split)
+                && !options.http_accept_gzip
+            {
                 if resume_state.should_resume {
                     info!(
                         "Concurrent mode + resume: existing {} bytes, continuing from offset {}",
@@ -305,11 +319,30 @@ impl DownloadCommand {
                     );
                 }
                 let max_retries = options.max_retries;
+                let target_scheme = reqwest::Url::parse(uri)
+                    .ok()
+                    .map(|url| url.scheme().to_owned())
+                    .unwrap_or_else(|| "http".to_string());
+                let (proxy_user, proxy_passwd) = options.proxy_credentials_for_scheme(
+                    &target_scheme,
+                );
+                let auth_options = crate::http::AuthResolveOptions {
+                    http_auth_challenge: options.http_auth_challenge,
+                    no_netrc: options.no_netrc,
+                    http_user: options.http_user.clone(),
+                    http_passwd: options.http_passwd.clone(),
+                    ftp_user: options.ftp_user.clone(),
+                    ftp_passwd: options.ftp_passwd.clone(),
+                    proxy_user,
+                    proxy_passwd,
+                };
                 let progress_arc = Arc::clone(&self.progress);
                 let mut concurrent_downloader = ConcurrentDownloader::new(
                     Arc::clone(&self.client),
                     self.output_path.clone(),
-                    self.headers.clone(),
+                    self.request_policy.clone(),
+                    auth_options,
+                    options.netrc_path.clone(),
                     cookie_helper.clone(),
                     progress_updater.clone(),
                     Arc::clone(&self.group),
@@ -334,19 +367,21 @@ impl DownloadCommand {
                         let mut sequential_downloader = SequentialDownloader::new(
                             Arc::clone(&self.client),
                             self.output_path.clone(),
-                            self.headers.clone(),
+                            self.request_policy.clone(),
                             cookie_helper,
                             progress_updater,
                             Arc::clone(&self.group),
                             Arc::clone(&self.progress),
                             self.global_limiter.clone(),
                         );
-                        return sequential_downloader.execute_with_gaps_with_retry(
+                        let result = sequential_downloader.execute_with_gaps_with_retry(
                             uri,
                             total_length,
                             &completed_ranges,
                             &retry_policy,
                         ).await;
+                        drop(sequential_downloader);
+                        return result;
                     }
                     Err(e) => return Err(e),
                 }
@@ -356,19 +391,21 @@ impl DownloadCommand {
             let mut sequential_downloader = SequentialDownloader::new(
                 Arc::clone(&self.client),
                 self.output_path.clone(),
-                self.headers.clone(),
+                self.request_policy.clone(),
                 cookie_helper,
                 progress_updater,
                 Arc::clone(&self.group),
                 Arc::clone(&self.progress),
                 self.global_limiter.clone(),
             );
-            sequential_downloader.execute_with_retry(
+            let result = sequential_downloader.execute_with_retry(
                 uri,
                 &resume_state,
                 total_length,
                 &retry_policy,
-            ).await
+            ).await;
+            drop(sequential_downloader);
+            result
         }
         .await;
 
@@ -389,27 +426,7 @@ impl DownloadCommand {
                 && let Some(ht) = HashType::from_str(algo)
             {
                 let cs = Checksum::new(ht, expected)?;
-                let file = tokio::fs::File::open(&self.output_path)
-                    .await
-                    .map_err(|e| {
-                        Aria2Error::Io(format!(
-                            "Failed to open file for checksum verification: {}",
-                            e
-                        ))
-                    })?;
-                let mut reader = tokio::io::BufReader::with_capacity(65536, file);
-                let mut validator = cs.create_validator();
-                let mut buf = vec![0u8; 65536];
-                loop {
-                    let n = reader.read(&mut buf).await.map_err(|e| {
-                        Aria2Error::Io(format!("Read error during checksum verification: {}", e))
-                    })?;
-                    if n == 0 {
-                        break;
-                    }
-                    validator.update(&buf[..n]);
-                }
-                if !validator.finalize()? {
+                if !verify_file(&self.output_path, &cs).await? {
                     tracing::error!(
                         algo = %algo,
                         path = %self.output_path.display(),
@@ -517,7 +534,13 @@ impl Command for DownloadCommand {
                 }
                 Err(error) => {
                     last_error = Some(error);
-                    break;
+                    // A request group may contain mirrors. Exhaust the
+                    // candidates before returning the last error so a
+                    // transient or mirror-local failure does not abort the
+                    // whole download prematurely.
+                    if candidates.peek().is_none() {
+                        break;
+                    }
                 }
             }
         }
@@ -665,13 +688,9 @@ impl DownloadCommand {
             })
             .filter(|header| !header.is_empty());
 
-        let mut request = self.client.get(uri);
-        if let Some(cookie_header) = cookie_header {
-            request = request.header("Cookie", cookie_header);
-        }
-        for (name, value) in &self.headers {
-            request = request.header(name, value);
-        }
+        let request =
+            self.request_policy
+                .apply(self.client.get(uri), cookie_header.as_deref(), &[]);
 
         let response = request.send().await.map_err(|error| {
             Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {

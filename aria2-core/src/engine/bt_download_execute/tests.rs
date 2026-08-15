@@ -4,6 +4,32 @@ use crate::engine::bt_download_execute::types::PeerKey;
 use std::collections::HashSet;
 
 #[test]
+fn tracker_tiers_are_deduplicated_without_reordering() {
+    let tiers = super::execute::deduplicate_tracker_tiers(vec![
+        vec![
+            "http://one/announce".to_string(),
+            "http://two/announce".to_string(),
+        ],
+        vec![
+            "http://two/announce".to_string(),
+            "http://three/announce".to_string(),
+        ],
+        vec!["http://one/announce".to_string()],
+    ]);
+
+    assert_eq!(
+        tiers,
+        vec![
+            vec![
+                "http://one/announce".to_string(),
+                "http://two/announce".to_string(),
+            ],
+            vec!["http://three/announce".to_string()],
+        ]
+    );
+}
+
+#[test]
 fn test_endgame_state_new_is_inactive() {
     let es = EndgameState::new();
     assert!(!es.is_endgame_active());

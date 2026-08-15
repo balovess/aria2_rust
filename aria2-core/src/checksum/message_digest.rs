@@ -1,10 +1,13 @@
+use adler32::RollingAdler32;
 use digest::Digest;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HashType {
     Md5,
     Sha1,
+    Sha224,
     Sha256,
+    Sha384,
     Sha512,
     Adler32,
 }
@@ -15,7 +18,9 @@ impl HashType {
         match s.to_lowercase().as_str() {
             "md5" => Some(HashType::Md5),
             "sha-1" | "sha1" => Some(HashType::Sha1),
+            "sha-224" | "sha224" => Some(HashType::Sha224),
             "sha-256" | "sha256" => Some(HashType::Sha256),
+            "sha-384" | "sha384" => Some(HashType::Sha384),
             "sha-512" | "sha512" => Some(HashType::Sha512),
             "adler32" => Some(HashType::Adler32),
             _ => None,
@@ -26,7 +31,9 @@ impl HashType {
         match self {
             HashType::Md5 => "md5",
             HashType::Sha1 => "sha1",
+            HashType::Sha224 => "sha224",
             HashType::Sha256 => "sha256",
+            HashType::Sha384 => "sha384",
             HashType::Sha512 => "sha512",
             HashType::Adler32 => "adler32",
         }
@@ -36,7 +43,9 @@ impl HashType {
         match self {
             HashType::Md5 => 16,
             HashType::Sha1 => 20,
+            HashType::Sha224 => 28,
             HashType::Sha256 => 32,
+            HashType::Sha384 => 48,
             HashType::Sha512 => 64,
             HashType::Adler32 => 4,
         }
@@ -46,7 +55,9 @@ impl HashType {
         vec![
             HashType::Md5,
             HashType::Sha1,
+            HashType::Sha224,
             HashType::Sha256,
+            HashType::Sha384,
             HashType::Sha512,
             HashType::Adler32,
         ]
@@ -58,14 +69,17 @@ impl HashType {
     /// the strongest available hash when multiple are provided (e.g., Metalink
     /// with both SHA-256 and MD5). Matches C++ `MessageDigest::isStronger()`.
     ///
-    /// Ordering: Adler32(0) < MD5(1) < SHA-1(2) < SHA-256(3) < SHA-512(4)
+    /// Ordering: Adler32/MD5(0) < SHA-1(1) < SHA-224(2) < SHA-256(3)
+    /// < SHA-384(4) < SHA-512(5)
     pub fn strength(&self) -> u8 {
         match self {
             HashType::Adler32 => 0,
-            HashType::Md5 => 1,
-            HashType::Sha1 => 2,
+            HashType::Md5 => 0,
+            HashType::Sha1 => 1,
+            HashType::Sha224 => 2,
             HashType::Sha256 => 3,
-            HashType::Sha512 => 4,
+            HashType::Sha384 => 4,
+            HashType::Sha512 => 5,
         }
     }
 
@@ -82,9 +96,11 @@ impl HashType {
 enum DigestInner {
     Md5(md5::Md5),
     Sha1(sha1::Sha1),
+    Sha224(sha2::Sha224),
     Sha256(sha2::Sha256),
+    Sha384(sha2::Sha384),
     Sha512(sha2::Sha512),
-    Adler32(Vec<u8>),
+    Adler32(RollingAdler32),
 }
 
 pub struct MessageDigest {
@@ -96,9 +112,11 @@ impl MessageDigest {
         let inner = match algo {
             HashType::Md5 => DigestInner::Md5(md5::Md5::new()),
             HashType::Sha1 => DigestInner::Sha1(sha1::Sha1::new()),
+            HashType::Sha224 => DigestInner::Sha224(sha2::Sha224::new()),
             HashType::Sha256 => DigestInner::Sha256(sha2::Sha256::new()),
+            HashType::Sha384 => DigestInner::Sha384(sha2::Sha384::new()),
             HashType::Sha512 => DigestInner::Sha512(sha2::Sha512::new()),
-            HashType::Adler32 => DigestInner::Adler32(Vec::new()),
+            HashType::Adler32 => DigestInner::Adler32(RollingAdler32::new()),
         };
         MessageDigest { inner }
     }
@@ -109,9 +127,11 @@ impl MessageDigest {
                 md5::Digest::update(d, data);
             }
             DigestInner::Sha1(d) => d.update(data),
+            DigestInner::Sha224(d) => d.update(data),
             DigestInner::Sha256(d) => d.update(data),
+            DigestInner::Sha384(d) => d.update(data),
             DigestInner::Sha512(d) => d.update(data),
-            DigestInner::Adler32(buf) => buf.extend_from_slice(data),
+            DigestInner::Adler32(d) => d.update_buffer(data),
         }
     }
 
@@ -119,12 +139,11 @@ impl MessageDigest {
         match self.inner {
             DigestInner::Md5(d) => md5::Digest::finalize(d).to_vec(),
             DigestInner::Sha1(d) => d.finalize().to_vec(),
+            DigestInner::Sha224(d) => d.finalize().to_vec(),
             DigestInner::Sha256(d) => d.finalize().to_vec(),
+            DigestInner::Sha384(d) => d.finalize().to_vec(),
             DigestInner::Sha512(d) => d.finalize().to_vec(),
-            DigestInner::Adler32(buf) => {
-                let checksum = adler32::adler32(&buf[..]).unwrap_or(1);
-                checksum.to_le_bytes().to_vec()
-            }
+            DigestInner::Adler32(d) => d.hash().to_be_bytes().to_vec(),
         }
     }
 
@@ -137,7 +156,9 @@ impl MessageDigest {
         match &self.inner {
             DigestInner::Md5(_) => 16,
             DigestInner::Sha1(_) => 20,
+            DigestInner::Sha224(_) => 28,
             DigestInner::Sha256(_) => 32,
+            DigestInner::Sha384(_) => 48,
             DigestInner::Sha512(_) => 64,
             DigestInner::Adler32(_) => 4,
         }
@@ -147,9 +168,11 @@ impl MessageDigest {
         match &mut self.inner {
             DigestInner::Md5(d) => *d = md5::Md5::new(),
             DigestInner::Sha1(d) => *d = sha1::Sha1::new(),
+            DigestInner::Sha224(d) => *d = sha2::Sha224::new(),
             DigestInner::Sha256(d) => *d = sha2::Sha256::new(),
+            DigestInner::Sha384(d) => *d = sha2::Sha384::new(),
             DigestInner::Sha512(d) => *d = sha2::Sha512::new(),
-            DigestInner::Adler32(s) => *s = Vec::new(),
+            DigestInner::Adler32(d) => *d = RollingAdler32::new(),
         }
     }
 
@@ -176,8 +199,12 @@ mod tests {
         assert_eq!(HashType::from_str("MD5"), Some(HashType::Md5));
         assert_eq!(HashType::from_str("sha-1"), Some(HashType::Sha1));
         assert_eq!(HashType::from_str("SHA1"), Some(HashType::Sha1));
+        assert_eq!(HashType::from_str("sha-224"), Some(HashType::Sha224));
+        assert_eq!(HashType::from_str("SHA224"), Some(HashType::Sha224));
         assert_eq!(HashType::from_str("sha-256"), Some(HashType::Sha256));
         assert_eq!(HashType::from_str("sha256"), Some(HashType::Sha256));
+        assert_eq!(HashType::from_str("sha-384"), Some(HashType::Sha384));
+        assert_eq!(HashType::from_str("SHA384"), Some(HashType::Sha384));
         assert_eq!(HashType::from_str("sha-512"), Some(HashType::Sha512));
         assert_eq!(HashType::from_str("adler32"), Some(HashType::Adler32));
         assert_eq!(HashType::from_str("unknown"), None);
@@ -220,12 +247,40 @@ mod tests {
     }
 
     #[test]
+    fn test_sha224_known_vector() {
+        assert_eq!(
+            MessageDigest::hash_hex(HashType::Sha224, b""),
+            "d14a028c2a3a2bc9476102bb288234c415a2b01f828ea62ac5b3e42f"
+        );
+        assert_eq!(
+            MessageDigest::hash_hex(HashType::Sha224, b"abc"),
+            "23097d223405d8228642a477bda255b32aadbce4bda0b3f7e36c9da7"
+        );
+    }
+
+    #[test]
+    fn test_sha384_known_vector() {
+        assert_eq!(
+            MessageDigest::hash_hex(HashType::Sha384, b""),
+            "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"
+        );
+        assert_eq!(
+            MessageDigest::hash_hex(HashType::Sha384, b"abc"),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7"
+        );
+    }
+
+    #[test]
     fn test_adler32_basic() {
         let bytes = MessageDigest::hash_data(HashType::Adler32, b"hello world");
         assert_eq!(bytes.len(), 4);
+        assert_eq!(
+            MessageDigest::hash_hex(HashType::Adler32, b"hello world"),
+            "1a0b045d"
+        );
 
         let empty = MessageDigest::hash_data(HashType::Adler32, b"");
-        assert_eq!(empty.len(), 4);
+        assert_eq!(empty, [0, 0, 0, 1]);
     }
 
     #[test]
@@ -269,11 +324,13 @@ mod tests {
 
     #[test]
     fn test_hash_type_strength_ordering() {
-        // Verify strength ordering: Adler32 < MD5 < SHA-1 < SHA-256 < SHA-512
+        // Match aria2_original: Adler32 and MD5 have equal strength.
         assert!(HashType::Sha512.strength() > HashType::Sha256.strength());
+        assert!(HashType::Sha384.strength() > HashType::Sha256.strength());
+        assert!(HashType::Sha256.strength() > HashType::Sha224.strength());
+        assert!(HashType::Sha224.strength() > HashType::Sha1.strength());
         assert!(HashType::Sha256.strength() > HashType::Sha1.strength());
-        assert!(HashType::Sha1.strength() > HashType::Md5.strength());
-        assert!(HashType::Md5.strength() > HashType::Adler32.strength());
+        assert_eq!(HashType::Md5.strength(), HashType::Adler32.strength());
     }
 
     #[test]
@@ -283,6 +340,6 @@ mod tests {
         assert!(HashType::Sha512.is_stronger(&HashType::Sha256));
         assert!(!HashType::Md5.is_stronger(&HashType::Sha256));
         assert!(!HashType::Sha256.is_stronger(&HashType::Sha256));
-        assert!(HashType::Md5.is_stronger(&HashType::Adler32));
+        assert!(!HashType::Md5.is_stronger(&HashType::Adler32));
     }
 }

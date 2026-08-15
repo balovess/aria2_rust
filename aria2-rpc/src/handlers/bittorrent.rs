@@ -16,7 +16,7 @@ impl RpcEngine {
         let Some(group_man) = &self.group_man else {
             return Vec::new();
         };
-        let man = group_man.read().await;
+        let man = group_man;
         man.all_groups()
             .into_iter()
             .map(|(_, group)| group.recover().gid().to_hex_string())
@@ -34,7 +34,7 @@ impl RpcEngine {
                 "aria2.removeDownloadResult is not supported by the core state model".into(),
             )
         })?;
-        let man = group_man.read().await;
+        let man = group_man;
         if man.remove_stopped_result(&gid).is_some() {
             Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
@@ -58,7 +58,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let group = man
             .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
@@ -94,7 +94,7 @@ impl RpcEngine {
     pub async fn handle_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
         if let Some(group_man) = &self.group_man {
-            group_man.write().await.pause_all();
+            group_man.pause_all();
         }
         let result = self
             .engine_cmd_tx
@@ -129,7 +129,7 @@ impl RpcEngine {
     pub async fn handle_force_pause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
         if let Some(group_man) = &self.group_man {
-            group_man.write().await.force_pause_all();
+            group_man.force_pause_all();
         }
         let result = self
             .engine_cmd_tx
@@ -164,7 +164,7 @@ impl RpcEngine {
     pub async fn handle_unpause_all(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
         let gids = self.lifecycle_gids().await;
         if let Some(group_man) = &self.group_man {
-            group_man.write().await.unpause_all();
+            group_man.unpause_all();
         }
         let result = self
             .engine_cmd_tx
@@ -205,7 +205,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let group = man
             .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
@@ -236,7 +236,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let files = if let Some(group) = man.group_by_hex(&gid) {
             let guard = group.recover();
             let completed = guard.get_completed_length();
@@ -266,7 +266,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let man = group_man.read().await;
+        let man = group_man;
         let group = man.group_by_hex(&gid).ok_or_else(|| {
             JsonRpcError::RpcExecution(format!("No active download for GID#{}", gid))
         })?;
@@ -330,7 +330,7 @@ impl RpcEngine {
         })?;
         // The original method has no parameters and purges all retained
         // results. It intentionally ignores the request object entirely.
-        group_man.read().await.purge_stopped_results();
+        group_man.purge_stopped_results();
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             "OK",
@@ -363,8 +363,9 @@ impl RpcEngine {
     /// `RpcMethod::execute` → `RpcMethod::authorize`): the multicall envelope
     /// itself is not authorized, but **each sub-call is**. A sub-call carries
     /// its own `"token:xxx"` first parameter, which is validated and then
-    /// stripped so the handler's positional arguments do not shift.
-    /// `envelope_token` is the secret found on the multicall request itself, if any.
+    /// stripped so the handler's positional arguments do not shift. The
+    /// envelope must contain the call list at parameter zero; an envelope
+    /// token is not a supported alternative in aria2's wire contract.
     ///
     /// # Error handling
     ///
@@ -374,9 +375,23 @@ impl RpcEngine {
     pub async fn handle_multicall(
         &self,
         req: &JsonRpcRequest,
-        envelope_token: Option<&str>,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
-        let calls: Vec<serde_json::Value> = req.get_param(0)?;
+        // C++ checkRequiredParam<List>() reports a method execution error
+        // (code 1), rather than JSON-RPC -32602, for a missing or mistyped
+        // multicall envelope parameter.
+        let calls: Vec<serde_json::Value> = match req.optional_param_value(0) {
+            Some(serde_json::Value::Array(calls)) => calls.clone(),
+            Some(_) => {
+                return Err(JsonRpcError::RpcExecution(
+                    "The parameter at 0 has wrong type.".to_string(),
+                ));
+            }
+            None => {
+                return Err(JsonRpcError::RpcExecution(
+                    "The parameter at 0 is required but missing.".to_string(),
+                ));
+            }
+        };
 
         if calls.is_empty() {
             return Ok(JsonRpcResponse::success(
@@ -395,17 +410,11 @@ impl RpcEngine {
                 }));
                 continue;
             };
-            let Some(method_name) = call_obj.get("methodName") else {
+            let Some(method_name) = call_obj.get("methodName").and_then(|value| value.as_str())
+            else {
                 results.push(serde_json::json!({
                     "code": 1,
                     "message": "Missing methodName."
-                }));
-                continue;
-            };
-            let Some(method_name) = method_name.as_str() else {
-                results.push(serde_json::json!({
-                    "code": 1,
-                    "message": "methodName must be a string."
                 }));
                 continue;
             };
@@ -417,10 +426,13 @@ impl RpcEngine {
                 continue;
             }
 
-            let call_params = call_obj
-                .get("params")
-                .cloned()
-                .unwrap_or(serde_json::json!([]));
+            // The original implementation accepts only a list for a
+            // sub-call's params member. Missing, null, object, and scalar
+            // values all become an empty list before authorization/dispatch.
+            let call_params = match call_obj.get("params") {
+                Some(serde_json::Value::Array(params)) => serde_json::Value::Array(params.clone()),
+                _ => serde_json::Value::Array(Vec::new()),
+            };
 
             // Authorize the sub-call the same way C++ RpcMethod::authorize()
             // does for every method invocation: pop a leading "token:xxx"
@@ -428,13 +440,11 @@ impl RpcEngine {
             // into the handler as a positional argument and shift every
             // subsequent parameter by one.
             let (sub_token, stripped_params) = split_auth_token(&call_params);
-            let effective_token = sub_token.as_deref().or(envelope_token);
-
             let sub_request =
                 JsonRpcRequest::new(method_name, stripped_params.unwrap_or(call_params));
 
             let sub_response = if rpc_method_requires_auth(method_name) {
-                match self.auth_middleware.validate(effective_token) {
+                match self.auth_middleware.validate(sub_token.as_deref()) {
                     Ok(()) => self.dispatch_single(&sub_request).await,
                     Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
                 }

@@ -1,17 +1,49 @@
 #![cfg(feature = "bittorrent")]
 
+mod e2e_helpers;
 mod fixtures;
+
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
 use aria2_core::engine::bt_tracker_comm::TrackerAnnouncer;
 use aria2_core::engine::command::Command;
+use aria2_core::engine::download_event_hooks::{
+    DownloadEvent, DownloadEventHooks, DownloadEventListener,
+};
+use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, HaltReason};
+use e2e_helpers::mock_http_server::MockHttpServer;
 use fixtures::mock_bt_peer::MockBtPeerServer;
 use fixtures::mock_tracker::MockTrackerServer;
 use fixtures::mock_udp_tracker::MockUdpTracker;
-use fixtures::test_torrent_builder::{build_test_torrent, expected_piece_data};
+use fixtures::test_torrent_builder::{
+    build_multi_file_test_torrent, build_test_torrent, build_test_torrent_with_web_seeds,
+    expected_piece_data,
+};
+use std::sync::{Arc, Mutex};
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
+}
+
+#[derive(Default)]
+struct RecordingBtEvents {
+    events: Mutex<Vec<(DownloadEvent, String)>>,
+}
+
+impl RecordingBtEvents {
+    fn saw(&self, event: DownloadEvent, gid: &str) -> bool {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(seen, seen_gid)| *seen == event && seen_gid == gid)
+    }
+}
+
+impl DownloadEventListener for RecordingBtEvents {
+    fn on_download_event(&self, event: DownloadEvent, gid: &str) {
+        self.events.lock().unwrap().push((event, gid.to_string()));
+    }
 }
 
 #[tokio::test]
@@ -147,7 +179,641 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
         .expect("halted BT command timed out")
         .expect("halted BT task panicked");
     assert!(result.is_err(), "halt should stop the command");
+    let control_path = ControlFile::control_path_for(&dir.path().join("halt.bin"));
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("halted BT download should write a valid checkpoint")
+        .expect("halted BT download should leave its checkpoint on disk");
+    assert_eq!(control_file.total_length(), 1024 * 1024);
+    assert_eq!(control_file.bitfield().len(), 8);
     tracker.wait_for_event("stopped").await;
+}
+
+#[tokio::test]
+async fn test_e2e_bt_resume_skips_verified_checkpoint_pieces() {
+    let dir = tmp_dir();
+    let tracker = MockTrackerServer::start(0).await;
+    let torrent_data = build_test_torrent("checkpoint.bin", 1024, 512, &tracker.announce_url());
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent_data).unwrap();
+    let info_hash = meta.info_hash.bytes;
+    let peer = MockBtPeerServer::start(
+        info_hash,
+        vec![
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ],
+    )
+    .await;
+    drop(tracker);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent("checkpoint.bin", 1024, 512, &tracker.announce_url());
+    let output_path = dir.path().join("checkpoint.bin");
+    let piece_zero = expected_piece_data(0, 512, 1024);
+    std::fs::write(&output_path, &piece_zero).unwrap();
+
+    let control_path = ControlFile::control_path_for(&output_path);
+    let mut control_file = ControlFile::open_or_create(&control_path, 1024, 2)
+        .await
+        .unwrap();
+    control_file.mark_torrent_checkpoint();
+    control_file.set_torrent_info_hash(info_hash);
+    control_file.mark_piece_done(0);
+    control_file.update_completed_length(512);
+    control_file.save().await.unwrap();
+
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(103),
+        &torrent_data,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), cmd.execute())
+        .await
+        .expect("checkpoint resume timed out")
+        .expect("checkpoint resume failed");
+
+    let requested = peer.requested_pieces().await;
+    assert!(
+        requested.contains(&1),
+        "missing piece was not requested: {requested:?}"
+    );
+    assert!(
+        !requested.contains(&0),
+        "verified checkpoint piece was requested again: {requested:?}"
+    );
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [piece_zero, expected_piece_data(1, 512, 1024)].concat()
+    );
+    assert!(
+        !control_path.exists(),
+        "successful resume must remove checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_check_integrity_redownloads_only_failed_piece() {
+    use aria2_core::util::rwlock_ext::RwLockRecover;
+
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "integrity.bin",
+        1024,
+        512,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ],
+    )
+    .await;
+    drop(tracker_placeholder);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent("integrity.bin", 1024, 512, &tracker.announce_url());
+    let output_path = dir.path().join("integrity.bin");
+    let mut existing = expected_piece_data(0, 512, 1024);
+    let mut corrupted_piece = expected_piece_data(1, 512, 1024);
+    corrupted_piece[0] ^= 0xff;
+    existing.extend_from_slice(&corrupted_piece);
+    std::fs::write(&output_path, existing).unwrap();
+
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        check_integrity: true,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(109),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let group = command.group_handle();
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("integrity-check BT command timed out")
+        .expect("integrity-check BT command failed");
+
+    let requested = peer.requested_pieces().await;
+    assert!(
+        requested.contains(&1),
+        "corrupted piece was not re-downloaded: {requested:?}"
+    );
+    assert!(
+        !requested.contains(&0),
+        "verified piece was requested again: {requested:?}"
+    );
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ]
+        .concat()
+    );
+    assert_eq!(group.recover().get_bt_bitfield(), Some(vec![0xc0]));
+    assert!(group.recover().status().is_completed());
+    assert!(
+        !ControlFile::control_path_for(&output_path).exists(),
+        "successful integrity repair must remove its checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_multi_file_integrity_repairs_piece_crossing_file_boundary() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_multi_file_test_torrent(
+        "multi-integrity",
+        &[4, 6],
+        6,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, 6, 10), expected_piece_data(1, 6, 10)],
+    )
+    .await;
+    drop(tracker_placeholder);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data =
+        build_multi_file_test_torrent("multi-integrity", &[4, 6], 6, &tracker.announce_url());
+    let output_dir = dir.path();
+    let first_path = output_dir.join("part-0.bin");
+    let second_path = output_dir.join("part-1.bin");
+    std::fs::write(&first_path, [0, 1, 2, 3]).unwrap();
+    std::fs::write(&second_path, [0xff, 5, 6, 7, 8, 9]).unwrap();
+
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        check_integrity: true,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9104),
+        &torrent_data,
+        &options,
+        Some(output_dir.to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("multi-file integrity check timed out")
+        .expect("multi-file integrity repair failed");
+
+    assert_eq!(peer.requested_pieces().await, vec![0]);
+    assert_eq!(std::fs::read(first_path).unwrap(), [0, 1, 2, 3]);
+    assert_eq!(std::fs::read(second_path).unwrap(), [4, 5, 6, 7, 8, 9]);
+}
+
+#[tokio::test]
+async fn test_e2e_bt_select_file_downloads_cross_boundary_piece_and_removes_unselected_file() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_multi_file_test_torrent(
+        "multi-selective",
+        &[4, 6],
+        6,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, 6, 10), expected_piece_data(1, 6, 10)],
+    )
+    .await;
+    drop(tracker_placeholder);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data =
+        build_multi_file_test_torrent("multi-selective", &[4, 6], 6, &tracker.announce_url());
+    let output_dir = dir.path();
+    let unselected_path = output_dir.join("part-0.bin");
+    let selected_path = output_dir.join("part-1.bin");
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        file_allocation: Some("none".to_string()),
+        select_file: Some("2".to_string()),
+        bt_remove_unselected_file: true,
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9105),
+        &torrent_data,
+        &options,
+        Some(output_dir.to_str().unwrap()),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("selective multi-file download timed out")
+        .expect("selective multi-file download failed");
+
+    let mut requested = peer.requested_pieces().await;
+    requested.sort_unstable();
+    requested.dedup();
+    assert_eq!(
+        requested,
+        vec![0, 1],
+        "the selected second file needs both the crossing and final piece"
+    );
+    assert!(
+        !unselected_path.exists(),
+        "bt-remove-unselected-file must remove the unselected file after success"
+    );
+    assert_eq!(
+        std::fs::read(selected_path).unwrap(),
+        [4, 5, 6, 7, 8, 9],
+        "the selected file must retain bytes from the cross-file pieces"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_complete_integrity_honors_hash_check_controls() {
+    use aria2_core::util::rwlock_ext::RwLockRecover;
+
+    let listener = Arc::new(RecordingBtEvents::default());
+    DownloadEventHooks::shared().add_listener(listener.clone());
+
+    for (gid, hook_enabled) in [(9101, true), (9102, false)] {
+        let dir = tmp_dir();
+        let tracker = MockTrackerServer::start(0).await;
+        let torrent_data =
+            build_test_torrent("complete-integrity.bin", 1024, 512, &tracker.announce_url());
+        let output_path = dir.path().join("complete-integrity.bin");
+        std::fs::write(
+            &output_path,
+            [
+                expected_piece_data(0, 512, 1024),
+                expected_piece_data(1, 512, 1024),
+            ]
+            .concat(),
+        )
+        .unwrap();
+
+        let options = DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            check_integrity: true,
+            file_allocation: Some("none".to_string()),
+            bt_hash_check_seed: false,
+            bt_enable_hook_after_hash_check: hook_enabled,
+            ..DownloadOptions::default()
+        };
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(gid),
+            &torrent_data,
+            &options,
+            Some(dir.path().to_str().unwrap()),
+        )
+        .unwrap();
+        let group = command.group_handle();
+        tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+            .await
+            .expect("complete integrity check timed out")
+            .expect("complete integrity check failed");
+
+        assert!(group.recover().status().is_completed());
+        assert_eq!(std::fs::read(&output_path).unwrap().len(), 1024);
+        assert!(
+            tracker.captured_queries().await.is_empty(),
+            "bt-hash-check-seed=false must not enter tracker/peer lifecycle"
+        );
+
+        let gid_hex = GroupId::new(gid).to_hex_string();
+        assert_eq!(
+            listener.saw(DownloadEvent::BtComplete, &gid_hex),
+            hook_enabled,
+            "bt-enable-hook-after-hash-check must control the BT completion event"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "complete-integrity-seed.bin",
+        1024,
+        512,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start(
+        meta.info_hash.bytes,
+        vec![
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ],
+    )
+    .await;
+    drop(tracker_placeholder);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent(
+        "complete-integrity-seed.bin",
+        1024,
+        512,
+        &tracker.announce_url(),
+    );
+    let output_path = dir.path().join("complete-integrity-seed.bin");
+    std::fs::write(
+        &output_path,
+        [
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ]
+        .concat(),
+    )
+    .unwrap();
+
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        check_integrity: true,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9103),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("default hash-check seed path timed out")
+        .expect("default hash-check seed path failed");
+
+    assert!(
+        tracker
+            .captured_queries()
+            .await
+            .iter()
+            .any(|query| query.contains("event=started")),
+        "default bt-hash-check-seed=true must enter the tracker lifecycle"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_pause_then_resume_uses_checkpoint() {
+    use aria2_core::request::request_group::DownloadStatus;
+    use aria2_core::util::rwlock_ext::RwLockRecover;
+
+    let dir = tmp_dir();
+    let total_size = 64 * 1024;
+    let piece_length = 16 * 1024;
+    let tracker = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "pause-resume.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let pieces = (0..meta.num_pieces())
+        .map(|index| expected_piece_data(index as u32, piece_length, total_size))
+        .collect();
+    let peer = MockBtPeerServer::start_with_response_delay(
+        meta.info_hash.bytes,
+        pieces,
+        std::time::Duration::from_millis(150),
+    )
+    .await;
+    drop(tracker);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent(
+        "pause-resume.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(105),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let group = cmd.group_handle();
+    let task = tokio::spawn(async move { cmd.execute().await });
+
+    for _ in 0..200 {
+        if !peer.requested_pieces().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    for _ in 0..200 {
+        let persisted_piece = group
+            .recover()
+            .get_bt_bitfield()
+            .is_some_and(|bitfield| bitfield.iter().any(|byte| *byte != 0));
+        if persisted_piece {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    {
+        group.recover_mut().pause().unwrap();
+    }
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("paused BT command timed out")
+        .expect("paused BT task panicked");
+    assert!(result.is_err(), "pause should stop the current command");
+    assert!(group.recover().status().is_paused());
+
+    let output_path = dir.path().join("pause-resume.bin");
+    let control_path = ControlFile::control_path_for(&output_path);
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("pause should write a valid checkpoint")
+        .expect("pause should leave a checkpoint");
+    assert!(
+        control_file.completed_pieces() > 0,
+        "pause should persist at least the piece that finished before the pause"
+    );
+    assert!(control_file.completed_pieces() < 4);
+    let completed = (0..4)
+        .filter(|&index| control_file.is_piece_done(index))
+        .collect::<Vec<_>>();
+    let requests_before_resume = peer.requested_pieces().await.len();
+
+    let mut resumed = BtDownloadCommand::new(
+        GroupId::new(106),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), resumed.execute())
+        .await
+        .expect("resumed BT command timed out")
+        .expect("resumed BT command failed");
+
+    let requests = peer.requested_pieces().await;
+    let resumed_requests = &requests[requests_before_resume..];
+    for index in completed {
+        assert!(
+            !resumed_requests.contains(&(index as u32)),
+            "resumed command requested completed piece {index}: {resumed_requests:?}"
+        );
+    }
+    let expected = (0..total_size)
+        .map(|index| (index % 256) as u8)
+        .collect::<Vec<_>>();
+    assert_eq!(std::fs::read(&output_path).unwrap(), expected);
+    assert!(
+        !control_path.exists(),
+        "completed resume must remove checkpoint"
+    );
+    assert!(matches!(group.recover().status(), DownloadStatus::Paused));
+}
+
+#[tokio::test]
+async fn test_e2e_bt_web_seed_download_and_checkpoint_resume() {
+    use aria2_core::request::request_group::DownloadStatus;
+    use aria2_core::util::rwlock_ext::RwLockRecover;
+
+    let dir = tmp_dir();
+    let total_size = 4096;
+    let piece_length = 512;
+    let data = (0..total_size)
+        .map(|index| (index % 256) as u8)
+        .collect::<Vec<_>>();
+    let web_seed = MockHttpServer::start()
+        .await
+        .expect("web-seed server should start");
+    web_seed.register_slow_range_response("/web-seed.bin", &data, 64, 40);
+
+    let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
+    let web_seed_url = format!("{}/web-seed.bin", web_seed.base_url());
+    let torrent_data = build_test_torrent_with_web_seeds(
+        "web-seed.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+        std::slice::from_ref(&web_seed_url),
+    );
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(107),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let group = command.group_handle();
+    let task = tokio::spawn(async move { command.execute().await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if web_seed
+                .take_request_log()
+                .iter()
+                .any(|request| request.path == "/web-seed.bin")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("web-seed request did not start");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if group
+                .recover()
+                .get_bt_bitfield()
+                .is_some_and(|bitfield| bitfield.iter().any(|byte| *byte != 0))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("web-seed piece did not persist before pause");
+
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("paused web-seed command timed out")
+        .expect("paused web-seed task panicked");
+    assert!(result.is_err(), "pause should stop the web-seed command");
+    assert!(matches!(group.recover().status(), DownloadStatus::Paused));
+
+    let output_path = dir.path().join("web-seed.bin");
+    let control_path = ControlFile::control_path_for(&output_path);
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("web-seed pause should write a valid checkpoint")
+        .expect("web-seed pause should leave a checkpoint");
+    assert!(control_file.is_torrent_checkpoint());
+    assert!(control_file.completed_pieces() > 0);
+    assert!(control_file.completed_pieces() < 8);
+
+    let mut resumed = BtDownloadCommand::new(
+        GroupId::new(108),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(20), resumed.execute())
+        .await
+        .expect("resumed web-seed command timed out")
+        .expect("resumed web-seed command failed");
+
+    assert_eq!(std::fs::read(&output_path).unwrap(), data);
+    assert!(!control_path.exists());
 }
 
 #[tokio::test]
@@ -408,6 +1074,10 @@ async fn test_e2e_bt_small_torrent_download() {
         &data[1020..],
         &[252u8, 253, 254, 255],
         "内容最后4字节应为252,253,254,255"
+    );
+    assert!(
+        !ControlFile::control_path_for(&output_path).exists(),
+        "completed BT downloads must remove their Rust checkpoint"
     );
 }
 

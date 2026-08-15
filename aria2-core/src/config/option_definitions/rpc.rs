@@ -50,6 +50,7 @@ impl crate::config::OptionRegistry {
             short_name: Some('I'),
             description: "RPC secret token for authorization".into(),
             category: OptionCategory::Rpc,
+            allow_empty: false,
             // C++ `GetGlobalOptionRpcMethod` explicitly omits this value.
             expose_in_aria2_rpc: false,
             ..Default::default()
@@ -59,6 +60,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::String,
             description: "RPC Basic Auth username".into(),
             category: OptionCategory::Rpc,
+            deprecated: true,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -66,6 +68,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::String,
             description: "RPC Basic Auth password".into(),
             category: OptionCategory::Rpc,
+            deprecated: true,
             ..Default::default()
         });
 

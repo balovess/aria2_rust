@@ -5,7 +5,9 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
-use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{AnnounceResponse, UdpEvent};
+use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
+    AnnounceResponse, UdpError, UdpEvent,
+};
 
 use crate::engine::udp_tracker_client::SharedUdpClient;
 
@@ -184,6 +186,10 @@ impl UdpTrackerManager {
         results
     }
 
+    pub async fn last_announce_error(&self) -> Option<UdpError> {
+        self.client.lock().await.completed_announce_error()
+    }
+
     fn advance_tier(&mut self) {
         if !self.endpoints.is_empty() {
             self.current_tier = (self.current_tier + 1) % self.endpoints.len();
@@ -193,6 +199,15 @@ impl UdpTrackerManager {
 
     pub fn endpoint_count(&self) -> usize {
         self.endpoints.len()
+    }
+
+    pub async fn use_tracker_url(&mut self, url: &str) {
+        if self.endpoints.len() != 1 || self.endpoints[0].url != url {
+            self.endpoints.clear();
+            self.current_tier = 0;
+            self.parse_tracker_urls(&[url.to_string()]);
+        }
+        self.client.lock().await.clear_completed_requests();
     }
 
     pub fn get_announce_interval(&self) -> u32 {

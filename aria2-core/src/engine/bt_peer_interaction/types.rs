@@ -6,6 +6,20 @@
 use crate::engine::bt_message_dispatcher::{InactiveReason, RequestSlot};
 use crate::engine::extension_registry::ExtensionUpdate;
 
+/// Outbound BitTorrent crypto policy resolved from the original option names.
+///
+/// Keeping the policy typed at the connection boundary prevents each caller
+/// from reinterpreting the related encryption options independently.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BtPeerCryptoPolicy {
+    /// Do not fall back to the legacy unencrypted handshake.
+    pub require_mse: bool,
+    /// Require RC4 after MSE negotiation.
+    pub force_encryption: bool,
+    /// Prefer RC4 when the peer offers both MSE methods.
+    pub prefer_encryption: bool,
+}
+
 // ======================================================================
 // Constants (matching C++ aria2)
 // ======================================================================

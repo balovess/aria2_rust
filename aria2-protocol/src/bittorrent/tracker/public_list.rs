@@ -1,9 +1,19 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
+
+use crate::http::client::ensure_ring_provider;
+
+pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
+pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(86_400);
+const TRACKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_BACKOFF: Duration = Duration::from_secs(3_600);
+const REMOTE_TEMPORARY_BACKOFF: Duration = Duration::from_secs(30);
 
 const EMBEDDED_TRACKER_LIST: &str = "http://1337.abcvg.info:80/announce
 http://lucke.fenesisu.moe:6969/announce
@@ -89,6 +99,22 @@ pub enum TrackerProtocol {
     Wss,
 }
 
+/// Failure categories used to keep local connectivity problems out of the
+/// process-wide public tracker health state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackerFailureKind {
+    /// DNS, socket, proxy, or TLS failures where the tracker was not reached.
+    Network,
+    /// The request or response timed out without a tracker-level response.
+    Timeout,
+    /// The tracker responded with a temporary server-side status.
+    RemoteTemporary,
+    /// The tracker explicitly rejected the announce.
+    TrackerRejected,
+    /// The remote response was not a valid tracker response.
+    MalformedResponse,
+}
+
 impl TrackerProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -100,7 +126,7 @@ impl TrackerProtocol {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerEntry {
     pub url: String,
     pub protocol: TrackerProtocol,
@@ -108,18 +134,53 @@ pub struct TrackerEntry {
     pub port: u16,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackerCatalogConfig {
+    pub enabled: bool,
+    pub sources: Vec<String>,
+    pub update_interval: Duration,
+}
+
+impl Default for TrackerCatalogConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sources: vec![DEFAULT_TRACKER_SOURCE.to_string()],
+            update_interval: DEFAULT_TRACKER_UPDATE_INTERVAL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrackerHealth {
+    consecutive_failures: u32,
+    next_retry: Option<Instant>,
+    successes: u64,
+    failures: u64,
+}
+
 pub struct PublicTrackerListStats {
     pub total_entries: usize,
     pub http_count: usize,
     pub udp_count: usize,
+    pub wss_count: usize,
     pub is_embedded_fallback: bool,
     pub last_updated: Option<Duration>,
+    pub sources: Vec<String>,
+    pub disabled: bool,
 }
 
 pub struct PublicTrackerList {
-    entries: tokio::sync::RwLock<Vec<TrackerEntry>>,
+    entries: tokio::sync::RwLock<Arc<Vec<TrackerEntry>>>,
+    source_entries: tokio::sync::RwLock<HashMap<String, Vec<TrackerEntry>>>,
+    http_client: reqwest::Client,
+    config: tokio::sync::RwLock<TrackerCatalogConfig>,
+    health: Mutex<HashMap<String, TrackerHealth>>,
     last_updated: tokio::sync::RwLock<Option<Instant>>,
+    last_refresh_error: tokio::sync::RwLock<Option<String>>,
     running: AtomicBool,
+    update_started: AtomicBool,
+    config_changed: Notify,
 }
 
 impl Default for PublicTrackerList {
@@ -130,31 +191,113 @@ impl Default for PublicTrackerList {
 
 impl PublicTrackerList {
     pub fn new() -> Self {
+        Self::new_with_config(TrackerCatalogConfig::default())
+    }
+
+    pub fn new_with_config(config: TrackerCatalogConfig) -> Self {
         let entries = Self::parse(EMBEDDED_TRACKER_LIST);
+        ensure_ring_provider();
+        let http_client = reqwest::Client::builder()
+            .timeout(TRACKER_REQUEST_TIMEOUT)
+            .build()
+            .expect("public tracker HTTP client should be constructible");
         Self {
-            entries: tokio::sync::RwLock::new(entries),
+            entries: tokio::sync::RwLock::new(Arc::new(entries)),
+            source_entries: tokio::sync::RwLock::new(HashMap::new()),
+            http_client,
+            config: tokio::sync::RwLock::new(config),
+            health: Mutex::new(HashMap::new()),
             last_updated: tokio::sync::RwLock::new(Some(Instant::now())),
+            last_refresh_error: tokio::sync::RwLock::new(None),
             running: AtomicBool::new(true),
+            update_started: AtomicBool::new(false),
+            config_changed: Notify::new(),
         }
     }
 
     pub fn parse(text: &str) -> Vec<TrackerEntry> {
         let mut result = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for line in text.lines() {
             let trimmed = line.trim();
-            if trimmed.is_empty() || !trimmed.contains("://") {
+            if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.contains("://") {
                 continue;
             }
 
-            if let Some(entry) = parse_single_tracker_url(trimmed) {
+            if let Some(entry) =
+                normalize_tracker_url(trimmed).and_then(|url| parse_single_tracker_url(&url))
+                && seen.insert(entry.url.clone())
+            {
                 result.push(entry);
             }
         }
         result
     }
 
+    pub async fn config(&self) -> TrackerCatalogConfig {
+        self.config.read().await.clone()
+    }
+
+    pub async fn set_config(&self, mut config: TrackerCatalogConfig) {
+        config.sources = normalize_sources(config.sources);
+        if config.update_interval.is_zero() {
+            config.update_interval = DEFAULT_TRACKER_UPDATE_INTERVAL;
+        }
+        *self.config.write().await = config;
+        self.config_changed.notify_one();
+    }
+
+    /// Apply configuration synchronously before the engine starts.
+    ///
+    /// Engine construction happens before its event loop is spawned, so using
+    /// a blocking task here would introduce a race with the first download.
+    pub fn set_config_now(&self, mut config: TrackerCatalogConfig) {
+        config.sources = normalize_sources(config.sources);
+        if config.update_interval.is_zero() {
+            config.update_interval = DEFAULT_TRACKER_UPDATE_INTERVAL;
+        }
+        *self
+            .config
+            .try_write()
+            .expect("public tracker config must not be held during engine setup") = config;
+        self.config_changed.notify_one();
+    }
+
+    pub async fn sources(&self) -> Vec<String> {
+        self.config.read().await.sources.clone()
+    }
+
+    pub async fn contains(&self, url: &str) -> bool {
+        self.snapshot().await.iter().any(|entry| entry.url == url)
+    }
+
+    pub async fn snapshot(&self) -> Arc<Vec<TrackerEntry>> {
+        self.entries.read().await.clone()
+    }
+
+    pub async fn available_snapshot(&self) -> Arc<Vec<TrackerEntry>> {
+        if !self.config.read().await.enabled {
+            return Arc::new(Vec::new());
+        }
+        let entries = self.snapshot().await;
+        let now = Instant::now();
+        let health = self.health.lock().await;
+        Arc::new(
+            entries
+                .iter()
+                .filter(|entry| {
+                    health
+                        .get(&entry.url)
+                        .and_then(|state| state.next_retry)
+                        .is_none_or(|retry_at| retry_at <= now)
+                })
+                .cloned()
+                .collect(),
+        )
+    }
+
     pub async fn get_http_trackers(&self) -> Vec<String> {
-        let entries = self.entries.read().await;
+        let entries = self.available_snapshot().await;
         entries
             .iter()
             .filter(|e| e.protocol == TrackerProtocol::Http || e.protocol == TrackerProtocol::Https)
@@ -163,7 +306,7 @@ impl PublicTrackerList {
     }
 
     pub async fn get_udp_trackers(&self) -> Vec<String> {
-        let entries = self.entries.read().await;
+        let entries = self.available_snapshot().await;
         entries
             .iter()
             .filter(|e| e.protocol == TrackerProtocol::Udp)
@@ -172,67 +315,187 @@ impl PublicTrackerList {
     }
 
     pub async fn get_all(&self) -> Vec<TrackerEntry> {
-        self.entries.read().await.clone()
+        self.snapshot().await.as_ref().clone()
     }
 
     pub async fn fetch_and_update(&self, url: &str) -> Result<usize, String> {
-        debug!("Fetching public tracker list from {}", url);
-
-        let resp = reqwest::get(url)
+        let entries = fetch_tracker_source(&self.http_client, url).await?;
+        self.source_entries
+            .write()
             .await
-            .map_err(|e| format!("HTTP GET failed: {}", e))?;
-
-        if !resp.status().is_success() {
-            return Err(format!("HTTP error: {}", resp.status()));
-        }
-
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| format!("Read body failed: {}", e))?;
-
-        let new_entries = Self::parse(&text);
-        if new_entries.is_empty() {
-            return Err("Parsed 0 entries from response".to_string());
-        }
-
-        let count = new_entries.len();
-        *self.entries.write().await = new_entries;
-        *self.last_updated.write().await = Some(Instant::now());
-
-        info!(
-            "Public tracker list updated from {}: {} trackers",
-            url, count
-        );
-        Ok(count)
+            .insert(url.to_string(), entries);
+        self.merge_source_snapshots().await
     }
 
     pub fn start_auto_update(self: &Arc<Self>, url: String, interval: Duration) {
-        let e = Arc::clone(self);
+        self.set_config_now(TrackerCatalogConfig {
+            enabled: true,
+            sources: vec![url],
+            update_interval: interval,
+        });
+        self.start_catalog_update();
+    }
 
+    pub fn start_catalog_update(self: &Arc<Self>) {
+        if self.update_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let catalog = Arc::clone(self);
         tokio::spawn(async move {
-            loop {
-                sleep(interval).await;
-
-                if !e.running.load(Ordering::Relaxed) {
-                    break;
+            while catalog.running.load(Ordering::Relaxed) {
+                let config = catalog.config().await;
+                if config.enabled
+                    && let Err(error) = catalog.refresh().await
+                {
+                    warn!("Public tracker catalog refresh failed: {}", error);
                 }
-
-                match e.fetch_and_update(&url).await {
-                    Ok(n) => debug!("Auto-update: refreshed {} public trackers", n),
-                    Err(err) => warn!("Auto-update fetch failed (keeping current list): {}", err),
+                let sleep = sleep(config.update_interval);
+                tokio::pin!(sleep);
+                tokio::select! {
+                    _ = &mut sleep => {},
+                    _ = catalog.config_changed.notified() => {},
                 }
             }
-            info!("Public tracker auto-update loop exited");
+            info!("Public tracker catalog update loop exited");
         });
+    }
+
+    pub async fn refresh(&self) -> Result<usize, String> {
+        let config = self.config().await;
+        if !config.enabled {
+            return Ok(0);
+        }
+        let sources = normalize_sources(config.sources);
+        if sources.is_empty() {
+            return Err("No public tracker sources configured".to_string());
+        }
+
+        let client = self.http_client.clone();
+        let results = futures::future::join_all(
+            sources
+                .iter()
+                .map(|source| fetch_tracker_source(&client, source)),
+        )
+        .await;
+        let mut errors = Vec::new();
+        let mut source_entries = self.source_entries.write().await;
+        source_entries.retain(|source, _| sources.contains(source));
+        for (source, result) in sources.iter().zip(results) {
+            match result {
+                Ok(entries) => {
+                    source_entries.insert(source.clone(), entries);
+                }
+                Err(error) => errors.push(format!("{}: {}", source, error)),
+            }
+        }
+        let has_source_snapshot = !source_entries.is_empty();
+        drop(source_entries);
+
+        if !has_source_snapshot {
+            let error = errors.join("; ");
+            *self.last_refresh_error.write().await = Some(error.clone());
+            return Err(if error.is_empty() {
+                "All public tracker sources returned no valid trackers".to_string()
+            } else {
+                error
+            });
+        }
+
+        let count = self.merge_source_snapshots().await?;
+        *self.last_refresh_error.write().await = (!errors.is_empty()).then_some(errors.join("; "));
+        Ok(count)
+    }
+
+    async fn merge_source_snapshots(&self) -> Result<usize, String> {
+        let source_entries = self.source_entries.read().await;
+        let mut merged = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for entries in source_entries.values() {
+            for entry in entries {
+                if seen.insert(entry.url.clone()) {
+                    merged.push(entry.clone());
+                }
+            }
+        }
+        drop(source_entries);
+        self.replace_snapshot(merged).await
+    }
+
+    async fn replace_snapshot(&self, entries: Vec<TrackerEntry>) -> Result<usize, String> {
+        if entries.is_empty() {
+            return Err("Parsed 0 entries from response".to_string());
+        }
+        let count = entries.len();
+        *self.entries.write().await = Arc::new(entries);
+        let current_urls: std::collections::HashSet<_> = self
+            .entries
+            .read()
+            .await
+            .iter()
+            .map(|entry| entry.url.clone())
+            .collect();
+        self.health
+            .lock()
+            .await
+            .retain(|url, _| current_urls.contains(url));
+        *self.last_updated.write().await = Some(Instant::now());
+        info!("Public tracker catalog updated: {} trackers", count);
+        Ok(count)
+    }
+
+    pub async fn record_success(&self, url: &str) {
+        let mut health = self.health.lock().await;
+        let state = health.entry(url.to_string()).or_default();
+        state.consecutive_failures = 0;
+        state.next_retry = None;
+        state.successes = state.successes.saturating_add(1);
+    }
+
+    pub async fn record_failure(&self, url: &str) {
+        self.record_failure_kind(url, TrackerFailureKind::RemoteTemporary)
+            .await;
+    }
+
+    /// Record a classified announce failure.
+    ///
+    /// Local failures are deliberately telemetry-only at catalog scope. A
+    /// caller's DNS outage, offline connection, or timeout must not hide a
+    /// tracker from unrelated downloads in the same process.
+    pub async fn record_failure_kind(&self, url: &str, kind: TrackerFailureKind) {
+        let mut health = self.health.lock().await;
+        let state = health.entry(url.to_string()).or_default();
+        state.failures = state.failures.saturating_add(1);
+
+        let (consecutive_failures, base_backoff) = match kind {
+            TrackerFailureKind::Network | TrackerFailureKind::Timeout => return,
+            TrackerFailureKind::RemoteTemporary => (
+                state.consecutive_failures.saturating_add(1),
+                REMOTE_TEMPORARY_BACKOFF,
+            ),
+            TrackerFailureKind::MalformedResponse => return,
+            TrackerFailureKind::TrackerRejected => return,
+        };
+
+        state.consecutive_failures = consecutive_failures;
+        let exponent = consecutive_failures.saturating_sub(1).min(10);
+        let backoff = base_backoff
+            .checked_mul(1u32 << exponent)
+            .unwrap_or(MAX_BACKOFF)
+            .min(MAX_BACKOFF);
+        state.next_retry = Some(Instant::now() + backoff);
+    }
+
+    pub async fn last_refresh_error(&self) -> Option<String> {
+        self.last_refresh_error.read().await.clone()
     }
 
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::Relaxed);
+        self.config_changed.notify_one();
     }
 
     pub async fn stats(&self) -> PublicTrackerListStats {
-        let entries = self.entries.read().await;
+        let entries = self.snapshot().await;
         let http_count = entries
             .iter()
             .filter(|e| matches!(e.protocol, TrackerProtocol::Http | TrackerProtocol::Https))
@@ -240,6 +503,10 @@ impl PublicTrackerList {
         let udp_count = entries
             .iter()
             .filter(|e| e.protocol == TrackerProtocol::Udp)
+            .count();
+        let wss_count = entries
+            .iter()
+            .filter(|e| e.protocol == TrackerProtocol::Wss)
             .count();
 
         let embedded = EMBEDDED_TRACKER_LIST
@@ -251,64 +518,105 @@ impl PublicTrackerList {
             total_entries: entries.len(),
             http_count,
             udp_count,
+            wss_count,
             is_embedded_fallback: entries.len() == embedded,
             last_updated: self.last_updated.read().await.map(|t| t.elapsed()),
+            sources: self.sources().await,
+            disabled: !self.config.read().await.enabled,
         }
     }
 }
 
+async fn fetch_tracker_source(
+    client: &reqwest::Client,
+    source: &str,
+) -> Result<Vec<TrackerEntry>, String> {
+    debug!("Fetching public tracker list from {}", source);
+    let response = client
+        .get(source)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP GET failed: {}", e))?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP error: {}", response.status()));
+    }
+    let body = response
+        .text()
+        .await
+        .map_err(|e| format!("Read body failed: {}", e))?;
+    let entries = PublicTrackerList::parse(&body);
+    if entries.is_empty() {
+        return Err("Parsed 0 entries from response".to_string());
+    }
+    Ok(entries)
+}
+
+fn normalize_sources(sources: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    sources
+        .into_iter()
+        .flat_map(|source| {
+            source
+                .split([',', '\n'])
+                .map(str::trim)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|source| !source.is_empty() && seen.insert(source.clone()))
+        .collect()
+}
+
+fn normalize_tracker_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let parsed = url::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https" | "udp" | "wss") {
+        return None;
+    }
+    if parsed.host_str()?.is_empty() {
+        return None;
+    }
+    if !parsed.path().is_empty() && parsed.path() != "/announce" && parsed.path() != "/announce/" {
+        return None;
+    }
+    let without_fragment = raw.split('#').next().unwrap_or(raw);
+    if parsed.path().is_empty() {
+        Some(format!("{without_fragment}/announce"))
+    } else if parsed.path() == "/announce/" {
+        Some(without_fragment.trim_end_matches('/').to_string())
+    } else {
+        Some(without_fragment.to_string())
+    }
+}
+
 fn parse_single_tracker_url(url: &str) -> Option<TrackerEntry> {
-    let protocol = if url.starts_with("https://") {
+    let parsed = url::Url::parse(url).ok()?;
+    let protocol = if parsed.scheme() == "https" {
         TrackerProtocol::Https
-    } else if url.starts_with("http://") {
+    } else if parsed.scheme() == "http" {
         TrackerProtocol::Http
-    } else if url.starts_with("udp://") {
+    } else if parsed.scheme() == "udp" {
         TrackerProtocol::Udp
-    } else if url.starts_with("wss://") {
+    } else if parsed.scheme() == "wss" {
         TrackerProtocol::Wss
     } else {
         return None;
     };
 
-    let after_proto = url.find("://")? + 3;
-    let rest = &url[after_proto..];
-
-    let host_end = rest.find('/')?;
-    let addr_part = &rest[..host_end];
-    let path = &rest[host_end..];
-
-    if path != "/announce" && path != "/announce/" {
-        return None;
-    }
-
-    let (_host_str, default_port): (&str, u16) = match protocol {
-        TrackerProtocol::Http => ("http", 80),
-        TrackerProtocol::Https => ("https", 443),
-        TrackerProtocol::Udp => ("udp", 6969),
-        TrackerProtocol::Wss => ("wss", 443),
+    let default_port = match protocol {
+        TrackerProtocol::Http => 80,
+        TrackerProtocol::Https | TrackerProtocol::Wss => 443,
+        TrackerProtocol::Udp => 6969,
     };
-
-    let port = if let Some(colon_pos) = addr_part.rfind(':') {
-        let port_str = &addr_part[colon_pos + 1..];
-        port_str.parse::<u16>().unwrap_or(default_port)
-    } else {
-        default_port
-    };
-
-    let host = if let Some(colon_pos) = addr_part.rfind(':') {
-        &addr_part[..colon_pos]
-    } else {
-        addr_part
-    };
-
-    if host.is_empty() || port == 0 {
+    let host = parsed.host_str()?.to_string();
+    let port = parsed.port().unwrap_or(default_port);
+    if host.is_empty() || port == 0 || parsed.path() != "/announce" {
         return None;
     }
 
     Some(TrackerEntry {
         url: url.to_string(),
         protocol,
-        host: host.to_string(),
+        host,
         port,
     })
 }
@@ -411,6 +719,127 @@ mod tests {
             all.len(),
             embedded_count,
             "default instance should use all embedded entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_catalog_has_no_available_trackers() {
+        let ptl = PublicTrackerList::new();
+        ptl.set_config(TrackerCatalogConfig {
+            enabled: false,
+            sources: Vec::new(),
+            update_interval: Duration::from_secs(60),
+        })
+        .await;
+
+        assert!(ptl.available_snapshot().await.is_empty());
+        assert!(ptl.get_http_trackers().await.is_empty());
+        assert!(ptl.get_udp_trackers().await.is_empty());
+        assert!(
+            !ptl.get_all().await.is_empty(),
+            "disabling availability must not erase the catalog snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn reenabled_catalog_exposes_existing_snapshot() {
+        let ptl = PublicTrackerList::new();
+        ptl.set_config(TrackerCatalogConfig {
+            enabled: false,
+            sources: Vec::new(),
+            update_interval: Duration::from_secs(60),
+        })
+        .await;
+        ptl.set_config(TrackerCatalogConfig {
+            enabled: true,
+            sources: Vec::new(),
+            update_interval: Duration::from_secs(60),
+        })
+        .await;
+
+        assert!(!ptl.available_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tracker_backoff_preserves_catalog_and_success_recovers() {
+        let ptl = PublicTrackerList::new();
+        let entry = PublicTrackerList::parse("http://unhealthy.example/announce")
+            .into_iter()
+            .next()
+            .expect("test tracker should parse");
+        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
+
+        ptl.record_failure(&entry.url).await;
+        ptl.record_failure(&entry.url).await;
+        assert!(ptl.contains(&entry.url).await);
+        ptl.record_failure(&entry.url).await;
+
+        assert!(ptl.contains(&entry.url).await);
+        assert!(ptl.available_snapshot().await.is_empty());
+
+        ptl.record_success(&entry.url).await;
+        assert!(!ptl.available_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_failures_do_not_cool_or_remove_tracker() {
+        let ptl = PublicTrackerList::new();
+        let entry = PublicTrackerList::parse("http://local-network.example/announce")
+            .into_iter()
+            .next()
+            .expect("test tracker should parse");
+        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
+
+        ptl.record_failure_kind(&entry.url, TrackerFailureKind::Network)
+            .await;
+        ptl.record_failure_kind(&entry.url, TrackerFailureKind::Timeout)
+            .await;
+
+        assert!(ptl.contains(&entry.url).await);
+        assert!(
+            ptl.available_snapshot()
+                .await
+                .iter()
+                .any(|candidate| candidate.url == entry.url)
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_temporary_failure_is_retriable_and_preserves_catalog() {
+        let ptl = PublicTrackerList::new();
+        let entry = PublicTrackerList::parse("http://temporary.example/announce")
+            .into_iter()
+            .next()
+            .expect("test tracker should parse");
+        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
+
+        ptl.record_failure_kind(&entry.url, TrackerFailureKind::RemoteTemporary)
+            .await;
+
+        assert!(ptl.contains(&entry.url).await);
+        assert!(ptl.available_snapshot().await.is_empty());
+        ptl.record_success(&entry.url).await;
+        assert!(!ptl.available_snapshot().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_tracker_failure_does_not_hide_or_remove_tracker() {
+        let ptl = PublicTrackerList::new();
+        let entry = PublicTrackerList::parse("http://rejected.example/announce")
+            .into_iter()
+            .next()
+            .expect("test tracker should parse");
+        ptl.replace_snapshot(vec![entry.clone()]).await.unwrap();
+
+        ptl.record_failure_kind(&entry.url, TrackerFailureKind::TrackerRejected)
+            .await;
+
+        assert!(ptl.contains(&entry.url).await);
+        assert!(
+            ptl.available_snapshot()
+                .await
+                .iter()
+                .any(|candidate| candidate.url == entry.url)
         );
     }
 

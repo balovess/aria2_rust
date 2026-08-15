@@ -30,6 +30,3 @@ pub use peer_conn::BtPeerConn;
 pub use session_resource::PeerSessionResource;
 pub use types::{ConnectionType, SendBuffer};
 pub use utp_connection::UtpPeerConnection;
-
-// crate-visible re-export: InnerConnection was pub(crate) in the original file.
-pub(crate) use peer_conn::InnerConnection;

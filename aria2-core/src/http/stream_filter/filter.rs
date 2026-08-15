@@ -3,7 +3,7 @@
 //! Provides composable stream data filter processing functions and
 //! automatic filter selection based on HTTP headers.
 
-use crate::error::Result;
+use crate::error::{Aria2Error, Result};
 use crate::http::stream_filter::bzip2::BZip2Decoder;
 use crate::http::stream_filter::chunked::ChunkedDecoder;
 use crate::http::stream_filter::deflate::DeflateDecoder;
@@ -43,8 +43,9 @@ pub fn flush_filters(filters: &mut [Box<dyn StreamFilter>]) -> Result<Vec<u8>> {
 
 /// HTTP content encoding auto-selector
 ///
-/// Automatically selects appropriate decoder filter list based on HTTP headers.
-/// Follows RFC 7230 Section 3.3.1: Transfer-Encoding takes priority over Content-Encoding.
+/// Automatically selects appropriate decoder filters based on HTTP headers.
+/// Transfer decoding runs before content decoding, matching the original
+/// response pipeline.
 ///
 /// # Priority Rules
 ///
@@ -59,127 +60,68 @@ pub fn flush_filters(filters: &mut [Box<dyn StreamFilter>]) -> Result<Vec<u8>> {
 /// use aria2_core::http::stream_filter::AutoFilterSelector;
 ///
 /// // Auto-select GZip decoder based on Content-Encoding: gzip
-/// let filters = AutoFilterSelector::select_filters(Some("gzip"), None);
+/// let filters = AutoFilterSelector::select_filters(Some("gzip"), None).unwrap();
 /// assert_eq!(filters.len(), 1);
 ///
-/// // Transfer-Encoding takes priority
-/// let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
-/// assert_eq!(filters.len(), 1); // Only chunked
+/// // Transfer-Encoding is decoded before Content-Encoding
+/// let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked")).unwrap();
+/// assert_eq!(filters.len(), 2);
 /// ```
 pub struct AutoFilterSelector;
 
 impl AutoFilterSelector {
-    /// Create appropriate filter list based on HTTP headers
+    /// Build a response filter chain while validating wire-level transfer
+    /// encoding.
     ///
-    /// Automatically analyzes Content-Encoding and Transfer-Encoding headers,
-    /// constructing corresponding decoder filters.
-    ///
-    /// # Arguments
-    ///
-    /// * `content_encoding` - Value of Content-Encoding header (optional)
-    /// * `transfer_encoding` - Value of Transfer-Encoding header (optional)
-    ///
-    /// # Returns
-    ///
-    /// Configured filter list
-    ///
-    /// # RFC Compliance
-    ///
-    /// Follows RFC 7230 Section 3.3.1:
-    /// - Transfer-Encoding has higher priority than Content-Encoding
-    /// - Multiple encoding values are processed in order (comma-separated)
+    /// The original aria2 response path supports exactly one transfer
+    /// encoding: case-insensitive `chunked`. Transfer decoding runs before
+    /// content decoding when both headers are present. Unsupported declared
+    /// transfer encodings are protocol errors instead of passthrough data.
     pub fn select_filters(
         content_encoding: Option<&str>,
         transfer_encoding: Option<&str>,
-    ) -> Vec<Box<dyn StreamFilter>> {
-        let mut filters: Vec<Box<dyn StreamFilter>> = Vec::new();
+    ) -> Result<Vec<Box<dyn StreamFilter>>> {
+        let mut filters = Self::select_content_encoding_filters(content_encoding);
 
-        // Transfer-Encoding takes priority over Content-Encoding (RFC 7230)
-        if let Some(te) = transfer_encoding {
-            // Parse multiple values (comma-separated)
-            for encoding in te.split(',') {
-                let encoding = encoding.trim().to_lowercase();
-                match encoding.as_str() {
-                    "chunked" => {
-                        filters.push(Box::new(ChunkedDecoder::new()));
-                    }
-                    "gzip" | "x-gzip" => {
-                        filters.push(Box::new(GZipDecoder::new()));
-                    }
-                    "deflate" => {
-                        filters.push(Box::new(DeflateDecoder::new()));
-                    }
-                    "bzip2" | "x-bzip2" => {
-                        filters.push(Box::new(BZip2Decoder::new()));
-                    }
-                    _ => {
-                        // Identity / none encoding -> passthrough (no decoder needed)
-                        if encoding.eq_ignore_ascii_case("identity")
-                            || encoding.eq_ignore_ascii_case("none")
-                        {
-                            continue;
-                        }
-
-                        // LZMA / x-lzma -> log warning, return identity (not yet supported)
-                        if encoding.contains("lzma") {
-                            tracing::warn!(
-                                "LZMA encoding not yet supported, returning passthrough"
-                            );
-                            continue;
-                        }
-
-                        // Brotli (br) -> placeholder for future support
-                        if encoding.eq_ignore_ascii_case("br") {
-                            tracing::debug!("Brotli encoding detected but not yet implemented");
-                            continue;
-                        }
-
-                        tracing::debug!("Unknown transfer encoding: {}", encoding);
-                    }
-                }
+        if let Some(transfer_encoding) = transfer_encoding {
+            let encoding = transfer_encoding.trim();
+            if !encoding.eq_ignore_ascii_case("chunked") {
+                return Err(Aria2Error::HttpProtocol(format!(
+                    "Transfer-Encoding not supported: {transfer_encoding}"
+                )));
             }
-        } else if let Some(ce) = content_encoding {
-            // Only process Content-Encoding when Transfer-Encoding is absent
-            for encoding in ce.split(',') {
-                let encoding = encoding.trim().to_lowercase();
-                match encoding.as_str() {
-                    "gzip" | "x-gzip" => {
-                        filters.push(Box::new(GZipDecoder::new()));
-                    }
-                    "deflate" => {
-                        filters.push(Box::new(DeflateDecoder::new()));
-                    }
-                    "bzip2" | "x-bzip2" => {
-                        filters.push(Box::new(BZip2Decoder::new()));
-                    }
-                    "identity" | "" => {
-                        // identity means no encoding, ignore
-                    }
-                    _ => {
-                        // Identity / none encoding -> passthrough (no decoder needed)
-                        if encoding.eq_ignore_ascii_case("identity")
-                            || encoding.eq_ignore_ascii_case("none")
-                        {
-                            continue;
-                        }
 
-                        // LZMA / x-lzma -> log warning, return identity (not yet supported)
-                        if encoding.contains("lzma") {
-                            tracing::warn!(
-                                "LZMA encoding not yet supported, returning passthrough"
-                            );
-                            continue;
-                        }
+            filters.insert(0, Box::new(ChunkedDecoder::new()));
+        }
 
-                        // Brotli (br) -> placeholder for future support
-                        if encoding.eq_ignore_ascii_case("br") {
-                            tracing::debug!("Brotli encoding detected but not yet implemented");
-                            continue;
-                        }
+        Ok(filters)
+    }
 
-                        tracing::debug!("Unknown content encoding: {}", encoding);
-                    }
+    fn select_content_encoding_filters(
+        content_encoding: Option<&str>,
+    ) -> Vec<Box<dyn StreamFilter>> {
+        let mut filters = Vec::new();
+
+        let Some(content_encoding) = content_encoding else {
+            return filters;
+        };
+
+        for encoding in content_encoding.split(',') {
+            let encoding = encoding.trim().to_lowercase();
+            match encoding.as_str() {
+                "gzip" | "x-gzip" => filters.push(Box::new(GZipDecoder::new())),
+                "deflate" => filters.push(Box::new(DeflateDecoder::new())),
+                "bzip2" | "x-bzip2" => filters.push(Box::new(BZip2Decoder::new())),
+                "identity" | "" | "none" => {}
+                _ if encoding.contains("lzma") => {
+                    tracing::warn!(
+                        "LZMA content encoding not yet supported, returning passthrough"
+                    );
                 }
+                "br" => {
+                    tracing::debug!("Brotli content encoding detected but not yet implemented");
+                }
+                _ => tracing::debug!("Unknown content encoding: {}", encoding),
             }
         }
 

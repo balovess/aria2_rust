@@ -293,8 +293,13 @@ where
                 })
             })?;
 
-        if bytes_read == 0 {
-            break;
+        if bytes_read == 0 || !line.ends_with("\r\n") {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "FTP response ended before CRLF-terminated response was complete"
+                        .into(),
+                },
+            ));
         }
 
         // Check buffer size limit – mirrors C++ FtpConnection strbuf_.size()+size guard
@@ -307,47 +312,83 @@ where
             ));
         }
 
-        let trimmed = line.trim_end();
-        if trimmed.len() < 4 {
-            continue;
-        }
+        let line = &line[..line.len() - 2];
 
-        let response_code: u16 = trimmed[..3].parse().unwrap_or(0);
         if code.is_none() {
-            code = Some(response_code);
+            let response_code = parse_status_line(line)?;
+            code = Some(response_code.0);
+            is_multiline = response_code.1;
+
+            if response_code.1 {
+                message.push_str(response_code.2);
+                message.push('\n');
+                continue;
+            }
+
+            message.push_str(response_code.2);
+            break;
         }
 
-        let sep = trimmed.as_bytes()[3];
-        if sep == b'-' && !is_multiline {
-            is_multiline = true;
-            if trimmed.len() > 4 {
-                message.push_str(&trimmed[4..]);
-            }
-            message.push('\n');
-            continue;
-        }
         if is_multiline {
-            if trimmed.starts_with(&format!("{} ", code.unwrap_or(0))) {
-                if trimmed.len() > 4 {
-                    message.push_str(&trimmed[4..]);
-                }
+            let expected_prefix = format!("{} ", code.expect("multiline response has a code"));
+            if line.starts_with(&expected_prefix) {
+                message.push_str(&line[expected_prefix.len()..]);
                 break;
             }
+
             // RFC 2389 continuation lines are usually prefixed by one space,
             // not by a three-digit response code. Preserve that framing so
             // FEAT consumers can distinguish feature lines from the header.
-            message.push_str(trimmed);
+            message.push_str(line);
             message.push('\n');
             continue;
         }
 
-        if trimmed.len() > 4 {
-            message = trimmed[4..].to_string();
-        }
         break;
     }
 
-    let code_val = code.unwrap_or(0);
+    let code_val = match code {
+        Some(code) => code,
+        None => {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "FTP response ended before a status code was received".into(),
+                },
+            ));
+        }
+    };
     debug!("FTP RESP: {} {}", code_val, message.trim());
     Ok((code_val, message))
+}
+
+/// Parse the first line of an FTP response.
+///
+/// The original client accepts only a three-digit status followed by a space
+/// or `-`; keeping that rule at the shared control seam prevents malformed
+/// replies from becoming the ambiguous status code `0`.
+fn parse_status_line(line: &str) -> Result<(u16, bool, &str)> {
+    if line.len() < 4 {
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::FtpProtocolError {
+                message: format!("Invalid FTP response line: {line:?}"),
+            },
+        ));
+    }
+
+    let bytes = line.as_bytes();
+    if !bytes[..3].iter().all(u8::is_ascii_digit) || !matches!(bytes[3], b' ' | b'-') {
+        return Err(Aria2Error::Recoverable(
+            RecoverableError::FtpProtocolError {
+                message: format!("Invalid FTP response line: {line:?}"),
+            },
+        ));
+    }
+
+    let code = line[..3].parse::<u16>().map_err(|_| {
+        Aria2Error::Recoverable(RecoverableError::FtpProtocolError {
+            message: format!("Invalid FTP response code: {line:?}"),
+        })
+    })?;
+
+    Ok((code, bytes[3] == b'-', &line[4..]))
 }

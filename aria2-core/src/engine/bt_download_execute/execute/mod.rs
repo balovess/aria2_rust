@@ -8,6 +8,20 @@ mod web_seed;
 
 pub use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
 
+pub(crate) fn deduplicate_tracker_tiers(tiers: Vec<Vec<String>>) -> Vec<Vec<String>> {
+    let mut seen = HashSet::new();
+    tiers
+        .into_iter()
+        .filter_map(|tier| {
+            let unique = tier
+                .into_iter()
+                .filter(|url| seen.insert(url.clone()))
+                .collect::<Vec<_>>();
+            (!unique.is_empty()).then_some(unique)
+        })
+        .collect()
+}
+
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -20,6 +34,7 @@ use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::control_file::ControlFile;
+use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -35,10 +50,20 @@ impl BtDownloadCommand {
         };
         while let Ok(incoming) = receiver.try_recv() {
             let endpoint = incoming.endpoint;
-            let mut conn = crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
-                incoming.connection,
-                endpoint,
-            );
+            let mut conn = match incoming.connection {
+                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(
+                    connection,
+                ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
+                    *connection,
+                    endpoint,
+                ),
+                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
+                    connection,
+                ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_encrypted(
+                    *connection,
+                    endpoint,
+                ),
+            };
             let remote_peer_id = conn.remote_peer_id();
             if remote_peer_id == Some(self.local_peer_id)
                 || remote_peer_id.is_some_and(|peer_id| {
@@ -65,6 +90,7 @@ impl BtDownloadCommand {
 #[async_trait]
 impl Command for BtDownloadCommand {
     async fn shutdown(&mut self) {
+        self.dht_periodic_lookup.cancel_pending_lookup().await;
         BtDownloadCommand::shutdown(self).await;
     }
 
@@ -133,6 +159,49 @@ impl Command for BtDownloadCommand {
             .recover()
             .set_control_file_path(ControlFile::control_path_for(&self.output_path));
 
+        // A zero-length torrent has no pieces or peers to acquire. Complete
+        // it after metadata preparation, matching the normal download
+        // lifecycle without entering tracker/peer discovery.
+        if total_size == 0 {
+            self.completed_bytes = 0;
+            self.progress.set_completed_length(0);
+            let payload_exists = self.bt_payload_exists();
+            let checkpoint = crate::engine::bt_checkpoint::BtCheckpoint::open(
+                &self.output_path,
+                payload_exists,
+                total_size,
+                piece_length,
+                num_pieces as usize,
+                meta.info_hash.bytes,
+            )
+            .await?;
+            checkpoint.remove().await?;
+            self.group.recover_mut().complete()?;
+            info!("BT zero-length download completed without peer discovery");
+            return Ok(());
+        }
+
+        let payload_exists = self.bt_payload_exists();
+        let checkpoint = crate::engine::bt_checkpoint::BtCheckpoint::open(
+            &self.output_path,
+            payload_exists,
+            total_size,
+            piece_length,
+            num_pieces as usize,
+            meta.info_hash.bytes,
+        )
+        .await?;
+        self.completed_bytes = if self.check_integrity {
+            0
+        } else {
+            checkpoint.completed_length()
+        };
+        self.progress.set_completed_length(self.completed_bytes);
+        self.group
+            .recover()
+            .set_bt_bitfield(checkpoint.bitfield().map(ToOwned::to_owned));
+        self.checkpoint = Some(checkpoint);
+
         // --check-integrity: verify existing data against the torrent's piece
         // hashes before allocating/downloading (mirrors C++
         // CheckIntegrityMan + CheckIntegrityCommand).
@@ -194,6 +263,45 @@ impl Command for BtDownloadCommand {
                     verified_pieces = verified_piece_indices.len(),
                     "Integrity check completed, proceeding with download"
                 );
+                self.completed_bytes = verified_piece_indices
+                    .iter()
+                    .filter_map(|&index| {
+                        (index < num_pieces as usize).then_some(
+                            total_size
+                                .saturating_sub(index as u64 * piece_length as u64)
+                                .min(piece_length as u64),
+                        )
+                    })
+                    .sum();
+                self.progress.set_completed_length(self.completed_bytes);
+                if let Some(checkpoint) = self.checkpoint.as_mut()
+                    && let Err(error) = checkpoint
+                        .save_verified_pieces(
+                            verified_piece_indices.iter().copied(),
+                            self.completed_bytes,
+                        )
+                        .await
+                {
+                    warn!(%error, "Failed to rewrite BT checkpoint after integrity checking");
+                }
+
+                // A complete integrity check is a distinct lifecycle from a
+                // normal piece download. The original public contract emits
+                // the BT completion hook at this seam and only continues
+                // into peer/seed setup when bt-hash-check-seed is enabled.
+                if verified_piece_indices.len() == num_pieces as usize && !self.hash_check_only {
+                    self.completed_bytes = total_size;
+                    self.progress.set_completed_length(total_size);
+                    self.hash_check_completed = true;
+                    self.bt_complete_event_emitted = true;
+                    if self.bt_enable_hook_after_hash_check {
+                        crate::engine::download_event_hooks::DownloadEventHooks::shared()
+                            .fire_event(
+                                crate::engine::download_event_hooks::DownloadEvent::BtComplete,
+                                &self.group.recover(),
+                            );
+                    }
+                }
             }
         }
 
@@ -202,6 +310,9 @@ impl Command for BtDownloadCommand {
             if self.check_integrity && verified_piece_indices.len() == num_pieces as usize {
                 self.completed_bytes = total_size;
                 self.progress.set_completed_length(total_size);
+                if let Some(checkpoint) = self.checkpoint.take() {
+                    checkpoint.remove().await?;
+                }
                 self.group.recover_mut().complete()?;
                 info!("hash-check-only completed successfully");
                 return Ok(());
@@ -209,6 +320,18 @@ impl Command for BtDownloadCommand {
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "hash-check-only: existing data failed torrent piece hash validation".into(),
             )));
+        }
+
+        // A successful integrity check with seeding disabled is already a
+        // complete download. Finish locally instead of discovering peers or
+        // announcing a new torrent session.
+        if self.hash_check_completed && !self.bt_hash_check_seed {
+            info!(
+                "Integrity check completed; bt-hash-check-seed disabled, stopping without seeding"
+            );
+            let started_at = self.started_at.unwrap_or_else(Instant::now);
+            self.finalize_download(started_at, &meta).await?;
+            return Ok(());
         }
 
         // File pre-allocation (mirrors C++ BtFileAllocationEntry queued into
@@ -275,11 +398,16 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        // BtSetup/PeerListenCommand counterpart: create the session-scoped
-        // listener before discovery so a torrent with no initial peers can
-        // still accept an incoming connection.
+        // BtSetup/PeerListenCommand counterpart: register this torrent on the
+        // engine-owned listener before discovery so one socket can serve all
+        // active torrents and route by info-hash.
         if self.incoming_peers.is_none() {
-            let (listen_ports, max_peers, caretaker_id, disable_ipv6) = {
+            let listener_manager = self.bt_listener.clone().ok_or_else(|| {
+                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
+                    message: "BitTorrent listener manager is not configured".to_string(),
+                })
+            })?;
+            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy) = {
                 let group = self.group.recover();
                 let ports = group
                     .options()
@@ -294,30 +422,46 @@ impl Command for BtDownloadCommand {
                     group.options().bt_max_peers,
                     group.gid().value(),
                     group.options().disable_ipv6,
+                    aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy {
+                        reject_plain: group.options().bt_force_encrypt
+                            || group.options().bt_require_crypto,
+                        force_encryption: group.options().bt_force_encrypt,
+                        prefer_encryption: group
+                            .effective_option_snapshot()
+                            .and_then(|snapshot| {
+                                snapshot
+                                    .get("bt-min-crypto-level")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .is_some_and(|level| level.eq_ignore_ascii_case("arc4"))
+                            || group.options().bt_force_encrypt,
+                    },
                 )
             };
-            let bind_listener = |bind_ip: std::net::IpAddr| {
-                crate::engine::bt_peer_listener::BtPeerListener::bind_ports(
+            let register = |bind_ip: std::net::IpAddr| {
+                listener_manager.register(crate::engine::bt_peer_listener::BtPeerRouteConfig {
                     bind_ip,
-                    listen_ports.clone(),
-                    meta.info_hash.bytes,
-                    self.local_peer_id,
+                    ports: listen_ports.clone(),
+                    info_hash: meta.info_hash.bytes,
+                    local_peer_id: self.local_peer_id,
                     caretaker_id,
                     max_peers,
-                    std::sync::Arc::clone(&self.peer_storage),
-                )
+                    peer_storage: std::sync::Arc::clone(&self.peer_storage),
+                    crypto_policy,
+                })
             };
-            let listener = if disable_ipv6 {
-                bind_listener(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+            let route = if disable_ipv6 {
+                register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
             } else {
-                match bind_listener(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
-                    Ok(listener) => Ok(listener),
+                match register(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)).await {
+                    Ok(route) => Ok(route),
                     Err(ipv6_error) => {
                         warn!(
                             error = %ipv6_error,
                             "IPv6 BitTorrent listener unavailable; falling back to IPv4"
                         );
-                        bind_listener(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
+                        register(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)).await
                     }
                 }
             }
@@ -326,21 +470,19 @@ impl Command for BtDownloadCommand {
                     message: format!("failed to bind BitTorrent peer listener: {error}"),
                 })
             })?;
-            let actual_addr = listener.local_addr().map_err(|error| {
-                Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {
-                    message: format!("failed to query BitTorrent listener address: {error}"),
-                })
-            })?;
-            self.listen_port = actual_addr.port();
+            let (listen_port, incoming_peers, route_handle) = route;
+            self.listen_port = listen_port;
             if let Some(registry) = &self.bt_registry
                 && let Ok(mut registry) = registry.write()
             {
                 registry.set_tcp_port(self.listen_port);
             }
-            let (incoming_peers, listener_task) = listener.spawn(max_peers.max(1));
             self.incoming_peers = Some(incoming_peers);
-            self.incoming_peer_listener_task = Some(listener_task);
-            info!("[BT] Incoming peer listener bound at {}", actual_addr);
+            self.bt_peer_route = Some(route_handle);
+            info!(
+                "[BT] Incoming peer route registered on TCP port {}",
+                listen_port
+            );
         }
 
         let peer_addrs = self
@@ -359,6 +501,16 @@ impl Command for BtDownloadCommand {
             )
             .await?
         };
+
+        // The initial DHT lookup is complete once discovery and the first
+        // PeerStorage admission have finished. Record the same count the
+        // original DHTGetPeersCommand uses for retry decisions.
+        if self.dht_engine.is_some() {
+            self.dht_periodic_lookup
+                .set_peer_limits(self.bt_runtime.min_peers(), self.bt_runtime.max_peers());
+            self.dht_periodic_lookup
+                .record_lookup_completed(self.tracked_peer_count());
+        }
 
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
         // BEP 0027 (Private Torrent): PEX must be disabled for private torrents
@@ -386,11 +538,23 @@ impl Command for BtDownloadCommand {
                 "[BT] Initializing web seed manager with {} URL(s)",
                 self.web_seed_urls.len()
             );
-            Some(crate::engine::bt_web_seed::WebSeedManager::new(
-                self.web_seed_urls.clone(),
-                piece_length,
-                total_size,
-            ))
+            let web_seed_tls = {
+                let group = self.group.recover();
+                ClientTlsConfig::from_download_options(group.options())
+            };
+            Some(
+                crate::engine::bt_web_seed::WebSeedManager::new_with_tls(
+                    self.web_seed_urls.clone(),
+                    piece_length,
+                    total_size,
+                    &web_seed_tls,
+                )
+                .map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "Web-seed HTTP client configuration failed: {error}"
+                    )))
+                })?,
+            )
         } else {
             None
         };
@@ -497,7 +661,7 @@ impl Command for BtDownloadCommand {
                 .await;
         }
 
-        if self.seed_enabled && !active_connections.is_empty() {
+        if self.seed_enabled {
             info!(
                 "Starting seeding phase with {} peers...",
                 active_connections.len()
@@ -510,11 +674,7 @@ impl Command for BtDownloadCommand {
             )
             .await?;
         } else {
-            info!(
-                "Skipping seeding (enabled={}, connections={})",
-                self.seed_enabled,
-                active_connections.len()
-            );
+            info!("Skipping seeding (enabled={})", self.seed_enabled,);
             for conn in &mut active_connections {
                 let _ = conn;
             }
@@ -527,7 +687,10 @@ impl Command for BtDownloadCommand {
     }
 
     fn status(&self) -> CommandStatus {
-        if self.completed_bytes > 0 {
+        if self.group.recover().status() == crate::request::request_group::DownloadStatus::Complete
+        {
+            CommandStatus::Completed
+        } else if self.completed_bytes > 0 {
             CommandStatus::Running
         } else {
             CommandStatus::Pending
@@ -606,6 +769,17 @@ impl BtDownloadCommand {
         let num_pieces = meta.num_pieces() as u32;
 
         Ok((meta, piece_length, total_size, num_pieces))
+    }
+
+    fn bt_payload_exists(&self) -> bool {
+        match self.multi_file_layout.as_ref() {
+            Some(layout) => layout.file_list().into_iter().all(|entry| {
+                layout
+                    .file_absolute_path(entry.index)
+                    .is_some_and(|path| entry.length == 0 || path.is_file())
+            }),
+            None => self.output_path.is_file(),
+        }
     }
 }
 

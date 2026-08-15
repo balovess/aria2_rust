@@ -93,6 +93,33 @@ fn test_completed_ranges_exclude_partial_or_failed_segments() {
         vec![(100, 200)]
     );
 }
+
+#[test]
+fn test_restore_completed_segments_from_bitfield() {
+    let mut mgr = ConcurrentSegmentManager::new(400, vec!["http://x.com/f".to_string()], Some(100));
+
+    // Segment zero and segment two are complete; segments one and three must
+    // remain pending for a safe resume.
+    let completed = mgr.restore_completed_from_bitfield(&[0b1010_0000]);
+
+    assert_eq!(completed, 200);
+    assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(1), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.segment_status(2), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(3), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.completed_ranges(), vec![(0, 100), (200, 100)]);
+}
+
+#[test]
+fn test_restore_completed_prefix_ignores_partial_segment() {
+    let mut mgr = ConcurrentSegmentManager::new(400, vec!["http://x.com/f".to_string()], Some(100));
+
+    assert_eq!(mgr.restore_completed_prefix(250), 200);
+    assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(1), Some(SegmentStatus::Done));
+    assert_eq!(mgr.segment_status(2), Some(SegmentStatus::Pending));
+}
+
 #[test]
 fn test_fail_and_reassign() {
     let mut mgr = ConcurrentSegmentManager::new(
@@ -216,11 +243,11 @@ fn test_select_mirror_for_next_segment_with_selector() {
     ];
 
     // Make fast.com have better stats
-    stat_man.update("fast.com", 1_000_000, false);
-    stat_man.update("slow.com", 1000, false);
-    let fast_stat = stat_man.find_stat("fast.com").unwrap();
+    stat_man.update_with_protocol("fast.com", "http", 1_000_000, false);
+    stat_man.update_with_protocol("slow.com", "http", 1000, false);
+    let fast_stat = stat_man.find_stat_by_protocol("fast.com", "http").unwrap();
     fast_stat.increment_counter();
-    let slow_stat = stat_man.find_stat("slow.com").unwrap();
+    let slow_stat = stat_man.find_stat_by_protocol("slow.com", "http").unwrap();
     slow_stat.increment_counter();
 
     let selector = Box::new(AdaptiveUriSelector::new_with_uris(
@@ -267,7 +294,9 @@ fn test_report_segment_complete_updates_stats() {
     assert!(success);
 
     // Check that stats were updated
-    let stat = stat_man.find_stat("test.mirror.com").unwrap();
+    let stat = stat_man
+        .find_stat_by_protocol("test.mirror.com", "http")
+        .unwrap();
     assert!(stat.get_download_speed() > 0);
 }
 
@@ -302,9 +331,62 @@ fn test_report_segment_failed_updates_stats() {
     assert!(reassign.is_some());
 
     // Check that stats were updated
-    let stat = stat_man.find_stat("failing.mirror.com").unwrap();
+    let stat = stat_man
+        .find_stat_by_protocol("failing.mirror.com", "http")
+        .unwrap();
     assert_eq!(stat.get_consecutive_failures(), 1);
     assert_eq!(stat.get_last_error_code(), 503);
+}
+
+#[test]
+fn test_segment_stats_are_isolated_by_protocol() {
+    use crate::selector::adaptive_uri_selector::AdaptiveUriSelector;
+    use crate::selector::server_stat_man::ServerStatMan;
+
+    let stat_man = Arc::new(ServerStatMan::new());
+
+    let http_urls = vec!["http://shared.mirror.test/file".to_string()];
+    let http_selector = Box::new(AdaptiveUriSelector::new_with_uris(
+        Arc::clone(&stat_man),
+        http_urls.clone(),
+    ));
+    let mut http_manager = ConcurrentSegmentManager::new_with_selector(
+        100,
+        http_urls,
+        Some(100),
+        Arc::clone(&stat_man),
+        http_selector,
+    );
+    http_manager.allocate_segments();
+    assert!(http_manager.report_segment_complete(0, 100, 1_000_000, false));
+
+    let https_urls = vec!["https://shared.mirror.test/file".to_string()];
+    let https_selector = Box::new(AdaptiveUriSelector::new_with_uris(
+        Arc::clone(&stat_man),
+        https_urls.clone(),
+    ));
+    let mut https_manager = ConcurrentSegmentManager::new_with_selector(
+        100,
+        https_urls,
+        Some(100),
+        Arc::clone(&stat_man),
+        https_selector,
+    );
+    https_manager.allocate_segments();
+    assert!(https_manager.report_segment_failed(0, 503).is_none());
+
+    assert!(
+        stat_man
+            .find_stat_by_protocol("shared.mirror.test", "http")
+            .is_some_and(|stat| stat.get_download_speed() > 0)
+    );
+    assert_eq!(
+        stat_man
+            .find_stat_by_protocol("shared.mirror.test", "https")
+            .map(|stat| stat.get_last_error_code()),
+        Some(503)
+    );
+    assert!(stat_man.find_stat("shared.mirror.test").is_none());
 }
 
 #[test]

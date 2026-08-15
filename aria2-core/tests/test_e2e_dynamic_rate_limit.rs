@@ -16,7 +16,6 @@ use fixtures::test_server::TestServer;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 /// Measure download throughput (bytes/sec) over a `window` by polling
 /// `RequestGroup::get_completed_length()` (lock-free atomic read).
@@ -79,21 +78,17 @@ async fn test_e2e_rpc_change_option_increases_download_rate() {
 
     // Wire RpcEngine to a shared RequestGroupMan — same setup the real
     // application uses in RPC mode.
-    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let engine = RpcEngine::new().with_group_man(group_man.clone());
 
     // Register the download group with a known GID so we can reference it
     // in the RPC call.
     let gid = GroupId::new(42);
     group_man
-        .read()
-        .await
         .add_group_with_gid(gid, vec![url.clone()], options.clone())
         .unwrap();
     let gid_hex = gid.to_hex_string();
     let group = group_man
-        .read()
-        .await
         .group_by_hex(&gid_hex)
         .expect("group should be registered");
 
@@ -173,19 +168,15 @@ async fn test_e2e_rpc_change_option_to_unlimited() {
         ..Default::default()
     };
 
-    let group_man = Arc::new(RwLock::new(RequestGroupMan::new()));
+    let group_man = Arc::new(RequestGroupMan::new());
     let engine = RpcEngine::new().with_group_man(group_man.clone());
 
     let gid = GroupId::new(7);
     group_man
-        .read()
-        .await
         .add_group_with_gid(gid, vec![url.clone()], options.clone())
         .unwrap();
     let gid_hex = gid.to_hex_string();
     let group = group_man
-        .read()
-        .await
         .group_by_hex(&gid_hex)
         .expect("group should be registered");
 

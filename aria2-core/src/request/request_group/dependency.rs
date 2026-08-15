@@ -13,16 +13,15 @@ use super::GroupId;
 #[cfg(feature = "bittorrent")]
 use super::{MetadataInfo, RequestGroup};
 #[cfg(feature = "bittorrent")]
-use crate::engine::bt_download_command::build_download_context_from_meta;
+use crate::engine::bt_download_command::{
+    apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
+};
 #[cfg(feature = "bittorrent")]
 use crate::util::rwlock_ext::RwLockRecover;
 #[cfg(feature = "bittorrent")]
 use std::path::PathBuf;
 #[cfg(feature = "bittorrent")]
 use std::sync::RwLock;
-
-#[cfg(feature = "bittorrent")]
-use crate::download::{DownloadContext, file_entry::FileEntry};
 
 /// A dependency that must be resolved before a download can start.
 ///
@@ -411,7 +410,10 @@ impl BtDependency {
         )
         .map_err(|error| error.to_string())?;
         let mut ctx = ctx;
-        apply_file_mappings(&mut ctx, &self.file_mappings)?;
+        apply_file_mappings(&mut ctx, &self.file_mappings).map_err(|error| error.to_string())?;
+        let select_file = self.payload.recover().options().select_file.clone();
+        apply_select_file_filter(&mut ctx, select_file.as_deref())
+            .map_err(|error| error.to_string())?;
         let payload = self.payload.recover();
         payload.set_bt_metadata_data(data.clone());
         payload.set_bt_metadata(
@@ -425,44 +427,6 @@ impl BtDependency {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
-}
-
-#[cfg(feature = "bittorrent")]
-fn apply_file_mappings(
-    context: &mut DownloadContext,
-    mappings: &[BtFileMapping],
-) -> Result<(), String> {
-    if mappings.is_empty() {
-        return Ok(());
-    }
-
-    let entries = context.get_file_entries_mut();
-    if entries.len() == 1 && mappings.len() == 1 && mappings[0].original_name.is_empty() {
-        apply_file_mapping(&mut entries[0], &mappings[0]);
-        return Ok(());
-    }
-
-    for entry in entries.iter_mut() {
-        entry.set_requested(false);
-    }
-
-    for mapping in mappings {
-        let entry = entries
-            .iter_mut()
-            .find(|entry| entry.original_name() == mapping.original_name)
-            .ok_or_else(|| format!("No entry '{}' in torrent metadata", mapping.original_name))?;
-        apply_file_mapping(entry, mapping);
-    }
-    Ok(())
-}
-
-#[cfg(feature = "bittorrent")]
-fn apply_file_mapping(entry: &mut FileEntry, mapping: &BtFileMapping) {
-    entry.set_requested(true);
-    entry.set_path(mapping.path.clone());
-    entry.set_uris(&mapping.uris);
-    entry.set_max_connection_per_server(mapping.max_connection_per_server);
-    entry.set_unique_protocol(mapping.unique_protocol);
 }
 
 #[cfg(feature = "bittorrent")]

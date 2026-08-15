@@ -18,6 +18,7 @@ use super::types::{
 // Re-export HttpResponse from aria2-protocol so handler methods can use it
 // without callers needing to import two different crates.
 pub use aria2_protocol::http::response::HttpResponse;
+use aria2_protocol::http::response::is_redirect_status;
 
 /// Handler for HTTP responses that need to be skipped (non-file-data responses).
 ///
@@ -132,17 +133,21 @@ impl HttpSkipResponseHandler {
     /// The body data is read, decoded (if chunked/content-encoded), and
     /// discarded via NullSinkFilter.
     fn consume_body(&self, response: &HttpResponse) -> Result<(), Aria2Error> {
-        // If body is empty, nothing to consume
+        let content_encoding = response.header("Content-Encoding").map(|s| s.as_str());
+        let transfer_encoding = response.header("Transfer-Encoding").map(|s| s.as_str());
+
+        // Validate transfer framing before the empty-body fast path. An
+        // unsupported declared transfer encoding is invalid even when the
+        // peer sends no payload bytes.
+        let mut filters = AutoFilterSelector::select_filters(content_encoding, transfer_encoding)?;
+
+        // Framing has been validated, but there is no body to consume.
         if response.body.is_empty() {
             tracing::trace!("Empty response body, nothing to consume");
             return Ok(());
         }
 
         // Build decoding pipeline: encoding filters -> null sink
-        let content_encoding = response.header("Content-Encoding").map(|s| s.as_str());
-        let transfer_encoding = response.header("Transfer-Encoding").map(|s| s.as_str());
-
-        let mut filters = AutoFilterSelector::select_filters(content_encoding, transfer_encoding);
         filters.push(Box::new(NullSinkFilter::new()));
 
         // Process the entire body through the filter chain (data is discarded)
@@ -168,7 +173,7 @@ impl HttpSkipResponseHandler {
         let status = response.status_code;
 
         // 3xx redirect handling
-        if response.is_redirect() {
+        if is_redirect_status(status) {
             return self.handle_redirect(response, request_method, current_url, redirect_count);
         }
 

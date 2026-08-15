@@ -172,12 +172,18 @@ aria2c -o output.dat -d /downloads -s 4 -x 8 http://example.com/large.bin
 |--------|-------------|---------|
 | `-d, --dir` | Save directory | `.` |
 | `-o, --out` | Output filename | auto |
-| `-s, --split` | Connections per server | `1` |
-| `-x, --max-connection-per-server` | Max connections per server | `1` |
+| `-s, --split` | Concurrent segment requests per download | `16` |
+| `-x, --max-connection-per-server` | Per-authority HTTP segment request cap; adaptive download may lower it | `16` |
 | `--max-download-limit` | Max download speed | unlimited |
 | `--timeout` | Timeout in seconds | `60` |
 | `-q, --quiet` | Quiet mode | false |
 
+For segmented HTTP downloads, `split` is the total concurrent request budget
+for one file. `max-connection-per-server` is the independent cap for each
+`scheme://host:port` authority. With multiple mirrors, different authorities
+may run concurrently within the `split` budget; mirrors sharing one authority
+share that authority's cap. HTTP adaptive concurrency starts at the configured
+cap and lowers only the authority that returns `429` or `503`.
 ### BitTorrent Download
 
 ```bash
@@ -190,7 +196,7 @@ Create a text file with URIs (one entry per block, Tab-separated mirrors):
 
 ```
   dir=/downloads
-  split=5
+  split=16
 http://mirror1.example.com/file.iso	http://mirror2.example.com/file.iso
 http://mirror3.example.com/file.iso
 ```
@@ -208,13 +214,26 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-08): the protocol, RPC, and CLI crates pass
-their all-feature package test suites; the core all-feature targets executed
-3,411 passing tests with 11 ignored and 0 failures before a Windows build
-timeout while the final target was starting. Node.js binding tests pass 123/123
-and Python binding tests pass 137/137 with a real `aria2c` binary. The single
-workspace aggregate command is still a build-time timeout on this host, so
-these results do not mean the migration is complete.
+Verification snapshot (2026-08-14): the current focused evidence includes
+the CLI, RPC, protocol, BitTorrent, Metalink, FTP/SFTP, Node.js, and Python
+regression/E2E suites recorded in
+[docs/compatibility-status.md](docs/compatibility-status.md). The workspace
+command `cargo test --workspace --all-targets --no-run` also compiles all Rust
+test and benchmark targets. Node.js reports 123 passed and Python reports 137
+passed on this host. Under the current `0.2.9`, the version entry point,
+application tests, Clippy, and the targeted parser/RPC regressions pass;
+`aria2c --version` reports `aria2-rust 0.2.9`, and all Rust members and SDK
+metadata resolve to that product version. Existing `check-certificate`,
+`ca-certificate`, `certificate`, and `private-key` configuration values are
+handled by the Rust HTTP transport across primary HTTP/HTTPS downloads,
+Metalink HTTP, production BitTorrent HTTP trackers, and web seeds; local
+Rustls HTTPS fixtures verify custom CA trust, disabled verification, separate
+PEM mutual TLS, legacy empty-password PKCS#12, and modern PBES2/AES-256
+single-file identities;
+aggregate runtime coverage,
+platform-specific binding runs, complete original-client/browser-extension
+interoperability, public C ABI compatibility, and the aria2 C performance
+comparison remain open; these results do not mean the migration is complete.
 
 The project is organized as a Cargo workspace with 4 crates:
 
@@ -462,8 +481,9 @@ path can still be `PARTIAL` or `UNVERIFIED` there.
 
 **Known gaps and verification status:**
 - This table is a capability inventory, not a release compatibility claim.
-- The migration is not currently all pass; optional features, ignored
-  network tests, binding E2E suites, and the public C ABI remain tracked work.
+- The migration is not currently all pass; optional features, ignored network
+  tests, platform-specific binding runs, original-client interoperability, and
+  the public C ABI remain tracked work.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.

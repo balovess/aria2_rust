@@ -9,10 +9,11 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::constants;
-use crate::engine::command::ProgressUpdate;
+use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate};
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::error::{Aria2Error, Result};
+use crate::http::HttpRequestPolicy;
 use crate::http::cookie::Cookie;
 use crate::http::cookie_storage::CookieStorage;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
@@ -40,6 +41,10 @@ pub struct DownloadCommand {
     /// being attempted.
     pub(super) initial_uri: String,
     pub(super) output_path: std::path::PathBuf,
+    /// Whether the output path has already gone through collision resolution.
+    /// Mirror failover reuses this resolved path after the prior attempt
+    /// releases its temporary registry claim.
+    pub(super) output_path_resolved: bool,
     pub(super) started: bool,
     pub(super) completed: bool,
     pub(super) completed_bytes: u64,
@@ -60,9 +65,9 @@ pub struct DownloadCommand {
     pub(super) global_limiter: Option<RateLimiter>,
     pub(super) perf_monitor: Option<Arc<PerformanceMonitor>>,
     pub(super) atomic_metrics: Arc<AtomicMetrics>,
-    pub(super) headers: Vec<(String, String)>,
-    pub(super) progress_sender: Option<mpsc::UnboundedSender<ProgressUpdate>>,
-    pub(super) progress_receiver: Option<mpsc::UnboundedReceiver<ProgressUpdate>>,
+    pub(super) request_policy: HttpRequestPolicy,
+    pub(super) progress_sender: Option<mpsc::Sender<ProgressUpdate>>,
+    pub(super) progress_receiver: Option<mpsc::Receiver<ProgressUpdate>>,
     pub(super) progress_aggregator_handle: Option<tokio::task::JoinHandle<()>>,
 
     // ── Tail reclaim progress tracking ─────────────────────────────────
@@ -96,6 +101,77 @@ pub struct DownloadCommand {
 
 fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProxyTarget {
+    Http,
+    Https,
+    All,
+}
+
+fn build_reqwest_proxy(
+    target: ProxyTarget,
+    proxy_url: &str,
+    username: Option<&str>,
+    password: Option<&str>,
+    no_proxy: Option<&str>,
+) -> std::result::Result<reqwest::Proxy, reqwest::Error> {
+    let mut proxy = match target {
+        ProxyTarget::Http => reqwest::Proxy::http(proxy_url)?,
+        ProxyTarget::Https => reqwest::Proxy::https(proxy_url)?,
+        ProxyTarget::All => reqwest::Proxy::all(proxy_url)?,
+    };
+
+    // Preserve credentials embedded in the proxy URL unless an option
+    // explicitly overrides them, matching AbstractCommand::makeProxyUri().
+    if username.is_some() || password.is_some() {
+        let embedded = proxy_url.parse::<reqwest::Url>().ok();
+        let embedded_user = embedded
+            .as_ref()
+            .filter(|url| !url.username().is_empty())
+            .map(|url| url.username().to_string());
+        let embedded_password = embedded
+            .as_ref()
+            .and_then(|url| url.password().map(str::to_string));
+        let effective_user = username.map(str::to_owned).or(embedded_user);
+        let effective_password = password
+            .map(str::to_owned)
+            .or(embedded_password)
+            .unwrap_or_default();
+
+        if let Some(user) = effective_user {
+            proxy = proxy.basic_auth(&user, &effective_password);
+        }
+    }
+
+    if let Some(no_proxy) = no_proxy {
+        proxy = proxy.no_proxy(reqwest::NoProxy::from_string(no_proxy));
+    }
+
+    Ok(proxy)
+}
+
+fn add_reqwest_proxy(
+    builder: reqwest::ClientBuilder,
+    target: ProxyTarget,
+    proxy_url: &str,
+    credentials: (Option<String>, Option<String>),
+    no_proxy: Option<&str>,
+) -> reqwest::ClientBuilder {
+    match build_reqwest_proxy(
+        target,
+        proxy_url,
+        credentials.0.as_deref(),
+        credentials.1.as_deref(),
+        no_proxy,
+    ) {
+        Ok(proxy) => builder.proxy(proxy),
+        Err(error) => {
+            warn!(%proxy_url, ?target, %error, "Ignoring invalid HTTP proxy configuration");
+            builder
+        }
+    }
 }
 
 impl DownloadCommand {
@@ -160,13 +236,23 @@ impl DownloadCommand {
             .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
-        let headers = options.parsed_headers();
+        let request_policy = options.http_request_policy();
 
         // Every client construction path below must use the same rustls
         // provider. The DNS-cache and proxy branches build custom clients
         // instead of reusing the global pool client.
         crate::http::client_pool::ensure_rustls_provider();
-        let no_proxy = options.http_proxy.is_none() && options.all_proxy.is_none();
+        let client_tls =
+            crate::http::client_identity::ClientTlsConfig::from_download_options(options);
+        let no_proxy = ![
+            options.http_proxy.as_deref(),
+            options.https_proxy.as_deref(),
+            options.all_proxy.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|proxy| !proxy.is_empty());
+        let has_custom_tls = client_tls.requires_custom_client();
         let client = if no_proxy {
             if let Some(addresses) = resolved_addresses.as_deref()
                 && !addresses.is_empty()
@@ -176,24 +262,47 @@ impl DownloadCommand {
                         "Unable to extract HTTP hostname for DNS cache override".to_string(),
                     ))
                 })?;
-                Arc::new(
-                    reqwest::Client::builder()
-                        .connect_timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                        ))
-                        .timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                        ))
-                        .user_agent(constants::USER_AGENT)
-                        .redirect(reqwest::redirect::Policy::none())
-                        .resolve_to_addrs(&host, addresses)
-                        .build()
-                        .map_err(|e| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                                "Failed to build HTTP client with DNS cache: {e}"
-                            )))
-                        })?,
-                )
+                let builder = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                    ))
+                    .timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                    ))
+                    .gzip(options.http_accept_gzip)
+                    .user_agent(constants::USER_AGENT)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .resolve_to_addrs(&host, addresses);
+                let builder = crate::http::client_identity::apply(builder, &client_tls)?;
+                Arc::new(builder.build().map_err(|e| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Failed to build HTTP client with DNS cache: {e}"
+                    )))
+                })?)
+            } else if options.http_accept_gzip || has_custom_tls {
+                let builder = reqwest::Client::builder()
+                    .connect_timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                    ))
+                    .timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                    ))
+                    .gzip(options.http_accept_gzip)
+                    .user_agent(constants::USER_AGENT)
+                    .redirect(reqwest::redirect::Policy::none())
+                    .pool_max_idle_per_host(constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
+                    .pool_idle_timeout(Some(Duration::from_secs(
+                        constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+                    )))
+                    .tcp_keepalive(Some(Duration::from_secs(
+                        constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+                    )));
+                let builder = crate::http::client_identity::apply(builder, &client_tls)?;
+                Arc::new(builder.build().map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Failed to build HTTP client: {error}"
+                    )))
+                })?)
             } else {
                 crate::http::client_pool::get_global_client()
             }
@@ -205,10 +314,11 @@ impl DownloadCommand {
                 .timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
                 ))
+                .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
-                .redirect(reqwest::redirect::Policy::limited(
-                    constants::HTTP_DEFAULT_MAX_REDIRECTS,
-                ))
+                // Redirects are handled by SequentialDownloader so direct,
+                // DNS-pinned, and proxied clients share one URI/retry seam.
+                .redirect(reqwest::redirect::Policy::none())
                 .pool_max_idle_per_host(constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
                 .pool_idle_timeout(Some(std::time::Duration::from_secs(
                     constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS,
@@ -217,23 +327,52 @@ impl DownloadCommand {
                     constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
                 )));
 
-            if let Some(ref proxy) = options.http_proxy
-                && let Ok(proxy_url) = proxy.parse::<reqwest::Url>()
-                && let Ok(p) = reqwest::Proxy::all(proxy_url.to_string())
+            let no_proxy = options.no_proxy.as_deref();
+
+            if let Some(proxy) = options
+                .http_proxy
+                .as_deref()
+                .filter(|proxy| !proxy.is_empty())
             {
-                builder = builder.proxy(p);
+                builder = add_reqwest_proxy(
+                    builder,
+                    ProxyTarget::Http,
+                    proxy,
+                    options.proxy_credentials_for_scheme("http"),
+                    no_proxy,
+                );
             }
 
-            if options.http_proxy.is_none()
-                && let Some(ref all_proxy) = options.all_proxy
+            if let Some(proxy) = options
+                .https_proxy
+                .as_deref()
+                .filter(|proxy| !proxy.is_empty())
+            {
+                builder = add_reqwest_proxy(
+                    builder,
+                    ProxyTarget::Https,
+                    proxy,
+                    options.proxy_credentials_for_scheme("https"),
+                    no_proxy,
+                );
+            }
+
+            if let Some(all_proxy) = options
+                .all_proxy
+                .as_deref()
+                .filter(|proxy| !proxy.is_empty())
             {
                 match ProxyUrl::parse(all_proxy) {
                     Ok(parsed) => match parsed.protocol {
                         crate::http::socks_connector::ProxyProtocol::Http
                         | crate::http::socks_connector::ProxyProtocol::Https => {
-                            if let Ok(p) = reqwest::Proxy::all(all_proxy.to_string()) {
-                                builder = builder.proxy(p);
-                            }
+                            builder = add_reqwest_proxy(
+                                builder,
+                                ProxyTarget::All,
+                                all_proxy,
+                                options.proxy_credentials_for_scheme("all"),
+                                no_proxy,
+                            );
                         }
                         _ => {
                             tracing::info!(
@@ -248,6 +387,7 @@ impl DownloadCommand {
                 }
             }
 
+            let builder = crate::http::client_identity::apply(builder, &client_tls)?;
             let client = builder.build().map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                     "Failed to build HTTP client: {}",
@@ -265,7 +405,7 @@ impl DownloadCommand {
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
 
         Ok(Self {
             group,
@@ -273,6 +413,7 @@ impl DownloadCommand {
             client,
             initial_uri: uri.to_string(),
             output_path: path,
+            output_path_resolved: false,
             started: false,
             completed: false,
             completed_bytes: 0,
@@ -293,7 +434,7 @@ impl DownloadCommand {
             global_limiter: None,
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
-            headers,
+            request_policy,
             progress_sender: Some(progress_tx),
             progress_receiver: Some(progress_rx),
             progress_aggregator_handle: None,
@@ -382,7 +523,7 @@ impl DownloadCommand {
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
-        let headers = options.parsed_headers();
+        let request_policy = options.http_request_policy();
         info!(
             "DownloadCommand created (shared client): {} -> {}",
             uri,
@@ -394,7 +535,7 @@ impl DownloadCommand {
 
         Self::load_cookies(&cookie_storage, &cookie_file, uri, options);
 
-        let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressUpdate>();
+        let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
 
         Ok(Self {
             group,
@@ -402,6 +543,7 @@ impl DownloadCommand {
             client,
             initial_uri: uri.to_string(),
             output_path: path,
+            output_path_resolved: false,
             started: false,
             completed: false,
             completed_bytes: 0,
@@ -422,7 +564,7 @@ impl DownloadCommand {
             global_limiter: None,
             perf_monitor: None,
             atomic_metrics: Arc::new(AtomicMetrics::new()),
-            headers,
+            request_policy,
             progress_sender: Some(progress_tx),
             progress_receiver: Some(progress_rx),
             progress_aggregator_handle: None,
@@ -461,10 +603,7 @@ impl DownloadCommand {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn with_progress_sender(
-        mut self,
-        sender: mpsc::UnboundedSender<ProgressUpdate>,
-    ) -> Self {
+    pub(crate) fn with_progress_sender(mut self, sender: mpsc::Sender<ProgressUpdate>) -> Self {
         self.progress_sender = Some(sender);
         self.progress_receiver = None;
         self
@@ -553,7 +692,7 @@ impl DownloadCommand {
     pub(super) fn create_progress_updater(&self) -> ProgressUpdater {
         ProgressUpdater::new(
             self.progress_sender.clone(),
-            Arc::clone(&self.group),
+            self.group.recover().global_net_stat(),
             Arc::clone(&self.progress),
             Arc::clone(&self.atomic_metrics),
             self.perf_monitor.clone(),

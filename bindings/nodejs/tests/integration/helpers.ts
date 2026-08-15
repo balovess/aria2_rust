@@ -65,7 +65,7 @@ const METHOD_HANDLERS: Record<string, (params: unknown[]) => unknown> = {
     numStoppedTotal: '0',
   }),
   'aria2.getVersion': () => ({
-    version: '1.37.0',
+    version: '0.2.9',
     enabledFeatures: ['Async DNS', 'BitTorrent', 'Firefox3 Cookie'],
   }),
   'aria2.getSessionInfo': () => ({

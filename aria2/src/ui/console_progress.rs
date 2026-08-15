@@ -17,7 +17,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
 
@@ -29,7 +28,7 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 /// Console progress reporter that periodically polls `RequestGroupMan`
 /// and renders active download progress to stdout.
 pub struct ConsoleProgressReporter {
-    group_man: Arc<RwLock<RequestGroupMan>>,
+    group_man: Arc<RequestGroupMan>,
     interval: Duration,
     /// Signal receiver – when the sender is dropped/sent, the loop exits.
     stop_rx: Option<oneshot::Receiver<()>>,
@@ -48,7 +47,7 @@ impl ConsoleProgressReporter {
     /// # Arguments
     ///
     /// * `group_man` - Shared request group manager
-    pub fn new(group_man: Arc<RwLock<RequestGroupMan>>) -> (Self, oneshot::Sender<()>) {
+    pub fn new(group_man: Arc<RequestGroupMan>) -> (Self, oneshot::Sender<()>) {
         let (stop_tx, stop_rx) = oneshot::channel();
         let reporter = Self {
             group_man,
@@ -93,9 +92,7 @@ impl ConsoleProgressReporter {
 
     /// Single poll-render cycle.
     async fn tick(&mut self) {
-        let man = self.group_man.read().await;
-        let all_groups = man.all_groups();
-        drop(man);
+        let all_groups = self.group_man.all_groups();
 
         // Build TaskProgress list from active/waiting groups.
         let mut tasks: Vec<TaskProgress> = Vec::new();

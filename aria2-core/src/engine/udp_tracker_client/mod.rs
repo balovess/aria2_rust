@@ -17,6 +17,7 @@ pub(crate) use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEve
 pub(crate) use protocol::UdpTrackerRequest;
 
 pub use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::AnnounceResponse;
+use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
 
 pub(crate) const REQUEST_TIMEOUT_SECS: u64 = 15;
 pub(crate) const MAX_RETRIES: u32 = 3;
@@ -85,6 +86,22 @@ impl UdpTrackerClient {
             .iter()
             .filter_map(|r| r.reply.as_ref())
             .collect()
+    }
+
+    /// Return the first terminal error for a completed announce request.
+    pub fn completed_announce_error(
+        &self,
+    ) -> Option<aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError> {
+        self.pending
+            .iter()
+            .filter(|request| request.scrape_info_hashes.is_empty())
+            .find_map(|request| request.error.filter(|error| *error != UdpError::Success))
+    }
+
+    pub fn clear_completed_requests(&mut self) {
+        self.pending.retain(|request| {
+            request.reply.is_none() && request.scrape_results.is_none() && request.error.is_none()
+        });
     }
 
     pub(crate) fn next_txn(&mut self) -> u32 {

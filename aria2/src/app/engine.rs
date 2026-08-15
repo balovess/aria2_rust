@@ -6,6 +6,8 @@
 //! - Running the engine event loop
 
 use super::App;
+#[cfg(feature = "bittorrent")]
+use aria2_core::config::TrackerCatalogConfig;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -26,6 +28,38 @@ impl App {
             .await
             .unwrap_or(100) as u64;
         let mut engine = DownloadEngine::new(tick_ms);
+
+        #[cfg(feature = "bittorrent")]
+        {
+            let config = self.config.read().await;
+            let sources = match config.get_global_option("bt-tracker-source").await {
+                Some(aria2_core::config::OptionValue::List(values)) => values,
+                Some(aria2_core::config::OptionValue::Str(value)) => value
+                    .split([',', '\n'])
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let update_interval = config
+                .get_global_i64("bt-tracker-update-interval")
+                .await
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| std::time::Duration::from_secs(seconds as u64))
+                .unwrap_or(
+                    aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL,
+                );
+            let enabled = config
+                .get_global_bool("enable-public-trackers")
+                .await
+                .unwrap_or(true);
+            engine.set_public_tracker_config(TrackerCatalogConfig {
+                enabled,
+                sources,
+                update_interval,
+            });
+        }
 
         let save_session_path = self
             .get_opt_str("save-session")
@@ -106,10 +140,7 @@ impl App {
                 .try_fold(0usize, |total, count| {
                     count.map(|count| total.saturating_add(count))
                 })?;
-            let first_gid = {
-                let man = self.request_man.read().await;
-                man.next_available_gid().value()
-            };
+            let first_gid = { self.request_man.next_available_gid().value() };
             let mut gid_iter =
                 (0..gid_count).map(|offset| GroupId::new(first_gid.saturating_add(offset as u64)));
             for input in &self.detected_inputs {
@@ -253,9 +284,7 @@ impl App {
     /// constructs them with the default `forceHalt = false`.
     async fn spawn_halt_watchers(
         &self,
-        cmd_tx: tokio::sync::mpsc::UnboundedSender<
-            aria2_core::engine::engine_command::EngineCommand,
-        >,
+        cmd_tx: aria2_core::engine::engine_command::EngineCommandSender,
     ) {
         use aria2_core::engine::halt_watchers;
 

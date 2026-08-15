@@ -105,7 +105,7 @@ describe('RPC Methods Integration', () => {
 
   it('getVersion', async () => {
     const version = await client.getVersion();
-    expect(version.version).toBe('1.37.0');
+    expect(version.version).toBe('0.2.9');
     expect(Array.isArray(version.enabledFeatures)).toBe(true);
   });
 

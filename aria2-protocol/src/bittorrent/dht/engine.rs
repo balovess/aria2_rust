@@ -13,12 +13,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use super::handler::DhtQueryHandler;
 use super::lookup::{announce_to_token_nodes, iterative_get_peers};
 use super::message::{DhtMessage, DhtMessageBuilder};
 use super::node::DhtNode;
@@ -165,6 +165,22 @@ pub(super) struct DhtEngineInner {
     pub(super) self_id: [u8; 20],
 }
 
+/// Owned dependencies available to background tasks.
+///
+/// This context deliberately does not contain an `Arc<DhtEngine>`. Keeping
+/// task dependencies separate prevents a task that is awaiting network I/O
+/// from forming a reference cycle with the engine's own `JoinHandle` list.
+pub(super) struct DhtEngineContext {
+    pub(super) inner: Arc<RwLock<DhtEngineInner>>,
+    pub(super) config: DhtEngineConfig,
+    pub(super) socket: DhtSocket,
+    pub(super) token_tracker: Arc<std::sync::Mutex<TokenTracker>>,
+    pub(super) peer_storage: Arc<DhtPeerStorage>,
+    pub(super) tracker: Arc<TransactionTracker>,
+    pub(super) handler_self_id: [u8; 20],
+    pub(super) shutdown_requested: Arc<AtomicBool>,
+}
+
 // ==================== DhtEngine ====================
 
 /// DHT engine — orchestrates the full DHT node lifecycle.
@@ -173,22 +189,12 @@ pub(super) struct DhtEngineInner {
 /// an `Arc<DhtEngine>` ready for shared use. All public methods take `&self`
 /// and use interior mutability for thread-safe access.
 pub struct DhtEngine {
-    /// Shared mutable state.
-    pub(super) inner: Arc<RwLock<DhtEngineInner>>,
-    /// Configuration (immutable after creation).
-    pub(super) config: DhtEngineConfig,
-    /// UDP socket for DHT communication.
-    pub(super) socket: DhtSocket,
-    /// Token tracker for generating/validating announce tokens.
-    pub(super) token_tracker: Arc<std::sync::Mutex<TokenTracker>>,
-    /// Peer storage for inbound announce_peer queries.
-    pub(super) peer_storage: Arc<DhtPeerStorage>,
-    /// Transaction tracker for matching queries to responses.
-    pub(super) tracker: Arc<TransactionTracker>,
-    /// Query handler for inbound KRPC queries.
-    pub(super) handler: DhtQueryHandler,
-    /// Shutdown signal sender.
-    pub(super) shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Rust-owned DHT state and dependencies.
+    pub(super) context: Arc<DhtEngineContext>,
+    /// Shared shutdown state observed by every background task.
+    pub(super) shutdown_tx: tokio::sync::watch::Sender<bool>,
+    /// Handles for background tasks owned by this engine.
+    pub(super) background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl DhtEngine {
@@ -285,19 +291,24 @@ impl DhtEngine {
         let token_tracker = Arc::new(std::sync::Mutex::new(TokenTracker::new()));
         let peer_storage = Arc::new(DhtPeerStorage::new());
         let tracker = Arc::new(TransactionTracker::new());
-        let handler = DhtQueryHandler::new(self_id);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let task_context = Arc::new(DhtEngineContext {
+            inner: Arc::clone(&inner),
+            config: config.clone(),
+            socket: socket.clone(),
+            token_tracker: Arc::clone(&token_tracker),
+            peer_storage: Arc::clone(&peer_storage),
+            tracker: Arc::clone(&tracker),
+            handler_self_id: self_id,
+            shutdown_requested: Arc::clone(&shutdown_requested),
+        });
 
         let engine = Arc::new(Self {
-            inner,
-            config: config.clone(),
-            socket,
-            token_tracker,
-            peer_storage,
-            tracker,
-            handler,
-            shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+            context: task_context,
+            shutdown_tx,
+            background_tasks: std::sync::Mutex::new(Vec::new()),
         });
 
         // Spawn the background receive loop
@@ -313,7 +324,7 @@ impl DhtEngine {
         if config.bootstrap_on_start {
             engine.spawn_bootstrap();
         } else {
-            engine.inner.write().await.state = DhtEngineState::Running;
+            engine.context.inner.write().await.state = DhtEngineState::Running;
         }
 
         Ok(engine)
@@ -325,26 +336,44 @@ impl DhtEngine {
     /// timeout the engine still transitions to `Running` so that lookups are
     /// not blocked indefinitely by an unreachable network.
     pub fn spawn_bootstrap(self: &Arc<Self>) {
-        let engine = Arc::clone(self);
-        let limit = self.config.bootstrap_timeout;
-        tokio::spawn(async move {
-            if tokio::time::timeout(limit, engine.bootstrap())
-                .await
-                .is_err()
-            {
-                warn!(
-                    timeout = ?limit,
-                    "DHT bootstrap timed out; continuing without entry-point nodes"
-                );
-                engine.inner.write().await.state = DhtEngineState::Running;
+        if self.context.shutdown_requested.load(Ordering::Acquire) {
+            return;
+        }
+
+        let context = Arc::clone(&self.context);
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
+        let limit = context.config.bootstrap_timeout;
+        let handle = tokio::spawn(async move {
+            let bootstrap = async {
+                if tokio::time::timeout(limit, context.bootstrap())
+                    .await
+                    .is_err()
+                    && !context.shutdown_requested.load(Ordering::Acquire)
+                {
+                    warn!(
+                        timeout = ?limit,
+                        "DHT bootstrap timed out; continuing without entry-point nodes"
+                    );
+                    context.inner.write().await.state = DhtEngineState::Running;
+                }
+            };
+
+            tokio::select! {
+                _ = bootstrap => {}
+                _ = shutdown_rx.changed() => {}
             }
         });
+        self.register_background_task(handle);
     }
 
     /// Return a snapshot of the current engine state.
     pub async fn state(&self) -> DhtEngineState {
-        let inner = self.inner.read().await;
-        inner.state
+        let inner = self.context.inner.read().await;
+        if self.context.shutdown_requested.load(Ordering::Acquire) {
+            DhtEngineState::ShuttingDown
+        } else {
+            inner.state
+        }
     }
 
     /// Look up peers for the given info hash via the DHT network.
@@ -360,17 +389,25 @@ impl DhtEngine {
             });
         }
 
-        let rt = Arc::new(RwLock::new(self.inner.read().await.routing_table.clone()));
-        let self_id = self.inner.read().await.self_id;
+        let rt = Arc::new(RwLock::new(
+            self.context.inner.read().await.routing_table.clone(),
+        ));
+        let self_id = self.context.inner.read().await.self_id;
 
         debug!(info_hash = %hex::encode(info_hash), "Starting DHT get_peers lookup");
 
-        let result =
-            iterative_get_peers(info_hash, &self_id, &rt, &self.socket, &self.tracker).await;
+        let result = iterative_get_peers(
+            info_hash,
+            &self_id,
+            &rt,
+            &self.context.socket,
+            &self.context.tracker,
+        )
+        .await;
 
         // Merge discovered nodes back into the main routing table
         {
-            let mut inner = self.inner.write().await;
+            let mut inner = self.context.inner.write().await;
             let discovered_rt = rt.read().await;
             for node in discovered_rt.all_nodes() {
                 inner.routing_table.insert(node.clone());
@@ -393,8 +430,10 @@ impl DhtEngine {
             return Ok(());
         }
 
-        let rt = Arc::new(RwLock::new(self.inner.read().await.routing_table.clone()));
-        let self_id = self.inner.read().await.self_id;
+        let rt = Arc::new(RwLock::new(
+            self.context.inner.read().await.routing_table.clone(),
+        ));
+        let self_id = self.context.inner.read().await.self_id;
 
         debug!(
             info_hash = %hex::encode(info_hash),
@@ -403,12 +442,18 @@ impl DhtEngine {
         );
 
         // First, do a get_peers lookup to obtain tokens
-        let result =
-            iterative_get_peers(info_hash, &self_id, &rt, &self.socket, &self.tracker).await;
+        let result = iterative_get_peers(
+            info_hash,
+            &self_id,
+            &rt,
+            &self.context.socket,
+            &self.context.tracker,
+        )
+        .await;
 
         // Merge discovered nodes back
         {
-            let mut inner = self.inner.write().await;
+            let mut inner = self.context.inner.write().await;
             let discovered_rt = rt.read().await;
             for node in discovered_rt.all_nodes() {
                 inner.routing_table.insert(node.clone());
@@ -422,8 +467,8 @@ impl DhtEngine {
                 &self_id,
                 port,
                 &result.token_nodes,
-                &self.socket,
-                &self.tracker,
+                &self.context.socket,
+                &self.context.tracker,
             )
             .await;
         }
@@ -436,7 +481,7 @@ impl DhtEngine {
     /// Sends a `ping` to `addr` and inserts it into the appropriate k-bucket
     /// once a response is received.
     pub async fn add_node(&self, addr: SocketAddr) {
-        let self_id = self.inner.read().await.self_id;
+        let self_id = self.context.inner.read().await.self_id;
         let msg = DhtMessageBuilder::ping(0, &self_id);
         let encoded = match msg.encode() {
             Ok(e) => e,
@@ -446,7 +491,7 @@ impl DhtEngine {
             }
         };
 
-        if let Err(e) = self.socket.send_to(addr, &encoded).await {
+        if let Err(e) = self.context.socket.send_to(addr, &encoded).await {
             debug!(addr = %addr, "Failed to send ping: {}", e);
             return;
         }
@@ -454,8 +499,9 @@ impl DhtEngine {
         // Wait briefly for a response
         let mut buf = [0u8; 4096];
         if let Ok((len, _from)) = self
+            .context
             .socket
-            .recv_with_timeout(&mut buf, self.config.query_timeout)
+            .recv_with_timeout(&mut buf, self.context.config.query_timeout)
             .await
             && len > 0
             && let Ok(response) = DhtMessage::decode(&buf[..len])
@@ -469,7 +515,7 @@ impl DhtEngine {
                 let mut node_id = [0u8; 20];
                 node_id.copy_from_slice(id_bytes);
                 let node = DhtNode::new(node_id, addr);
-                let mut inner = self.inner.write().await;
+                let mut inner = self.context.inner.write().await;
                 inner.routing_table.insert(node);
                 debug!(addr = %addr, id = %hex::encode(node_id), "Added DHT node via add_node");
             }
@@ -486,28 +532,58 @@ impl DhtEngine {
 
     /// Synchronous shutdown — sets engine state to `ShuttingDown`.
     pub fn shutdown(&self) {
-        let mut tx = self.shutdown_tx.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(sender) = tx.take() {
-            let _ = sender.send(());
+        let first_shutdown = {
+            let _background_tasks = self
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            !self.context.shutdown_requested.swap(true, Ordering::AcqRel)
+        };
+
+        if first_shutdown {
+            let _ = self.shutdown_tx.send(true);
+
+            if let Ok(mut inner) = self.context.inner.try_write() {
+                inner.state = DhtEngineState::ShuttingDown;
+            }
+
+            info!("DHT shutdown signal sent");
         }
-        // Set state synchronously
-        if let Ok(_inner) = self.inner.try_write() {
-            // Already shutting down — can't hold the lock across await
-        }
-        info!("DHT shutdown signal sent");
     }
 
     /// Async shutdown — signals the engine to stop and awaits full teardown.
     pub async fn shutdown_async(&self) {
         self.shutdown();
 
-        // Wait for the background task to terminate
-        // (it will observe the shutdown signal via the oneshot channel)
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let tasks = {
+            let mut background_tasks = self
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *background_tasks)
+        };
+
+        // Give tasks a chance to observe the shared signal before aborting a
+        // maintenance operation that is currently awaiting network I/O.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while !tasks.iter().all(tokio::task::JoinHandle::is_finished)
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        for task in tasks {
+            if !task.is_finished() {
+                task.abort();
+            }
+            let _ = task.await;
+        }
+
+        self.context.inner.write().await.state = DhtEngineState::ShuttingDown;
 
         // Save routing table to disk
-        if let Some(ref path) = self.config.dht_file_path {
-            let inner = self.inner.read().await;
+        if let Some(ref path) = self.context.config.dht_file_path {
+            let inner = self.context.inner.read().await;
             let self_id = inner.self_id;
             let nodes: Vec<DhtNode> = inner.routing_table.collect_good_nodes();
             drop(inner);
@@ -525,12 +601,42 @@ impl DhtEngine {
 
     /// Return a snapshot of DHT engine statistics.
     pub async fn stats(&self) -> DhtEngineStats {
-        let inner = self.inner.read().await;
+        let inner = self.context.inner.read().await;
+        let state = if self.context.shutdown_requested.load(Ordering::Acquire) {
+            DhtEngineState::ShuttingDown
+        } else {
+            inner.state
+        };
         DhtEngineStats {
             total_nodes: inner.routing_table.total_node_count(),
             good_nodes: inner.routing_table.good_node_count(),
-            pending_transactions: self.tracker.pending_count(),
-            state: inner.state,
+            pending_transactions: self.context.tracker.pending_count(),
+            state,
+        }
+    }
+
+    /// Register a background task owned by this engine.
+    pub(super) fn register_background_task(&self, task: tokio::task::JoinHandle<()>) {
+        let mut background_tasks = self
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if self.context.shutdown_requested.load(Ordering::Acquire) {
+            task.abort();
+        } else {
+            background_tasks.push(task);
+        }
+    }
+}
+
+impl Drop for DhtEngine {
+    fn drop(&mut self) {
+        let mut background_tasks = self
+            .background_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for task in background_tasks.drain(..) {
+            task.abort();
         }
     }
 }
@@ -574,6 +680,29 @@ mod tests {
         assert_eq!(engine.state().await, DhtEngineState::Running);
 
         engine.shutdown_async().await;
+        assert_eq!(engine.state().await, DhtEngineState::ShuttingDown);
+        assert_eq!(engine.stats().await.state, DhtEngineState::ShuttingDown);
+        assert!(
+            engine
+                .background_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dht_engine_sync_shutdown_is_immediately_observable() {
+        let engine = DhtEngine::start(DhtEngineConfig::local())
+            .await
+            .expect("start should succeed");
+
+        engine.shutdown();
+
+        assert_eq!(engine.state().await, DhtEngineState::ShuttingDown);
+        assert_eq!(engine.stats().await.state, DhtEngineState::ShuttingDown);
+
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]
@@ -598,7 +727,7 @@ mod tests {
             .await
             .expect("DHT should fall back to the next available port");
 
-        assert_eq!(engine.socket.local_addr().port(), second_port);
+        assert_eq!(engine.context.socket.local_addr().port(), second_port);
         drop(occupied);
         engine.shutdown_async().await;
     }

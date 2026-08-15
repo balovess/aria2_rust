@@ -18,7 +18,7 @@ pub const HTTP_DEFAULT_ERROR_CODE: u16 = 500;
 
 // HTTP client pool defaults (higher concurrency than per-download defaults)
 // Increased from 16 to 64 to support high-concurrency multi-segment downloads
-// where 16+ connections to the same host is common (split=5 * max-connection=4 = 20)
+// where 16+ requests to the same authority are common.
 pub const HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST: usize = 64;
 pub const HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS: u64 = 300;
 
@@ -57,7 +57,6 @@ pub const BT_SNUBBED_TIMEOUT_SECS: u64 = 60;
 pub const BT_ENDGAME_THRESHOLD: usize = 20;
 pub const DEFAULT_BT_ENDGAME_THRESHOLD: usize = BT_ENDGAME_THRESHOLD;
 pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";
-pub const DEFAULT_PIECE_PRIORITY: &str = "rarest";
 pub const BT_PEER_CONNECTION_DELAY_MS: u64 = 100;
 pub const BT_MAX_UNCHOKE_WAIT_ATTEMPTS: usize = 50;
 pub const BT_PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
@@ -99,8 +98,8 @@ pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
 pub const DEFAULT_SECURE_FALLOC: bool = false;
 pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
-pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 4;
-pub const DEFAULT_SPLIT: u16 = 5;
+pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
+pub const DEFAULT_SPLIT: u16 = 16;
 pub const MIN_SEGMENT_SIZE: usize = 1024 * 256;
 pub const MAX_SEGMENT_SIZE: usize = 1024 * 1024 * 16;
 pub const DEFAULT_SEGMENT_SIZE: usize = 1_048_576;
@@ -120,6 +119,7 @@ pub const RATE_LIMITER_MIN_WAIT_SECS: f64 = 0.000001;
 
 // FTP defaults
 pub const FTP_DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
+pub const FTP_DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 60;
 pub const FTP_WELCOME_TIMEOUT_SECS: u64 = 15;
 pub const FTP_COMMAND_TIMEOUT_SECS: u64 = 30;
 pub const FTP_TRANSFER_COMPLETE_TIMEOUT_SECS: u64 = 10;

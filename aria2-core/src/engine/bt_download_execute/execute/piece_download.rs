@@ -324,34 +324,69 @@ impl BtDownloadCommand {
 
         let mut piece_picker =
             aria2_protocol::bittorrent::piece::picker::PiecePicker::new(num_pieces);
+        // aria2_original uses RarestPieceSelector as the base BitTorrent
+        // selector. `bt-prioritize-piece` is an additive wrapper around it,
+        // not a replacement for the torrent-wide selection strategy.
         piece_picker.set_strategy(
-            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::Sequential,
+            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::RarestFirst,
         );
 
-        // G2: Set piece priority mode from config option (--bt-prioritize-piece)
-        let prioritize_piece_mode = {
-            let g = self.group.recover();
-            g.options().bt_prioritize_piece.clone()
+        let allowed_pieces = {
+            let group = self.group.recover();
+            group.get_download_context().and_then(|context| {
+                crate::engine::bt_piece_selector::allowed_piece_indices(
+                    &context,
+                    piece_length as u64,
+                    num_pieces,
+                )
+            })
         };
-        match prioritize_piece_mode.as_str() {
-            "head" => {
-                piece_picker.set_priority_mode(
-                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialHead,
-                );
-                info!("[BT] Piece priority mode: SequentialHead (from start)");
+        if let Some(allowed_pieces) = allowed_pieces {
+            info!(
+                "[BT] Selective file filter enabled: {} of {} pieces selected",
+                allowed_pieces.len(),
+                num_pieces
+            );
+            piece_picker.set_allowed_pieces(&allowed_pieces);
+        }
+
+        if !self.check_integrity
+            && let Some(bitfield) = self
+                .checkpoint
+                .as_ref()
+                .and_then(|checkpoint| checkpoint.bitfield())
+        {
+            for index in 0..num_pieces as usize {
+                if bitfield
+                    .get(index / 8)
+                    .is_some_and(|byte| byte & (1 << (7 - index % 8)) != 0)
+                {
+                    piece_picker.mark_completed(index as u32);
+                    piece_manager.mark_piece_complete(index as u32);
+                }
             }
-            "tail" => {
-                piece_picker.set_priority_mode(
-                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::SequentialTail,
-                );
-                info!("[BT] Piece priority mode: SequentialTail (from end)");
+        }
+
+        let prioritized_pieces = {
+            let group = self.group.recover();
+            let rules = crate::config::parse_piece_priority(&group.options().bt_prioritize_piece)
+                .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+            match group.get_download_context() {
+                Some(context) => crate::engine::bt_piece_selector::prioritized_piece_indices(
+                    &rules,
+                    context.get_file_entries(),
+                    piece_length as u64,
+                )
+                .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?,
+                None => Vec::new(),
             }
-            _ => {
-                piece_picker.set_priority_mode(
-                    aria2_protocol::bittorrent::piece::picker::PiecePriorityMode::RarestFirst,
-                );
-                info!("[BT] Piece priority mode: RarestFirst (default)");
-            }
+        };
+        if !prioritized_pieces.is_empty() {
+            info!(
+                "[BT] Prioritizing {} file-boundary pieces from bt-prioritize-piece",
+                prioritized_pieces.len()
+            );
+            piece_picker.set_priority_pieces(prioritized_pieces);
         }
 
         let mut peer_tracker =
@@ -406,6 +441,16 @@ impl BtDownloadCommand {
                 writer.close().await.map_err(|error| {
                     Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                 })?;
+                if let Some(checkpoint) = self.checkpoint.as_mut() {
+                    checkpoint
+                        .save(&piece_picker.export_bitfield(), self.completed_bytes)
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::FileIo(format!(
+                                "Failed to save halted BT checkpoint: {error}"
+                            ))
+                        })?;
+                }
                 return Err(Aria2Error::DownloadFailed(
                     "BitTorrent download halted".into(),
                 ));
@@ -560,6 +605,64 @@ impl BtDownloadCommand {
                 }
             }
 
+            // DHTGetPeersCommand counterpart. The lookup runs in a background
+            // task and this poll never waits on network I/O, so DHT timeouts do
+            // not stall piece scheduling or halt detection.
+            self.dht_periodic_lookup
+                .set_peer_limits(self.bt_runtime.min_peers(), self.bt_runtime.max_peers());
+            let mut dht_peers = Vec::new();
+            super::check_periodic_dht_lookup(
+                &mut self.dht_periodic_lookup,
+                self.dht_engine.as_ref(),
+                &meta.info_hash.bytes,
+                active_connections.len(),
+                &mut dht_peers,
+            )
+            .await;
+            dht_peers.retain(|peer| !self.is_peer_temporarily_rejected(&peer.ip));
+            if !dht_peers.is_empty() {
+                info!(
+                    discovered = dht_peers.len(),
+                    "[BT] Periodic DHT lookup found new peers"
+                );
+                let new_connections = self
+                    .connect_to_discovered_peers(
+                        &dht_peers,
+                        &meta.info_hash.bytes,
+                        num_pieces,
+                        active_connections,
+                        piece_length,
+                        total_size,
+                    )
+                    .await;
+                let mut context = NewPeerConnectionsContext {
+                    peer_last_data_time: &mut peer_last_data_time,
+                    pex_enabled_peers,
+                    allowed_fast_sent_peers: &mut self.allowed_fast_sent_peers,
+                    suggest_sent_counts: &mut self.suggest_sent_counts,
+                    peer_tracker: &mut peer_tracker,
+                    choking_algo: &mut self.choking_algo,
+                };
+                let connected = Self::append_new_connections(
+                    active_connections,
+                    new_connections,
+                    self.group.recover().options().bt_max_peers,
+                    self.is_private,
+                    &mut context,
+                    &self.peer_storage,
+                    self.group.recover().gid().value(),
+                );
+                if connected > 0 {
+                    info!("[BT] Connected to {} DHT-discovered peers", connected);
+                    let group = self.group.recover();
+                    sync_peer_snapshots(&group, active_connections);
+                }
+            }
+            if self.dht_periodic_lookup.is_lookup_completion_pending() {
+                self.dht_periodic_lookup
+                    .on_lookup_completed(self.tracked_peer_count());
+            }
+
             let remaining = piece_picker.remaining_count();
             let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
 
@@ -704,10 +807,16 @@ impl BtDownloadCommand {
                         self.completed_bytes += piece_data_len as u64;
 
                         // Sync bitfield to RequestGroup for session persistence
+                        let bitfield = piece_picker.export_bitfield();
                         {
-                            let bitfield = piece_picker.export_bitfield();
                             let g = self.group.recover();
-                            g.set_bt_bitfield(Some(bitfield));
+                            g.set_bt_bitfield(Some(bitfield.clone()));
+                        }
+                        if let Some(checkpoint) = self.checkpoint.as_mut()
+                            && let Err(error) =
+                                checkpoint.save(&bitfield, self.completed_bytes).await
+                        {
+                            tracing::warn!(%error, "Failed to save BT checkpoint after piece completion");
                         }
 
                         BtPeerInteraction::broadcast_have(
@@ -815,6 +924,9 @@ impl BtDownloadCommand {
             .close()
             .await
             .map_err(|error| Aria2Error::FileIo(format!("Failed to close BT output: {error}")))?;
+        if let Some(checkpoint) = self.checkpoint.take() {
+            checkpoint.remove().await?;
+        }
         tracing::info!("[BT] Writer flushed and closed OK");
         info!(
             "BT download done: {} ({} bytes)",

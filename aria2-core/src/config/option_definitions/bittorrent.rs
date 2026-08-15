@@ -10,7 +10,10 @@ impl crate::config::OptionRegistry {
             name: "seed-time".into(),
             opt_type: OptionType::Float,
             short_name: Some('G'),
-            default_value: OptionValue::Float(0.0),
+            // aria2_original uses NO_DEFAULT_VALUE here. A configured zero
+            // must remain distinguishable from an omitted option because it
+            // explicitly disables the seed-time criterion.
+            default_value: OptionValue::None,
             description: "Seeding time in minutes (0=infinite)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -205,6 +208,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "listen-port".into(),
             opt_type: OptionType::IntegerRange,
+            short_name: Some('L'),
             default_value: OptionValue::Str("6881-6999".into()),
             min: Some(1024),
             max: Some(65535),
@@ -216,9 +220,10 @@ impl crate::config::OptionRegistry {
         // --- Piece Selection Priority (G2) ---
         self.register(OptionDef {
             name: "bt-prioritize-piece".into(),
-            opt_type: OptionType::String,
-            default_value: OptionValue::Str("rarest".into()),
-            description: "Piece selection priority mode: 'rarest' (default), 'head' (sequential from start), 'tail' (sequential from end)".into(),
+            opt_type: OptionType::PiecePriority,
+            description:
+                "Prioritize pieces at the head or tail of each file (head[=SIZE],tail[=SIZE])"
+                    .into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
@@ -315,6 +320,41 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::List,
             description: "Comma-separated list of tracker announce URIs".into(),
             category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-tracker-source".into(),
+            opt_type: OptionType::List,
+            default_value: OptionValue::List(vec![
+                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_SOURCE
+                    .to_string(),
+            ]),
+            cumulative_delimiter: Some("\n"),
+            description: "Remote public tracker list sources".into(),
+            category: OptionCategory::BitTorrent,
+            // Rust-only extension. Keep it out of the original
+            // getGlobalOption/getOption projections while retaining the
+            // explicit extension option for local configuration and RPC.
+            expose_in_aria2_rpc: false,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "bt-tracker-update-interval".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(86_400),
+            min: Some(1),
+            description: "Public tracker list refresh interval in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: false,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "enable-public-trackers".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Use public trackers in addition to torrent trackers".into(),
+            category: OptionCategory::BitTorrent,
+            expose_in_aria2_rpc: false,
             ..Default::default()
         });
         self.register(OptionDef {

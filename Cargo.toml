@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 authors = ["aria2-rust contributors"]
 license = "GPL-2.0-or-later"
@@ -30,9 +30,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1.5"
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-aria2-protocol = { path = "aria2-protocol", version = "0.2.2" }
-aria2-core = { path = "aria2-core", version = "0.2.2" }
-aria2-rpc = { path = "aria2-rpc", version = "0.2.2" }
+aria2-protocol = { path = "aria2-protocol", version = "0.2.9" }
+aria2-core = { path = "aria2-core", version = "0.2.9" }
+aria2-rpc = { path = "aria2-rpc", version = "0.2.9" }
 
 # Cross-crate: unify to workspace-level
 reqwest = { version = "0.13", default-features = false }
@@ -45,6 +45,7 @@ rand = "0.8"
 tempfile = "3.8"
 rustls = { version = "0.23", default-features = false }
 rustls-pemfile = "2.1"
+p12_q3 = "0.8"
 
 [workspace.metadata.release]
 # Release workflow settings

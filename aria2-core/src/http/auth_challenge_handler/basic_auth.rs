@@ -23,7 +23,7 @@ pub fn handle_basic_challenge(
 ) -> AuthChallengeResult {
     // Activate BasicCred — this either activates an existing entry or
     // creates a new one from the credential resolution chain.
-    let activated = auth_factory.activate_basic_cred(host, port, path, auth_opts);
+    let activated = is_proxy || auth_factory.activate_basic_cred(host, port, path, auth_opts);
 
     if !activated {
         warn!(
@@ -48,7 +48,11 @@ pub fn handle_basic_challenge(
     let mut opts_with_challenge = auth_opts.clone();
     opts_with_challenge.http_auth_challenge = true;
 
-    let auth_config = auth_factory.resolve(&url_for_resolve, false, &opts_with_challenge);
+    let auth_config = if is_proxy {
+        auth_factory.resolve_proxy(auth_opts)
+    } else {
+        auth_factory.resolve(&url_for_resolve, false, &opts_with_challenge)
+    };
 
     match auth_config {
         Some(ac) => {

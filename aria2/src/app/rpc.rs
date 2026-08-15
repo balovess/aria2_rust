@@ -13,7 +13,6 @@ use aria2_core::config::OptionValue;
 use aria2_core::engine::download_event_hooks::{
     DownloadEvent as CoreDownloadEvent, DownloadEventHooks, DownloadEventListener,
 };
-use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::server::{
@@ -22,7 +21,6 @@ use aria2_rpc::server::{
 use aria2_rpc::websocket::{DownloadEvent as RpcDownloadEvent, EventType};
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
-use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, error, info};
 
 // ============================================================================
@@ -170,10 +168,12 @@ impl App {
     /// - `rpc-cors-domain` — CORS allowed origins
     ///
     /// Returns a handle to the server task on success.
-    pub async fn start_rpc_server(
+    pub async fn start_rpc_server<
+        T: Into<aria2_core::engine::engine_command::EngineCommandSender>,
+    >(
         &self,
-        group_man: Arc<RwLock<RequestGroupMan>>,
-        engine_cmd_tx: mpsc::UnboundedSender<EngineCommand>,
+        group_man: Arc<RequestGroupMan>,
+        engine_cmd_tx: T,
     ) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
         // Read RPC configuration
         let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
@@ -347,6 +347,7 @@ use colored::Colorize;
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
+    use tokio::sync::mpsc;
 
     const GID: &str = "2089b05ecca3d829";
 

@@ -84,6 +84,15 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if opts.hash_check_only {
         map.insert("hash-check-only".to_string(), "true".to_string());
     }
+    if !opts.bt_enable_hook_after_hash_check {
+        map.insert(
+            "bt-enable-hook-after-hash-check".to_string(),
+            "false".to_string(),
+        );
+    }
+    if !opts.bt_hash_check_seed {
+        map.insert("bt-hash-check-seed".to_string(), "false".to_string());
+    }
     if let Some(ref v) = opts.metalink_version {
         map.insert("metalink-version".to_string(), v.clone());
     }
@@ -101,6 +110,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if let Some(ref v) = opts.select_file {
         map.insert("select-file".to_string(), v.clone());
+    }
+    if opts.bt_remove_unselected_file {
+        map.insert("bt-remove-unselected-file".to_string(), "true".to_string());
     }
     if !opts.metalink_enable_unique_protocol {
         map.insert(
@@ -209,14 +221,38 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.http_proxy {
         map.insert("http-proxy".to_string(), v.clone());
     }
+    if let Some(ref v) = opts.http_proxy_user {
+        map.insert("http-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.http_proxy_passwd {
+        map.insert("http-proxy-passwd".to_string(), v.clone());
+    }
     if let Some(ref v) = opts.all_proxy {
         map.insert("all-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.all_proxy_user {
+        map.insert("all-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.all_proxy_passwd {
+        map.insert("all-proxy-passwd".to_string(), v.clone());
     }
     if let Some(ref v) = opts.https_proxy {
         map.insert("https-proxy".to_string(), v.clone());
     }
+    if let Some(ref v) = opts.https_proxy_user {
+        map.insert("https-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.https_proxy_passwd {
+        map.insert("https-proxy-passwd".to_string(), v.clone());
+    }
     if let Some(ref v) = opts.ftp_proxy {
         map.insert("ftp-proxy".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_proxy_user {
+        map.insert("ftp-proxy-user".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.ftp_proxy_passwd {
+        map.insert("ftp-proxy-passwd".to_string(), v.clone());
     }
     if let Some(ref v) = opts.no_proxy {
         map.insert("no-proxy".to_string(), v.clone());
@@ -236,6 +272,24 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if let Some(ref v) = opts.referer {
         map.insert("referer".to_string(), v.clone());
+    }
+    if !opts.enable_http_keep_alive {
+        map.insert("enable-http-keep-alive".to_string(), "false".to_string());
+    }
+    if opts.enable_http_pipelining {
+        map.insert("enable-http-pipelining".to_string(), "true".to_string());
+    }
+    if opts.http_accept_gzip {
+        map.insert("http-accept-gzip".to_string(), "true".to_string());
+    }
+    if opts.http_no_cache {
+        map.insert("http-no-cache".to_string(), "true".to_string());
+    }
+    if opts.use_head {
+        map.insert("use-head".to_string(), "true".to_string());
+    }
+    if opts.no_want_digest_header {
+        map.insert("no-want-digest-header".to_string(), "true".to_string());
     }
     if !opts.check_certificate {
         map.insert("check-certificate".to_string(), "false".to_string());

@@ -20,7 +20,7 @@ use std::collections::VecDeque;
 
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::error::{Aria2Error, Result};
 use crate::http::auth::erase_confidential_info;
@@ -354,69 +354,6 @@ impl HttpPipelineConnection {
 }
 
 // ---------------------------------------------------------------------------
-// NTLM auth stub — mirrors the C++ NTLM enum variant
-// ---------------------------------------------------------------------------
-
-/// NTLM authentication state machine.
-///
-/// NTLM is a connection-oriented authentication scheme that requires
-/// multiple round-trips on the same TCP connection.  Full NTLM support
-/// requires the `ntlm` crate or an equivalent SSP integration.
-///
-/// This is a **stub** that provides the API surface; actual NTLM
-/// negotiation is not yet implemented.
-#[derive(Debug, Clone)]
-pub enum NtlmState {
-    /// Initial state — no negotiation started.
-    Initial,
-    /// Received Type 2 challenge from server; need to compute Type 3 response.
-    /// TODO: Store server challenge blob for Type 3 computation.
-    ChallengeReceived,
-    /// NTLM negotiation complete; subsequent requests on this connection
-    /// carry the negotiated security context.
-    Authenticated,
-}
-
-impl NtlmState {
-    /// Build the initial Type 1 (Negotiate) message.
-    ///
-    /// Returns the `Authorization: NTLM <base64>` header value.
-    ///
-    /// TODO: Implement actual Type 1 message construction using the NTLM
-    ///       protocol (NegotiateFlags, domain name, workstation name).
-    pub fn build_type1_header(&self) -> Result<String> {
-        // TODO: Implement NTLM Type 1 message
-        warn!("NTLM Type 1 message construction not yet implemented");
-        Err(Aria2Error::Network(
-            "NTLM authentication is not yet implemented".to_string(),
-        ))
-    }
-
-    /// Process a Type 2 challenge from the server and produce a Type 3
-    /// response header value.
-    ///
-    /// TODO: Parse the server challenge, compute the NTLMv1/v2 response
-    ///       hash, and construct the Type 3 (Authenticate) message.
-    pub fn build_type3_header(
-        &mut self,
-        _challenge_header: &str,
-        _username: &str,
-        _password: &str,
-    ) -> Result<String> {
-        // TODO: Implement NTLM Type 3 message
-        warn!("NTLM Type 3 message construction not yet implemented");
-        Err(Aria2Error::Network(
-            "NTLM authentication is not yet implemented".to_string(),
-        ))
-    }
-
-    /// Whether NTLM negotiation is complete.
-    pub fn is_authenticated(&self) -> bool {
-        matches!(self, NtlmState::Authenticated)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -453,22 +390,6 @@ mod tests {
         assert!(outstanding.iter().any(|e| e.segment_id == Some(1)));
         assert!(outstanding.iter().any(|e| e.segment_id == Some(2)));
         assert!(!outstanding.iter().any(|e| e.segment_id == Some(3)));
-    }
-
-    #[test]
-    fn test_ntlm_state_stub() {
-        let state = NtlmState::Initial;
-        assert!(!state.is_authenticated());
-
-        let state = NtlmState::Authenticated;
-        assert!(state.is_authenticated());
-
-        let mut state = NtlmState::ChallengeReceived;
-        assert!(
-            state
-                .build_type3_header("challenge", "user", "pass")
-                .is_err()
-        );
     }
 
     #[test]

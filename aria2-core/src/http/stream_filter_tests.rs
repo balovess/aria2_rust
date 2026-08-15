@@ -234,7 +234,7 @@ fn test_process_filters_with_decoders() {
 #[test]
 fn test_auto_select_gzip_content_encoding() {
     // Content-Encoding: gzip → should select GZipDecoder
-    let filters = AutoFilterSelector::select_filters(Some("gzip"), None);
+    let filters = AutoFilterSelector::select_filters(Some("gzip"), None).unwrap();
 
     assert_eq!(filters.len(), 1, "Should select 1 filter for gzip");
 }
@@ -242,22 +242,49 @@ fn test_auto_select_gzip_content_encoding() {
 #[test]
 fn test_auto_select_chunked_transfer_encoding() {
     // Transfer-Encoding: chunked → should select ChunkedDecoder
-    let filters = AutoFilterSelector::select_filters(None, Some("chunked"));
+    let filters = AutoFilterSelector::select_filters(None, Some("chunked")).unwrap();
 
     assert_eq!(filters.len(), 1, "Should select 1 filter for chunked");
 }
 
 #[test]
+fn test_transfer_encoding_accepts_only_chunked() {
+    for transfer_encoding in ["gzip", "deflate", "bzip2", "br", "x-custom", "identity", ""] {
+        let result = AutoFilterSelector::select_filters(None, Some(transfer_encoding));
+        let error = result.expect_err("unsupported transfer encoding must be rejected");
+        assert!(
+            matches!(error, Aria2Error::HttpProtocol(ref message) if message.contains(transfer_encoding)),
+            "unexpected error for {transfer_encoding:?}: {error:?}"
+        );
+    }
+
+    assert!(AutoFilterSelector::select_filters(None, Some("CHUNKED")).is_ok());
+    assert!(AutoFilterSelector::select_filters(None, Some("chunked, gzip")).is_err());
+}
+
+#[test]
+fn test_transfer_encoding_preserves_content_encoding_stage() {
+    let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"))
+        .expect("chunked transfer encoding should be accepted");
+
+    assert_eq!(
+        filters.len(),
+        2,
+        "wire transfer decoding must precede content decoding"
+    );
+}
+
+#[test]
 fn test_auto_select_x_gzip_encoding() {
     // x-gzip is an alias for gzip
-    let filters = AutoFilterSelector::select_filters(Some("x-gzip"), None);
+    let filters = AutoFilterSelector::select_filters(Some("x-gzip"), None).unwrap();
 
     assert_eq!(filters.len(), 1, "x-gzip should be treated as gzip");
 }
 
 #[test]
 fn test_auto_select_bzip2_encoding() {
-    let filters = AutoFilterSelector::select_filters(Some("bzip2"), None);
+    let filters = AutoFilterSelector::select_filters(Some("bzip2"), None).unwrap();
 
     assert_eq!(
         filters.len(),
@@ -269,7 +296,7 @@ fn test_auto_select_bzip2_encoding() {
 #[test]
 fn test_auto_select_identity_encoding() {
     // identity means no encoding
-    let filters = AutoFilterSelector::select_filters(Some("identity"), None);
+    let filters = AutoFilterSelector::select_filters(Some("identity"), None).unwrap();
 
     assert_eq!(
         filters.len(),
@@ -281,7 +308,7 @@ fn test_auto_select_identity_encoding() {
 #[test]
 fn test_auto_select_no_encoding() {
     // No encoding info
-    let filters = AutoFilterSelector::select_filters(None, None);
+    let filters = AutoFilterSelector::select_filters(None, None).unwrap();
 
     assert_eq!(filters.len(), 0, "No encoding should result in empty list");
 }
@@ -343,30 +370,49 @@ fn test_http_response_decoded_body_no_body() {
     );
 }
 
+#[test]
+fn test_http_response_decoded_body_rejects_unsupported_transfer_encoding() {
+    use super::request_response::HttpResponse;
+    use std::collections::HashMap;
+
+    let mut headers = HashMap::new();
+    headers.insert("Transfer-Encoding".to_string(), vec!["gzip".to_string()]);
+    let response = HttpResponse {
+        status_code: 200,
+        reason_phrase: "OK".to_string(),
+        version: "HTTP/1.1".to_string(),
+        headers,
+        body: Some(b"not-a-gzip-transfer-stream".to_vec()),
+    };
+
+    let error = response
+        .decoded_body()
+        .expect_err("unsupported transfer encoding must be rejected");
+    assert!(matches!(error, Aria2Error::HttpProtocol(message) if message.contains("gzip")));
+}
+
 // ==================== Mixed encoding handling tests ====================
 
 #[test]
 fn test_mixed_encoding_handling() {
-    // When both Transfer-Encoding and Content-Encoding exist,
-    // per RFC 7230, Transfer-Encoding takes priority
+    // Transfer-Encoding is decoded before Content-Encoding.
 
     // Scenario 1: Transfer-Encoding=chunked + Content-Encoding=gzip
-    // Should only use chunked decoder
-    let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked"));
+    let filters = AutoFilterSelector::select_filters(Some("gzip"), Some("chunked")).unwrap();
 
     assert_eq!(
         filters.len(),
-        1,
-        "Transfer-Encoding should take priority over Content-Encoding"
+        2,
+        "Transfer-Encoding should be decoded before Content-Encoding"
     );
 }
 
 #[test]
 fn test_multiple_content_encodings() {
     // Multiple Content-Encoding values (comma-separated)
-    let filters = AutoFilterSelector::select_filters(Some("gzip, deflate"), None);
+    let filters = AutoFilterSelector::select_filters(Some("gzip, deflate"), None).unwrap();
 
-    // Currently only gzip is supported, deflate will output warning but not add a filter
+    // Both supported content encodings contribute a decoder stage.
     assert!(
         !filters.is_empty(),
         "Should at least handle supported encodings"

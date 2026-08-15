@@ -55,6 +55,7 @@ pub enum UdpState {
 pub enum UdpError {
     Success,
     TrackerError,
+    MalformedResponse,
     Timeout,
     Network,
     Shutdown,
@@ -65,6 +66,7 @@ impl fmt::Display for UdpError {
         match self {
             UdpError::Success => write!(f, "success"),
             UdpError::TrackerError => write!(f, "tracker_error"),
+            UdpError::MalformedResponse => write!(f, "malformed_response"),
             UdpError::Timeout => write!(f, "timeout"),
             UdpError::Network => write!(f, "network"),
             UdpError::Shutdown => write!(f, "shutdown"),

@@ -9,7 +9,7 @@
 class Aria2Rust < Formula
   desc "The ultra fast download utility - rewritten in Rust"
   homepage "https://github.com/balovess/aria2_rust"
-  version "0.2.1"
+  version "0.2.9"
   license "GPL-2.0-or-later"
 
   on_macos do

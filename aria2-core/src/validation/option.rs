@@ -52,9 +52,9 @@ pub fn validate_out_filename(name: &str) -> Result<String> {
 }
 
 pub fn validate_split_value(n: u16) -> Result<u16> {
-    if n == 0 || n > 16 {
+    if n == 0 {
         return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-            "split value must be between 1 and 16".into(),
+            "split value must be at least 1".into(),
         )));
     }
     Ok(n)

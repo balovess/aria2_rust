@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
 use super::super::net_stat::NetStat;
@@ -50,6 +51,10 @@ pub struct DownloadContext {
 
     // -- Per-download network statistics --
     pub(super) net_stat: NetStat,
+
+    // -- Optional manager-owned aggregate network statistics --
+    pub(super) global_net_stat:
+        OnceLock<std::sync::Arc<crate::request::global_net_stat::GlobalNetStat>>,
 
     // -- Timestamp when download stopped --
     pub(super) download_stop_time: Option<std::time::Instant>,
@@ -129,6 +134,7 @@ impl DownloadContext {
             file_entries: Vec::new(),
             piece_hashes: Vec::new(),
             net_stat: NetStat::default(),
+            global_net_stat: OnceLock::new(),
             download_stop_time: None,
             piece_hash_type: String::new(),
             digest: String::new(),
@@ -163,6 +169,7 @@ impl DownloadContext {
             attrs: HashMap::new(),
             piece_hashes: Vec::new(),
             net_stat: NetStat::default(),
+            global_net_stat: OnceLock::new(),
             download_stop_time: None,
             piece_hash_type: String::new(),
             digest: String::new(),

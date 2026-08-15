@@ -33,4 +33,21 @@ mod tests {
         assert_eq!(DEFAULT_PEER_AGENT, DEFAULT_USER_AGENT);
         assert!(DEFAULT_PEER_ID_PREFIX.starts_with("A2-RUST-"));
     }
+
+    #[test]
+    fn product_identity_does_not_impersonate_upstream_aria2() {
+        assert_ne!(PRODUCT_NAME, "aria2");
+        assert!(!DEFAULT_USER_AGENT.starts_with("aria2/"));
+        assert!(!DEFAULT_PEER_AGENT.starts_with("aria2/"));
+    }
+
+    #[test]
+    fn product_identity_is_the_only_release_version_source() {
+        assert_eq!(PRODUCT_VERSION, env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            DEFAULT_USER_AGENT,
+            "aria2-rust/".to_owned() + PRODUCT_VERSION
+        );
+        assert_eq!(DEFAULT_PEER_AGENT, DEFAULT_USER_AGENT);
+    }
 }

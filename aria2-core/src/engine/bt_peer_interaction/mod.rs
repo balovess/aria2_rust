@@ -25,7 +25,7 @@ pub mod types;
 pub use interactive::BtPeerInteractive;
 pub use piece_provider::PieceProvider;
 pub use types::{
-    CheckHaveResult, ChokingDecision, DEFAULT_ALLOWED_FAST_SET_SIZE,
+    BtPeerCryptoPolicy, CheckHaveResult, ChokingDecision, DEFAULT_ALLOWED_FAST_SET_SIZE,
     DEFAULT_KEEP_ALIVE_INTERVAL_SECS, DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate,
     FLOODING_CHECK_INTERVAL_SECS, INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision,
     MAX_UNCHOKE_WAIT_ATTEMPTS, MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS,
@@ -72,15 +72,13 @@ impl BtPeerInteraction {
     ///
     /// # Returns
     /// * `PeerConnectionResult` containing connected peers and failure count
-    #[allow(clippy::too_many_arguments)]
     pub async fn connect_to_peers(
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
-        require_crypto: bool,
-        force_encrypt: bool,
+        crypto_policy: BtPeerCryptoPolicy,
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
@@ -93,8 +91,7 @@ impl BtPeerInteraction {
             match Self::connect_peer_ready(
                 addr,
                 info_hash_raw,
-                require_crypto,
-                force_encrypt,
+                crypto_policy,
                 num_pieces,
                 piece_length,
                 total_length,
@@ -130,14 +127,12 @@ impl BtPeerInteraction {
     pub async fn connect_peer_ready(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
-        require_crypto: bool,
-        force_encrypt: bool,
+        crypto_policy: BtPeerCryptoPolicy,
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
     ) -> Result<BtPeerConn> {
-        let mut conn =
-            Self::connect_single_peer(addr, info_hash_raw, require_crypto, force_encrypt).await?;
+        let mut conn = Self::connect_single_peer(addr, info_hash_raw, crypto_policy).await?;
         conn.sync_peer_identity();
         conn.allocate_session_resource(piece_length, total_length);
         info!(
@@ -159,15 +154,27 @@ impl BtPeerInteraction {
     async fn connect_single_peer(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
-        require_crypto: bool,
-        force_encrypt: bool,
+        crypto_policy: BtPeerCryptoPolicy,
     ) -> Result<BtPeerConn> {
-        if force_encrypt || require_crypto {
+        if crypto_policy.require_mse {
             // Try MSE encrypted connection
-            BtPeerConn::connect_mse(addr, info_hash_raw, require_crypto).await
+            BtPeerConn::connect_mse(
+                addr,
+                info_hash_raw,
+                crypto_policy.force_encryption,
+                crypto_policy.prefer_encryption,
+            )
+            .await
         } else {
             // Try MSE first, fall back to plain
-            match BtPeerConn::connect_mse(addr, info_hash_raw, false).await {
+            match BtPeerConn::connect_mse(
+                addr,
+                info_hash_raw,
+                crypto_policy.force_encryption,
+                crypto_policy.prefer_encryption,
+            )
+            .await
+            {
                 Ok(conn) => Ok(conn),
                 Err(_) => {
                     debug!("[BT] MSE failed, trying plain connection");

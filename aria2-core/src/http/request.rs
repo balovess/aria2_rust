@@ -283,7 +283,8 @@ impl HttpRequestBuilder {
     /// Use `basic_auth()` or `bearer_token()` to generate the value.
     /// Mirrors C++ aria2's `authConfig_->getAuthText()` flow.
     ///
-    /// TODO: Add support for Digest and NTLM authentication schemes.
+    /// Digest challenge responses are built by the HTTP auth challenge handler;
+    /// this builder accepts the resulting complete header value.
     pub fn authorization(mut self, value: String) -> Self {
         self.authorization = Some(value);
         self

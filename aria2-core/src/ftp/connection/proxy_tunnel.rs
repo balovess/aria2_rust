@@ -546,14 +546,14 @@ mod tests {
             proxy_port: 8080,
             target_host: "ftp.example.com".to_string(),
             target_port: 21,
-            user_agent: "aria2/rust".to_string(),
+            user_agent: crate::constants::USER_AGENT.to_string(),
             ..Default::default()
         };
 
         let request = FtpProxyTunnel::build_connect_request(&config, None);
         assert!(request.starts_with("CONNECT ftp.example.com:21 HTTP/1.1\r\n"));
         assert!(request.contains("Host: ftp.example.com:21\r\n"));
-        assert!(request.contains("User-Agent: aria2/rust\r\n"));
+        assert!(request.contains(&format!("User-Agent: {}\r\n", crate::constants::USER_AGENT)));
         assert!(!request.contains("Proxy-Authorization"));
         assert!(request.ends_with("\r\n\r\n"));
     }

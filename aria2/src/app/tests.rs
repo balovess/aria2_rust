@@ -105,6 +105,37 @@ async fn test_load_cli_args_rejects_invalid_file_allocation() {
 }
 
 #[tokio::test]
+async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
+    let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=head=512K,tail"])
+        .expect("clap should parse the original piece-priority syntax");
+    let mut app = App::new();
+
+    app.load_cli_args(cli)
+        .await
+        .expect("the registry should accept the original piece-priority syntax");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.bt_prioritize_piece, "head=512K,tail");
+}
+
+#[tokio::test]
+async fn test_load_cli_args_rejects_legacy_piece_priority_mode() {
+    let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=rarest"])
+        .expect("clap should parse the value before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("the registry must reject the old synthetic piece-priority mode");
+
+    assert!(
+        error.contains("--bt-prioritize-piece"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn application_rpc_does_not_enable_cors_by_default() {
     let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -259,7 +290,7 @@ async fn test_no_conf_skips_explicit_config_file() {
         .await
         .expect("--no-conf should not attempt to read the file");
 
-    assert_eq!(app.get_opt_i64("split").await, Some(5));
+    assert_eq!(app.get_opt_i64("split").await, Some(16));
 }
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -314,7 +345,7 @@ async fn test_standard_session_restores_metalink_graph() {
     }
 
     assert_eq!(app.restore_session().await.expect("restore session"), 2);
-    let groups = app.request_man.read().await.list_groups();
+    let groups = app.request_man.list_groups();
     let metadata = groups
         .iter()
         .find(|group| {
@@ -351,6 +382,99 @@ async fn test_standard_session_restores_metalink_graph() {
         !payload_options.contains_key("aria2-rust-metadata-uri"),
         "session metadata must not be observable through task options"
     );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_session_save_then_restart_restores_metalink_graph() {
+    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::request::request_group::{DownloadOptions, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let options = DownloadOptions {
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        out: Some("payload.bin".to_string()),
+        ..Default::default()
+    };
+    let graph = MetalinkRequestGraph::new_memory_with_fallback(
+        "https://example.test/payload.torrent",
+        "payload.bin",
+        &options,
+        GroupId::new(0x30),
+        GroupId::new(0x40),
+        vec!["https://mirror.example.test/payload.bin".to_string()],
+    )
+    .expect("graph should be constructible");
+
+    let app = App::new();
+    app.request_man
+        .add_metalink_graph(graph)
+        .expect("graph should be queued");
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1),
+        "only the dependency-gated payload should be persisted"
+    );
+
+    let session_text = tokio::fs::read_to_string(&session_file)
+        .await
+        .expect("saved session should be readable");
+    assert!(session_text.contains("aria2-rust-payload-gid=0000000000000040"));
+    assert!(session_text.contains("aria2-rust-metadata-uri=https://example.test/payload.torrent"));
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        2,
+        "restart must rebuild both metadata and payload groups"
+    );
+    let groups = restarted.request_man.list_groups();
+    let metadata = groups
+        .iter()
+        .find(|group| group.recover().gid() == GroupId::new(0x30))
+        .expect("metadata group should be restored");
+    assert_eq!(
+        metadata.recover().belongs_to_gid(),
+        Some(GroupId::new(0x40))
+    );
+
+    let payload = groups
+        .iter()
+        .find(|group| group.recover().gid() == GroupId::new(0x40))
+        .expect("payload group should be restored");
+    assert_eq!(
+        payload.recover().output_name().as_deref(),
+        Some("payload.bin")
+    );
+    assert!(!payload.recover().is_dependency_resolved());
 }
 
 /// Test 1: Load entries from session file
@@ -433,7 +557,7 @@ ftp://server.com/bigfile.bin
     assert_eq!(count, 3, "Should restore 3 non-completed entries");
 
     // Verify RequestGroupMan has corresponding groups
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let group_count = man.count();
     assert_eq!(group_count, 3, "RequestGroupMan should have 3 groups");
     assert!(
@@ -531,7 +655,7 @@ http://example.com/paused4.iso
     // Should only restore 2 entries (active and paused), skip 2 complete
     assert_eq!(count, 2, "Should only restore 2 non-completed entries");
 
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let group_count = man.count();
     assert_eq!(group_count, 2, "RequestGroupMan should have 2 groups");
 }
@@ -567,7 +691,7 @@ async fn test_save_session_on_shutdown() {
     };
 
     {
-        let man = app.request_man.read().await;
+        let man = &app.request_man;
         man.add_group(
             vec!["http://example.com/file1.zip".to_string()],
             opts.clone(),
@@ -745,7 +869,7 @@ async fn test_bt_bitfield_preserved_on_restore() {
     assert_eq!(result.unwrap(), 1, "Should restore 1 BT task");
 
     // Verify bitfield is preserved in RequestGroup
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let groups = man.list_groups();
     assert_eq!(groups.len(), 1, "Should have 1 group");
 
@@ -852,7 +976,7 @@ http://example.com/new2.iso
         "C++ aria2 restores all non-finished entries including 0/0 progress"
     );
 
-    let man = app.request_man.read().await;
+    let man = &app.request_man;
     let group_count = man.count();
     assert_eq!(group_count, 2, "Should restore both 0/0 progress groups");
 }

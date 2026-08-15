@@ -24,6 +24,7 @@ use stopped::StoppedResults;
 
 pub use reserved::PositionMode as ChangePositionMode;
 
+use super::global_net_stat::GlobalNetStat;
 use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph;
@@ -70,6 +71,9 @@ pub struct RequestGroupMan {
 
     /// Global upload speed limit (bytes/sec).
     global_upload_limit: std::sync::RwLock<Option<u64>>,
+
+    /// Session transfer counters shared by all registered groups.
+    global_net_stat: Arc<GlobalNetStat>,
 }
 
 impl RequestGroupMan {
@@ -87,6 +91,7 @@ impl RequestGroupMan {
             graph_insert_lock: std::sync::Mutex::new(()),
             global_download_limit: std::sync::RwLock::new(None),
             global_upload_limit: std::sync::RwLock::new(None),
+            global_net_stat: Arc::new(GlobalNetStat::default()),
         }
     }
 
@@ -327,8 +332,6 @@ impl RequestGroupMan {
         if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
             let group = group_lock.recover();
             group.request_halt(HaltReason::UserRequest);
-            group.remove_control_file();
-            let _ = group.process_remove_control_file();
             info!("Requested removal of active download task #{}", gid.value());
             return Ok(());
         }
@@ -360,11 +363,6 @@ impl RequestGroupMan {
             group_lock
                 .recover()
                 .request_force_halt(HaltReason::UserRequest);
-            if let Some(group) = self.active.get(&gid).map(|entry| entry.value().clone()) {
-                let group = group.recover();
-                group.remove_control_file();
-                let _ = group.process_remove_control_file();
-            }
             info!(
                 "Requested force removal of active download task #{}",
                 gid.value()
@@ -448,6 +446,15 @@ impl RequestGroupMan {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
         let mut group = group_lock.recover_mut();
+        if !matches!(
+            group.status(),
+            DownloadStatus::Active | DownloadStatus::Waiting
+        ) {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be paused now",
+                gid.to_hex_string()
+            )));
+        }
         group.pause()?;
         info!("Pausing download task #{}", gid.value());
         Ok(())
@@ -458,10 +465,14 @@ impl RequestGroupMan {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
         let mut group = group_lock.recover_mut();
-        if group.status().is_paused() {
-            group.resume()?;
-            info!("Resuming download task #{}", gid.value());
+        if !group.status().is_paused() {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be unpaused now",
+                gid.to_hex_string()
+            )));
         }
+        group.resume()?;
+        info!("Resuming download task #{}", gid.value());
         Ok(())
     }
 
@@ -470,6 +481,15 @@ impl RequestGroupMan {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
         let mut group = group_lock.recover_mut();
+        if !matches!(
+            group.status(),
+            DownloadStatus::Active | DownloadStatus::Waiting
+        ) {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be paused now",
+                gid.to_hex_string()
+            )));
+        }
         group.force_pause()?;
         Ok(())
     }
@@ -824,6 +844,9 @@ impl RequestGroupMan {
         let gid = group.recover().gid();
         match self.groups.entry(gid) {
             Entry::Vacant(entry) => {
+                group
+                    .recover_mut()
+                    .set_global_net_stat(Arc::clone(&self.global_net_stat));
                 entry.insert(group);
                 true
             }
@@ -881,6 +904,26 @@ mod tests {
         }
 
         assert_eq!(man.count(), num_tasks);
+    }
+
+    #[test]
+    fn registered_group_receives_session_transfer_counters() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group = man.find_group(gid).expect("registered group");
+        let stats = group
+            .recover()
+            .global_net_stat()
+            .expect("manager counters must be injected");
+
+        stats.update_download(7);
+
+        assert_eq!(stats.session_download_length_for_test(), 7);
     }
 
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -1328,6 +1371,38 @@ mod tests {
         assert_eq!(man.active_count(), 1);
         let status = man.find_group(gid).unwrap().recover().status();
         assert_eq!(status, DownloadStatus::Active);
+    }
+
+    #[test]
+    fn test_paused_reserved_group_is_not_promoted_until_unpaused() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        // Reproduce the race window between the pause-flag check and the
+        // promotion status transition: the status is paused, but the flag
+        // has already been consumed by another lifecycle operation.
+        let group = man.find_group(gid).unwrap();
+        {
+            let mut group = group.recover_mut();
+            group.pause().unwrap();
+            group.control_flags.clear_pause();
+        }
+
+        let promoted = man.fill_from_reserver();
+        assert!(promoted.is_empty(), "paused group must remain reserved");
+        assert_eq!(man.reserved.len(), 1);
+        assert_eq!(man.active.len(), 0);
+        assert!(man.find_group(gid).unwrap().recover().status().is_paused());
+
+        man.unpause_group(gid).unwrap();
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1, "unpaused group should be promoted");
+        assert_eq!(man.active_count(), 1);
     }
 
     /// A group paused by `reduce_to_limit()` carries the restart flag; when

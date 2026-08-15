@@ -19,7 +19,7 @@ impl UdpTrackerClient {
             }
 
             if let Some(mut req) = self.pending.pop_front() {
-                if req.reply.is_some() || req.scrape_results.is_some() {
+                if req.reply.is_some() || req.scrape_results.is_some() || req.error.is_some() {
                     self.pending.push_front(req);
                     return false;
                 }
@@ -245,7 +245,7 @@ impl UdpTrackerClient {
                 }
                 Err(e) => {
                     warn!("Parse CONNECT response from {} failed: {}", from, e);
-                    req.error = Some(UdpError::TrackerError);
+                    req.error = Some(UdpError::MalformedResponse);
                 }
             },
             Some(UdpAction::Announce) => {
@@ -263,7 +263,7 @@ impl UdpTrackerClient {
                     }
                     Err(e) => {
                         warn!("Parse ANNOUNCE response from {} failed: {}", from, e);
-                        req.error = Some(UdpError::TrackerError);
+                        req.error = Some(UdpError::MalformedResponse);
                     }
                 }
                 self.pending.push_back(req);
@@ -301,7 +301,7 @@ impl UdpTrackerClient {
             },
             _ => {
                 warn!("Unknown action {} from {}", action_val, from);
-                req.error = Some(UdpError::TrackerError);
+                req.error = Some(UdpError::MalformedResponse);
                 self.pending.push_back(req);
             }
         }
@@ -315,7 +315,7 @@ impl UdpTrackerClient {
             .enumerate()
             .filter(|(_, r)| {
                 r.dispatched_at.is_some_and(|t| {
-                    t.duration_since(now) > Duration::from_secs(REQUEST_TIMEOUT_SECS)
+                    now.duration_since(t) > Duration::from_secs(REQUEST_TIMEOUT_SECS)
                 })
             })
             .map(|(i, _)| i)
@@ -353,6 +353,7 @@ impl UdpTrackerClient {
                 } else {
                     warn!("Max retries exceeded for txn_id={}", req.txn_id);
                     req.error = Some(UdpError::Timeout);
+                    self.pending.push_back(req);
                 }
             }
         }

@@ -226,6 +226,61 @@ impl RpcEngine {
                 });
             }
         }
+        #[cfg(feature = "bittorrent")]
+        if let Some(value) = new_opts.get("bt-tracker-source")
+            && let Some(tx) = &self.engine_cmd_tx
+        {
+            use aria2_core::engine::engine_command::EngineCommand;
+            use aria2_core::request::request_group::option_value_to_string;
+
+            let sources = option_value_to_string(value).ok_or_else(|| {
+                JsonRpcError::RpcExecution(
+                    "Option 'bt-tracker-source' must be a string or array".to_string(),
+                )
+            })?;
+            if sources
+                .split([',', '\n'])
+                .map(str::trim)
+                .all(|source| source.is_empty())
+            {
+                return Err(JsonRpcError::RpcExecution(
+                    "Option 'bt-tracker-source' must contain at least one source".to_string(),
+                ));
+            }
+            let _ = tx.send(EngineCommand::SetPublicTrackerSources { sources });
+        }
+        #[cfg(feature = "bittorrent")]
+        if let Some(value) = new_opts.get("bt-tracker-update-interval")
+            && let Some(tx) = &self.engine_cmd_tx
+        {
+            use aria2_core::engine::engine_command::EngineCommand;
+
+            let seconds =
+                parse_non_negative_u64_for_option_change(value, "bt-tracker-update-interval")?;
+            if seconds == 0 {
+                return Err(JsonRpcError::RpcExecution(
+                    "Option 'bt-tracker-update-interval' must be greater than zero".to_string(),
+                ));
+            }
+            let _ = tx.send(EngineCommand::SetPublicTrackerUpdateInterval { seconds });
+        }
+        #[cfg(feature = "bittorrent")]
+        if let Some(value) = new_opts.get("enable-public-trackers")
+            && let Some(tx) = &self.engine_cmd_tx
+        {
+            use aria2_core::engine::engine_command::EngineCommand;
+
+            let enabled = registry
+                .parse_rpc_value("enable-public-trackers", value)
+                .map_err(JsonRpcError::RpcExecution)?
+                .as_bool()
+                .ok_or_else(|| {
+                    JsonRpcError::RpcExecution(
+                        "Option 'enable-public-trackers' must be a boolean".to_string(),
+                    )
+                })?;
+            let _ = tx.send(EngineCommand::SetPublicTrackersEnabled { enabled });
+        }
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             "OK",
@@ -251,7 +306,6 @@ impl RpcEngine {
         // this matches C++ getOption rather than exposing a queued value.
         let (group_option_state, stopped_result) = if let Some(group_man) = self.group_man.as_ref()
         {
-            let group_man = group_man.read().await;
             let group_option_state = group_man.group_by_hex(&gid).map(|group| {
                 let group = group.recover();
                 (group.effective_option_snapshot(), group.runtime_options())
@@ -332,7 +386,7 @@ impl RpcEngine {
             .group_man
             .as_ref()
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
-        let manager = group_man.read().await;
+        let manager = group_man;
         manager
             .change_group_options(&gid, changes)
             .map_err(JsonRpcError::RpcExecution)?;

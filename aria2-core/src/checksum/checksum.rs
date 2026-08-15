@@ -1,3 +1,7 @@
+use std::path::Path;
+
+use tokio::io::AsyncReadExt;
+
 use super::message_digest::{HashType, MessageDigest};
 use crate::error::{Aria2Error, Result};
 
@@ -68,6 +72,28 @@ impl Checksum {
             digest: MessageDigest::new(self.hash_type),
         }
     }
+}
+
+/// Verify a file incrementally without loading it into memory.
+pub async fn verify_file(path: &Path, checksum: &Checksum) -> Result<bool> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| Aria2Error::Io(format!("Failed to open {}: {}", path.display(), error)))?;
+    let mut reader = tokio::io::BufReader::with_capacity(65536, file);
+    let mut validator = checksum.create_validator();
+    let mut buffer = vec![0u8; 65536];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).await.map_err(|error| {
+            Aria2Error::Io(format!("Failed to read {}: {}", path.display(), error))
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        validator.update(&buffer[..bytes_read]);
+    }
+
+    validator.finalize()
 }
 
 pub struct ChecksumValidator<'a> {
@@ -164,5 +190,38 @@ mod tests {
     fn test_checksum_is_empty_false_for_valid() {
         let cs = Checksum::new(HashType::Md5, "d41d8cd98f00b204e9800998ecf8427e").unwrap();
         assert!(!cs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_streams_and_accepts_matching_digest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        tokio::fs::write(&path, b"aria2-rust").await.unwrap();
+        let checksum = Checksum::new(
+            HashType::Sha256,
+            "b467a8c596e15709e4805cb631a2d7cc8a2cf287869eb2f994cb8100d8ae809c",
+        )
+        .unwrap();
+
+        assert!(verify_file(&path, &checksum).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_verify_file_rejects_mismatch_and_reports_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("payload.bin");
+        tokio::fs::write(&path, b"payload").await.unwrap();
+        let checksum = Checksum::new(
+            HashType::Sha256,
+            "239f59ed55e737c77147cf55ad0c1b030f1f5f7f5e5b6e7c7b5d8a1a3f2a4a6b",
+        )
+        .unwrap();
+
+        assert!(!verify_file(&path, &checksum).await.unwrap());
+        assert!(
+            verify_file(&dir.path().join("missing.bin"), &checksum)
+                .await
+                .is_err()
+        );
     }
 }

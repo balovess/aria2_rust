@@ -1,4 +1,5 @@
 use crate::config::OptionValue;
+use url::Url;
 
 /// How a metadata file should be handled after it is downloaded.
 ///
@@ -96,6 +97,12 @@ pub struct DownloadOptions {
     pub check_integrity: bool,
     /// Only validate existing piece hashes; never allocate or download.
     pub hash_check_only: bool,
+    /// Run the BitTorrent completion hook after a successful integrity check.
+    /// The aria2 default is `true`.
+    pub bt_enable_hook_after_hash_check: bool,
+    /// Continue into the BitTorrent seed lifecycle after a successful
+    /// integrity check of a complete payload. The aria2 default is `true`.
+    pub bt_hash_check_seed: bool,
     /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
     pub seed_time: Option<f64>,
     /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
@@ -123,9 +130,17 @@ pub struct DownloadOptions {
     pub max_retries: u32,
     pub retry_wait: u64,
     pub http_proxy: Option<String>,
+    pub http_proxy_user: Option<String>,
+    pub http_proxy_passwd: Option<String>,
     pub all_proxy: Option<String>,
+    pub all_proxy_user: Option<String>,
+    pub all_proxy_passwd: Option<String>,
     pub https_proxy: Option<String>,
+    pub https_proxy_user: Option<String>,
+    pub https_proxy_passwd: Option<String>,
     pub ftp_proxy: Option<String>,
+    pub ftp_proxy_user: Option<String>,
+    pub ftp_proxy_passwd: Option<String>,
     pub no_proxy: Option<String>,
     pub dht_file_path: Option<String>,
 
@@ -145,10 +160,10 @@ pub struct DownloadOptions {
     pub bt_snubbed_timeout: Option<u64>,
 
     // ------------------------------------------------------------------
-    // Piece selection priority mode (G2)
+    // aria2-compatible file-boundary piece priority (G2)
     // ------------------------------------------------------------------
-    /// Piece selection priority: "rarest" (default), "head" (sequential from start),
-    /// "tail" (sequential from end).
+    /// Original `head[=SIZE],tail[=SIZE]` syntax. Empty means unset; the
+    /// normal BitTorrent selector remains rarest-first when it is absent.
     pub bt_prioritize_piece: String,
     /// Detach completed BitTorrent seeders from the active-download budget.
     pub bt_detach_seed_only: bool,
@@ -177,10 +192,28 @@ pub struct DownloadOptions {
     /// Override `Referer` header. Also injected into the `header` list by
     /// [`DownloadOptions::parsed_headers`] when set.
     pub referer: Option<String>,
+    /// Keep HTTP connections alive. C++ default: `true`.
+    pub enable_http_keep_alive: bool,
+    /// Enable the HTTP/1.1 pipelining hint. C++ default: `false`.
+    pub enable_http_pipelining: bool,
+    /// Advertise gzip/deflate response support. C++ default: `false`.
+    pub http_accept_gzip: bool,
+    /// Add `Pragma` and `Cache-Control: no-cache` to HTTP requests.
+    pub http_no_cache: bool,
+    /// Use HEAD when the remote length is unknown. C++ default: `false`.
+    pub use_head: bool,
+    /// Omit the HTTP `Want-Digest` request header. C++ default: `false`.
+    pub no_want_digest_header: bool,
     /// Verify TLS certificates for HTTPS and the FTPS extension.
     pub check_certificate: bool,
     /// Custom CA certificate bundle used by HTTPS/FTPS TLS adapters.
     pub ca_certificate: Option<String>,
+    /// Client certificate used for HTTPS mutual TLS.
+    /// Corresponds to aria2_original's `certificate` option.
+    pub certificate: Option<String>,
+    /// Private key paired with the client certificate.
+    /// Corresponds to aria2_original's `private-key` option.
+    pub private_key: Option<String>,
     /// Minimum TLS version accepted by HTTPS/FTPS TLS adapters.
     pub min_tls_version: Option<String>,
 
@@ -202,6 +235,9 @@ pub struct DownloadOptions {
     /// Select specific files from a metalink by segment index (e.g. "1-3,5").
     /// Maps to C++ `PREF_SELECT_FILE`.
     pub select_file: Option<String>,
+    /// Remove unselected BitTorrent files after a successful download.
+    /// Maps to C++ `PREF_BT_REMOVE_UNSELECTED_FILE`.
+    pub bt_remove_unselected_file: bool,
     /// Piece length in bytes for metalink downloads. Default: 1 MiB (1_048_576).
     /// Maps to C++ `PREF_PIECE_LENGTH`.
     pub piece_length: Option<u64>,
@@ -345,8 +381,8 @@ pub struct DownloadOptions {
 }
 
 // Manual Default impl: `enable_dht` and `enable_public_trackers` default to
-// `true` (matching the load path in `option_handler.rs` and `task.rs` which
-// use `unwrap_or(true)`). All other fields use their type-level defaults.
+// `true`, matching the canonical config/task option conversion paths that use
+// `unwrap_or(true)`. All other fields use their type-level defaults.
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
@@ -367,6 +403,8 @@ impl Default for DownloadOptions {
             secure_falloc: false,
             check_integrity: false,
             hash_check_only: false,
+            bt_enable_hook_after_hash_check: true,
+            bt_hash_check_seed: true,
             seed_time: None,
             seed_ratio: Some(1.0),
             checksum: None,
@@ -385,9 +423,17 @@ impl Default for DownloadOptions {
             max_retries: crate::constants::DEFAULT_MAX_RETRIES,
             retry_wait: 0,
             http_proxy: None,
+            http_proxy_user: None,
+            http_proxy_passwd: None,
             all_proxy: None,
+            all_proxy_user: None,
+            all_proxy_passwd: None,
             https_proxy: None,
+            https_proxy_user: None,
+            https_proxy_passwd: None,
             ftp_proxy: None,
+            ftp_proxy_user: None,
+            ftp_proxy_passwd: None,
             no_proxy: None,
             dht_file_path: None,
             bt_max_peers: 55,
@@ -401,8 +447,16 @@ impl Default for DownloadOptions {
             header: Vec::new(),
             user_agent: None,
             referer: None,
+            enable_http_keep_alive: true,
+            enable_http_pipelining: false,
+            http_accept_gzip: false,
+            http_no_cache: false,
+            use_head: false,
+            no_want_digest_header: false,
             check_certificate: true,
             ca_certificate: None,
+            certificate: None,
+            private_key: None,
             min_tls_version: None,
             // Metalink
             metalink_version: None,
@@ -411,6 +465,7 @@ impl Default for DownloadOptions {
             metalink_location: None,
             metalink_preferred_protocol: None,
             select_file: None,
+            bt_remove_unselected_file: false,
             piece_length: None,
             metalink_enable_unique_protocol: true,
             // FTP
@@ -621,10 +676,15 @@ impl DownloadOptions {
                 .get("hash-check-only")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            seed_time: options
-                .get("seed-time")
-                .and_then(|v| v.parse::<f64>().ok())
-                .filter(|value| *value > 0.0),
+            bt_enable_hook_after_hash_check: options
+                .get("bt-enable-hook-after-hash-check")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            bt_hash_check_seed: options
+                .get("bt-hash-check-seed")
+                .map(|v| v == "true")
+                .unwrap_or(true),
+            seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
                 .and_then(|v| v.parse::<f64>().ok()),
@@ -699,9 +759,17 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(crate::constants::DEFAULT_RETRY_WAIT_SECS),
             http_proxy: options.get("http-proxy").cloned(),
+            http_proxy_user: options.get("http-proxy-user").cloned(),
+            http_proxy_passwd: options.get("http-proxy-passwd").cloned(),
             all_proxy: options.get("all-proxy").cloned(),
+            all_proxy_user: options.get("all-proxy-user").cloned(),
+            all_proxy_passwd: options.get("all-proxy-passwd").cloned(),
             https_proxy: options.get("https-proxy").cloned(),
+            https_proxy_user: options.get("https-proxy-user").cloned(),
+            https_proxy_passwd: options.get("https-proxy-passwd").cloned(),
             ftp_proxy: options.get("ftp-proxy").cloned(),
+            ftp_proxy_user: options.get("ftp-proxy-user").cloned(),
+            ftp_proxy_passwd: options.get("ftp-proxy-passwd").cloned(),
             no_proxy: options.get("no-proxy").cloned(),
             dht_file_path: options.get("dht-file-path").cloned(),
             bt_max_upload_slots: options
@@ -716,7 +784,7 @@ impl DownloadOptions {
             bt_prioritize_piece: options
                 .get("bt-prioritize-piece")
                 .cloned()
-                .unwrap_or_else(|| crate::constants::DEFAULT_PIECE_PRIORITY.to_string()),
+                .unwrap_or_default(),
             bt_detach_seed_only: options
                 .get("bt-detach-seed-only")
                 .map(|v| v == "true")
@@ -738,11 +806,37 @@ impl DownloadOptions {
                 .unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
+            enable_http_keep_alive: options
+                .get("enable-http-keep-alive")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            enable_http_pipelining: options
+                .get("enable-http-pipelining")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            http_accept_gzip: options
+                .get("http-accept-gzip")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            http_no_cache: options
+                .get("http-no-cache")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            use_head: options
+                .get("use-head")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            no_want_digest_header: options
+                .get("no-want-digest-header")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             check_certificate: options
                 .get("check-certificate")
                 .map(|v| v != "false")
                 .unwrap_or(true),
             ca_certificate: options.get("ca-certificate").cloned(),
+            certificate: options.get("certificate").cloned(),
+            private_key: options.get("private-key").cloned(),
             min_tls_version: options.get("min-tls-version").cloned(),
             metalink_version: options.get("metalink-version").cloned(),
             metalink_language: options.get("metalink-language").cloned(),
@@ -750,6 +844,10 @@ impl DownloadOptions {
             metalink_location: options.get("metalink-location").cloned(),
             metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
             select_file: options.get("select-file").cloned(),
+            bt_remove_unselected_file: options
+                .get("bt-remove-unselected-file")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             piece_length: positive_size_u64("piece-length"),
             metalink_enable_unique_protocol: options
                 .get("metalink-enable-unique-protocol")
@@ -856,6 +954,82 @@ impl DownloadOptions {
         }
         result
     }
+
+    /// Build the internal HTTP request policy shared by every HTTP request
+    /// path. The option names and defaults remain exposed through the aria2
+    /// compatible configuration/RPC surfaces.
+    pub fn http_request_policy(&self) -> crate::http::HttpRequestPolicy {
+        crate::http::HttpRequestPolicy::new(
+            self.parsed_headers(),
+            self.http_accept_gzip,
+            self.http_no_cache,
+            !self.no_want_digest_header,
+            self.enable_http_keep_alive,
+            self.enable_http_pipelining,
+        )
+    }
+
+    /// Resolve proxy credentials using aria2's protocol-specific precedence.
+    ///
+    /// A protocol-specific credential overrides the corresponding
+    /// `all-proxy-*` value. The `all` selector is used when constructing the
+    /// fallback proxy matcher itself.
+    pub(crate) fn proxy_credentials_for_scheme(
+        &self,
+        scheme: &str,
+    ) -> (Option<String>, Option<String>) {
+        let (user, passwd, proxy_url) = match scheme {
+            "https" => (
+                &self.https_proxy_user,
+                &self.https_proxy_passwd,
+                self.https_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
+            ),
+            "http" => (
+                &self.http_proxy_user,
+                &self.http_proxy_passwd,
+                self.http_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
+            ),
+            "ftp" => (
+                &self.ftp_proxy_user,
+                &self.ftp_proxy_passwd,
+                self.ftp_proxy
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| self.all_proxy.as_deref().filter(|value| !value.is_empty())),
+            ),
+            _ => (
+                &self.all_proxy_user,
+                &self.all_proxy_passwd,
+                self.all_proxy.as_deref().filter(|value| !value.is_empty()),
+            ),
+        };
+
+        let embedded = proxy_url
+            .and_then(|value| Url::parse(value).ok())
+            .map(|url| {
+                (
+                    (!url.username().is_empty()).then(|| url.username().to_string()),
+                    url.password().map(str::to_string),
+                )
+            })
+            .unwrap_or((None, None));
+
+        (
+            user.clone()
+                .or_else(|| self.all_proxy_user.clone())
+                .or(embedded.0),
+            passwd
+                .clone()
+                .or_else(|| self.all_proxy_passwd.clone())
+                .or(embedded.1),
+        )
+    }
 }
 
 /// Case-insensitive check whether a `(name, value)` header list already contains
@@ -890,6 +1064,76 @@ mod tests {
         assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
         assert_eq!(options.follow_metalink, Some(FollowMode::Disabled));
         assert!(options.uses_memory_download());
+    }
+
+    #[test]
+    fn proxy_credentials_prefer_protocol_specific_values() {
+        let options = DownloadOptions {
+            http_proxy_user: Some("http-user".to_string()),
+            http_proxy_passwd: Some("http-pass".to_string()),
+            https_proxy_user: Some("https-user".to_string()),
+            all_proxy_user: Some("all-user".to_string()),
+            all_proxy_passwd: Some("all-pass".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (Some("http-user".to_string()), Some("http-pass".to_string()))
+        );
+        assert_eq!(
+            options.proxy_credentials_for_scheme("https"),
+            (Some("https-user".to_string()), Some("all-pass".to_string()))
+        );
+        assert_eq!(
+            options.proxy_credentials_for_scheme("all"),
+            (Some("all-user".to_string()), Some("all-pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn proxy_credentials_fall_back_to_embedded_proxy_url_values() {
+        let options = DownloadOptions {
+            http_proxy: Some("http://url-user:url-pass@proxy.example:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (Some("url-user".to_string()), Some("url-pass".to_string()))
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_credentials_override_embedded_proxy_url_values() {
+        let options = DownloadOptions {
+            http_proxy: Some("http://url-user:url-pass@proxy.example:8080".to_string()),
+            http_proxy_user: Some("option-user".to_string()),
+            http_proxy_passwd: Some("option-pass".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (
+                Some("option-user".to_string()),
+                Some("option-pass".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn embedded_proxy_credentials_follow_non_empty_proxy_fallback() {
+        let options = DownloadOptions {
+            http_proxy: Some(String::new()),
+            all_proxy: Some("http://all-user:all-pass@proxy.example:8080".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            options.proxy_credentials_for_scheme("http"),
+            (Some("all-user".to_string()), Some("all-pass".to_string()))
+        );
     }
 
     #[cfg(feature = "bittorrent")]
@@ -940,5 +1184,24 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("continue".to_string(), "true".to_string());
         assert!(DownloadOptions::from_option_strings(&values).continue_download);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn hash_check_controls_survive_option_conversion() {
+        let values = HashMap::from([
+            (
+                "bt-enable-hook-after-hash-check".to_string(),
+                "false".to_string(),
+            ),
+            ("bt-hash-check-seed".to_string(), "false".to_string()),
+            ("bt-remove-unselected-file".to_string(), "true".to_string()),
+        ]);
+
+        let options = DownloadOptions::from_option_strings(&values);
+
+        assert!(!options.bt_enable_hook_after_hash_check);
+        assert!(!options.bt_hash_check_seed);
+        assert!(options.bt_remove_unselected_file);
     }
 }

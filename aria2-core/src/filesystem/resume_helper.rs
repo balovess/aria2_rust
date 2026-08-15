@@ -48,7 +48,7 @@ impl ResumeHelper {
                 })?;
         }
 
-        if !self.continue_opt || total_length == 0 {
+        if !self.continue_opt {
             return Ok(ResumeState {
                 existing_length: 0,
                 control_file: None,
@@ -57,6 +57,12 @@ impl ResumeHelper {
                 is_complete: false,
             });
         }
+
+        // The remote length is not known yet for a normal HTTP GET. A
+        // resumable local file is still enough to issue the initial Range
+        // request; the response then provides the authoritative entity
+        // length. This matches aria2's request-first flow and avoids a
+        // synthetic bytes=0-0 probe for ordinary downloads.
 
         let existing_length = if file_exists {
             tokio::fs::metadata(&self.output_path)
@@ -86,11 +92,12 @@ impl ResumeHelper {
             // authoritative source for the resume offset — existing_length
             // (file size on disk) is unreliable for preallocated files which
             // have total_length bytes on disk regardless of actual progress.
-            (Some(cf), _) if cf.completed_pieces() > 0 || cf.completed_length() > 0 => {
+            (Some(cf), _) => {
                 let offset = cf.completed_length();
                 let complete =
                     cf.completed_length() >= total_length && cf.total_length() == total_length;
-                (offset, true, complete)
+                let should_resume = cf.completed_pieces() > 0 || offset > 0;
+                (offset, should_resume, complete)
             }
             // No control file — if the file already exists at full size,
             // assume it was previously downloaded completely. This path is
@@ -158,6 +165,24 @@ mod tests {
         assert!(state.should_resume);
         assert_eq!(state.start_offset, 500);
         assert_eq!(state.existing_length, 500);
+        assert!(!state.is_complete);
+    }
+
+    #[tokio::test]
+    async fn test_detect_partial_file_when_remote_length_is_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unknown-length.bin");
+        tokio::fs::write(&path, vec![0xAB; 500]).await.unwrap();
+
+        let helper = ResumeHelper::new(&path, true);
+        let state = helper.detect(0).await.unwrap();
+
+        assert!(state.should_resume);
+        assert_eq!(state.start_offset, 500);
+        assert_eq!(
+            ResumeHelper::build_range_header(&state).as_deref(),
+            Some("bytes=500-")
+        );
         assert!(!state.is_complete);
     }
 
@@ -335,5 +360,33 @@ mod tests {
             state.is_complete,
             "is_complete must be true when completed_length >= total_length"
         );
+    }
+
+    /// A preallocated file with a fresh control file is not a completed
+    /// download. The control file is authoritative even when its data file
+    /// already has the full remote length on disk.
+    #[tokio::test]
+    async fn test_detect_preallocated_file_with_zero_control_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_path = dir.path().join("fresh-prealloc.bin");
+        let ctrl_path = ControlFile::control_path_for(&out_path);
+        let total_length = 4096;
+
+        tokio::fs::write(&out_path, vec![0u8; total_length as usize])
+            .await
+            .unwrap();
+        let cf = ControlFile::open_or_create(&ctrl_path, total_length, 1)
+            .await
+            .unwrap();
+        cf.save().await.unwrap();
+
+        let state = ResumeHelper::new(&out_path, true)
+            .detect(total_length)
+            .await
+            .unwrap();
+
+        assert!(!state.should_resume);
+        assert!(!state.is_complete);
+        assert_eq!(state.start_offset, 0);
     }
 }
