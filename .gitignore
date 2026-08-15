@@ -9,6 +9,8 @@ bindings/python/tests/unit/__pycache__/
 bindings/python/tests/integration/__pycache__/
 bindings/python/tests/__pycache__/
 *.txt
+!aria2/tests/fixtures/compatibility_option_inventory.txt
+!aria2-core/tests/fixtures/compatibility_option_policies.txt
 *.md
 *.7z
 *.bak

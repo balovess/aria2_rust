@@ -862,15 +862,16 @@ fn regression_registry_contains_core_options() {
     assert!(registry.contains("dry-run"));
 }
 
-/// The checked-in original preference inventory is the source boundary for
+/// The project-owned compatibility inventory is the source boundary for
 /// registry coverage. `help` and `version` are CLI actions, while the
 /// remaining differences must be explicit Rust extensions.
 #[cfg(feature = "bittorrent")]
 #[test]
-fn regression_registry_inventory_matches_original_and_extensions() {
+fn regression_registry_inventory_matches_compatibility_baseline_and_extensions() {
     use std::collections::BTreeSet;
 
-    const ORIGINAL_PREFS: &str = include_str!("../../../aria2_original/src/prefs.cc");
+    const COMPATIBILITY_OPTION_INVENTORY: &str =
+        include_str!("../fixtures/compatibility_option_inventory.txt");
     const EXPECTED_RUST_EXTENSIONS: &[&str] = &[
         "bt-enable-web-seed",
         "bt-peer-blocklist",
@@ -896,11 +897,10 @@ fn regression_registry_inventory_matches_original_and_extensions() {
         "utp-listen-port",
     ];
 
-    let original = ORIGINAL_PREFS
-        .split("makePref(\"")
-        .skip(1)
-        .filter_map(|entry| entry.split_once("\")").map(|(name, _)| name))
-        .filter(|name| !name.is_empty())
+    let baseline = COMPATIBILITY_OPTION_INVENTORY
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.starts_with('#'))
         .collect::<BTreeSet<_>>();
     let registry = OptionRegistry::new();
     let registered = registry
@@ -913,14 +913,14 @@ fn regression_registry_inventory_matches_original_and_extensions() {
         .copied()
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(original.len(), 214, "prefs.cc inventory changed");
+    assert_eq!(baseline.len(), 214, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
         234,
         "all-features registry inventory changed"
     );
     assert_eq!(
-        original
+        baseline
             .difference(&registered)
             .copied()
             .collect::<BTreeSet<_>>(),
@@ -929,7 +929,7 @@ fn regression_registry_inventory_matches_original_and_extensions() {
     );
     assert_eq!(
         registered
-            .difference(&original)
+            .difference(&baseline)
             .copied()
             .collect::<BTreeSet<_>>(),
         expected_extensions,

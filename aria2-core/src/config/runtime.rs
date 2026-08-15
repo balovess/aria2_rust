@@ -1,9 +1,9 @@
 //! Runtime option policy shared by every external adapter.
 //!
-//! The option names in this module mirror
-//! `aria2_original/src/OptionHandlerFactory.cc`. Keeping this metadata in
-//! core prevents JSON-RPC, XML-RPC, the C API, and future adapters from
-//! drifting into different interpretations of the same wire contract.
+//! The option names in this module define one compatibility policy shared by
+//! every external adapter. Keeping this metadata in core prevents JSON-RPC,
+//! XML-RPC, the C API, and future adapters from drifting into different
+//! interpretations of the same wire contract.
 
 use std::collections::HashMap;
 
@@ -462,11 +462,6 @@ mod tests {
         is_global_option_changeable, is_initial_option, is_option_changeable,
         project_initial_options,
     };
-    #[cfg(feature = "bittorrent")]
-    use super::{INITIAL_REQUEST_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS};
-    #[cfg(feature = "bittorrent")]
-    use crate::config::OptionRegistry;
-
     #[test]
     fn policy_matches_original_wire_names() {
         assert!(is_global_option_changeable("dir"));
@@ -528,26 +523,5 @@ mod tests {
             is_option_changeable("bt-detach-seed-only", false),
             ChangeableKind::NotChangeable
         );
-    }
-
-    #[cfg(feature = "bittorrent")]
-    #[test]
-    fn runtime_policy_names_are_registered_without_duplicates() {
-        let registry = OptionRegistry::new();
-        for (policy, names) in [
-            ("global", RUNTIME_GLOBAL_CHANGEABLE_OPTIONS),
-            ("initial", INITIAL_REQUEST_OPTIONS),
-            ("immediate", RUNTIME_CHANGEABLE_OPTIONS),
-            ("reserved", RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS),
-        ] {
-            let mut unique = std::collections::HashSet::new();
-            for name in names {
-                assert!(
-                    registry.contains(name),
-                    "{policy} policy has unknown option {name}"
-                );
-                assert!(unique.insert(name), "{policy} policy repeats option {name}");
-            }
-        }
     }
 }

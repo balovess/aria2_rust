@@ -792,7 +792,7 @@ mod tests {
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
     #[test]
     fn generate_from_bytes_groups_named_shared_torrent_metaurl_files() {
-        let data = include_bytes!("../../../aria2_original/test/metalink4-groupbymetaurl.xml");
+        let data = include_bytes!("../../tests/fixtures/grouped_metaurl.xml");
         let commands = MetalinkToRequestGroup::new()
             .generate_from_bytes(data, &DownloadOptions::default())
             .expect("grouped Metalink should convert");
@@ -992,8 +992,8 @@ mod tests {
 
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
     #[test]
-    fn original_groupbymetaurl_fixture_has_metadata_payload_and_independent_groups() {
-        let data = include_bytes!("../../../aria2_original/test/metalink4-groupbymetaurl.xml");
+    fn grouped_metaurl_fixture_has_metadata_payload_and_independent_groups() {
+        let data = include_bytes!("../../tests/fixtures/grouped_metaurl.xml");
         let converter = MetalinkToRequestGroup::new();
         let options = DownloadOptions::default();
         let mut gids = (1..=6).map(crate::request::request_group::GroupId::new);

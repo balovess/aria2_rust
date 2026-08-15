@@ -18,7 +18,7 @@
 | 2026-08-09 | 外部兼容优先：RPC/JSON-RPC/XML-RPC/WebSocket、CLI、配置、session、错误码和原版客户端可观察行为必须以 aria2_original 为契约；Rust 架构和性能优化只能发生在该契约之后 |
 | 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
 | 2026-08-12 | 产品身份统一为 `aria2-rust 0.2.9`；只兼容 aria2_original 的外部 CLI/RPC/协议行为，不复用原版版本报告文本或内部 C++ 结构 |
-| 2026-08-15 | CLI/config 选项审计收口：`aria2_original/src/prefs.cc` 的 214 个名称中，Rust registry 覆盖 212 个，`help`/`version` 由 CLI action 处理；全特性 registry 另含 22 个 Rust 扩展。原版短选项与 Rust 新增别名分开记录和测试，保留 `-L/-e/-r/-I/-G/-g/-B/-X`，不修改长选项、配置键、默认值或 RPC wire |
+| 2026-08-15 | CLI/config 选项审计收口：`aria2_original/src/prefs.cc` 的 214 个名称中，Rust registry 覆盖 212 个，`help`/`version` 由 CLI action 处理；全特性 registry 另含 22 个 Rust 扩展。原版短选项与 Rust 新增别名分开记录和测试，保留 `-L/-e/-r/-I/-G/-g/-B/-X`，不修改长选项、配置键、默认值或 RPC wire；四组运行时策略由 Rust 项目自有基线逐项回归，global 允许 3 个 Rust 扩展、reserved 允许 1 个 Rust 扩展 |
 | 2026-08-14 | RPC 生命周期语义对齐 `aria2_original`：`forcePause` 在响应前提交 `paused`，reserved 的 `remove`/`forceRemove` 在响应前进入 stopped result，未知 GID 返回 execution error code 1；重复 `pause`/`forcePause` 和非法 `unpause` 状态不再静默成功。active 任务仍由 Rust `EngineCommand` 完成协议取消、checkpoint 与 completion 收口。RPC 测试 19 + 71 + 55、RequestGroupMan 31、engine loop 14 全通过；未修改配置、默认值、版本或 wire 结构，整体迁移仍为 PARTIAL |
 | 2026-08-12 | FTP 生产路径补齐协议错误边界、`550` 文件不存在映射和 `REST 0` 行为；本地 FTP E2E 通过，真实第三方 FTP/FTPS 和原版客户端互操作仍为 PARTIAL |
 | 2026-08-13 | BitTorrent 共享 TCP listener 与 info-hash 路由完成；MSE PadA/PadB、RC4/Plain negotiation、`bt-force-encryption`、`bt-require-crypto`、`bt-min-crypto-level` 和 listener shutdown 增加真实 socket 回归证据；整体迁移仍为 PARTIAL |
@@ -645,8 +645,13 @@ E2E fixture 广告错误地址仍能下载的回归，避免把 NAT/错误广告
 本轮 CLI/config 生命周期对照还确认 `OptionHandlerFactory.cc` 的四组原版
 集合没有缺项：`setInitialOption` 113/113、`setChangeGlobalOption` 120/120、
 `setChangeOptionForReserved` 106/106、`setChangeOption` 7/7。Rust-only
-公共 tracker 控制项作为扩展输入保留，但不进入原版兼容的全局和任务选项
-响应。
+公共 tracker 控制项作为扩展输入保留，并明确计为 global 的 3 个扩展
+（`enable-public-trackers`、`bt-tracker-source`、
+`bt-tracker-update-interval`）和 reserved 的 1 个扩展
+（`enable-public-trackers`），不伪装成原版注册项。测试
+`cargo test -p aria2-core --all-features --test runtime_policy_baseline -- --test-threads=1`
+只读取 Rust 项目自有的 `aria2-core/tests/fixtures/compatibility_option_policies.txt`
+基线并报告集合差异；本轮结果为 `1 passed, 0 failed`。
 
 这些是增量证据，不代表 530 个 C++ 对照单元都已达到行为兼容，也不代表
 workspace、原版浏览器插件和完整端到端矩阵已经全部通过。
