@@ -18,6 +18,7 @@
 | 2026-08-09 | 外部兼容优先：RPC/JSON-RPC/XML-RPC/WebSocket、CLI、配置、session、错误码和原版客户端可观察行为必须以 aria2_original 为契约；Rust 架构和性能优化只能发生在该契约之后 |
 | 2026-08-09 | 解析 seam 收敛：OptionDef 作为 CLI/config/RPC 的类型校验入口；结构化执行语义（如 BitTorrent `index-out`）复用同一解析结果，不以统一字符串存储替代行为对照 |
 | 2026-08-12 | 产品身份统一为 `aria2-rust 0.2.9`；只兼容 aria2_original 的外部 CLI/RPC/协议行为，不复用原版版本报告文本或内部 C++ 结构 |
+| 2026-08-15 | CLI/config 选项审计收口：`aria2_original/src/prefs.cc` 的 214 个名称中，Rust registry 覆盖 212 个，`help`/`version` 由 CLI action 处理；全特性 registry 另含 22 个 Rust 扩展。原版短选项与 Rust 新增别名分开记录和测试，保留 `-L/-e/-r/-I/-G/-g/-B/-X`，不修改长选项、配置键、默认值或 RPC wire |
 | 2026-08-14 | RPC 生命周期语义对齐 `aria2_original`：`forcePause` 在响应前提交 `paused`，reserved 的 `remove`/`forceRemove` 在响应前进入 stopped result，未知 GID 返回 execution error code 1；重复 `pause`/`forcePause` 和非法 `unpause` 状态不再静默成功。active 任务仍由 Rust `EngineCommand` 完成协议取消、checkpoint 与 completion 收口。RPC 测试 19 + 71 + 55、RequestGroupMan 31、engine loop 14 全通过；未修改配置、默认值、版本或 wire 结构，整体迁移仍为 PARTIAL |
 | 2026-08-12 | FTP 生产路径补齐协议错误边界、`550` 文件不存在映射和 `REST 0` 行为；本地 FTP E2E 通过，真实第三方 FTP/FTPS 和原版客户端互操作仍为 PARTIAL |
 | 2026-08-13 | BitTorrent 共享 TCP listener 与 info-hash 路由完成；MSE PadA/PadB、RC4/Plain negotiation、`bt-force-encryption`、`bt-require-crypto`、`bt-min-crypto-level` 和 listener shutdown 增加真实 socket 回归证据；整体迁移仍为 PARTIAL |
@@ -1215,7 +1216,7 @@ work; RPC and WebSocket therefore remain `PARTIAL`.
   `-D warnings`. The overall RPC status remains `PARTIAL` because complete
   original-client and browser-extension interoperability is still unverified.
 
-#### CLI short-option compatibility checkpoint (2026-08-09)
+#### CLI short-option compatibility checkpoint (2026-08-15)
 
 - `aria2_original/src/OptionHandlerFactory.cc` is the source of truth for the
   short flags. The Rust registry and clap adapter now agree on the original
@@ -1223,16 +1224,29 @@ work; RPC and WebSocket therefore remain `PARTIAL`.
   parameterized-uri`, `-R remote-time`, `-u max-upload-limit`, and `-Z
   force-sequential`; `-h` invokes help, `-v` invokes version, and `-V` enables
   `check-integrity`.
-- `--verbose` remains available as a Rust extension without taking `-v`;
-  `-L` remains an additional non-conflicting alias for `listen-port`.
+- `--verbose` remains available as a Rust extension without taking `-v`.
+  Rust also keeps documented additive aliases for `listen-port`, RPC options,
+  and BitTorrent seeding, peer-limit, and encryption options. They do not
+  replace or alter any original short option.
 - `check-integrity` carries `short_name = Some('V')` in the core
   `OptionRegistry`, and `file-allocation` defaults to `prealloc` in both the
   registry and the shared runtime constant. HTTP, FTP, BitTorrent, and
   Metalink constructors read that same constant when no explicit allocation
   option is supplied.
 - Focused verification: `cargo test -p aria2 --test test_cli_options
-  --all-features` passed 95 tests; the core allocation tests passed 44 tests;
-  `test_internalized_defaults` passed 12 tests plus 2 ignored tests.
+  --all-features` passed 109 tests; `cargo test -p aria2-core --all-features
+  --lib config::option -- --test-threads=1` passed 45 tests; `cargo fmt --all
+  -- --check` passed.
+- The all-features option inventory is explicit: 214 names in
+  `aria2_original/src/prefs.cc`, 212 original names in the Rust registry,
+  `help`/`version` as CLI actions, and 22 additional Rust extension options.
+  The eight additive short aliases are `-L` -> `listen-port`, `-e` ->
+  `enable-rpc`, `-r` -> `rpc-listen-port`, `-I` -> `rpc-secret`, `-G` ->
+  `seed-time`, `-g` -> `seed-ratio`, `-B` -> `bt-max-peers`, and `-X` ->
+  `bt-force-encryption`. They are not presented as original registrations.
+- The source metadata audit also corrected the original deprecated markers for
+  `rpc-user` and `rpc-passwd`; the Rust-owned hidden coefficient options remain
+  documented separately from original hidden preferences.
 - Full default/changeability comparison, optional-argument/getopt edge cases,
   version/help text parity, and complete original-client interoperability
   remain open. The original parser does not dynamically generate arbitrary

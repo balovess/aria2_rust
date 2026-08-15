@@ -60,6 +60,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::String,
             description: "RPC Basic Auth username".into(),
             category: OptionCategory::Rpc,
+            deprecated: true,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -67,6 +68,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::String,
             description: "RPC Basic Auth password".into(),
             category: OptionCategory::Rpc,
+            deprecated: true,
             ..Default::default()
         });
 

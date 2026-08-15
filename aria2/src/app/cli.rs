@@ -6,7 +6,7 @@
 //! - `-h` → help (aria2_original)
 //! - `-v` → version (aria2_original)
 //! - `-V` → check-integrity (aria2_original)
-//! - `-L` → listen-port (additional non-conflicting alias)
+//! - `-L` → listen-port (Rust additive alias)
 //! - `--save-cookies` has no short form (matching aria2_original)
 //!
 //! # Boolean option semantics (`--opt[=true|false]`)

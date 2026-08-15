@@ -208,6 +208,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "listen-port".into(),
             opt_type: OptionType::IntegerRange,
+            short_name: Some('L'),
             default_value: OptionValue::Str("6881-6999".into()),
             min: Some(1024),
             max: Some(65535),

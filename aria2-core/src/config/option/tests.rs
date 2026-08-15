@@ -127,6 +127,66 @@ fn test_option_def_builder() {
 }
 
 #[test]
+fn test_rpc_basic_auth_options_match_original_deprecation_metadata() {
+    let registry = OptionRegistry::new();
+
+    assert!(registry.get("rpc-user").unwrap().is_deprecated());
+    assert!(registry.get("rpc-passwd").unwrap().is_deprecated());
+    assert!(!registry.get("rpc-secret").unwrap().is_deprecated());
+    assert!(
+        !registry
+            .get("rpc-secret")
+            .unwrap()
+            .is_exposed_in_aria2_rpc()
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn test_hidden_and_deprecated_option_sets_match_original_boundary() {
+    use std::collections::BTreeSet;
+
+    let registry = OptionRegistry::new();
+    let hidden = registry
+        .all()
+        .values()
+        .filter(|definition| definition.is_hidden())
+        .map(|definition| definition.name().to_owned())
+        .collect::<BTreeSet<_>>();
+    let deprecated = registry
+        .all()
+        .values()
+        .filter(|definition| definition.is_deprecated())
+        .map(|definition| definition.name().to_owned())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        hidden,
+        BTreeSet::from([
+            "bt-keep-alive-interval".to_string(),
+            "bt-request-timeout".to_string(),
+            "bt-timeout".to_string(),
+            "dht-listen-addr".to_string(),
+            "dns-timeout".to_string(),
+            "max-http-pipelining".to_string(),
+            "optimize-concurrent-downloads-coeffA".to_string(),
+            "optimize-concurrent-downloads-coeffB".to_string(),
+            "peer-connection-timeout".to_string(),
+            "select-least-used-host".to_string(),
+            "startup-idle-time".to_string(),
+        ])
+    );
+    assert_eq!(
+        deprecated,
+        BTreeSet::from([
+            "enable-async-dns6".to_string(),
+            "rpc-passwd".to_string(),
+            "rpc-user".to_string(),
+        ])
+    );
+}
+
+#[test]
 fn test_option_def_parse_integer() {
     let def = OptionDef {
         name: "split".into(),

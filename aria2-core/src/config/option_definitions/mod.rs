@@ -7,25 +7,25 @@
 //!
 //! # Original CLI Contract
 //!
-//! Registry short names are copied from the active option handlers and usage
-//! definitions in `aria2_original`. They are public compatibility data, not
-//! an internal prioritization scheme:
+//! Original registry short names are copied from the active option handlers
+//! and usage definitions in `aria2_original`. They are public compatibility
+//! data, not an internal prioritization scheme:
 //!
-//! `-a file-allocation`, `-B bt-max-peers`, `-c continue`, `-d dir`,
-//! `-D daemon`, `-e enable-rpc`, `-g seed-ratio`, `-G seed-time`,
-//! `-i input-file`, `-I rpc-secret`, `-j max-concurrent-downloads`,
+//! `-a file-allocation`, `-c continue`, `-d dir`, `-D daemon`,
+//! `-i input-file`, `-j max-concurrent-downloads`,
 //! `-k min-split-size`, `-l log`, `-m max-tries`, `-M metalink-file`,
 //! `-n no-netrc`, `-o out`, `-O index-out`, `-p ftp-pasv`,
-//! `-P parameterized-uri`, `-q quiet`, `-r rpc-listen-port`,
+//! `-P parameterized-uri`, `-q quiet`,
 //! `-R remote-time`, `-s split`, `-S show-files`, `-t timeout`,
 //! `-T torrent-file`, `-u max-upload-limit`, `-U user-agent`,
-//! `-V check-integrity`, `-x max-connection-per-server`,
-//! `-X bt-force-encryption`, and `-Z force-sequential`.
+//! `-V check-integrity`, `-x max-connection-per-server`, and
+//! `-Z force-sequential`.
 //!
 //! `-h/--help` and `-v/--version` are CLI actions rather than registry
-//! options. The binary keeps `-L` as an additive alias for `listen-port`; it
-//! is intentionally not assigned to the registry because the original has no
-//! short name for that option.
+//! options. The Rust CLI additionally accepts `-B`, `-e`, `-g`, `-G`, `-I`,
+//! `-L`, `-r`, and `-X` as additive aliases for long options that have no
+//! upstream short form. These aliases are Rust product extensions and are
+//! tested separately from the original short-option contract.
 
 mod advanced;
 #[cfg(feature = "bittorrent")]

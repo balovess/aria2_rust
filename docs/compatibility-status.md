@@ -92,6 +92,102 @@ that one aggregate workspace test execution, platform-specific binding runs,
 public C ABI compatibility, or complete original-client/browser-extension
 interoperability is complete.
 
+## 2026-08-15 Full Workspace and Internal Seam Checkpoint
+
+The full Rust workspace test-and-benchmark target run now has an explicit
+successful process exit after the failure-path test timing correction. The
+test helper uses a one-second retry wait, matching the production option's
+seconds unit; no product default or user configuration was changed.
+
+~~~text
+cargo test --workspace --all-targets
+  exit_code=0
+  5632 passed, 0 failed, 47 ignored
+cargo fmt --all -- --check
+  PASS
+cargo clippy --workspace --all-targets -- -D warnings
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS after internal cleanup
+npm test (bindings/nodejs)
+  123 passed, 0 failed
+npm run typecheck (bindings/nodejs)
+  PASS
+python -m pytest -p no:cacheprovider (bindings/python, bundled Python 3.12)
+  137 passed, 0 failed
+~~~
+
+The original source tree has no NTLM HTTP authentication implementation. The
+Rust-only `NtlmState` API was therefore removed instead of retaining a public
+stub that always returned an error. Basic and Digest authentication remain
+separate supported compatibility paths. This is internal dead-code cleanup;
+it does not alter CLI/configuration, RPC, wire formats, product identity, or
+the required original-client surface.
+
+This checkpoint strengthens the reproducible test and ownership evidence but
+does not change the overall `PARTIAL` status. Original-client interoperability,
+platform-specific runs, public C ABI compatibility, and the remaining module
+matrix gaps still require independent evidence.
+
+The checksum seam audit for this checkpoint found that production download
+commands use `check_integrity::man::CheckIntegrityTask` and
+`IntegrityOutcome`; the exported `StreamCheckIntegrity`, `BtCheckIntegrity`,
+`CheckIntegrityKind`, and `ValidatorKind` types have no production callers and
+retain unconnected lifecycle methods. They remain an explicit Rust-crate
+interface decision rather than being silently deleted during this migration.
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity -- --test-threads=1
+  52 passed, 0 failed
+~~~
+
+## 2026-08-15 CLI Short-Option Contract and Extension Boundary
+
+The original short-option table remains sourced from the active
+`aria2_original/src/OptionHandlerFactory.cc` handlers. Rust additionally keeps
+explicit aliases for `listen-port`, RPC options, and BitTorrent seeding, peer
+limits, and encryption. The exact Rust extension aliases are:
+
+| Class | Short options | Long-option targets |
+| --- | --- | --- |
+| Original compatibility contract | `-a`, `-c`, `-d`, `-D`, `-i`, `-j`, `-k`, `-l`, `-m`, `-M`, `-n`, `-o`, `-O`, `-p`, `-P`, `-q`, `-R`, `-s`, `-S`, `-t`, `-T`, `-u`, `-U`, `-V`, `-x`, `-Z` | The mappings sourced from `aria2_original/src/OptionHandlerFactory.cc` |
+| Rust additive aliases | `-L`, `-e`, `-r`, `-I`, `-G`, `-g`, `-B`, `-X` | `listen-port`, `enable-rpc`, `rpc-listen-port`, `rpc-secret`, `seed-time`, `seed-ratio`, `bt-max-peers`, `bt-force-encryption` |
+
+These aliases are additive product extensions and are tested separately, so
+they cannot be mistaken for original compatibility claims. Original long
+option names, configuration keys, defaults, and RPC behavior are unchanged;
+this is a parser-boundary clarification, not a configuration change.
+
+The option inventory is also split explicitly: `prefs.cc` contains 214 names;
+the all-features Rust registry contains 212 original names plus 22 Rust
+extensions, while `help` and `version` are handled as CLI actions. The
+source-derived public help inventory remains a separate 198-name check and
+does not include hidden/internal preference names.
+
+The source metadata audit now matches the original deprecated set: `rpc-user`
+and `rpc-passwd` are explicitly marked deprecated alongside the existing
+deprecated option. Rust also retains two intentionally hidden product-owned
+coefficient options, `optimize-concurrent-downloads-coeffA` and
+`optimize-concurrent-downloads-coeffB`; they
+are not claimed as original options.
+
+Verification:
+
+~~~text
+cargo test -p aria2 --test test_cli_options --all-features -- --test-threads=1
+  109 passed, 0 failed
+cargo test -p aria2-core --all-features --lib config::option -- --test-threads=1
+  45 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+~~~
+
+The CLI/options matrix remains `PARTIAL`: exact defaults, changeability,
+help-tag text, feature-conditional runtime behavior, and original-client
+end-to-end interoperability still require evidence. The short-option boundary
+and the current source inventory are verified; they do not claim full option
+semantic parity.
+
 ## 2026-08-14 HTTP Redirect Contract Checkpoint
 
 The Rust protocol response seam now matches
@@ -708,7 +804,7 @@ checkpoint.
 | Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Ordinary HTTP payloads now stream through the Rust disk-writer seam, persist pause/remove progress in Rust `A2CF`, resume with `Range`, remove the checkpoint on success, and verify whole-file and `<pieces>` hashes by streaming the output file. Named shared metaurls now form one multi-file payload with per-file direct-mirror and original-name mappings, and the original `metalink4-groupbymetaurl.xml` shape is covered. Both manager-owned `BtDependency` resolution and command-level direct-mirror fallback reuse one torrent-context mapping seam; a local HTTP regression proves that a failed shared group requests one torrent metadata resource and preserves every file path/name/URI mapping. A process-level E2E now submits `EngineCommand::AddMetalinkGraph`, verifies one metadata request, promotion-time context injection, the mapped output path, and a web-seed payload completion (`13 passed, 0 failed, 2 ignored`). The application session path now proves save/restart/restore of a standard memory-backed graph (`test_session_save_then_restart_restores_metalink_graph`: 1 passed), including metadata-first dependency reconstruction. Zero-length torrent payloads complete without peer discovery. Full `follow-torrent=mem` semantics, other Metalink lifecycle variants, and live protocol interoperability remain open. |
 | Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Single- and multi-mirror concurrent HTTP paths, ordinary Metalink payloads, and SFTP now create/load, checkpoint, flush on cancellation or Range fallback, restore compatible prefixes or segment bitfields, discard untrusted sidecars, and remove `.aria2` only after successful completion and checksum verification where configured; two real multi-mirror HTTP cases, the Metalink lifecycle E2E, and SFTP checksum preflight/transfer cases verify restored data is not incorrectly accepted. Metalink whole-file and piece hashes are checked through streaming file reads. Session serialization preserves original option names and non-default values for resume policy, trackers, port ranges, piece sizing, FTP/auth/netrc settings, plus the original 16-hex-digit GID form; Rust-only fields remain extensions. The result-code seam now contains exactly the original wire values `0..32`; `paused` remains a separate task status and cannot leak a Rust-only error code. Live engine pause/remove orchestration across every protocol, checksum-integrity dispatcher callbacks beyond the covered paths, and broader original-client interoperability remain incomplete or unverified. |
 | RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, feature-specific method/notification discovery, feature-aware `getVersion`, browser-facing CORS preflight headers, and real HTTP E2E coverage exist. CORS is disabled by default as in `aria2_original`; explicit `rpc-allow-origin-all=true` enables wildcard headers, and `Access-Control-Max-Age` matches the original at `1728000`. XML-RPC execution faults use HTTP 200 + `faultCode=1`; structurally malformed documents or conversion failures use the original HTTP 400 empty-body contract, while well-formed documents with invalid scalar/member values follow the original omission semantics before normal method execution. `getServers` is active-only and reports only real in-flight requests; waiting, paused, stopped, or unknown GIDs return execution error code 1. `getSessionInfo` now generates one 20-byte random session key per engine and exposes the original 40-character lowercase hexadecimal representation. The catalog is 33 core methods plus 2 BitTorrent and 1 Metalink method when enabled; notifications are 5 core plus 1 BitTorrent event when enabled. `aria2.forceUnpause` is rejected as an unknown original method and omitted from `system.listMethods`, keeping original-client discovery exact. Task creation and runtime changes share core validation; `RequestGroup` owns a source-derived `setInitialOption(true)` request snapshot and transfers its effective state to `DownloadResult` when a task stops, excluding process-only RPC settings and Rust-only session metadata. `getOption` therefore keeps the original task state for both live and stopped GIDs, including only changes already applied to the task; later `changeGlobalOption` calls affect future tasks without rewriting existing ones. `getGlobalOption` uses registry-owned original wire metadata: defined hidden or deprecated original values remain observable, no-default values stay absent until configured, `rpc-secret` is withheld, and Rust-only uTP fields cannot leak into an original-client response. `changeUri` now honors the optional zero-based insertion position after deletions, matching the original ordering and count result; task-creation positions share the same rejection rules for negative values. `tellStatus`, `tellActive`, `tellWaiting`, and `tellStopped` honor the original optional `keys` field filter while preserving full output when omitted, and waiting/stopped pagination supports the original negative-offset semantics. Full original-client interoperability, including the browser-extension matrix and complete XML-RPC client coverage, remains unverified. |
-| CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | `OptionDef::parse_value` remains the shared typed seam for CLI/config/RPC validation, and `App::load_cli_args` now propagates validation failures instead of silently discarding them. Regression coverage proves invalid `--split=0` and unknown `--file-allocation` values are rejected before engine startup; startup coverage proves `--no-conf` skips an explicit config file as in the original. `IntegerRange` preserves ordered range wire values, `IndexOut` uses one cumulative `INDEX=PATH` parser for validation and BT execution, and `bt-prioritize-piece` validates the original `head[=SIZE],tail[=SIZE]` grammar through the same registry seam. The original short-option contract is covered for registry mappings, including `-a`/`-p`/`-P`/`-R`/`-u`/`-Z`/`-S`/`-T`/`-M`, and `-h`/`-v`/`-V` actions. `-h`/`--help[=TAG|KEYWORD]` now preserves the optional-argument/getopt boundary, renders before engine startup, and filters by long-option keyword or supported help groups. A source-derived audit now finds all 198 original public option names represented in Rust CLI help; runtime behavior for newly exposed process options, exact defaults/changeability, exact help-tag membership/text, and full E2E proof remain open. CLI product identity and version output intentionally belong to `aria2-rust`. Rust-only names are retained only where they are documented extensions or compatibility aliases and still require ownership review. |
+| CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | `OptionDef::parse_value` remains the shared typed seam for CLI/config/RPC validation, and `App::load_cli_args` now propagates validation failures instead of silently discarding them. Regression coverage proves invalid `--split=0` and unknown `--file-allocation` values are rejected before engine startup; startup coverage proves `--no-conf` skips an explicit config file as in the original. `IntegerRange` preserves ordered range wire values, `IndexOut` uses one cumulative `INDEX=PATH` parser for validation and BT execution, and `bt-prioritize-piece` validates the original `head[=SIZE],tail[=SIZE]` grammar through the same registry seam. The original short-option contract and the eight Rust additive aliases are covered separately, including `-h`/`-v`/`-V` actions. `-h`/`--help[=TAG|KEYWORD]` now preserves the optional-argument/getopt boundary, renders before engine startup, and filters by long-option keyword or supported help groups. The current inventory audit is `214 prefs.cc names = 212 original registry names + 2 CLI actions`; the all-features registry has 22 additional Rust extensions, and the source-derived public help check represents 198 names. Runtime behavior for newly exposed process options, exact defaults/changeability, exact help-tag membership/text, and full E2E proof remain open. CLI product identity and version output intentionally belong to `aria2-rust`. |
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI. |
 
 ## Verification Evidence
@@ -1691,7 +1787,7 @@ consolidation work explicitly:
 | Resume policy | `aria2-core/src/engine/download_command/execute.rs` and `request/request_group/control_ops.rs` | Keep HTTP response interpretation in `SequentialDownloader`; command-level URI selection, atomic resume-failure accumulation, and fresh-download fallback stay in `DownloadCommand`. Do not make RPC or protocol adapters reinterpret `always-resume` or `max-resume-failure-tries`. |
 | HTTP/FTP transport | core orchestration plus protocol transport | Existing layers are useful adapters but are not yet one canonical implementation; remove pass-through duplication only after behavior comparison and live interoperability coverage. |
 | FTP ownership | `aria2-core/src/engine/ftp_download_command/` is the only production FTP/FTPS path; `aria2-core/src/ftp/connection/negotiation/` and `aria2-protocol/src/ftp/` have no core production callers | Treat the engine path as the current behavioral reference. The target is one deep core FTP transport seam, but `FtpClient`, `FtpNegotiator`, and the standalone protocol client must not be deleted or merged until their public Rust API and behavior are covered by replacement tests. |
-| Integrity | core streaming/control-file paths plus Metalink verifier | Preserve separate algorithm-specific adapters for now; unify lifecycle callbacks after the remaining TODO/no-op paths have regression coverage. |
+| Integrity | `aria2-core/src/checksum/check_integrity/man.rs` plus streaming/control-file paths | Keep `CheckIntegrityTask`/`IntegrityOutcome` as the production seam; `FileChunkValidator` and `MultiFileChunkValidator` provide the concrete adapters. The legacy exported wrapper types are not production callers and require an explicit Rust-crate interface decision before removal. |
 
 ## Acceptance Gate
 
