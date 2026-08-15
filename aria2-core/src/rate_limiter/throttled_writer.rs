@@ -133,6 +133,10 @@ where
         Ok(())
     }
 
+    async fn flush(&mut self) -> Result<()> {
+        self.inner.flush().await
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         self.inner.finalize().await
     }

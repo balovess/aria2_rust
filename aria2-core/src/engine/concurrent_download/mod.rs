@@ -27,6 +27,9 @@ pub(crate) fn server_stat_error_code(error: &Aria2Error) -> u16 {
     match error {
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) => *code,
         Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. }) => 416,
+        Aria2Error::Recoverable(
+            RecoverableError::ResourceNotFound | RecoverableError::MaxFileNotFound,
+        ) => 404,
         Aria2Error::Recoverable(RecoverableError::Timeout) => 408,
         _ => crate::constants::HTTP_DEFAULT_ERROR_CODE,
     }

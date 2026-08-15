@@ -107,6 +107,8 @@ pub struct ResponseProcessorConfig {
     /// Expected entity length from the request's file entry. Zero disables total-length validation,
     /// matching C++ `FileEntry::getLength() == 0` wildcard behavior.
     pub expected_entity_length: u64,
+    /// Maximum number of 404 responses before retrying stops.
+    pub max_file_not_found: u32,
 }
 
 impl Default for ResponseProcessorConfig {
@@ -120,6 +122,7 @@ impl Default for ResponseProcessorConfig {
             max_pipelined_request: 1,
             metalink_location: Vec::new(),
             expected_entity_length: 0,
+            max_file_not_found: 0,
         }
     }
 }

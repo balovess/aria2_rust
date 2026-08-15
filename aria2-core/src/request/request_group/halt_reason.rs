@@ -208,6 +208,11 @@ impl DownloadControlFlags {
         self.save_control_requested.load(Ordering::Acquire)
     }
 
+    /// Consume one pending control-file save request.
+    pub fn take_save_control_request(&self) -> bool {
+        self.save_control_requested.swap(false, Ordering::AcqRel)
+    }
+
     /// Clear the save control flag after processing.
     pub fn clear_save_control(&self) {
         self.save_control_requested.store(false, Ordering::Release);

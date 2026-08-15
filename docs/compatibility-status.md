@@ -1,14 +1,14 @@
 # Compatibility Status
 
-Last verified: 2026-08-15
+Last verified: 2026-08-16
 Reference implementation: aria2_original/  
-Rust workspace version: 0.2.9
-Public product identity: aria2-rust 0.2.9
+Rust workspace version: 0.3.0
+Public product identity: aria2-rust 0.3.0
 
 All product-version surfaces are owned by this workspace release source:
 CLI `--version`, the startup banner, RPC `aria2.getVersion`, default HTTP and
 BitTorrent identities, SDK metadata, distribution metadata, and installer
-fallbacks resolve to `aria2-rust 0.2.9`. Protocol-format versions such as JSON-
+fallbacks resolve to `aria2-rust 0.3.0`. Protocol-format versions such as JSON-
 RPC `2.0`, Metalink `3.0`/`4.0`, SFTP `3`, and internal persistence-format
 versions are intentionally separate from product identity.
 
@@ -17,6 +17,15 @@ under docs/migration/ and the historical plans under .trae/ are useful
 evidence, but their checklists do not establish behavioural compatibility.
 
 ## Status Rules
+
+The Goal control vocabulary is `missing`, `partial`, `compatible`, and
+`verified`. The existing uppercase labels in the matrix are retained as a
+readable audit projection: `MISSING` maps to `missing`, `PARTIAL` and
+`UNVERIFIED` map to `partial`, `FULL` maps to `compatible` until the required
+Rust-owned protocol/E2E evidence is independently reproducible, and `N/A`
+maps to an intentional Rust-native replacement. Historical module records may
+use their original audit labels; the current matrix and Goal control are the
+authoritative status surface.
 
 | Status | Meaning |
 | --- | --- |
@@ -50,6 +59,205 @@ additive, explicitly documented, and must not change the result observed by an
 original client using an original request. Features absent from
 `aria2_original` (for example FTPS) are measured as extensions and are not
 substitutes for missing original behavior.
+
+## Goal Control
+
+| Field | Current value |
+| --- | --- |
+| Active phase | `phase-2-core-domain` (`in_progress`) |
+| Passed and locked phases | `phase-1-baseline-matrix` (`passed_locked`) |
+| Latest verification | 2026-08-16 in the uncommitted worktree based on `a3468a6f7a32c147424b16ecd479618cc110061d` (`dev`) |
+| Current status | `PARTIAL`; phase 1 is locked, but the final acceptance and stop conditions are not met |
+
+### Phase 1 Evidence
+
+- `aria2_original/configure.ac:5` identifies the reference release as `1.37.0`.
+  Its `src/` tree contains 415 `.cc` files and 523 C/C++ headers. The
+  historical 530-unit ledger excludes the public API header
+  `src/includes/aria2/aria2.h`: the remaining 115 headers have no matching
+  `.cc`, so 415 + 115 = 530. That public header is tracked separately by the
+  C API row below; the source-count discrepancy is resolved.
+- The Rust workspace metadata currently contains `aria2`, `aria2-core`,
+  `aria2-protocol`, and `aria2-rpc`, with their feature sets recorded by
+  `cargo metadata --no-deps --format-version 1`. The 20 module records under
+  `docs/migration/` and the current matrix are present. The matrix now also
+  owns tests/fixtures, bindings/SDKs, examples/benchmarks, and workspace/CI;
+  the phase-1 matrix and validation plan are complete; the next phase is
+  constrained to the core domain evidence below and may not be skipped.
+- The targeted test-boundary search found `aria2_original` only in comments,
+  documentation strings, and assertion text in Rust sources. It found no
+  `include_str!`/`include_bytes!` source loading or process invocation that
+  reads, builds, links, starts, or dynamically depends on the reference tree.
+- Current workspace evidence: `cargo test -p aria2-rpc --test
+  test_rpc_shutdown --all-features -- --test-threads=1` passed 5 tests;
+  `test_e2e_dynamic_rate_limit` passed 2 tests;
+  `test_rpc_system_methods` passed 7 tests; and
+  `cargo test -p aria2-core --all-targets --no-run` passed. These validate the
+  current RPC test-boundary change only and do not close a migration phase.
+
+### Worktree Ownership Record
+
+The following pre-existing worktree changes are in scope for the next audit
+and must be preserved: release publishing changes in
+`.github/workflows/release.yml`; dependency and lockfile changes in
+`Cargo.lock` and `aria2-core/Cargo.toml`; option-registry documentation in
+`aria2-core/src/config/option_definitions/mod.rs`; the RPC test relocation and
+new fixtures under `aria2-rpc/tests/`; the CLI compatibility fixture and test;
+the Python package metadata; and the changes already present in
+`docs/MIGRATION.md` and this file. The deleted
+`aria2-core/tests/test_rpc_shutdown.rs` is replaced by the RPC-owned test
+recorded above. No unrelated change may be reverted or overwritten.
+
+### Completed Improvements And Next Action
+
+- The compatibility inventory is Rust-owned for tests, the short-option
+  extension boundary is documented separately, and the current matrix records
+  behavior evidence instead of treating source comparison as compatibility.
+- Phase 1 verification passed: `cargo fmt --all -- --check`,
+  `cargo test --workspace --all-targets --no-run`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `git diff --check` all exited successfully on 2026-08-15. The worktree
+  record and Rust-owned test-boundary audit also passed, so the phase is now
+  `passed_locked`.
+- The shared `RetryPolicy` now retries only timeouts, temporary network
+  failures, and `ServerError` codes present in its configured HTTP allowlist.
+  404, resume, authentication, redirect, range, and other protocol failures
+  are terminal at this policy seam; the public `max-tries` total-attempt and
+  unlimited-zero semantics remain unchanged.
+- Buffered and streaming segmented HTTP Range requests now share structured
+  status classification: 416 is `RangeNotSatisfiable`, 5xx is `ServerError`,
+  authentication statuses remain auth failures, ordinary 4xx responses such
+  as 403 are terminal `HttpProtocolError` values, and 404 is a typed
+  `ResourceNotFound` value rather than `FatalError::Config`.
+- `max-file-not-found` is now enforced per RequestGroup across sequential
+  HTTP, segmented HTTP, and in-memory metadata downloads. A configured limit
+  produces `MaxFileNotFound`; zero keeps the first 404 terminal as
+  `ResourceNotFound`, and the shared retry policy still treats generic 404s as
+  non-retryable.
+- Sequential HTTP and in-memory metadata cancellation now interrupts pending
+  body reads and preserves the existing partial-checkpoint rules; autosave
+  requests now exclude terminal RequestGroups; concurrent-to-sequential gap
+  recovery now observes the same cancellation boundary. The immediate next
+  action is to cover the remaining protocol command paths and session graph
+  variants,
+  integrity-dispatch callback branches, and cross-protocol lifecycle E2E
+  before any later phase is opened.
+
+## 2026-08-16 Segmented HTTP Range Status Classification Checkpoint
+
+The buffered and streaming segmented HTTP Range paths now share one structured
+status classifier. HTTP 416 remains `RangeNotSatisfiable`, HTTP 5xx remains
+`ServerError`, 401/407 remains an authentication failure, and ordinary 4xx
+responses such as 403 remain terminal `HttpProtocolError` values while 404
+returns typed `ResourceNotFound` instead of `FatalError::Config`. This keeps
+the Range seam consistent with the sequential and gap download paths and
+preserves the public not-found result code.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::http_segment_downloader -- --test-threads=1
+  24 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_gap_retry -- --test-threads=1
+  26 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The focused library tests include local HTTP fixtures for buffered 404 and
+streaming 403 responses, plus direct 404/503 classifier coverage. The
+segmented Range path now feeds the RequestGroup not-found counter; broader
+protocol lifecycle combinations and original-client interoperability remain
+open phase-2 work, so the overall status remains `PARTIAL`.
+
+## 2026-08-16 `max-file-not-found` Lifecycle Checkpoint
+
+The HTTP not-found path now has one RequestGroup-owned counter and typed
+classification. Sequential HTTP, sequential gap/auth-retry paths, concurrent
+single- and multi-mirror Range paths, and in-memory metadata downloads use the
+same effective task option snapshot. `max-file-not-found=0` returns
+`ResourceNotFound` without retrying; a positive limit permits 404 retries and
+returns `MaxFileNotFound` at the configured terminal count. Generic
+`RetryPolicy` 404 behavior remains terminal, so unrelated HTTP protocol errors
+are not broadened into retries.
+
+Rust-owned verification on 2026-08-16:
+
+~~~text
+cargo test -p aria2-core --all-features --lib
+  3415 passed, 0 failed, 1 ignored
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  32 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_download max_file_not_found -- --test-threads=1
+  3 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The focused E2E fixture verifies sequential, concurrent segmented, and
+in-memory 404 failures preserve `MaxFileNotFound`; the sequential fixture
+observes exactly three requests for a configured limit of three. This closes
+the current not-found classification and retry slice only. FTP/SFTP status
+parity, broader cross-protocol lifecycle combinations, original-client
+interoperability, and final workspace acceptance remain open; the overall
+status remains `PARTIAL`.
+
+## 2026-08-16 Stopped Result Follow-graph Checkpoint
+
+Completed groups now regenerate their `DownloadResult` after post-download
+processing creates follow-up child groups. Previously, the demotion scan
+captured the result before `followed_by` child GIDs were attached to the live
+parent, so `tellStopped` and other stopped-result consumers could lose that
+relationship. Error and removed groups retain their original demotion snapshot.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib request::request_group_man --all-features -- --test-threads=1
+  33 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The manager regression uses an in-memory Metalink fixture and verifies that a
+completed stopped parent exposes its generated child GID while the child is
+queued for promotion. This closes only the stopped-result relationship slice;
+broader follow/session graph variants, cross-protocol lifecycle E2E, and
+original-client interoperability remain open phase-2 work. The overall status
+remains `PARTIAL`.
+
+### Phase 1 Validation Plan
+
+| Gate | Required Rust-owned evidence |
+| --- | --- |
+| Reference inventory | `aria2_original/configure.ac`, the 415 `.cc` plus 115 implementation header-only units, the separately owned public C API header, source/build/test directory inventory, and the 20 detailed module records |
+| Rust ownership inventory | `cargo metadata --no-deps --format-version 1`, all four crate feature sets, public C/Python/Node surfaces, four examples, benchmark targets, and both CI workflows each mapped to one current matrix row |
+| Compatibility boundary | Rust-owned CLI/config/RPC/protocol fixtures and baselines; a source audit proving no test reads, builds, links, starts, or dynamically loads `aria2_original` |
+| Lifecycle and protocol E2E plan | Local fixtures for HTTP/HTTPS, FTP, SFTP, BitTorrent/DHT, Metalink, proxy/auth, RPC/JSON-RPC/XML-RPC/WebSocket, retry/resume, concurrency, checksum, cancellation, pause/resume, removal, restart, and abnormal-network paths |
+| Public-surface plan | CLI/config defaults and aliases, session/control files, notifications/errors, C API, Python and Node SDK tests, examples, and browser/original-client contract tests with Rust-owned expected results |
+| Performance plan | Reproducible Rust workloads for throughput, latency, CPU, memory, allocations, I/O, lock contention, and concurrency; comparable `aria2_original` measurements are independent audit evidence and never test runtime inputs |
+| Phase exit | `cargo fmt --all -- --check`, relevant Clippy with `-D warnings`, focused Rust tests, `git diff --check`, and a complete worktree/matrix ownership review; passed on 2026-08-15 and locked as `phase-1-baseline-matrix` |
+
+### Remaining Risks And Reopen Conditions
+
+The current matrix remains `PARTIAL` for protocol semantics, original-client
+and browser-extension interoperability, platform coverage, public C ABI
+compatibility, measured C/Rust performance comparison, and several lifecycle
+and E2E slices. Reopen phase-1 review if the reference-tree inventory changes,
+the matrix ownership or status rules change, a test begins loading external
+reference data, or any recorded worktree path is added, removed, or moved.
 
 ## 2026-08-14 Independent Product Identity Guard
 
@@ -157,6 +365,308 @@ are representative checks from the same run, not an aggregate count. This
 still does not close original-client interoperability, platform coverage, or
 the remaining `PARTIAL` module matrix.
 
+## 2026-08-15 Retry Error Classification Checkpoint
+
+`RetryPolicy::should_retry` no longer treats every `RecoverableError` as
+retryable. The shared policy now admits only timeouts, temporary network
+failures, and configured `retryable_http_codes`; HTTP 404, `CannotResume`,
+authentication failures, redirect failures, range failures, and other
+protocol errors stop without another attempt. This preserves the existing
+`max-tries` total-attempt contract and `max-tries=0` unlimited behavior.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib engine::retry_policy --all-features -- --test-threads=1
+  18 passed, 0 failed
+cargo test -p aria2-core --test test_retry --all-features -- --test-threads=1
+  16 passed, 0 failed
+cargo test -p aria2-core --test test_error_network --all-features -- --test-threads=1
+  32 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --test test_e2e_gap_retry --all-features -- --test-threads=1
+  26 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The HTTP fixture counts requests: a persistent 500 uses two total attempts
+when configured for two, while a persistent 404 uses one request even when
+the policy allows three total attempts. The separate skip-response
+`max-file-not-found` classification and the broader inconsistent 4xx mapping
+across range, Metalink, and gap paths remain open phase-2 work. The overall
+migration remains `PARTIAL`.
+
+## 2026-08-15 Gap HTTP Status Classification Checkpoint
+
+The sequential gap downloader now preserves a structured `RangeNotSatisfiable`
+error for HTTP 416, keeps HTTP 5xx responses as `ServerError`, and maps other
+HTTP failures to `HttpProtocolError` instead of a fatal configuration error.
+This keeps result-code mapping and the shared retry policy consistent with the
+ordinary sequential download path.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib engine::sequential_download::gap_download --all-features -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_gap_retry --all-features -- --test-threads=1
+  26 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+Metalink status mapping and the remaining range/4xx paths still require a
+separate audit. The overall migration remains `PARTIAL`.
+
+## 2026-08-15 Metalink HTTP Status Classification Checkpoint
+
+The two Rust-owned Metalink HTTP paths now map 5xx responses to structured
+`ServerError` values and other HTTP failures to terminal `HttpProtocolError`
+values instead of `FatalError::Config`. This aligns Metalink retry eligibility
+and result-code mapping with ordinary sequential HTTP downloads.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib engine::metalink_download_command --all-features -- --test-threads=1
+  19 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This is focused command-level evidence only. Full Metalink lifecycle,
+cross-protocol, and original-client interoperability evidence remain open;
+the overall migration remains `PARTIAL`.
+
+## 2026-08-15 HTTP Redirect and Auth Error Classification Checkpoint
+
+Sequential HTTP redirect failures without a `Location` header or with an
+invalid target now return structured `HttpProtocolError` values. Auth-retry
+redirect failures use the same protocol classification, and a post-auth 5xx
+remains a retryable `ServerError` while other post-auth HTTP failures are
+terminal protocol errors. Redirect following and credential resolution are
+unchanged.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib engine::sequential_download::auth_retry --all-features -- --test-threads=1
+  2 passed, 0 failed
+cargo test -p aria2-core --lib engine::download_command --all-features -- --test-threads=1
+  26 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_download test_e2e_redirect_without_location_is_http_protocol_error --all-features -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+Full auth challenge coverage across schemes, proxy variants, and original
+client interoperability remains open phase-2 work; the migration remains
+`PARTIAL`.
+
+## 2026-08-15 Autosave Control-file Flush Checkpoint
+
+`SaveSessionCommand` now requests a control-file flush for every non-terminal
+group before serializing the session. The active protocol command remains the
+owner of its live checkpoint and consumes the request at its durable writer
+boundary. The request/consume seam covers sequential and concurrent HTTP,
+FTP/FTP proxy, SFTP, Metalink, and BitTorrent paths; it does not copy protocol
+state into `RequestGroupMan`.
+
+~~~text
+cargo test -p aria2-core --lib auto_save --all-features -- --test-threads=1
+  10 passed, 0 failed
+cargo test -p aria2-core --lib progress_checkpoint --all-features -- --test-threads=1
+  5 passed, 0 failed
+cargo test -p aria2-core --lib filesystem::disk_writer --all-features -- --test-threads=1
+  20 passed, 0 failed
+cargo check -p aria2-core --all-targets --all-features
+  PASS
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+The autosave regression reads a real `.aria2` sidecar after the active
+checkpoint owner consumes the request and verifies the updated completed
+length. The product identity is now `aria2-rust 0.3.0` across the workspace,
+CLI/RPC identity adapters, SDK metadata, installers, and distribution manifests.
+This checkpoint remains phase-2 evidence only; live autosave timing, full
+cross-protocol lifecycle E2E, original-client interoperability, and the
+remaining matrix gaps keep the overall status `PARTIAL`.
+
+## 2026-08-15 Sequential HTTP Cancellation Checkpoint
+
+Sequential HTTP body reads now race every pending `bytes_stream` item against
+the RequestGroup cancellation watcher. The in-memory metadata path uses the
+same cancellation tick. Pause and remove can therefore stop a stalled
+response without waiting for another body chunk. The existing
+finalize-before-checkpoint ordering is shared by pending-read and
+between-chunk cancellation paths.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_download test_e2e_sequential_http_pause_interrupts_stalled_body_read --all-features -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_download --all-features -- --test-threads=1
+  28 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+cargo test --workspace --all-targets --no-run
+  PASS
+~~~
+
+The Rust-owned slow-stream fixtures confirm that a paused sequential HTTP
+download leaves a `.aria2` checkpoint with a strictly partial completed
+length, while paused in-memory metadata does not create an output file. This
+closes only the HTTP stalled-read slice; live cross-protocol lifecycle
+coverage, original-client interoperability, and the remaining phase-2 gaps
+keep the overall status `PARTIAL`.
+
+## 2026-08-15 RequestGroup Autosave Terminal Filter Checkpoint
+
+`RequestGroupMan::request_control_file_saves` now requests persistence only
+for waiting, active, and paused groups. Complete, error, and removed groups
+are excluded even before their scheduling entry is demoted, preventing stale
+autosave requests from being attached to terminal tasks.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib request::request_group_man --all-features -- --test-threads=1
+  32 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes only the terminal-state filtering slice of the phase-2
+RequestGroup seam. Full cross-protocol lifecycle, session variants, and
+original-client interoperability remain open, so the overall status remains
+`PARTIAL`.
+
+## 2026-08-15 Gap-download Cancellation Checkpoint
+
+Concurrent HTTP fallback now reaches the Rust sequential gap downloader with
+the completed ranges preserved. Both the ranged request and each pending body
+chunk race the RequestGroup cancellation watcher; a pause or removal cleans
+the partial gap and returns promptly instead of waiting for another network
+chunk. The fixture forces a real `416` fallback and stalls the next ranged
+body read.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --test test_e2e_gap_retry --all-features -- --test-threads=1
+  25 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo test --workspace --all-targets --no-run
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the gap-download cancellation slice. Remaining protocol
+command lifecycle coverage, session variants, integrity-dispatch callbacks,
+cross-protocol E2E, and original-client interoperability keep phase 2 and the
+overall migration `PARTIAL`.
+
+## 2026-08-15 Integrity-dispatch Outcome Checkpoint
+
+The Rust-owned integrity manager now has direct regression coverage for the
+detailed `IntegrityOutcome` consumed by the BitTorrent command: a mixed file
+with one verified and one mismatched piece reports `verified_piece_indices` and
+`failed_piece_indices` without collapsing the result to a boolean. The
+production repair path is covered for a failed single piece, a piece crossing
+two physical files, and complete-payload hash-check seed controls.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity -- --test-threads=1
+  53 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --test test_e2e_bittorrent_download test_e2e_bt_check_integrity_redownloads_only_failed_piece -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --test test_e2e_bittorrent_download test_e2e_bt_multi_file_integrity_repairs_piece_crossing_file_boundary -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --features bittorrent --test test_e2e_bittorrent_download test_e2e_bt_complete_integrity -- --test-threads=1
+  2 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes the detailed integrity-outcome dispatch slice only. Remaining
+integrity callback branches, protocol command lifecycle coverage, session
+variants, cross-protocol E2E, and original-client interoperability keep phase
+2 and the overall migration `PARTIAL`.
+
+## 2026-08-15 Session follow-mode Round-trip Checkpoint
+
+Session option serialization now has direct coverage for the three-valued
+follow-mode contract at the session boundary. `follow-torrent=mem` and
+`follow-metalink=false` are written using their canonical wire values and
+restore to the corresponding typed `FollowMode` variants; the existing full
+session file E2E remains green.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib session::session_entry --all-features -- --test-threads=1
+  19 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_session --all-features -- --test-threads=1
+  13 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes only the typed follow-mode session round-trip slice. Standard and
+memory-backed Metalink graph variants, broader session lifecycle combinations,
+cross-protocol E2E, and original-client interoperability remain open, so phase
+2 and the overall migration stay `PARTIAL`.
+
+## 2026-08-15 Cross-protocol E2E Checkpoint
+
+The Rust-owned cross-protocol target passes the current local lifecycle
+matrix: FTP anonymous/authenticated fallback, Metalink mirror failover and
+SHA-256 verification, rate limiting, filename collision handling, disk-space
+failure handling, and session save/restore all complete under their bounded
+fixtures. The two ignored tests are the existing BitTorrent seeder fixture
+cases and are not counted as passes.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --test deep_e2e_cross_protocol --all-features -- --test-threads=1
+  18 passed, 0 failed, 2 ignored
+~~~
+
+This strengthens local cross-protocol evidence only. Full protocol lifecycle
+combinations, third-party services, platform coverage, browser/original-client
+interoperability, and the remaining phase-2 gates remain open; the overall
+migration stays `PARTIAL`.
+
 ## 2026-08-15 CLI Short-Option Contract and Extension Boundary
 
 The original short-option table is recorded in the checked-in Rust-owned
@@ -223,7 +733,7 @@ instead of being silently consumed.
 
 This is an internal Rust implementation correction at the external HTTP
 behavior seam. It does not change option names, defaults, user configuration,
-RPC/CLI wire behavior, or the `aria2-rust 0.2.9` product identity, and it does
+RPC/CLI wire behavior, or the `aria2-rust 0.3.0` product identity, and it does
 not copy the C++ command state machine.
 
 Verification on 2026-08-14:
@@ -257,7 +767,7 @@ protocol error. Transfer decoding runs before the independent
 keeping the implementation Rust-native.
 
 The empty-body path is validated as well. No option name, default, user
-configuration, RPC/CLI wire behavior, or `aria2-rust 0.2.9` product identity
+configuration, RPC/CLI wire behavior, or `aria2-rust 0.3.0` product identity
 was changed.
 
 Verification on 2026-08-14:
@@ -638,7 +1148,7 @@ cargo test -p aria2-core --all-features --test test_e2e_metalink_lifecycle -- --
 
 The configuration registry remains Rust-owned. This checkpoint did not change
 option names, product defaults, user configuration files, or the
-`aria2-rust 0.2.9` release identity.
+`aria2-rust 0.3.0` release identity.
 
 The explicit-value seam now has a separate default-value path. CLI, config-file,
 and environment input all pass explicit text through `OptionDef::parse_value`;
@@ -691,7 +1201,7 @@ own eight tests. The active CLI, config-file, environment, RPC, session, and
 download-option paths already use the canonical `config::OptionRegistry`,
 `ConfigParser`, and typed `OptionDef` seam. Removing the duplicate default table
 and auto-detect parser reduces drift risk and does not change any user option,
-default, wire shape, or `aria2-rust 0.2.9` identity.
+default, wire shape, or `aria2-rust 0.3.0` identity.
 
 Deletion verification on 2026-08-14:
 
@@ -828,6 +1338,10 @@ checkpoint.
 | RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, feature-specific method/notification discovery, feature-aware `getVersion`, browser-facing CORS preflight headers, and real HTTP E2E coverage exist. CORS is disabled by default as in `aria2_original`; explicit `rpc-allow-origin-all=true` enables wildcard headers, and `Access-Control-Max-Age` matches the original at `1728000`. XML-RPC execution faults use HTTP 200 + `faultCode=1`; structurally malformed documents or conversion failures use the original HTTP 400 empty-body contract, while well-formed documents with invalid scalar/member values follow the original omission semantics before normal method execution. `getServers` is active-only and reports only real in-flight requests; waiting, paused, stopped, or unknown GIDs return execution error code 1. `getSessionInfo` now generates one 20-byte random session key per engine and exposes the original 40-character lowercase hexadecimal representation. The catalog is 33 core methods plus 2 BitTorrent and 1 Metalink method when enabled; notifications are 5 core plus 1 BitTorrent event when enabled. `aria2.forceUnpause` is rejected as an unknown original method and omitted from `system.listMethods`, keeping original-client discovery exact. Task creation and runtime changes share core validation; `RequestGroup` owns a source-derived `setInitialOption(true)` request snapshot and transfers its effective state to `DownloadResult` when a task stops, excluding process-only RPC settings and Rust-only session metadata. `getOption` therefore keeps the original task state for both live and stopped GIDs, including only changes already applied to the task; later `changeGlobalOption` calls affect future tasks without rewriting existing ones. `getGlobalOption` uses registry-owned original wire metadata: defined hidden or deprecated original values remain observable, no-default values stay absent until configured, `rpc-secret` is withheld, and Rust-only uTP fields cannot leak into an original-client response. `changeUri` now honors the optional zero-based insertion position after deletions, matching the original ordering and count result; task-creation positions share the same rejection rules for negative values. `tellStatus`, `tellActive`, `tellWaiting`, and `tellStopped` honor the original optional `keys` field filter while preserving full output when omitted, and waiting/stopped pagination supports the original negative-offset semantics. Full original-client interoperability, including the browser-extension matrix and complete XML-RPC client coverage, remains unverified. |
 | CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | `OptionDef::parse_value` remains the shared typed seam for CLI/config/RPC validation, and `App::load_cli_args` now propagates validation failures instead of silently discarding them. Regression coverage proves invalid `--split=0` and unknown `--file-allocation` values are rejected before engine startup; startup coverage proves `--no-conf` skips an explicit config file as in the original. `IntegerRange` preserves ordered range wire values, `IndexOut` uses one cumulative `INDEX=PATH` parser for validation and BT execution, and `bt-prioritize-piece` validates the original `head[=SIZE],tail[=SIZE]` grammar through the same registry seam. The original short-option contract and the eight Rust additive aliases are covered separately, including `-h`/`-v`/`-V` actions. `-h`/`--help[=TAG|KEYWORD]` now preserves the optional-argument/getopt boundary, renders before engine startup, and filters by long-option keyword or supported help groups. The Rust-owned inventory baseline is `214` public names; the all-features registry has 22 additional Rust extensions, and the Rust-owned public-help baseline represents 198 names. Runtime changeability is now verified item-by-item against the Rust-owned compatibility baseline (`setInitialOption` 113/113, global 120/120, reserved 106/106, immediate 7/7), with Rust extensions listed separately. Exact defaults, help-tag membership/text, feature-conditional behavior, and full E2E proof remain open. CLI product identity and version output intentionally belong to `aria2-rust`. |
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI. |
+| Bindings and SDKs | bindings/c/, bindings/python/, bindings/nodejs/ | PARTIAL | The C binding is covered through the core opaque-handle API; the maintained Python and Node.js clients have Rust-owned unit, integration, and local E2E suites. Current checkpoints report Python 137 passed and Node.js 123 passed with typecheck passing, but platform-specific binding runs, package publication metadata, and complete original-client interoperability remain open. |
+| Examples and benchmarks | examples/, benches/, aria2-core/benches/, aria2-rpc/benches/ | PARTIAL | Example and benchmark targets are part of the Rust workspace inventory and compile in the workspace target checkpoint. Reproducible workload definitions and Rust-side performance regression results exist for selected seams, while complete benchmark coverage, allocation/lock/IO measurements, and a comparable aria2_original performance baseline remain open. |
+| Tests and fixtures | aria2/tests/, aria2-core/tests/, aria2-protocol/tests/, aria2-rpc/tests/, tests/ | PARTIAL | Rust-owned fixtures, compatibility baselines, unit/integration/E2E tests, and binding suites are the only allowed regression inputs. Current targeted RPC tests and core target compilation pass; the complete cross-crate, platform, original-client, and browser-contract run remains open. |
+| Workspace and CI | Cargo.toml, .github/workflows/ | PARTIAL | Workspace target compilation, formatting, and selected Clippy gates have reproducible evidence. CI release publishing and platform matrices are tracked as product-owned workflow behavior; current platform-specific runs, complete release validation, and one final aggregate acceptance run remain open. |
 
 ## Verification Evidence
 
@@ -888,7 +1402,7 @@ download option. This includes the standalone protocol HTTP client used by
 tracker code, Metalink, concurrent downloads, web seeds, and tracker clients.
 
 The project emits one product identity. The Cargo package version
-(`aria2-rust` 0.2.9 on this checkout), CLI version action and startup banner,
+(`aria2-rust` 0.3.0 on this checkout), CLI version action and startup banner,
 RPC `getVersion`,
 default HTTP/tracker User-Agent, BitTorrent peer agent, and BitTorrent
 extension handshake use the same release source.
@@ -927,14 +1441,14 @@ version policy.
 
 The workspace is also version-consistent: all four Rust member crates use the
 workspace package version, all internal path dependency constraints target
-0.2.9, distribution manifests and SDK package metadata use 0.2.9, and active
-installer fallbacks and examples use `aria2-rust/0.2.9`. Code-generated output
+0.3.0, distribution manifests and SDK package metadata use 0.3.0, and active
+installer fallbacks and examples use `aria2-rust/0.3.0`. Code-generated output
 and test fixtures must not emit an upstream aria2 product version. External
 input fixtures use neutral client or generator labels when a version field is
 needed. Wire-protocol versions such as JSON-RPC `2.0`, Metalink `3.0`/`4.0`,
 and SFTP version `3` are format versions, not product identity.
 
-- `user-agent` and `peer-agent` registry defaults use `aria2-rust/0.2.9`.
+- `user-agent` and `peer-agent` registry defaults use `aria2-rust/0.3.0`.
   The peer-ID prefix is `A2-RUST-`; the default peer ID is generated once per
   process and remains exactly 20 bytes.
 - RPC message shapes, method names, authentication, errors, notifications,
@@ -951,7 +1465,7 @@ This slice was checked with `cargo fmt --all -- --check`, the focused
 `handlers::handler_tests::test_get_version_uses_product_version` regressions,
 the complete `test_cli_options` target (105 passed),
 `cargo build -p aria2 --all-features -j 1` with an observed
-`aria2c --version` value of `aria2-rust 0.2.9`, and
+`aria2c --version` value of `aria2-rust 0.3.0`, and
 `cargo clippy -p aria2 --all-targets --all-features -- -D warnings`.
 The RPC catalog additionally passed the independent
 `handlers::system::tests::test_list_methods` regression and the real HTTP
@@ -1059,7 +1573,7 @@ and original-client interoperability have complete evidence.
 ### Product Identity, Defaults, and Feature Wiring (2026-08-13)
 
 `aria2-rust` is an independent product. The workspace and all public product
-identity adapters use version `0.2.9`: CLI `--version`, the startup banner,
+identity adapters use version `0.3.0`: CLI `--version`, the startup banner,
 RPC `aria2.getVersion`, HTTP User-Agent, BitTorrent peer agent, SDK metadata,
 and distribution metadata. The upstream C++ version-report text is not used.
 JSON-RPC `2.0`, Metalink `3.0`/`4.0`, and SFTP `3` are protocol-format
@@ -1145,7 +1659,7 @@ continues into the seed lifecycle.
 
 The defaults and option names remain the existing public contract. This slice
 does not copy the original C++ class structure, alter user configuration, or
-change the `aria2-rust 0.2.9` product identity.
+change the `aria2-rust 0.3.0` product identity.
 
 ~~~text
 cargo test -p aria2-core --features bittorrent --test test_e2e_bittorrent_download -- --test-threads=1
@@ -1175,7 +1689,7 @@ checkpoint removal occur only after the replacement bytes pass verification.
 
 This preserves the original `ChecksumCheckIntegrityEntry` observable behavior
 without copying the C++ command hierarchy or changing the public
-`aria2-rust 0.2.9` identity.
+`aria2-rust 0.3.0` identity.
 
 ~~~text
 cargo test -p aria2-core --features sftp --test test_e2e_sftp_download -- --test-threads=1
@@ -1242,7 +1756,7 @@ cargo test -p aria2-rpc --lib handlers::handler_tests::test_get_global_option_us
 cargo test -p aria2-rpc --test test_e2e_all_rpc_methods --all-features -j 1       55 passed
 cargo test -p aria2-rpc --test test_e2e_http_server --all-features -j 1           46 passed
 cargo test -p aria2-rpc --test test_https_rpc --all-features -j 1                  4 passed
-cargo metadata --no-deps --format-version 1                                      0.2.9 for all Rust members
+cargo metadata --no-deps --format-version 1                                      0.3.0 for all Rust members
 cargo fmt --all -- --check                                                       PASS
 ~~~
 
@@ -2006,7 +2520,7 @@ keep the existing protocol-specific-over-all precedence, and tunnel mode no
 longer resolves the origin locally when the proxy can resolve it.
 
 This is an internal Rust implementation. No option name, default, user
-configuration format, CLI/RPC wire value, or `aria2-rust 0.2.9` product
+configuration format, CLI/RPC wire value, or `aria2-rust 0.3.0` product
 identity changed; no C++ proxy command chain was copied into the repository.
 
 Focused verification:

@@ -1,9 +1,11 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId};
+use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::test_server::TestServer;
 use std::path::Path;
+use std::sync::Arc;
 
 async fn start_server() -> TestServer {
     TestServer::start().await
@@ -93,6 +95,34 @@ async fn test_e2e_gap_retry_with_server_error() {
 
     let result = cmd.execute().await;
     assert!(result.is_err(), "Download should fail after retries");
+    assert_eq!(
+        server.error_500_requests(),
+        2,
+        "Configured retryable HTTP 500 should use both total attempts"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_http_404_is_not_retried() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/error/404", server.base_url());
+
+    let options = DownloadOptions {
+        max_retries: 3,
+        retry_wait: 0,
+        ..Default::default()
+    };
+    let mut cmd = DownloadCommand::new(GroupId::new(4), &url, &options, dir.path().to_str(), None)
+        .expect("Failed to create DownloadCommand");
+
+    let result = cmd.execute().await;
+    assert!(result.is_err(), "404 download should fail");
+    assert_eq!(
+        server.error_404_requests(),
+        1,
+        "Non-retryable HTTP 404 should stop after the first request"
+    );
 }
 
 #[tokio::test]
@@ -294,6 +324,55 @@ async fn test_e2e_gap_retry_with_connection_disconnect() {
     for (i, &byte) in data.iter().enumerate().take(251) {
         assert_eq!(byte, i as u8, "Byte {} should be {}", i, i);
     }
+}
+
+#[tokio::test]
+async fn test_e2e_gap_pause_interrupts_stalled_body_read() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/files/slow_gap_test.bin", server.base_url());
+    let options = DownloadOptions {
+        max_retries: 1,
+        split: Some(2),
+        use_head: true,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(601),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .unwrap();
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if server.slow_gap_attempts() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("concurrent download did not enter sequential gap recovery");
+
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), command_task)
+        .await
+        .expect("pause must interrupt a stalled gap body read")
+        .expect("gap download command task panicked");
+    assert!(
+        result.is_err(),
+        "paused gap download must stop with an error"
+    );
+    assert!(group.recover().status().is_paused());
 }
 
 #[tokio::test]

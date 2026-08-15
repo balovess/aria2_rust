@@ -679,7 +679,7 @@ fn test_redirect_missing_location_header() {
 fn test_retry_policy_recoverable_vs_fatal() {
     let policy = RetryPolicy::new(5, 1000);
 
-    // Recoverable errors should allow retry
+    // Transient transport errors and configured HTTP statuses should retry.
     assert!(policy.should_retry(0, &Aria2Error::Recoverable(RecoverableError::Timeout)));
     assert!(policy.should_retry(
         0,
@@ -690,6 +690,22 @@ fn test_retry_policy_recoverable_vs_fatal() {
         &Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
             message: "test".into()
         })
+    ));
+
+    assert!(!policy.should_retry(
+        0,
+        &Aria2Error::Recoverable(RecoverableError::ServerError { code: 404 })
+    ));
+    assert!(!policy.should_retry(0, &Aria2Error::Recoverable(RecoverableError::CannotResume)));
+    assert!(!policy.should_retry(
+        0,
+        &Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+            message: "HTTP 401".into()
+        })
+    ));
+    assert!(!policy.should_retry(
+        0,
+        &Aria2Error::Recoverable(RecoverableError::HttpTooManyRedirects { count: 20 })
     ));
 
     // Fatal errors should NOT allow retry

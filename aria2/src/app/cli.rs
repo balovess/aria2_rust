@@ -693,7 +693,7 @@ pub struct GeneralArgs {
     #[arg(long = "lowest-speed-limit")]
     pub lowest_speed_limit: Option<String>,
 
-    /// Max number of 404 not-found attempts (0=unlimited)
+    /// Max number of 404 not-found attempts (0=stop immediately)
     #[arg(long = "max-file-not-found")]
     pub max_file_not_found: Option<u64>,
 

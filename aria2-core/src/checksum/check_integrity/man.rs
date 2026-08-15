@@ -904,6 +904,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_enqueue_with_outcome_preserves_piece_indices() {
+        let dir = test_dir("outcome");
+        let path = dir.join("f.bin");
+        let data = b"aaaabbbb".to_vec();
+        std::fs::write(&path, &data).unwrap();
+
+        let expected = vec![sha1_hex(&data[0..4]), sha1_hex(b"xxxx")];
+        let task = file_task(&path, 4, 8, expected, HashType::Sha1)
+            .unwrap()
+            .expect("task created");
+        let outcome = enqueue_with_outcome(&shared_with_concurrency(1), 4, task)
+            .await
+            .unwrap();
+
+        assert!(!outcome.verified);
+        assert_eq!(outcome.verified_piece_indices, vec![0]);
+        assert_eq!(outcome.failed_piece_indices, vec![1]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_file_task_none_when_no_digests_or_missing() {
         let dir = test_dir("none");
         let path = dir.join("missing.bin");

@@ -424,7 +424,40 @@ pub async fn execute(
                             .await;
                     }
                     Err(e) => {
+                        let e = if matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                        ) {
+                            dl.group.recover().file_not_found_error()
+                        } else {
+                            e
+                        };
                         tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                        let is_file_not_found = matches!(
+                            &e,
+                            Aria2Error::Recoverable(
+                                RecoverableError::ResourceNotFound
+                                    | RecoverableError::MaxFileNotFound
+                            )
+                        );
+                        let file_not_found_retry_allowed = !matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                        ) && dl.group.recover().can_retry_file_not_found();
+                        if is_file_not_found && !file_not_found_retry_allowed {
+                            cancel_and_persist(
+                                executor,
+                                &mut write_rx,
+                                &mut writer,
+                                limiter.as_ref(),
+                                dl.global_limiter.as_ref(),
+                                &mut ctrl_file,
+                                completed_bytes,
+                                &mut progress_handles,
+                            )
+                            .await?;
+                            return Err(e);
+                        }
                         let is_capacity_limited = matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::ServerError { code })

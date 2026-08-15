@@ -24,14 +24,13 @@ use aria2_protocol::sftp::session::SftpSession;
 
 use super::types::SftpDownloadCommand;
 
-#[async_trait]
-impl Command for SftpDownloadCommand {
+impl SftpDownloadCommand {
     /// Execute the SFTP download.
     ///
     /// This is the main entry point called by the download engine. It orchestrates
     /// the entire download lifecycle from connection establishment through data
     /// transfer to cleanup.
-    async fn execute(&mut self) -> Result<()> {
+    async fn execute_once(&mut self) -> Result<()> {
         // -----------------------------------------------------------------
         // Phase 0: Initialization
         // -----------------------------------------------------------------
@@ -357,7 +356,10 @@ impl Command for SftpDownloadCommand {
 
             self.completed_bytes += n as u64;
             if let Some(checkpoint) = self.checkpoint.as_mut() {
-                checkpoint.update(self.completed_bytes, false).await;
+                let save_requested = self.group.recover().take_save_control_file_request();
+                checkpoint
+                    .update(self.completed_bytes, save_requested)
+                    .await;
             }
 
             // Update progress in RequestGroup
@@ -479,6 +481,42 @@ impl Command for SftpDownloadCommand {
 
         Ok(())
     }
+}
+
+#[async_trait]
+impl Command for SftpDownloadCommand {
+    async fn execute(&mut self) -> Result<()> {
+        let mut attempts = 0u32;
+        loop {
+            let result = self.execute_once().await;
+            let error = match result {
+                Ok(()) => return Ok(()),
+                Err(error) => error,
+            };
+            let error = match error {
+                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                | Aria2Error::Fatal(FatalError::FileNotFound { .. }) => {
+                    self.group.recover().file_not_found_error()
+                }
+                error => error,
+            };
+            let should_retry = matches!(
+                &error,
+                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+            ) && self
+                .retry_policy
+                .can_retry_after(attempts.saturating_add(1))
+                && self.group.recover().can_retry_file_not_found();
+            if !should_retry {
+                return Err(error);
+            }
+
+            attempts = attempts.saturating_add(1);
+            let wait = self.retry_policy.compute_wait(attempts).unwrap_or_default();
+            tokio::time::sleep(wait).await;
+            self.completed_bytes = 0;
+        }
+    }
 
     /// Return the current status of this command.
     fn status(&self) -> CommandStatus {
@@ -518,6 +556,7 @@ impl SftpDownloadCommand {
 
     async fn flush_checkpoint(&mut self) {
         if let Some(checkpoint) = self.checkpoint.as_mut() {
+            let _ = self.group.recover().take_save_control_file_request();
             checkpoint.update(self.completed_bytes, true).await;
         }
     }

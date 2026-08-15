@@ -650,13 +650,40 @@ impl DownloadCommand {
         Ok(())
     }
 
-    /// Download a metadata source into a memory buffer.
+    /// Download a metadata source into a memory buffer, retrying 404s when
+    /// `max-file-not-found` permits another attempt.
+    async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
+        let options = self.group.recover().options_arc();
+        let mut attempt = 0u32;
+        loop {
+            match self.execute_in_memory_attempt(uri).await {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        &error,
+                        Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound)
+                    ) && self.group.recover().can_retry_file_not_found()
+                        && (options.max_retries == 0
+                            || attempt.saturating_add(1) < options.max_retries) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                    if options.retry_wait > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(options.retry_wait))
+                            .await;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Download one metadata source into a memory buffer.
     ///
     /// This is the Rust equivalent of aria2's memory pre-download handler:
     /// the response is streamed into an owned `Vec<u8>`, no output path is
     /// opened, and the post-download handler consumes the buffer before the
     /// parent group is demoted.
-    async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
+    async fn execute_in_memory_attempt(&mut self, uri: &str) -> Result<()> {
         self.check_cancelled()?;
 
         // A JSON/session restore may already carry the completed metadata
@@ -699,6 +726,9 @@ impl DownloadCommand {
         })?;
         let status = response.status();
         if !status.is_success() {
+            if status.as_u16() == 404 {
+                return Err(self.group.recover().file_not_found_error());
+            }
             if status.is_server_error() {
                 return Err(Aria2Error::Recoverable(
                     crate::error::RecoverableError::ServerError {
@@ -727,7 +757,17 @@ impl DownloadCommand {
         let mut stream = response.bytes_stream();
         let mut completed = 0u64;
 
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                chunk = stream.next() => chunk,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                    self.check_cancelled()?;
+                    continue;
+                }
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
             self.check_cancelled()?;
             let chunk = chunk.map_err(|error| {
                 Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {

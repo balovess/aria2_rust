@@ -197,6 +197,27 @@ fn test_classify_ftp_error_permanent() {
 }
 
 #[test]
+fn test_classify_ftp_not_found_uses_resource_result() {
+    let command = FtpDownloadCommand::new(
+        GroupId::new(103),
+        "ftp://example.com/file.txt",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        command.classify_ftp_error(550, "File unavailable"),
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+    ));
+    assert!(matches!(
+        command.classify_ftp_error(450, "Busy"),
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
+    ));
+}
+
+#[test]
 fn test_resume_offset_calculation() {
     // Test that resume offset would be calculated correctly from existing file
     // (This logic is in new(), so we verify the concept)

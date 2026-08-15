@@ -67,10 +67,20 @@ pub(super) async fn try_web_seed_fallback(
                 }
 
                 cmd.completed_bytes += web_seed_len;
-                if let Some(checkpoint) = cmd.checkpoint.as_mut()
-                    && let Err(error) = checkpoint.save(&bitfield, cmd.completed_bytes).await
-                {
-                    warn!(%error, "Failed to save BT checkpoint after web-seed piece completion");
+                if let Some(checkpoint) = cmd.checkpoint.as_mut() {
+                    let save_requested = cmd.group.recover().is_save_control_file_requested();
+                    match checkpoint.save(&bitfield, cmd.completed_bytes).await {
+                        Ok(()) if save_requested => {
+                            cmd.group.recover().take_save_control_file_request();
+                        }
+                        Err(error) => {
+                            warn!(
+                                %error,
+                                "Failed to save BT checkpoint after web-seed piece completion"
+                            );
+                        }
+                        Ok(()) => {}
+                    }
                 }
                 Ok(true)
             } else {

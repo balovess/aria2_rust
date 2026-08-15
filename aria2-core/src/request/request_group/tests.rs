@@ -623,6 +623,55 @@ fn test_effective_option_snapshot_overlays_only_applied_runtime_changes() {
 }
 
 #[test]
+fn test_file_not_found_limit_uses_effective_group_options() {
+    let mut group = RequestGroup::new(
+        GroupId::new(44),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([(
+        "max-file-not-found".to_string(),
+        serde_json::json!("3"),
+    )]));
+
+    assert_eq!(group.max_file_not_found(), 3);
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::ResourceNotFound
+    );
+    assert!(group.can_retry_file_not_found());
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::ResourceNotFound
+    );
+    assert!(group.can_retry_file_not_found());
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::MaxFileNotFound
+    );
+    assert!(!group.can_retry_file_not_found());
+}
+
+#[test]
+fn test_file_not_found_zero_stops_without_retry() {
+    let mut group = RequestGroup::new(
+        GroupId::new(45),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([(
+        "max-file-not-found".to_string(),
+        serde_json::json!("0"),
+    )]));
+
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::ResourceNotFound
+    );
+    assert!(!group.can_retry_file_not_found());
+}
+
+#[test]
 fn test_download_result_preserves_effective_option_snapshot() {
     let mut group = RequestGroup::new(
         GroupId::new(43),

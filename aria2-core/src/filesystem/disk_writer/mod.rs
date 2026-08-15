@@ -50,6 +50,7 @@ pub fn new_sequential_download_writer(
 #[async_trait]
 pub trait DiskWriter: Send + Sync {
     async fn write(&mut self, data: &[u8]) -> Result<()>;
+    async fn flush(&mut self) -> Result<()>;
     async fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
@@ -57,6 +58,10 @@ pub trait DiskWriter: Send + Sync {
 impl DiskWriter for Box<dyn DiskWriter> {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
         self.as_mut().write(data).await
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        self.as_mut().flush().await
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {

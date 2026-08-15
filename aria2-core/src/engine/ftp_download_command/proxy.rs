@@ -208,7 +208,10 @@ impl FtpDownloadCommand {
             body_bytes = body_bytes.saturating_add(bytes_read as u64);
             self.completed_bytes = self.completed_bytes.saturating_add(bytes_read as u64);
             if let Some(checkpoint) = self.checkpoint.as_mut() {
-                checkpoint.update(self.completed_bytes, false).await;
+                let save_requested = self.group.recover().take_save_control_file_request();
+                checkpoint
+                    .update(self.completed_bytes, save_requested)
+                    .await;
             }
             self.group.recover().update_progress(self.completed_bytes);
         }

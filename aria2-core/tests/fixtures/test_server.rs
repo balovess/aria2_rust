@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
@@ -10,6 +12,9 @@ const LARGE_PATTERN: u8 = 0xCD;
 pub struct TestServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    slow_gap_attempts: Arc<AtomicUsize>,
+    error_404_requests: Arc<AtomicUsize>,
+    error_500_requests: Arc<AtomicUsize>,
 }
 
 impl TestServer {
@@ -20,6 +25,12 @@ impl TestServer {
             .expect("Failed to bind test server port");
         let actual_addr = listener.local_addr().unwrap();
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let slow_gap_attempts = Arc::new(AtomicUsize::new(0));
+        let handler_slow_gap_attempts = Arc::clone(&slow_gap_attempts);
+        let error_404_requests = Arc::new(AtomicUsize::new(0));
+        let handler_error_404_requests = Arc::clone(&error_404_requests);
+        let error_500_requests = Arc::new(AtomicUsize::new(0));
+        let handler_error_500_requests = Arc::clone(&error_500_requests);
 
         tokio::spawn(async move {
             loop {
@@ -33,9 +44,25 @@ impl TestServer {
                                 let mut parts = first_line.split(' ');
                                 parts.next();
                                 let path = parts.next().unwrap_or("");
-                                if path.starts_with("/files/timeout_") || path.starts_with("/files/disconnect_") {
-                                    let _ = Self::handle_async_request(&mut stream, &request).await;
+                                if path.starts_with("/files/timeout_")
+                                    || path.starts_with("/files/disconnect_")
+                                    || path == "/files/slow_stream_test.bin"
+                                    || path == "/files/slow_gap_test.bin"
+                                {
+                                    let _ = Self::handle_async_request(
+                                        &mut stream,
+                                        &request,
+                                        Arc::clone(&handler_slow_gap_attempts),
+                                    )
+                                    .await;
                                 } else {
+                                    if path == "/error/404"
+                                        || path == "/files/concurrent_404_test.bin"
+                                    {
+                                        handler_error_404_requests.fetch_add(1, Ordering::SeqCst);
+                                    } else if path == "/error/500" {
+                                        handler_error_500_requests.fetch_add(1, Ordering::SeqCst);
+                                    }
                                     let response = Self::handle_request(&request);
                                     let _ = stream.write_all(&response).await;
                                     let _ = stream.flush().await;
@@ -52,11 +79,26 @@ impl TestServer {
         TestServer {
             addr: actual_addr,
             shutdown: Some(shutdown_tx),
+            slow_gap_attempts,
+            error_404_requests,
+            error_500_requests,
         }
     }
 
     pub fn base_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    pub fn slow_gap_attempts(&self) -> usize {
+        self.slow_gap_attempts.load(Ordering::SeqCst)
+    }
+
+    pub fn error_404_requests(&self) -> usize {
+        self.error_404_requests.load(Ordering::SeqCst)
+    }
+
+    pub fn error_500_requests(&self) -> usize {
+        self.error_500_requests.load(Ordering::SeqCst)
     }
 
     async fn read_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
@@ -70,6 +112,7 @@ impl TestServer {
     async fn handle_async_request(
         stream: &mut tokio::net::TcpStream,
         request: &[u8],
+        slow_gap_attempts: Arc<AtomicUsize>,
     ) -> std::io::Result<()> {
         let request_str = String::from_utf8_lossy(request);
         let first_line = request_str.lines().next().unwrap_or("");
@@ -77,6 +120,87 @@ impl TestServer {
         let path = parts.nth(1).unwrap_or("");
 
         match path {
+            "/files/slow_gap_test.bin" => {
+                const TOTAL: usize = 2 * 1024 * 1024;
+                let range = request_str.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("range")
+                        .then_some(value.trim().strip_prefix("bytes="))??
+                        .split_once('-')
+                        .map(|(start, end)| {
+                            (start.parse::<usize>().ok(), end.parse::<usize>().ok())
+                        })
+                });
+
+                let Some((Some(start), Some(end))) = range else {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {TOTAL}\r\n\r\n"
+                    );
+                    stream.write_all(header.as_bytes()).await?;
+                    return stream.flush().await;
+                };
+
+                let end = end.min(TOTAL - 1);
+                if start >= TOTAL / 2 {
+                    let attempt = slow_gap_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                    if attempt == 1 {
+                        stream
+                            .write_all(
+                                b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */2097152\r\nContent-Length: 0\r\n\r\n",
+                            )
+                            .await?;
+                        return stream.flush().await;
+                    }
+
+                    let header = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {start}-{end}/{TOTAL}\r\nContent-Length: {}\r\n\r\n",
+                        end - start + 1
+                    );
+                    stream.write_all(header.as_bytes()).await?;
+                    stream.flush().await?;
+                    if request_str.starts_with("HEAD ") {
+                        return Ok(());
+                    }
+
+                    let chunk = vec![0x6b; 64 * 1024];
+                    let mut remaining = end - start + 1;
+                    while remaining > 0 {
+                        let size = remaining.min(chunk.len());
+                        stream.write_all(&chunk[..size]).await?;
+                        stream.flush().await?;
+                        remaining -= size;
+                        if remaining > 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
+                    return Ok(());
+                }
+
+                let body = vec![0x6b; end - start + 1];
+                let header = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {start}-{end}/{TOTAL}\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.write_all(&body).await?;
+                stream.flush().await
+            }
+            "/files/slow_stream_test.bin" => {
+                let header = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 2097152\r\n\r\n";
+                stream.write_all(header).await?;
+                stream.flush().await?;
+                if request_str.starts_with("HEAD ") {
+                    return Ok(());
+                }
+
+                let chunk = vec![0x5a; 64 * 1024];
+                for _ in 0..32 {
+                    stream.write_all(&chunk).await?;
+                    stream.flush().await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Ok(())
+            }
             "/files/timeout_test.bin" => {
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 let body: Vec<u8> = (0..=100u8).collect();
@@ -197,6 +321,13 @@ impl TestServer {
                 let body = vec![LARGE_PATTERN; 10 * 1024 * 1024];
                 http_response(200, "application/octet-stream", &body)
             }
+            "/files/concurrent_404_test.bin" => {
+                if is_head {
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 2000000\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n".to_vec()
+                } else {
+                    http_404()
+                }
+            }
             "/files/range_test.bin" => {
                 let range_header = if request_str.contains("Range:") {
                     Some(request_str.split("Range: ").nth(1).and_then(|r| r.lines().next()).unwrap_or(""))
@@ -221,6 +352,9 @@ impl TestServer {
             }
             "/redirect" => {
                 b"HTTP/1.1 302 Found\r\nLocation: /files/small.bin\r\nContent-Length: 0\r\n\r\n".to_vec()
+            }
+            "/redirect_missing" => {
+                b"HTTP/1.1 302 Found\r\nContent-Length: 0\r\n\r\n".to_vec()
             }
             "/slow" => {
                 b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec()

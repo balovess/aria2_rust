@@ -129,6 +129,7 @@ fn test_build_ssh_options_without_password() {
         output_path: std::path::PathBuf::from("/tmp/out"),
         started: false,
         completed_bytes: 0,
+        retry_policy: crate::engine::retry_policy::RetryPolicy::default(),
         host_key_fingerprint: None,
         host: "host".to_string(),
         port: 22,
@@ -170,14 +171,14 @@ fn test_map_ssh_connect_timeout_to_recoverable() {
 }
 
 #[test]
-fn test_map_file_not_found_to_fatal() {
+fn test_map_file_not_found_to_resource_result() {
     let err = FileOpError::NotFound {
         path: "/missing".to_string(),
     };
     let mapped = SftpDownloadCommand::map_file_op_error(&err, "host", "/missing");
     assert!(matches!(
         mapped,
-        Aria2Error::Fatal(FatalError::FileNotFound { .. })
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
     ));
 }
 
@@ -272,6 +273,7 @@ fn create_test_cmd() -> SftpDownloadCommand {
         output_path: std::path::PathBuf::from("/tmp/download/file.zip"),
         started: false,
         completed_bytes: 0,
+        retry_policy: crate::engine::retry_policy::RetryPolicy::default(),
         host_key_fingerprint: None,
         host: "example.com".to_string(),
         port: 2222,

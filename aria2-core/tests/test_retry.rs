@@ -37,6 +37,25 @@ fn test_should_retry_recoverable_error() {
 }
 
 #[test]
+fn test_should_not_retry_non_transient_recoverable_errors() {
+    let policy = RetryPolicy::new(5, 0);
+
+    for error in [
+        Aria2Error::Recoverable(RecoverableError::ServerError { code: 404 }),
+        Aria2Error::Recoverable(RecoverableError::CannotResume),
+        Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+            message: "HTTP 401".into(),
+        }),
+        Aria2Error::Recoverable(RecoverableError::HttpTooManyRedirects { count: 20 }),
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: "missing Location".into(),
+        }),
+    ] {
+        assert!(!policy.should_retry(0, &error), "unexpected retry: {error}");
+    }
+}
+
+#[test]
 fn test_should_not_retry_fatal_error() {
     let policy = RetryPolicy::new(3, 1000);
 

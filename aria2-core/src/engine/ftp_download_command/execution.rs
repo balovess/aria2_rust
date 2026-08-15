@@ -91,9 +91,15 @@ impl Command for FtpDownloadCommand {
                 Err(attempt_error) => {
                     self.flush_checkpoint().await;
                     let FtpAttemptError {
-                        source: e,
+                        source: mut e,
                         failed_control,
                     } = attempt_error;
+                    if matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                    ) {
+                        e = self.group.recover().file_not_found_error();
+                    }
                     let reject_control = matches!(
                         e,
                         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
@@ -112,15 +118,20 @@ impl Command for FtpDownloadCommand {
                         );
                     }
                     // Check if this is a retry-worthy error
-                    let is_retryable_error = matches!(
-                        &e,
-                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
-                            | Aria2Error::Recoverable(RecoverableError::Timeout)
-                    );
-                    let should_retry = is_retryable_error
-                        && self
+                    let should_retry = match &e {
+                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+                            self.retry_policy
+                                .can_retry_after(attempts.saturating_add(1))
+                                && self.group.recover().can_retry_file_not_found()
+                        }
+                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            ..
+                        })
+                        | Aria2Error::Recoverable(RecoverableError::Timeout) => self
                             .retry_policy
-                            .can_retry_after(attempts.saturating_add(1));
+                            .can_retry_after(attempts.saturating_add(1)),
+                        _ => false,
+                    };
 
                     if should_retry {
                         attempts = attempts.saturating_add(1);
@@ -213,6 +224,7 @@ impl FtpDownloadCommand {
 
     pub(super) async fn flush_checkpoint(&mut self) {
         if let Some(checkpoint) = self.checkpoint.as_mut() {
+            let _ = self.group.recover().take_save_control_file_request();
             checkpoint.update(self.completed_bytes, true).await;
         }
     }
@@ -702,7 +714,10 @@ impl FtpDownloadCommand {
             }
             self.completed_bytes += bytes_read as u64;
             if let Some(checkpoint) = self.checkpoint.as_mut() {
-                checkpoint.update(self.completed_bytes, false).await;
+                let save_requested = self.group.recover().take_save_control_file_request();
+                checkpoint
+                    .update(self.completed_bytes, save_requested)
+                    .await;
             }
 
             // Update progress in request group

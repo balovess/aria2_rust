@@ -62,6 +62,31 @@ fn validate_content_range(
     Ok(())
 }
 
+fn classify_range_status(status: reqwest::StatusCode, range_header: &str) -> Option<Aria2Error> {
+    let status_code = status.as_u16();
+    match status_code {
+        200 => Some(Aria2Error::Recoverable(RecoverableError::CannotResume)),
+        416 => Some(Aria2Error::Recoverable(
+            RecoverableError::RangeNotSatisfiable {
+                range: range_header.to_string(),
+            },
+        )),
+        401 | 407 => Some(Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+            message: format!("authentication failed: HTTP {status}"),
+        })),
+        404 => Some(Aria2Error::Recoverable(RecoverableError::ResourceNotFound)),
+        500.. => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+            code: status_code,
+        })),
+        400.. => Some(Aria2Error::Recoverable(
+            RecoverableError::HttpProtocolError {
+                message: format!("HTTP error: {status}"),
+            },
+        )),
+        _ => None,
+    }
+}
+
 impl HttpSegmentDownloader {
     /// Create a new `HttpSegmentDownloader`.
     #[must_use]
@@ -389,41 +414,11 @@ impl HttpSegmentDownloader {
 
         self.remember_peer(response.remote_addr());
         let status = response.status();
-        match status.as_u16() {
-            206 => {
-                validate_content_range(&response, offset, length, expected_entity_length)?;
-            }
-            200 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
-            }
-            416 => {
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::RangeNotSatisfiable {
-                        range: format!("bytes={}-{}", offset, offset + length.saturating_sub(1)),
-                    },
-                ));
-            }
-            401 | 407 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
-                    message: format!("authentication failed: HTTP {status}"),
-                }));
-            }
-            429 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                    code: 429,
-                }));
-            }
-            code if (400..500).contains(&code) => {
-                return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                    format!("HTTP client error {}: {}", code, effective_url),
-                )));
-            }
-            code if code >= 500 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                    code,
-                }));
-            }
-            _ => {}
+        if let Some(error) = classify_range_status(status, &range_header) {
+            return Err(error);
+        }
+        if status.as_u16() == 206 {
+            validate_content_range(&response, offset, length, expected_entity_length)?;
         }
 
         // Don't pre-allocate the full segment length — it can be very large
@@ -526,41 +521,11 @@ impl HttpSegmentDownloader {
 
         self.remember_peer(response.remote_addr());
         let status = response.status();
-        match status.as_u16() {
-            206 => {
-                validate_content_range(&response, offset, length, expected_entity_length)?;
-            }
-            200 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::CannotResume));
-            }
-            416 => {
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::RangeNotSatisfiable {
-                        range: format!("bytes={}-{}", offset, offset + length.saturating_sub(1)),
-                    },
-                ));
-            }
-            401 | 407 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
-                    message: format!("authentication failed: HTTP {status}"),
-                }));
-            }
-            429 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                    code: 429,
-                }));
-            }
-            code if (400..500).contains(&code) => {
-                return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                    format!("HTTP client error {}: {}", code, effective_url),
-                )));
-            }
-            code if code >= 500 => {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                    code,
-                }));
-            }
-            _ => {}
+        if let Some(error) = classify_range_status(status, &range_header) {
+            return Err(error);
+        }
+        if status.as_u16() == 206 {
+            validate_content_range(&response, offset, length, expected_entity_length)?;
         }
 
         let mut stream = response.bytes_stream();
@@ -746,6 +711,111 @@ mod tests {
 
         // Wait for server with timeout
         let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
+    }
+
+    #[test]
+    fn test_classify_range_status_keeps_terminal_and_retryable_http_errors_distinct() {
+        assert!(matches!(
+            classify_range_status(reqwest::StatusCode::NOT_FOUND, "bytes=0-9"),
+            Some(Aria2Error::Recoverable(RecoverableError::ResourceNotFound))
+        ));
+        assert!(matches!(
+            classify_range_status(reqwest::StatusCode::SERVICE_UNAVAILABLE, "bytes=0-9"),
+            Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 503
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_download_range_maps_not_found_to_resource_not_found() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut request = [0u8; 2048];
+            let _n = stream
+                .read(&mut request)
+                .await
+                .expect("read should succeed");
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{addr}/missing");
+
+        let result = dl.download_range(&url, 0, 10, None, &[], None, 20).await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Recoverable(RecoverableError::ResourceNotFound))
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), server_handle)
+            .await
+            .expect("404 fixture should finish")
+            .expect("404 fixture task should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_download_range_streaming_maps_ordinary_4xx_to_http_protocol_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut request = [0u8; 2048];
+            let _n = stream
+                .read(&mut request)
+                .await
+                .expect("read should succeed");
+            stream
+                .write_all(
+                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{addr}/forbidden");
+        let (write_tx, _write_rx) = mpsc::channel(8);
+
+        let result = dl
+            .download_range_streaming(&url, 0, 10, None, &[], None, &write_tx, 20)
+            .await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Recoverable(
+                RecoverableError::HttpProtocolError { message }
+            )) if message.contains("403")
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), server_handle)
+            .await
+            .expect("403 fixture should finish")
+            .expect("403 fixture task should succeed");
     }
 
     #[tokio::test]

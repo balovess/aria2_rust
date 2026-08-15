@@ -17,7 +17,7 @@ use crate::ftp::connection::{
 use crate::network::ConnectionContext;
 
 use crate::constants;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::error::{Aria2Error, RecoverableError, Result};
 
 // ---------------------------------------------------------------------------
 // URL decoding
@@ -393,7 +393,7 @@ impl RawFtpControl {
         for target in cwd_targets(&base_working_dir, &directory) {
             let response = self.command(&format!("CWD {}", target)).await?;
             if response.0 == 550 {
-                return Err(Aria2Error::Fatal(FatalError::FileNotFound { path: target }));
+                return Err(Aria2Error::Recoverable(RecoverableError::ResourceNotFound));
             }
             if response.0 != 250 {
                 return Err(Aria2Error::Recoverable(
@@ -463,9 +463,7 @@ impl RawFtpControl {
             return Ok(Some(size));
         }
         if resp.0 == 550 {
-            return Err(Aria2Error::Fatal(FatalError::FileNotFound {
-                path: remote_path.to_string(),
-            }));
+            return Err(Aria2Error::Recoverable(RecoverableError::ResourceNotFound));
         }
         // SIZE command may not be supported by all servers
         debug!("SIZE command returned: {} {}", resp.0, resp.1);
@@ -615,9 +613,7 @@ impl RawFtpControl {
         let resp = self.command(&format!("RETR {}", remote_path)).await?;
         if resp.0 != 150 && resp.0 != 125 {
             if resp.0 == 550 {
-                return Err(Aria2Error::Fatal(FatalError::FileNotFound {
-                    path: remote_path.to_string(),
-                }));
+                return Err(Aria2Error::Recoverable(RecoverableError::ResourceNotFound));
             }
             return Err(Aria2Error::Recoverable(
                 RecoverableError::FtpProtocolError {

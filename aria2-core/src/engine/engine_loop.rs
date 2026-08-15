@@ -588,6 +588,12 @@ fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
         Aria2Error::Recoverable(RecoverableError::HttpProtocolError { .. }) => {
             DownloadResultCode::HttpProtocolError
         }
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+            DownloadResultCode::ResourceNotFound
+        }
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound) => {
+            DownloadResultCode::MaxFileNotFound
+        }
         Aria2Error::Recoverable(RecoverableError::HttpAuthFailed { .. }) => {
             DownloadResultCode::HttpAuthFailed
         }

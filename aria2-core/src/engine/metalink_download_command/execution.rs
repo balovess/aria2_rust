@@ -19,6 +19,18 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::MetalinkDownloadCommand;
 
+fn classify_metalink_http_status(status_code: u16) -> Aria2Error {
+    if status_code == 404 {
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+    } else if status_code >= 500 {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
+    } else {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: format!("HTTP error: {status_code}"),
+        })
+    }
+}
+
 struct PayloadDownload {
     path: PathBuf,
     completed_length: u64,
@@ -75,7 +87,12 @@ impl MetalinkDownloadCommand {
 
     async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
         let _ = writer.finalize().await;
+        self.flush_checkpoint().await;
+    }
+
+    async fn flush_checkpoint(&mut self) {
         if let Some(checkpoint) = self.checkpoint.as_mut() {
+            let _ = self.group.recover().take_save_control_file_request();
             checkpoint.update(self.completed_bytes, true).await;
         }
     }
@@ -687,15 +704,7 @@ impl MetalinkDownloadCommand {
             if let Some(checkpoint) = self.checkpoint.as_mut() {
                 checkpoint.update(resume_offset, true).await;
             }
-            if status.as_u16() >= 500 {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                    code: status.as_u16(),
-                }));
-            }
-            return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                "HTTP error: {}",
-                status
-            ))));
+            return Err(classify_metalink_http_status(status.as_u16()));
         }
 
         if resume_offset > 0 && status.as_u16() == 200 {
@@ -816,9 +825,7 @@ impl MetalinkDownloadCommand {
             };
             if let Some(lifecycle_error) = self.lifecycle_error() {
                 writer.finalize().await.ok();
-                if let Some(checkpoint) = self.checkpoint.as_mut() {
-                    checkpoint.update(self.completed_bytes, true).await;
-                }
+                self.flush_checkpoint().await;
                 return Err(lifecycle_error);
             }
             if let Err(error) = writer.write(&bytes).await {
@@ -830,7 +837,10 @@ impl MetalinkDownloadCommand {
             self.completed_bytes = self.completed_bytes.saturating_add(bytes.len() as u64);
 
             if let Some(checkpoint) = self.checkpoint.as_mut() {
-                checkpoint.update(self.completed_bytes, false).await;
+                let save_requested = self.group.recover().take_save_control_file_request();
+                checkpoint
+                    .update(self.completed_bytes, save_requested)
+                    .await;
             }
 
             let elapsed = last_speed_update.elapsed();
@@ -888,14 +898,7 @@ impl MetalinkDownloadCommand {
         })?;
         let status = response.status();
         if !status.is_success() && status.as_u16() != 206 {
-            if status.as_u16() >= 500 {
-                return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                    code: status.as_u16(),
-                }));
-            }
-            return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                "HTTP error: {status}"
-            ))));
+            return Err(classify_metalink_http_status(status.as_u16()));
         }
         response
             .bytes()
@@ -1080,5 +1083,26 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
             hasher.update(data);
             format!("{:x}", hasher.finalize())
         }
+    }
+}
+
+#[cfg(test)]
+mod http_status_tests {
+    use super::*;
+
+    #[test]
+    fn classifies_5xx_as_retryable_server_errors() {
+        assert!(matches!(
+            classify_metalink_http_status(503),
+            Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
+        ));
+    }
+
+    #[test]
+    fn classifies_not_found_as_resource_not_found() {
+        assert!(matches!(
+            classify_metalink_http_status(404),
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+        ));
     }
 }

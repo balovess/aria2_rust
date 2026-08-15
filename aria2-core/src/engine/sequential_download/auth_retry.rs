@@ -13,6 +13,16 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
 
+fn classify_auth_retry_status(status_code: u16) -> Aria2Error {
+    if status_code >= 500 {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
+    } else {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: format!("HTTP error after auth retry: {status_code}"),
+        })
+    }
+}
+
 pub(super) enum AuthRetryOutcome {
     Completed(Result<()>),
     Redirect(String),
@@ -245,28 +255,38 @@ impl SequentialDownloader {
                     let location = match location {
                         Some(location) => location,
                         None => {
-                            return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                                format!(
-                                    "HTTP {} redirect without Location header",
-                                    retry_status.as_u16()
-                                ),
-                            ))));
+                            return Some(Err(Aria2Error::Recoverable(
+                                RecoverableError::HttpProtocolError {
+                                    message: format!(
+                                        "HTTP {} redirect without Location header",
+                                        retry_status.as_u16()
+                                    ),
+                                },
+                            )));
                         }
                     };
                     let base_url = match url_parsed {
                         Some(url) => url,
                         None => {
-                            return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                                format!("Cannot resolve HTTP redirect from invalid URL: {uri}"),
-                            ))));
+                            return Some(Err(Aria2Error::Recoverable(
+                                RecoverableError::HttpProtocolError {
+                                    message: format!(
+                                        "Cannot resolve HTTP redirect from invalid URL: {uri}"
+                                    ),
+                                },
+                            )));
                         }
                     };
                     let target_url = match base_url.join(location) {
                         Ok(url) => url.to_string(),
                         Err(error) => {
-                            return Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                                format!("Failed to resolve redirect URL '{location}': {error}"),
-                            ))));
+                            return Some(Err(Aria2Error::Recoverable(
+                                RecoverableError::HttpProtocolError {
+                                    message: format!(
+                                        "Failed to resolve redirect URL '{location}': {error}"
+                                    ),
+                                },
+                            )));
                         }
                     };
                     return Some(Ok(AuthRetryOutcome::Redirect(target_url)));
@@ -285,9 +305,12 @@ impl SequentialDownloader {
                     )));
                 }
 
-                Some(Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                    format!("HTTP error after auth retry: {}", retry_status),
-                ))))
+                let error = if retry_status.as_u16() == 404 {
+                    self.classify_file_not_found()
+                } else {
+                    classify_auth_retry_status(retry_status.as_u16())
+                };
+                Some(Err(error))
             }
             AuthChallengeResult::NoCredentials {
                 status_code,
@@ -308,5 +331,27 @@ impl SequentialDownloader {
                 None // Fall through to normal error handling
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_auth_retry_5xx_as_server_error() {
+        assert!(matches!(
+            classify_auth_retry_status(503),
+            Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
+        ));
+    }
+
+    #[test]
+    fn classifies_auth_retry_4xx_as_protocol_error() {
+        assert!(matches!(
+            classify_auth_retry_status(404),
+            Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message })
+                if message.contains("404")
+        ));
     }
 }

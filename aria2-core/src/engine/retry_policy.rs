@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::constants;
-use crate::error::Aria2Error;
+use crate::error::{Aria2Error, RecoverableError};
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -92,8 +92,18 @@ impl RetryPolicy {
     /// `attempt` is the index of the failed attempt, so attempt `0` is the
     /// first request. The policy stores total attempts; `0` means unlimited.
     pub fn should_retry(&self, attempt: u32, error: &Aria2Error) -> bool {
-        self.can_retry_after(attempt.saturating_add(1))
-            && matches!(error, Aria2Error::Recoverable(_))
+        self.can_retry_after(attempt.saturating_add(1)) && self.is_retryable_error(error)
+    }
+
+    fn is_retryable_error(&self, error: &Aria2Error) -> bool {
+        match error {
+            Aria2Error::Recoverable(RecoverableError::Timeout)
+            | Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. }) => true,
+            Aria2Error::Recoverable(RecoverableError::ServerError { code }) => {
+                self.should_retry_http(*code)
+            }
+            _ => false,
+        }
     }
 
     pub fn should_retry_http(&self, status_code: u16) -> bool {
@@ -316,6 +326,68 @@ mod tests {
             &Aria2Error::Recoverable(crate::error::RecoverableError::Timeout)
         ));
         assert!(p.total_estimated_wait_sec().is_infinite());
+    }
+
+    #[test]
+    fn test_should_retry_only_allows_transient_errors_and_configured_statuses() {
+        let p = RetryPolicy::default();
+
+        assert!(p.should_retry(0, &Aria2Error::Recoverable(RecoverableError::Timeout)));
+        assert!(p.should_retry(
+            0,
+            &Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: "connection reset".to_string(),
+            })
+        ));
+
+        for code in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                p.should_retry(
+                    0,
+                    &Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                ),
+                "HTTP status {code} should be retryable"
+            );
+        }
+
+        for error in [
+            Aria2Error::Recoverable(RecoverableError::ServerError { code: 404 }),
+            Aria2Error::Recoverable(RecoverableError::ServerError { code: 501 }),
+            Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
+                range: "bytes=10-20".to_string(),
+            }),
+            Aria2Error::Recoverable(RecoverableError::CannotResume),
+            Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+                message: "redirect missing Location".to_string(),
+            }),
+            Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+                message: "HTTP 401".to_string(),
+            }),
+            Aria2Error::Recoverable(RecoverableError::HttpTooManyRedirects { count: 20 }),
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound),
+        ] {
+            assert!(
+                !p.should_retry(0, &error),
+                "error should not be retried: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_retry_honors_custom_http_status_allowlist() {
+        let mut p = RetryPolicy::new(3, 0);
+        p.retryable_http_codes.clear();
+        p.retryable_http_codes.insert(418);
+
+        assert!(p.should_retry(
+            0,
+            &Aria2Error::Recoverable(RecoverableError::ServerError { code: 418 })
+        ));
+        assert!(!p.should_retry(
+            0,
+            &Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
+        ));
     }
 
     #[test]

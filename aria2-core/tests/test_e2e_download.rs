@@ -1,8 +1,8 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
-use aria2_core::error::Aria2Error;
-use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use aria2_core::error::{Aria2Error, RecoverableError};
+use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::test_server::{TestServer, medium_pattern, small_content};
 use std::path::Path;
@@ -43,6 +43,256 @@ async fn test_e2e_http_download_small_file() {
 
     let data = std::fs::read(&output_path).expect("Failed to read downloaded file");
     assert_eq!(data, small_content(), "Content mismatch");
+}
+
+#[tokio::test]
+async fn test_e2e_redirect_without_location_is_http_protocol_error() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/redirect_missing", server.base_url());
+    let options = DownloadOptions {
+        max_retries: 3,
+        retry_wait: 0,
+        ..DownloadOptions::default()
+    };
+    let mut command =
+        DownloadCommand::new(GroupId::new(2), &url, &options, dir.path().to_str(), None)
+            .expect("create redirect error command");
+
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("redirect error must not hang")
+        .expect_err("redirect without Location must fail");
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message })
+            if message.contains("Location")
+    ));
+}
+
+#[tokio::test]
+async fn test_e2e_max_file_not_found_retries_and_preserves_result_code() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/error/404", server.base_url());
+    let options = DownloadOptions {
+        max_retries: 5,
+        retry_wait: 0,
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2001),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "max-file-not-found".to_string(),
+            serde_json::json!("3"),
+        )]));
+
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create max-file-not-found command");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("404 retry path must not hang")
+        .expect_err("persistent 404 must fail");
+
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+    ));
+    assert_eq!(server.error_404_requests(), 3);
+}
+
+#[tokio::test]
+async fn test_e2e_concurrent_max_file_not_found_preserves_result_code() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/files/concurrent_404_test.bin", server.base_url());
+    let options = DownloadOptions {
+        max_retries: 5,
+        retry_wait: 0,
+        split: Some(4),
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2002),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "max-file-not-found".to_string(),
+            serde_json::json!("3"),
+        )]));
+
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create concurrent max-file-not-found command");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("concurrent 404 path must not hang")
+        .expect_err("persistent concurrent 404 must fail");
+
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+    ));
+    assert!(server.error_404_requests() >= 3);
+}
+
+#[tokio::test]
+async fn test_e2e_in_memory_max_file_not_found_preserves_result_code() {
+    let server = start_server().await;
+    let url = format!("{}/error/404", server.base_url());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        max_retries: 5,
+        retry_wait: 0,
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2003),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "max-file-not-found".to_string(),
+            serde_json::json!("3"),
+        )]));
+
+    let mut command =
+        DownloadCommand::new_with_group(Arc::clone(&group), &url, &options, None, None)
+            .expect("create in-memory max-file-not-found command");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("in-memory 404 path must not hang")
+        .expect_err("persistent in-memory 404 must fail");
+
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+    ));
+    assert_eq!(server.error_404_requests(), 3);
+}
+
+#[tokio::test]
+async fn test_e2e_sequential_http_pause_interrupts_stalled_body_read() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let output = dir.path().join("slow_stream_test.bin");
+    let options = DownloadOptions {
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1001),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .unwrap();
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if tokio::fs::metadata(&output)
+                .await
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("slow HTTP stream did not write its first body chunk");
+
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), command_task)
+        .await
+        .expect("pause must interrupt a stalled sequential HTTP body read")
+        .expect("sequential HTTP command task panicked");
+    assert!(result.is_err(), "paused download must stop with an error");
+    assert!(group.recover().status().is_paused());
+
+    let control_path = aria2_core::filesystem::control_file::ControlFile::control_path_for(&output);
+    let checkpoint = aria2_core::filesystem::control_file::ControlFile::load(&control_path)
+        .await
+        .unwrap()
+        .expect("pause must preserve a sequential HTTP checkpoint");
+    assert!(checkpoint.completed_length() > 0);
+    assert!(checkpoint.completed_length() < checkpoint.total_length());
+}
+
+#[tokio::test]
+async fn test_e2e_in_memory_http_pause_interrupts_stalled_body_read() {
+    let server = start_server().await;
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1002),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command =
+        DownloadCommand::new_with_group(Arc::clone(&group), &url, &options, None, None).unwrap();
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if group.recover().completed_length() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("slow HTTP metadata stream did not write its first body chunk");
+
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), command_task)
+        .await
+        .expect("pause must interrupt a stalled in-memory HTTP body read")
+        .expect("in-memory HTTP command task panicked");
+    assert!(
+        result.is_err(),
+        "paused metadata download must stop with an error"
+    );
+    assert!(group.recover().status().is_paused());
 }
 
 #[tokio::test]

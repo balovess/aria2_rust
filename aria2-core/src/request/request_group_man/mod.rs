@@ -665,6 +665,22 @@ impl RequestGroupMan {
             .collect()
     }
 
+    /// Request a durable control-file flush for every non-terminal group.
+    ///
+    /// The active protocol command remains the owner of its in-memory
+    /// checkpoint. It consumes this request at its next durable write boundary.
+    pub fn request_control_file_saves(&self) {
+        for group in self.list_groups() {
+            let group = group.recover();
+            if matches!(
+                group.status(),
+                DownloadStatus::Waiting | DownloadStatus::Active | DownloadStatus::Paused
+            ) {
+                group.save_control_file();
+            }
+        }
+    }
+
     pub fn get_active_groups(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
         self.groups_snapshot()
             .into_iter()
@@ -907,6 +923,62 @@ mod tests {
     }
 
     #[test]
+    fn control_file_save_requests_skip_terminal_groups() {
+        let man = RequestGroupMan::new();
+        let gids: Vec<_> = (0..6)
+            .map(|index| {
+                man.add_group(
+                    vec![format!("http://example.com/file{index}.bin")],
+                    DownloadOptions::default(),
+                )
+                .unwrap()
+            })
+            .collect();
+
+        man.fill_from_reserver();
+        man.find_group(gids[1])
+            .unwrap()
+            .recover_mut()
+            .pause()
+            .unwrap();
+        man.find_group(gids[2]).unwrap().recover().mark_complete();
+        man.find_group(gids[3])
+            .unwrap()
+            .recover()
+            .mark_error("failed".to_string());
+        man.find_group(gids[4]).unwrap().recover().mark_removed();
+
+        man.request_control_file_saves();
+
+        assert!(
+            man.find_group(gids[0])
+                .unwrap()
+                .recover()
+                .is_save_control_file_requested()
+        );
+        assert!(
+            man.find_group(gids[1])
+                .unwrap()
+                .recover()
+                .is_save_control_file_requested()
+        );
+        assert!(
+            man.find_group(gids[5])
+                .unwrap()
+                .recover()
+                .is_save_control_file_requested()
+        );
+        for gid in &gids[2..5] {
+            assert!(
+                !man.find_group(*gid)
+                    .unwrap()
+                    .recover()
+                    .is_save_control_file_requested()
+            );
+        }
+    }
+
+    #[test]
     fn registered_group_receives_session_transfer_counters() {
         let man = RequestGroupMan::new();
         let gid = man
@@ -1090,6 +1162,40 @@ mod tests {
             payload.recover().uris(),
             &["https://mirror.test/file.bin".to_string()]
         );
+    }
+
+    #[cfg(feature = "metalink")]
+    #[test]
+    fn completed_stopped_result_includes_followed_by_child_gids() {
+        let man = RequestGroupMan::new();
+        let parent_gid = man
+            .add_group(
+                vec!["https://example.test/index.meta4".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let parent = man.find_group(parent_gid).expect("parent group");
+        parent
+            .recover()
+            .set_content_type("application/metalink4+xml");
+        parent.recover().set_in_memory_data(
+            br#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>https://example.test/payload.bin</url></file></metalink>"#.to_vec(),
+        );
+
+        man.fill_from_reserver();
+        parent.recover().mark_complete();
+
+        let demoted = man.remove_stopped_groups(None);
+
+        assert_eq!(demoted, vec![parent_gid]);
+        let result = man
+            .find_stopped_result(&parent_gid.to_hex_string())
+            .expect("completed result must be stored");
+        assert_eq!(result.followed_by.len(), 1);
+        let child_gid = result.followed_by[0];
+        assert!(child_gid != parent_gid);
+        assert!(man.find_group(child_gid).is_some());
+        assert_eq!(man.reserved.len(), 1);
     }
 
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
