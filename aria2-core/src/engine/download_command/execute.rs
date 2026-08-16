@@ -217,8 +217,15 @@ impl DownloadCommand {
             // before allocating/downloading (mirrors C++ CheckIntegrityMan +
             // CheckIntegrityCommand). No-op when there is nothing to validate.
             if self.check_integrity && total_length > 0 {
-                use crate::checksum::check_integrity::man as ci_man;
-                ci_man::cut_trailing_garbage(&self.output_path, total_length).await?;
+                use crate::checksum::check_integrity::{
+                    man as ci_man, IntegrityTrailingGarbageAction,
+                };
+                IntegrityTrailingGarbageAction::single_file(
+                    self.output_path.clone(),
+                    total_length,
+                )
+                .apply()
+                .await?;
                 use crate::checksum::message_digest::HashType;
                 // Extract owned data first so the RwLock guard is dropped
                 // before any await (guard is not Send).
@@ -304,7 +311,13 @@ impl DownloadCommand {
             }
 
             let options = self.group.recover().options_arc();
-            let split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+            let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+            let min_split_size = self.group.recover().effective_min_split_size();
+            let split = crate::engine::concurrent_download::effective_segment_count(
+                total_length,
+                requested_split,
+                min_split_size,
+            ) as u16;
 
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();

@@ -16,6 +16,8 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
+use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::session::save_session_command::SaveSessionCommand;
 use bytes::Bytes;
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
@@ -64,6 +66,29 @@ fn make_options(
         out: Some(out.to_string()),
         ..Default::default()
     }
+}
+
+fn make_concurrent_command(
+    gid: GroupId,
+    uri: &str,
+    options: &DownloadOptions,
+    output_dir: Option<&str>,
+    output_name: Option<&str>,
+) -> DownloadCommand {
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![uri.to_string()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
+    DownloadCommand::new_with_group(group, uri, options, output_dir, output_name)
+        .expect("Failed to create DownloadCommand")
 }
 
 /// Check if a request log entry has a Range header.
@@ -161,14 +186,14 @@ async fn test_concurrent_download_assembles_file_correctly() {
     // Clean up any leftover from previous runs
     let _ = std::fs::remove_file(&out_path);
 
-    let mut cmd = DownloadCommand::new(
+    let options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    let mut cmd = make_concurrent_command(
         GroupId::new(1),
         &url,
-        &make_options(Some(4), Some(2), &tmp_dir, &out_name),
+        &options,
         Some(&tmp_dir),
         Some(&out_name),
-    )
-    .expect("Failed to create DownloadCommand");
+    );
 
     cmd.execute()
         .await
@@ -221,14 +246,14 @@ async fn test_concurrent_download_small_file_sequential() {
     let out_path = format!("{}/{}", tmp_dir, out_name);
     let _ = std::fs::remove_file(&out_path);
 
-    let mut cmd = DownloadCommand::new(
+    let options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    let mut cmd = make_concurrent_command(
         GroupId::new(3),
         &url,
-        &make_options(Some(4), Some(2), &tmp_dir, &out_name),
+        &options,
         Some(&tmp_dir),
         Some(&out_name),
-    )
-    .expect("Failed to create DownloadCommand");
+    );
 
     cmd.execute().await.expect("Download should succeed");
 
@@ -282,14 +307,14 @@ async fn test_concurrent_download_multiple_range_requests() {
     let out_path = format!("{}/{}", tmp_dir, out_name);
     let _ = std::fs::remove_file(&out_path);
 
-    let mut cmd = DownloadCommand::new(
+    let options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    let mut cmd = make_concurrent_command(
         GroupId::new(4),
         &url,
-        &make_options(Some(4), Some(2), &tmp_dir, &out_name),
+        &options,
         Some(&tmp_dir),
         Some(&out_name),
-    )
-    .expect("Failed to create DownloadCommand");
+    );
 
     cmd.execute()
         .await
@@ -326,7 +351,7 @@ async fn test_multi_mirror_resume_restores_completed_segments() {
         .await
         .expect("Failed to start second mirror");
 
-    let file_size = 2 * 1024 * 1024;
+    let file_size = 4 * 1024 * 1024;
     let data = generate_test_data(file_size, 17);
     register_range_with_head(&first_server, "/mirror-file", &data);
     register_range_with_head(&second_server, "/mirror-file", &data);
@@ -362,6 +387,13 @@ async fn test_multi_mirror_resume_restores_completed_segments() {
             options.clone(),
         ),
     ));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
     let mut command = DownloadCommand::new_with_group(
         group,
         &first_url,
@@ -425,7 +457,7 @@ async fn test_multi_mirror_without_continue_discards_stale_control_file() {
     let second_server = MockHttpServer::start()
         .await
         .expect("Failed to start second mirror");
-    let file_size = 2 * 1024 * 1024;
+    let file_size = 4 * 1024 * 1024;
     let data = generate_test_data(file_size, 29);
     register_range_with_head(&first_server, "/fresh-file", &data);
     register_range_with_head(&second_server, "/fresh-file", &data);
@@ -453,6 +485,13 @@ async fn test_multi_mirror_without_continue_discards_stale_control_file() {
             options.clone(),
         ),
     ));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
     let mut command = DownloadCommand::new_with_group(
         group,
         &first_url,
@@ -511,6 +550,13 @@ async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
         vec![url.clone()],
         options,
     )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
     let mut engine = DownloadEngine::new(5);
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
@@ -577,6 +623,13 @@ async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
         vec![url],
         options,
     )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
     let mut engine = DownloadEngine::new(5);
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
@@ -610,6 +663,95 @@ async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn test_concurrent_save_session_flushes_requested_control_file() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 8 * 1024 * 1024;
+    let data = generate_test_data(file_size, 67);
+    server.register_slow_range_response("/save-session", &data, 64 * 1024, 20);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "concurrent-save-session.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = make_url(&server.base_url(), "/save-session");
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.continue_download = true;
+    options.allow_overwrite = true;
+
+    let gid = GroupId::new(405);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
+    let manager = Arc::new(RequestGroupMan::new());
+    manager.add_group_arc(Arc::clone(&group));
+
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some(output_name),
+    )
+    .expect("concurrent download command should be created");
+    let task = tokio::spawn(async move { command.execute().await });
+
+    wait_for_control_file(&control_path).await;
+    wait_for_progress(&group).await;
+
+    let session_path = dir.path().join("concurrent-save-session.txt");
+    let mut save_session = SaveSessionCommand::new(session_path.clone(), manager);
+    save_session
+        .execute()
+        .await
+        .expect("session save should request the concurrent checkpoint");
+    assert!(session_path.exists());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !group.read().unwrap().is_save_control_file_requested() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("concurrent HTTP command did not consume the save request");
+
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("requested concurrent checkpoint should be readable")
+        .expect("requested concurrent checkpoint should exist");
+    assert!(
+        control_file.completed_length() > 0,
+        "requested concurrent checkpoint should contain progress"
+    );
+    assert!(
+        control_file.completed_pieces() > 0,
+        "requested concurrent checkpoint should contain a completed segment"
+    );
+
+    group.write().unwrap().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("paused concurrent save-session command timed out")
+        .expect("paused concurrent save-session task panicked");
+    assert!(result.is_err(), "pause should stop the concurrent command");
+    assert!(output_path.exists(), "paused output should be retained");
+    server.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Test 8: Capacity feedback lowers concurrency and requeues 429 segments
 // ---------------------------------------------------------------------------
@@ -620,7 +762,7 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
         .await
         .expect("Failed to start mock server");
 
-    let file_size = 2 * 1024 * 1024;
+    let file_size = 4 * 1024 * 1024;
     let data = generate_test_data(file_size, 99);
     let active = Arc::new(AtomicUsize::new(0));
     let max_active = Arc::new(AtomicUsize::new(0));
@@ -692,14 +834,13 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
 
     let mut options = make_options(Some(4), Some(4), &tmp_dir, &out_name);
     options.retry_wait = 0;
-    let mut cmd = DownloadCommand::new(
+    let mut cmd = make_concurrent_command(
         GroupId::new(5),
         &url,
         &options,
         Some(&tmp_dir),
         Some(&out_name),
-    )
-    .expect("Failed to create DownloadCommand");
+    );
     cmd.execute()
         .await
         .expect("Rate-limited download should converge and succeed");
@@ -717,10 +858,10 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
         .collect::<Vec<_>>();
     assert_eq!(range_requests.len(), 6);
     for (range, expected_count) in [
-        ("bytes=0-524287", 1),
-        ("bytes=524288-1048575", 1),
-        ("bytes=1048576-1572863", 2),
-        ("bytes=1572864-2097151", 2),
+        ("bytes=0-1048575", 1),
+        ("bytes=1048576-2097151", 1),
+        ("bytes=2097152-3145727", 2),
+        ("bytes=3145728-4194303", 2),
     ] {
         assert_eq!(
             range_requests

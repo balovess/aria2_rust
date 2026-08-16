@@ -37,6 +37,7 @@ impl super::RequestGroupMan {
     /// 6. Fire `on-download-start` hook
     /// 7. Re-insert pending groups at front of reserved queue
     pub fn fill_from_reserver(&self) -> Vec<Arc<std::sync::RwLock<super::RequestGroup>>> {
+        let _lifecycle = self.lifecycle_guard();
         let max = self.max_concurrent();
         let current_active = self.active_count();
         let slots_available = if max == 0 {

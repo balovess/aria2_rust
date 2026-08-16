@@ -11,6 +11,9 @@ use aria2_core::engine::download_event_hooks::{
 };
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, HaltReason};
+use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::session::save_session_command::SaveSessionCommand;
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use e2e_helpers::mock_http_server::MockHttpServer;
 use fixtures::mock_bt_peer::MockBtPeerServer;
 use fixtures::mock_tracker::MockTrackerServer;
@@ -814,6 +817,114 @@ async fn test_e2e_bt_web_seed_download_and_checkpoint_resume() {
 
     assert_eq!(std::fs::read(&output_path).unwrap(), data);
     assert!(!control_path.exists());
+}
+
+#[tokio::test]
+async fn test_e2e_bt_save_session_flushes_requested_checkpoint() {
+    let dir = tmp_dir();
+    let total_size = 4096;
+    let piece_length = 512;
+    let data = (0..total_size)
+        .map(|index| (index % 256) as u8)
+        .collect::<Vec<_>>();
+    let web_seed = MockHttpServer::start()
+        .await
+        .expect("web-seed server should start");
+    web_seed.register_slow_range_response("/save-session.bin", &data, 64, 40);
+
+    let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
+    let web_seed_url = format!("{}/save-session.bin", web_seed.base_url());
+    let torrent_data = build_test_torrent_with_web_seeds(
+        "save-session.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+        std::slice::from_ref(&web_seed_url),
+    );
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(109);
+    let group = Arc::new(std::sync::RwLock::new(
+        aria2_core::request::request_group::RequestGroup::new(
+            gid,
+            vec!["bt://save-session".to_string()],
+            options.clone(),
+        ),
+    ));
+    let manager = Arc::new(RequestGroupMan::new());
+    manager.add_group_arc(Arc::clone(&group));
+
+    let mut command = BtDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let task = tokio::spawn(async move { command.execute().await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if group
+                .recover()
+                .get_bt_bitfield()
+                .is_some_and(|bitfield| bitfield.iter().any(|byte| *byte != 0))
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("web-seed piece did not complete before session save");
+
+    let session_path = dir.path().join("save-session.txt");
+    let mut save_session = SaveSessionCommand::new(session_path.clone(), manager);
+    save_session
+        .execute()
+        .await
+        .expect("session save should request the active BT checkpoint");
+    assert!(session_path.exists());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !group.recover().is_save_control_file_requested() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("BT command did not consume the save request");
+
+    let output_path = dir.path().join("save-session.bin");
+    let control_path = ControlFile::control_path_for(&output_path);
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("requested BT checkpoint should be readable")
+        .expect("requested BT checkpoint should exist");
+    let completed_piece = (0..8)
+        .find(|&index| control_file.is_piece_done(index))
+        .expect("requested BT checkpoint should contain a completed piece");
+    let output = std::fs::read(&output_path).expect("BT output should be readable");
+    let piece_length = piece_length as usize;
+    let start = completed_piece * piece_length;
+    assert_eq!(
+        &output[start..start + piece_length],
+        &data[start..start + piece_length],
+        "checkpointed BT piece must be flushed before the sidecar is saved"
+    );
+
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("paused BT save-session command timed out")
+        .expect("paused BT save-session task panicked");
+    assert!(result.is_err(), "pause should stop the active BT command");
 }
 
 #[tokio::test]

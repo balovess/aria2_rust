@@ -100,6 +100,7 @@ pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
 pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
 pub const DEFAULT_SPLIT: u16 = 16;
+pub const DEFAULT_MIN_SPLIT_SIZE: u64 = 20 * 1024 * 1024;
 pub const MIN_SEGMENT_SIZE: usize = 1024 * 256;
 pub const MAX_SEGMENT_SIZE: usize = 1024 * 1024 * 16;
 pub const DEFAULT_SEGMENT_SIZE: usize = 1_048_576;

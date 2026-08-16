@@ -2,6 +2,7 @@
 
 mod e2e_helpers;
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -124,7 +125,14 @@ fn options(split: u16, max_connection_per_server: u16) -> DownloadOptions {
 }
 
 fn data() -> Arc<Vec<u8>> {
-    Arc::new((0..(2 * 1024 * 1024)).map(|index| index as u8).collect())
+    Arc::new((0..(8 * 1024 * 1024)).map(|index| index as u8).collect())
+}
+
+fn set_test_min_split_size(command: &mut DownloadCommand) {
+    command.group_mut().set_option_snapshot(HashMap::from([(
+        "min-split-size".to_string(),
+        serde_json::json!("1M"),
+    )]));
 }
 
 async fn execute_download(
@@ -143,6 +151,7 @@ async fn execute_download(
         options.dir.as_deref(),
         options.out.as_deref(),
     )?;
+    set_test_min_split_size(&mut command);
     command.group_mut().set_total_length(total_length);
     command.execute().await
 }
@@ -172,6 +181,7 @@ async fn execute_multi_mirror_download(
         options.dir.as_deref(),
         options.out.as_deref(),
     )?;
+    set_test_min_split_size(&mut command);
     command.execute().await
 }
 
@@ -369,6 +379,7 @@ async fn cancellation_releases_http_requests() {
         options.out.as_deref(),
     )
     .unwrap();
+    set_test_min_split_size(&mut command);
     command.group_mut().set_total_length(body.len() as u64);
     let group = command.request_group().unwrap();
     let task = tokio::spawn(async move { command.execute().await });

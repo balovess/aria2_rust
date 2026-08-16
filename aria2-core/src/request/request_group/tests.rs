@@ -420,6 +420,31 @@ fn test_download_options_choking_config_clone() {
     assert_eq!(cloned.bt_snubbed_timeout, Some(90));
 }
 
+#[test]
+fn test_effective_min_split_size_uses_task_snapshot_and_runtime_override() {
+    let mut group = RequestGroup::new(
+        GroupId::new(12),
+        vec!["http://example.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert_eq!(
+        group.effective_min_split_size(),
+        crate::constants::DEFAULT_MIN_SPLIT_SIZE
+    );
+
+    group.set_option_snapshot(std::collections::HashMap::from([(
+        "min-split-size".to_string(),
+        serde_json::json!("10M"),
+    )]));
+    assert_eq!(group.effective_min_split_size(), 10 * 1024 * 1024);
+
+    group
+        .try_update_option("min-split-size", serde_json::json!("4M"))
+        .expect("min-split-size should accept a valid reserved-task update");
+    assert_eq!(group.effective_min_split_size(), 4 * 1024 * 1024);
+}
+
 // ==================== BT Metadata Tests ====================
 
 #[test]

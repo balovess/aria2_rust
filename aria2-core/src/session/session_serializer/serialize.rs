@@ -48,6 +48,18 @@ pub fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
             }
 
             let mut options = download_options_to_map(group.options());
+            if let Some(value) = group
+                .effective_option_snapshot()
+                .and_then(|snapshot| snapshot.get("min-split-size").cloned())
+                .and_then(|value| crate::request::request_group::option_value_to_string(&value))
+                .filter(|value| {
+                    crate::config::OptionValue::parse_size_str_checked(value)
+                        .ok()
+                        .is_some_and(|value| value != crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+                })
+            {
+                options.insert("min-split-size".to_string(), value);
+            }
 
             #[cfg(feature = "bittorrent")]
             let bt_dependency = group.bt_dependency_descriptor();

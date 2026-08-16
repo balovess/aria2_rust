@@ -52,6 +52,11 @@ pub struct RequestGroupMan {
     /// Reserved (waiting) downloads — queued but not yet started.
     pub(super) reserved: ReservedQueue,
 
+    /// Serializes transitions between the canonical index and the active or
+    /// reserved scheduling stores. RPC lifecycle calls may run concurrently
+    /// with the engine's promotion and requeue passes.
+    lifecycle_lock: std::sync::Mutex<()>,
+
     /// Completed/failed downloads — stored for RPC `tellStopped`.
     pub(super) stopped: StoppedResults,
 
@@ -84,6 +89,7 @@ impl RequestGroupMan {
             groups: DashMap::new(),
             active: DashMap::new(),
             reserved: ReservedQueue::new(),
+            lifecycle_lock: std::sync::Mutex::new(()),
             stopped: StoppedResults::new(),
             max_concurrent: AtomicU32::new(5), // Default matching aria2
             next_gid: AtomicU64::new(1),
@@ -95,12 +101,19 @@ impl RequestGroupMan {
         }
     }
 
+    fn lifecycle_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.lifecycle_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     // ── Group Addition ──────────────────────────────────────────────────
 
     /// Add a new download group to the reserved queue.
     /// The engine will promote it to active when a slot is available.
     /// Returns the generated GID.
     pub fn add_group(&self, uris: Vec<String>, options: DownloadOptions) -> Result<GroupId> {
+        let _lifecycle = self.lifecycle_guard();
         let gid = self.generate_gid();
         let memory_download = options.uses_memory_download();
         let group = RequestGroup::new(gid, uris, options);
@@ -130,7 +143,15 @@ impl RequestGroupMan {
     /// to the reserved queue. Used by `EngineCommand::AddDownload` which
     /// creates the group externally (e.g. from an RPC `addUri` call).
     pub fn add_group_arc(&self, group: Arc<std::sync::RwLock<RequestGroup>>) {
+        let _lifecycle = self.lifecycle_guard();
         let gid = group.recover().gid();
+        if matches!(
+            group.recover().status(),
+            DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
+        ) {
+            warn!(gid = gid.value(), "Ignoring stale terminal request group");
+            return;
+        }
         if !self.register_group(Arc::clone(&group)) {
             warn!(gid = gid.value(), "Ignoring duplicate request group");
             return;
@@ -149,6 +170,7 @@ impl RequestGroupMan {
     /// Unlike `add_group_arc`, this path validates identity and advances the
     /// automatic allocator before queueing the group.
     pub fn add_restored_group(&self, group: Arc<std::sync::RwLock<RequestGroup>>) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         let gid = group.recover().gid();
         if !self.register_group(Arc::clone(&group)) {
             return Err(crate::error::Aria2Error::DownloadFailed(format!(
@@ -170,6 +192,7 @@ impl RequestGroupMan {
     /// child groups from `postDownloadProcessing()` are inserted at
     /// position 0 so they are promoted before other waiting downloads.
     pub fn insert_reserved_at_front(&self, groups: Vec<Arc<std::sync::RwLock<RequestGroup>>>) {
+        let _lifecycle = self.lifecycle_guard();
         let mut registered = Vec::with_capacity(groups.len());
         for group in groups {
             let gid = group.recover().gid();
@@ -193,6 +216,7 @@ impl RequestGroupMan {
         &self,
         graph: metalink_request_graph::MetalinkRequestGraph,
     ) -> Result<(GroupId, GroupId)> {
+        let _lifecycle = self.lifecycle_guard();
         let _insert_guard = self.graph_insert_lock.lock().map_err(|_| {
             crate::error::Aria2Error::DownloadFailed("graph insertion lock poisoned".to_string())
         })?;
@@ -239,6 +263,7 @@ impl RequestGroupMan {
         uris: Vec<String>,
         options: DownloadOptions,
     ) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         let memory_download = options.uses_memory_download();
         let group = RequestGroup::new(gid, uris, options);
         if memory_download {
@@ -291,6 +316,7 @@ impl RequestGroupMan {
         pos: i32,
         mode: ChangePositionMode,
     ) -> Result<usize> {
+        let _lifecycle = self.lifecycle_guard();
         if self.reserved.is_empty() {
             return Err(crate::error::Aria2Error::InvalidArgument(
                 "reserved queue is empty".to_string(),
@@ -314,6 +340,7 @@ impl RequestGroupMan {
 
     /// Remove a group by numeric GID from either active or reserved.
     pub fn remove_group_by_id(&self, gid: GroupId) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
+        let _lifecycle = self.lifecycle_guard();
         // Try active first, then reserved.
         let removed = self
             .active
@@ -327,6 +354,7 @@ impl RequestGroupMan {
     }
 
     pub fn remove_group(&self, gid: GroupId) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         // Keep active groups in requestGroups_ and only mark them for halt;
         // RequestGroupMan removes them after their last command exits.
         if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
@@ -336,6 +364,11 @@ impl RequestGroupMan {
             return Ok(());
         }
 
+        self.remove_reserved_group(gid)
+    }
+
+    /// Remove a reserved group while the lifecycle transition lock is held.
+    fn remove_reserved_group(&self, gid: GroupId) -> Result<()> {
         if self.reserved.find_by_gid(gid).is_none() {
             return Err(crate::error::Aria2Error::InvalidArgument(format!(
                 "GID {} not found",
@@ -359,6 +392,7 @@ impl RequestGroupMan {
     /// The engine still owns task abortion and completion accounting; this
     /// method only publishes the C++ force-halt intent on the group.
     pub fn force_remove_group(&self, gid: GroupId) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         if let Some(group_lock) = self.active.get(&gid).map(|entry| entry.value().clone()) {
             group_lock
                 .recover()
@@ -370,7 +404,7 @@ impl RequestGroupMan {
             return Ok(());
         }
         // Reserved groups have no in-flight task, so remove them synchronously.
-        self.remove_group(gid)
+        self.remove_reserved_group(gid)
     }
 
     /// Mark an active command as timed out while preserving finalization.
@@ -398,6 +432,7 @@ impl RequestGroupMan {
     /// Mirrors C++ `createInitialCommand()` failure handling which stops the
     /// group with an error.
     pub fn fail_spawned_group(&self, gid: GroupId, message: &str) -> bool {
+        let _lifecycle = self.lifecycle_guard();
         if let Some((_, group)) = self.active.remove(&gid) {
             self.unregister_group(gid);
             group.recover_mut().mark_error(message.to_string());
@@ -421,6 +456,7 @@ impl RequestGroupMan {
     /// waiting forever and prevent the engine from reaching an idle state.
     #[cfg(feature = "bittorrent")]
     pub(super) fn fail_reserved_group(&self, gid: GroupId, message: &str) -> bool {
+        let _lifecycle = self.lifecycle_guard();
         let Some(group) = self.reserved.remove_by_gid(gid) else {
             warn!(gid = gid.value(), "Failed reserved group not found");
             return false;
@@ -442,6 +478,7 @@ impl RequestGroupMan {
     // ── Pause/Unpause ───────────────────────────────────────────────────
 
     pub fn pause_group(&self, gid: GroupId) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
@@ -461,6 +498,7 @@ impl RequestGroupMan {
     }
 
     pub fn unpause_group(&self, gid: GroupId) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
@@ -477,6 +515,7 @@ impl RequestGroupMan {
     }
 
     pub fn force_pause_group(&self, gid: GroupId) -> Result<()> {
+        let _lifecycle = self.lifecycle_guard();
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
@@ -495,6 +534,7 @@ impl RequestGroupMan {
     }
 
     pub fn pause_all(&self) {
+        let _lifecycle = self.lifecycle_guard();
         for entry in self.groups.iter() {
             let mut group = entry.recover_mut();
             let _ = group.pause();
@@ -502,6 +542,7 @@ impl RequestGroupMan {
     }
 
     pub fn force_pause_all(&self) {
+        let _lifecycle = self.lifecycle_guard();
         for entry in self.groups.iter() {
             let mut group = entry.recover_mut();
             let _ = group.force_pause();
@@ -509,6 +550,7 @@ impl RequestGroupMan {
     }
 
     pub fn unpause_all(&self) {
+        let _lifecycle = self.lifecycle_guard();
         for entry in self.groups.iter() {
             let mut group = entry.recover_mut();
             let _ = group.resume();
@@ -538,6 +580,7 @@ impl RequestGroupMan {
     /// still owns their command handles and will force-halt them through
     /// [`Self::force_halt_all`].
     pub fn force_remove_reserved(&self) -> usize {
+        let _lifecycle = self.lifecycle_guard();
         let groups = self.reserved.drain();
         let removed = groups.len();
         for group_lock in groups {
@@ -759,6 +802,7 @@ impl RequestGroupMan {
     // ── Clear Completed ─────────────────────────────────────────────────
 
     pub fn clear_completed(&self) -> Result<usize> {
+        let _lifecycle = self.lifecycle_guard();
         // Remove completed/errored groups from active.
         let to_remove: Vec<GroupId> = self
             .active
@@ -920,6 +964,29 @@ mod tests {
         }
 
         assert_eq!(man.count(), num_tasks);
+    }
+
+    #[test]
+    fn stale_terminal_add_command_does_not_reinsert_group() {
+        let man = RequestGroupMan::new();
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group = man.find_group(gid).unwrap();
+
+        // A queued AddDownload can outlive a concurrent remove. Replaying it
+        // must not put a terminal group back into the canonical index.
+        man.remove_group(gid).unwrap();
+        assert!(man.find_group(gid).is_none());
+
+        man.add_group_arc(group);
+
+        assert!(man.find_group(gid).is_none());
+        assert_eq!(man.reserved.len(), 0);
+        assert_eq!(man.stopped_count(), 1);
     }
 
     #[test]
@@ -1591,6 +1658,51 @@ mod tests {
         let guard = group.recover();
         assert!(guard.is_force_halt_requested());
         assert_eq!(guard.get_halt_reason(), HaltReason::UserRequest);
+    }
+
+    #[test]
+    fn test_force_remove_waits_for_lifecycle_transition_lock() {
+        let man = Arc::new(RequestGroupMan::new());
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.fill_from_reserver();
+
+        let lifecycle = man.lifecycle_lock.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let worker = Arc::clone(&man);
+        let handle = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            completed_tx.send(worker.force_remove_group(gid)).unwrap();
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            completed_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "force removal must wait for the lifecycle transition lock"
+        );
+
+        drop(lifecycle);
+        assert!(
+            completed_rx
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap()
+                .is_ok()
+        );
+        handle.join().unwrap();
+
+        let group = man
+            .find_group(gid)
+            .expect("active group must remain indexed");
+        assert!(group.recover().is_force_halt_requested());
     }
 
     // ── Remove writes a REMOVED stopped result ──────────────────────────

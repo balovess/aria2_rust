@@ -342,6 +342,12 @@ async fn test_e2e_gap_pause_interrupts_stalled_body_read() {
         vec![url.clone()],
         options.clone(),
     )));
+    group
+        .recover_mut()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
     let mut command = DownloadCommand::new_with_group(
         Arc::clone(&group),
         &url,

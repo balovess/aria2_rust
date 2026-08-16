@@ -39,6 +39,46 @@ use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
+    pub(super) async fn persist_checkpoint_after_piece(
+        &mut self,
+        writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
+        bitfield: &[u8],
+    ) -> Result<()> {
+        let save_requested = self.group.recover().is_save_control_file_requested();
+        if save_requested {
+            writer.flush().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to flush requested BitTorrent checkpoint: {error}"
+                ))
+            })?;
+        }
+
+        let Some(checkpoint) = self.checkpoint.as_mut() else {
+            if save_requested {
+                return Err(Aria2Error::FileIo(
+                    "Requested BitTorrent checkpoint is unavailable".into(),
+                ));
+            }
+            return Ok(());
+        };
+
+        match checkpoint.save(bitfield, self.completed_bytes).await {
+            Ok(()) => {
+                if save_requested {
+                    self.group.recover().take_save_control_file_request();
+                }
+                Ok(())
+            }
+            Err(error) if save_requested => Err(Aria2Error::FileIo(format!(
+                "Failed to save requested BitTorrent checkpoint: {error}"
+            ))),
+            Err(error) => {
+                warn!(%error, "Failed to save BT checkpoint after piece completion");
+                Ok(())
+            }
+        }
+    }
+
     fn drain_incoming_peers(
         &mut self,
         active_connections: &mut Vec<crate::engine::bt_peer_connection::BtPeerConn>,
@@ -206,32 +246,30 @@ impl Command for BtDownloadCommand {
         // hashes before allocating/downloading (mirrors C++
         // CheckIntegrityMan + CheckIntegrityCommand).
         let mut verified_piece_indices = Vec::new();
+        let mut integrity_finished_action =
+            crate::checksum::check_integrity::IntegrityFinishedAction::default();
         if self.check_integrity {
-            use crate::checksum::check_integrity::man as ci_man;
+            use crate::checksum::check_integrity::{IntegrityTrailingGarbageAction, man as ci_man};
             use crate::checksum::message_digest::HashType;
             use crate::util::rwlock_ext::RwLockRecover;
             let gid = self.group.recover().gid().value();
             let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
-            let task = if let Some(ref layout) = self.multi_file_layout {
-                let files: Vec<_> = layout
-                    .file_list()
-                    .iter()
-                    .filter_map(|entry| {
-                        layout
-                            .file_absolute_path(entry.index)
-                            .map(|path| (path.to_path_buf(), entry.length))
-                    })
-                    .collect();
-                ci_man::cut_multi_file_trailing_garbage(&files).await?;
+            let integrity_files = self.integrity_files(total_size);
+            IntegrityTrailingGarbageAction::new(integrity_files.clone())
+                .apply()
+                .await?;
+            let task = if self.multi_file_layout.is_some() {
                 ci_man::multi_file_task(
-                    files,
+                    integrity_files
+                        .iter()
+                        .map(|file| (file.path.clone(), file.length))
+                        .collect(),
                     piece_length as u64,
                     total_size,
                     piece_hashes_hex,
                     HashType::Sha1,
                 )?
             } else {
-                ci_man::cut_trailing_garbage(&self.output_path, total_size).await?;
                 ci_man::file_task(
                     &self.output_path,
                     piece_length as u64,
@@ -263,6 +301,13 @@ impl Command for BtDownloadCommand {
                     verified_pieces = verified_piece_indices.len(),
                     "Integrity check completed, proceeding with download"
                 );
+                integrity_finished_action =
+                    crate::checksum::check_integrity::IntegrityFinishedAction::for_bt(
+                        integrity_files,
+                        self.hash_check_only,
+                        self.bt_hash_check_seed,
+                        self.bt_enable_hook_after_hash_check,
+                    );
                 self.completed_bytes = verified_piece_indices
                     .iter()
                     .filter_map(|&index| {
@@ -294,7 +339,7 @@ impl Command for BtDownloadCommand {
                     self.progress.set_completed_length(total_size);
                     self.hash_check_completed = true;
                     self.bt_complete_event_emitted = true;
-                    if self.bt_enable_hook_after_hash_check {
+                    if integrity_finished_action.run_completion_hook {
                         crate::engine::download_event_hooks::DownloadEventHooks::shared()
                             .fire_event(
                                 crate::engine::download_event_hooks::DownloadEvent::BtComplete,
@@ -347,15 +392,18 @@ impl Command for BtDownloadCommand {
             if strategy != AllocationStrategy::None {
                 let gid = self.group.recover().gid().value();
                 let man = file_allocation_man::shared();
-                if let Some(ref layout) = self.multi_file_layout {
-                    let files: Vec<(std::path::PathBuf, u64)> = layout
-                        .file_list()
-                        .iter()
-                        .filter_map(|f| {
-                            layout
-                                .file_absolute_path(f.index)
-                                .map(|p| (p.to_path_buf(), f.length))
-                        })
+                let allocation_files = if self.hash_check_completed {
+                    integrity_finished_action
+                        .file_allocation
+                        .clone()
+                        .unwrap_or_else(|| self.integrity_files(total_size))
+                } else {
+                    self.integrity_files(total_size)
+                };
+                if self.multi_file_layout.is_some() {
+                    let files: Vec<(std::path::PathBuf, u64)> = allocation_files
+                        .into_iter()
+                        .map(|file| (file.path, file.length))
                         .collect();
                     file_allocation_man::enqueue_multi(
                         &man,
@@ -769,6 +817,30 @@ impl BtDownloadCommand {
         let num_pieces = meta.num_pieces() as u32;
 
         Ok((meta, piece_length, total_size, num_pieces))
+    }
+
+    fn integrity_files(
+        &self,
+        total_size: u64,
+    ) -> Vec<crate::checksum::check_integrity::IntegrityFile> {
+        match self.multi_file_layout.as_ref() {
+            Some(layout) => layout
+                .file_list()
+                .iter()
+                .filter_map(|entry| {
+                    layout.file_absolute_path(entry.index).map(|path| {
+                        crate::checksum::check_integrity::IntegrityFile::new(
+                            path.to_path_buf(),
+                            entry.length,
+                        )
+                    })
+                })
+                .collect(),
+            None => vec![crate::checksum::check_integrity::IntegrityFile::new(
+                self.output_path.clone(),
+                total_size,
+            )],
+        }
     }
 
     fn bt_payload_exists(&self) -> bool {

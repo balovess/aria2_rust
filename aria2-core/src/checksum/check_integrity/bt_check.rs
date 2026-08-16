@@ -118,25 +118,26 @@ impl BtCheckIntegrity {
 
     /// Build the post-success dispatch plan.
     pub fn on_download_finished(&self) -> IntegrityFinishedAction {
-        IntegrityFinishedAction {
-            file_allocation: (!self.hash_check_only && self.hash_check_seed).then(|| self.files()),
-            run_completion_hook: self.enable_completion_hook,
-        }
+        IntegrityFinishedAction::for_bt(
+            self.files(),
+            self.hash_check_only,
+            self.hash_check_seed,
+            self.enable_completion_hook,
+        )
     }
 
     /// Build the dispatch plan for an incomplete BT download.
     pub fn on_download_incomplete(&self) -> IntegrityIncompleteAction {
-        IntegrityIncompleteAction {
-            reset_piece_storage: self.piece_storage.is_some(),
-            file_allocation: (!self.hash_check_only).then(|| self.files()),
-        }
+        IntegrityIncompleteAction::new(
+            self.piece_storage.is_some(),
+            self.hash_check_only,
+            self.files(),
+        )
     }
 
     /// Build the request for removing bytes beyond the declared file lengths.
     pub fn cut_trailing_garbage(&self) -> IntegrityTrailingGarbageAction {
-        IntegrityTrailingGarbageAction {
-            files: self.files(),
-        }
+        IntegrityTrailingGarbageAction::new(self.files())
     }
 
     /// Whether incomplete validation should be reported as an error.

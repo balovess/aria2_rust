@@ -23,7 +23,7 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::{ConcurrentDownloadResult, ConcurrentDownloader};
+use super::{ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count};
 
 async fn flush_requested_control_file(
     dl: &ConcurrentDownloader,
@@ -60,13 +60,14 @@ pub async fn execute_with_coordinator(
     resume_state: &ResumeState,
     max_retries_per_segment: u32,
 ) -> Result<ConcurrentDownloadResult> {
-    let split = (dl
+    let requested_split = dl
         .group
         .recover()
         .options()
         .split
-        .unwrap_or(constants::DEFAULT_SPLIT) as usize)
-        .max(1);
+        .unwrap_or(constants::DEFAULT_SPLIT);
+    let min_split_size = dl.group.recover().effective_min_split_size();
+    let split = effective_segment_count(total_length, requested_split, min_split_size);
     let segment_size = total_length.div_ceil(split as u64).max(1);
     let max_conn = dl
         .group

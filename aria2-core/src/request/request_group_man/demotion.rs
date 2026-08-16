@@ -77,6 +77,7 @@ impl super::RequestGroupMan {
         gid: crate::request::request_group::GroupId,
         result: crate::request::request_group::DownloadResult,
     ) -> bool {
+        let _lifecycle = self.lifecycle_guard();
         if let Some((_, group)) = self.active.remove(&gid) {
             self.unregister_group(gid);
             // Release runtime resources (C++ `releaseRuntimeResource()`).
@@ -118,6 +119,7 @@ impl super::RequestGroupMan {
     ///
     /// Returns the number of groups re-queued.
     pub fn requeue_non_terminal_groups(&self, event_hooks: Option<&DownloadEventHooks>) -> usize {
+        let _lifecycle = self.lifecycle_guard();
         let mut to_move: Vec<(GroupId, Arc<std::sync::RwLock<RequestGroup>>)> = Vec::new();
 
         for entry in self.active.iter() {

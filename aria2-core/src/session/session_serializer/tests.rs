@@ -49,6 +49,31 @@ fn test_generated_child_groups_are_not_saved() {
     assert!(group_to_entry(&child.recover()).is_none());
 }
 
+#[test]
+fn test_group_session_entry_preserves_min_split_size_snapshot() {
+    let group = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(3),
+        vec!["http://example.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    )));
+    group.recover_mut().set_option_snapshot(HashMap::from([(
+        "min-split-size".to_string(),
+        serde_json::json!("10M"),
+    )]));
+
+    let entry = group_to_entry(&group.recover()).expect("waiting group should be serializable");
+    assert_eq!(
+        entry.options.get("min-split-size"),
+        Some(&"10M".to_string())
+    );
+
+    let restored = deserialize(&entry.serialize()).expect("session entry should deserialize");
+    assert_eq!(
+        restored[0].options.get("min-split-size"),
+        Some(&"10M".to_string())
+    );
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn ordinary_follow_child_keeps_plain_session_identity() {

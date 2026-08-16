@@ -24,7 +24,7 @@ use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::{ConcurrentDownloadResult, ConcurrentDownloader};
+use super::{ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count};
 
 /// Run the single-mirror concurrent download pipeline.
 ///
@@ -42,7 +42,9 @@ pub async fn execute(
     }
 
     let options = dl.group.recover().options_arc();
-    let split = (options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize).max(1);
+    let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+    let min_split_size = dl.group.recover().effective_min_split_size();
+    let split = effective_segment_count(total_length, requested_split, min_split_size);
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
@@ -52,8 +54,10 @@ pub async fn execute(
     let seg_size = total_length.div_ceil(split as u64).max(1);
 
     tracing::info!(
-        "Concurrent download started: split={}, max_conn={}, segment_size={} bytes, total={}",
+        "Concurrent download started: split={}, requested_split={}, min_split_size={}, max_conn={}, segment_size={} bytes, total={}",
         split,
+        requested_split,
+        min_split_size,
         max_conn,
         seg_size,
         total_length

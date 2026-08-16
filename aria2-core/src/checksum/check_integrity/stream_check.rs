@@ -105,17 +105,16 @@ impl StreamCheckIntegrity {
     /// The command owner applies the piece-storage reset through its mutable
     /// owner and sends the listed files to the async allocation manager.
     pub fn on_download_incomplete(&self) -> IntegrityIncompleteAction {
-        IntegrityIncompleteAction {
-            reset_piece_storage: self.piece_storage.is_some(),
-            file_allocation: (!self.hash_check_only).then(|| self.files()),
-        }
+        IntegrityIncompleteAction::new(
+            self.piece_storage.is_some(),
+            self.hash_check_only,
+            self.files(),
+        )
     }
 
     /// Build the request for removing bytes beyond the declared file lengths.
     pub fn cut_trailing_garbage(&self) -> IntegrityTrailingGarbageAction {
-        IntegrityTrailingGarbageAction {
-            files: self.files(),
-        }
+        IntegrityTrailingGarbageAction::new(self.files())
     }
 
     /// Whether incomplete validation should be reported as an error.

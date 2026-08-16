@@ -208,7 +208,7 @@ impl crate::config::OptionRegistry {
             name: "min-split-size".into(),
             opt_type: OptionType::Size,
             short_name: Some('k'),
-            default_value: OptionValue::Int((20 * 1024 * 1024) as i64),
+            default_value: OptionValue::Int(crate::constants::DEFAULT_MIN_SPLIT_SIZE as i64),
             min: Some(1024 * 1024),
             max: Some(1024 * 1024 * 1024),
             description: "Min split size".into(),

@@ -17,6 +17,12 @@ pub struct IntegrityFile {
     pub length: u64,
 }
 
+impl IntegrityFile {
+    pub fn new(path: PathBuf, length: u64) -> Self {
+        Self { path, length }
+    }
+}
+
 /// Work required after a piece-hash check finds incomplete data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrityIncompleteAction {
@@ -28,6 +34,17 @@ pub struct IntegrityIncompleteAction {
 }
 
 impl IntegrityIncompleteAction {
+    pub fn new(
+        reset_piece_storage: bool,
+        hash_check_only: bool,
+        files: Vec<IntegrityFile>,
+    ) -> Self {
+        Self {
+            reset_piece_storage,
+            file_allocation: (!hash_check_only).then_some(files),
+        }
+    }
+
     /// Apply the lifecycle part that requires mutable piece-storage ownership.
     pub fn apply_piece_storage(
         &self,
@@ -47,6 +64,14 @@ pub struct IntegrityTrailingGarbageAction {
 }
 
 impl IntegrityTrailingGarbageAction {
+    pub fn new(files: Vec<IntegrityFile>) -> Self {
+        Self { files }
+    }
+
+    pub fn single_file(path: PathBuf, length: u64) -> Self {
+        Self::new(vec![IntegrityFile::new(path, length)])
+    }
+
     /// Apply truncation through the existing async integrity helper.
     pub async fn apply(&self) -> crate::error::Result<()> {
         let files: Vec<_> = self
@@ -65,4 +90,18 @@ pub struct IntegrityFinishedAction {
     pub file_allocation: Option<Vec<IntegrityFile>>,
     /// Whether the owning command should emit its BT completion hook.
     pub run_completion_hook: bool,
+}
+
+impl IntegrityFinishedAction {
+    pub fn for_bt(
+        files: Vec<IntegrityFile>,
+        hash_check_only: bool,
+        hash_check_seed: bool,
+        run_completion_hook: bool,
+    ) -> Self {
+        Self {
+            file_allocation: (!hash_check_only && hash_check_seed).then_some(files),
+            run_completion_hook,
+        }
+    }
 }

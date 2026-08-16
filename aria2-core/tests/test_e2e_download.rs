@@ -1,12 +1,16 @@
 mod fixtures;
+use aria2_core::checksum::message_digest::{HashType, MessageDigest};
+use aria2_core::download::DownloadContext;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::error::{Aria2Error, RecoverableError};
+use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{
     DownloadOptions, DownloadStatus, FollowMode, GroupId, RequestGroup,
 };
+use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::test_server::{TestServer, medium_pattern, small_content};
 use std::path::Path;
@@ -74,6 +78,62 @@ async fn test_e2e_http_download_small_file() {
 
     let data = std::fs::read(&output_path).expect("Failed to read downloaded file");
     assert_eq!(data, small_content(), "Content mismatch");
+}
+
+#[tokio::test]
+async fn test_e2e_http_check_integrity_applies_trailing_cleanup_plan() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/files/small.bin", server.base_url());
+    let content = small_content().to_vec();
+    let output_path = dir.path().join("small.bin");
+
+    let mut oversized = content.clone();
+    oversized.extend_from_slice(b"trailing bytes");
+    std::fs::write(&output_path, oversized).expect("write oversized payload");
+
+    let mut context = DownloadContext::new(
+        content.len() as u32,
+        content.len() as u64,
+        output_path.to_string_lossy().into_owned(),
+    );
+    context.set_piece_hashes(
+        "sha-1".to_string(),
+        vec![MessageDigest::hash_hex(HashType::Sha1, &content)],
+    );
+
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        always_resume: false,
+        check_integrity: true,
+        continue_download: true,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1001),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_download_context(Arc::new(context));
+
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create integrity command");
+    tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("integrity check must not hang")
+        .expect("integrity check must complete");
+
+    assert_eq!(std::fs::read(&output_path).unwrap(), content);
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
 }
 
 #[tokio::test]
@@ -380,6 +440,99 @@ async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() 
     assert!(
         !control_path.exists(),
         "successful sequential HTTP completion must remove the control file"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_save_session_flushes_sequential_http_control_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "engine-sequential-save-session.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let session_path = dir.path().join("save-session.txt");
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        use_head: false,
+        split: Some(1),
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1005);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if tokio::fs::metadata(&output_path)
+                .await
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sequential HTTP engine did not make progress");
+
+    let mut save_session = SaveSessionCommand::new(session_path.clone(), manager);
+    save_session
+        .execute()
+        .await
+        .expect("saveSession command should persist the session");
+    assert!(
+        session_path.exists(),
+        "saveSession must write the session file"
+    );
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let request_consumed = !group.recover().is_save_control_file_requested();
+            let checkpoint_progress = ControlFile::load(&control_path)
+                .await
+                .ok()
+                .flatten()
+                .map(|checkpoint| checkpoint.completed_length())
+                .unwrap_or(0);
+            if request_consumed && checkpoint_progress > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("saveSession must flush sequential HTTP control-file progress");
+
+    command_tx
+        .send(EngineCommand::RemoveDownload { gid })
+        .expect("HTTP remove command should be accepted");
+    wait_for_http_engine(
+        engine_task,
+        "sequential HTTP save-session test did not stop after removal",
+    )
+    .await;
+    assert!(
+        control_path.exists(),
+        "removed download must retain its checkpoint"
     );
 }
 

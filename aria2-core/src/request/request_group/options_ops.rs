@@ -417,6 +417,19 @@ fn apply_rpc_option(
 impl super::RequestGroup {
     // ── Basic Accessors ─────────────────────────────────────────────────
 
+    /// Resolve the effective minimum range split size from the canonical task
+    /// option snapshot. This option remains outside `DownloadOptions` so the
+    /// public Rust struct does not gain a breaking field; CLI, RPC, session,
+    /// and runtime option paths still preserve its original wire value.
+    pub(crate) fn effective_min_split_size(&self) -> u64 {
+        self.effective_option_snapshot()
+            .and_then(|options| options.get("min-split-size").cloned())
+            .and_then(|value| super::options::option_value_to_string(&value))
+            .and_then(|value| crate::config::OptionValue::parse_size_str_checked(&value).ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+    }
+
     /// Return the group ID.
     pub fn gid(&self) -> super::GroupId {
         self.gid

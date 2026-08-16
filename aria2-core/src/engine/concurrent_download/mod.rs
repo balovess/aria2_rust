@@ -18,6 +18,25 @@ use crate::util::rwlock_ext::RwLockRecover;
 pub use pipeline::execute_with_coordinator;
 pub use segment::execute;
 
+/// Cap the requested concurrent ranges at aria2's minimum split-size policy.
+///
+/// A task may request more connections than its payload can support without
+/// creating ranges of the configured minimum size. The original scheduler
+/// therefore keeps one range for a payload smaller than that threshold and
+/// only admits additional ranges as another minimum-sized range remains.
+pub(crate) fn effective_segment_count(
+    total_length: u64,
+    requested_split: u16,
+    min_split_size: u64,
+) -> usize {
+    let requested = u64::from(requested_split.max(1));
+    let max_by_minimum = total_length
+        .checked_div(min_split_size.max(1))
+        .unwrap_or(0)
+        .max(1);
+    requested.min(max_by_minimum) as usize
+}
+
 /// Map a completed HTTP attempt to the status code recorded by mirror stats.
 ///
 /// The download error remains the source of truth for callers. This helper
@@ -179,7 +198,7 @@ impl ConcurrentDownloader {
 
 #[cfg(test)]
 mod tests {
-    use super::server_stat_error_code;
+    use super::{effective_segment_count, server_stat_error_code};
     use crate::error::{Aria2Error, RecoverableError};
 
     #[test]
@@ -214,5 +233,26 @@ mod tests {
             )),
             crate::constants::HTTP_DEFAULT_ERROR_CODE
         );
+    }
+
+    #[test]
+    fn min_split_size_caps_concurrent_segment_count() {
+        assert_eq!(
+            effective_segment_count(10 * 1024 * 1024, 16, 20 * 1024 * 1024),
+            1
+        );
+        assert_eq!(
+            effective_segment_count(40 * 1024 * 1024, 16, 20 * 1024 * 1024),
+            2
+        );
+        assert_eq!(
+            effective_segment_count(100 * 1024 * 1024, 16, 20 * 1024 * 1024),
+            5
+        );
+    }
+
+    #[test]
+    fn zero_min_split_size_keeps_requested_segment_count() {
+        assert_eq!(effective_segment_count(10 * 1024 * 1024, 4, 0), 4);
     }
 }
