@@ -372,6 +372,7 @@ async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() 
     )
     .await;
 
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
     assert_eq!(
         tokio::fs::metadata(&output_path).await.unwrap().len(),
         2 * 1024 * 1024
