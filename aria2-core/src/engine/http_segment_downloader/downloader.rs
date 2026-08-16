@@ -75,6 +75,9 @@ fn classify_range_status(status: reqwest::StatusCode, range_header: &str) -> Opt
             message: format!("authentication failed: HTTP {status}"),
         })),
         404 => Some(Aria2Error::Recoverable(RecoverableError::ResourceNotFound)),
+        429 => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+            code: status_code,
+        })),
         500.. => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
             code: status_code,
         })),
@@ -723,6 +726,12 @@ mod tests {
             classify_range_status(reqwest::StatusCode::SERVICE_UNAVAILABLE, "bytes=0-9"),
             Some(Aria2Error::Recoverable(RecoverableError::ServerError {
                 code: 503
+            }))
+        ));
+        assert!(matches!(
+            classify_range_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "bytes=0-9"),
+            Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 429
             }))
         ));
     }

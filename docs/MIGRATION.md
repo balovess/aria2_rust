@@ -1,5 +1,153 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-16 Core HTTP lifecycle checkpoint
+
+The engine-level sequential HTTP regression now covers the complete
+pause/unpause and removal lifecycle through `DownloadEngine`: pausing a live
+stream saves a non-empty partial control file, unpause allows the group to be
+re-promoted and finish, and removal retains both the partial output and its
+control file. The pause fixture intentionally ignores Range requests, so the
+test sets `always_resume=false` to exercise the explicit fresh-download
+fallback after the saved checkpoint is observed. The test therefore does not
+claim range-resume interoperability.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_download test_e2e_engine_sequential_http -- --test-threads=1
+  2 passed, 0 failed
+~~~
+
+This closes the local sequential HTTP engine pause/unpause/removal lifecycle
+slice only. Third-party HTTP range behavior, broader cross-protocol lifecycle
+coverage, owner-side integrity-plan application, interoperability, and final
+workspace acceptance remain open; the migration remains `PARTIAL`.
+
+## 2026-08-16 Integrity Callback Dispatch Plan Checkpoint
+
+The legacy `StreamCheckIntegrity` and `BtCheckIntegrity` wrappers now return
+explicit Rust-owned plans for incomplete-check reset/allocation, successful BT
+allocation and hook selection, and trailing-garbage cleanup. The plans carry
+physical file paths and declared lengths and preserve hash-check-only behavior.
+The BT incomplete branch now retains the original allocation behavior.
+
+These methods describe work instead of performing registry lookups or blocking
+async I/O: the owning command remains responsible for mutable `PieceStorage`
+access and the existing file-allocation/truncation managers. Production
+downloads already use the direct `CheckIntegrityTask`/`IntegrityOutcome` seam,
+so the legacy wrapper owner-side application is still recorded as `PARTIAL`.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity -- --test-threads=1
+  56 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo test --workspace --all-targets --all-features --quiet
+  PASS
+~~~
+
+This closes the callback-plan interface and regression slice only. Owner-side
+application evidence, broader protocol lifecycle coverage, interoperability,
+and final workspace acceptance remain open.
+
+## 2026-08-16 Adaptive HTTP Range Capacity Retry Checkpoint
+
+Segmented HTTP Range downloads now classify HTTP 429 as a typed
+`ServerError`, so the adaptive concurrency controller recognizes capacity
+responses, reduces admission, and requeues the affected ranges without
+consuming the ordinary segment retry budget. The single-URI executor no longer
+reports success while rate-limited ranges remain unwritten.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1
+  8 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::http_segment_downloader -- --test-threads=1
+  24 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_rate_limit -- --test-threads=1
+  9 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_http_concurrent -- --test-threads=1
+  9 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3419 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The E2E regression verifies exactly one request for each successful initial
+range and one retry for each initially rate-limited range, followed by an
+exact byte-for-byte output comparison. This closes only the adaptive segmented
+HTTP capacity-retry slice; broader protocol lifecycle combinations,
+third-party interoperability, original-client interoperability, and final
+workspace acceptance remain open. The migration remains `PARTIAL`.
+
+## 2026-08-16 FTP/SFTP Not-Found E2E Checkpoint
+
+The Rust-owned protocol fixtures now exercise the typed remote not-found
+result through the real command loops. FTP `550` responses and SFTP
+`SSH_FX_NO_SUCH_FILE` responses return `ResourceNotFound` with the default
+threshold, while an effective `max-file-not-found=2` snapshot terminates each
+loop with `MaxFileNotFound` after the second remote failure.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  36 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  23 passed, 0 failed, 2 ignored
+~~~
+
+This closes the local FTP/SFTP not-found lifecycle slice only. Third-party
+FTP/FTPS/SFTP servers, original-client interoperability, broader cross-
+protocol lifecycle combinations, and final workspace acceptance remain open;
+the migration remains `PARTIAL`.
+
+## 2026-08-16 Follow-mode And Session Graph Variant Checkpoint
+
+The session persistence path now has Rust-owned regression coverage for all
+three explicit follow values: `true`, `false`, and `mem`. The values survive
+the complete `RequestGroup -> ResumeData -> RequestGroup` round trip as typed
+`FollowMode` variants. The post-download handler chain also verifies that
+`false` disables the corresponding handlers while `mem` remains an enabled
+follow mode. Existing Metalink graph reconstruction and generated-child
+exclusion tests remain green.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib session::session_persistence::tests -- --test-threads=1
+  19 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::post_download_handler::tests::test_build_handler_chain_respects_follow_modes -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_session -- --test-threads=1
+  13 passed, 0 failed
+cargo test -p aria2-core --all-features --test deep_e2e_cross_protocol -- --test-threads=1
+  18 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_checksum -- --test-threads=1
+  13 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3419 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the typed follow-mode persistence and handler-selection slice
+only. Integrity-dispatch callback branches, live third-party protocol
+interoperability, broader lifecycle combinations, and final workspace
+acceptance remain open; the migration remains `PARTIAL`.
+
 ## 2026-08-16 `max-file-not-found` Lifecycle Checkpoint
 
 The HTTP not-found path now has one RequestGroup-owned counter and typed
@@ -314,7 +462,7 @@ cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
 ~~~
 
 This closes the detailed integrity-outcome dispatch slice only. Remaining
-integrity callback branches, protocol command lifecycle coverage, session
+owner-side integrity callback application, protocol command lifecycle coverage, session
 variants, cross-protocol E2E, and original-client interoperability keep the
 overall migration `PARTIAL`.
 
@@ -1811,3 +1959,65 @@ cargo clippy -p aria2-protocol --all-targets --features bittorrent -- -D warning
 cargo fmt --all -- --check
   PASS
 ~~~
+
+## 2026-08-16 FTP/SFTP remote not-found checkpoint
+
+FTP 550 responses from CWD traversal, `SIZE`, and `RETR` now map to the
+typed `ResourceNotFound` result instead of an unknown fatal error. The FTP
+command records remote not-found responses in the owning `RequestGroup`,
+honors both `max-file-not-found` and the public total-attempt `max-tries`
+limit, and preserves distinct permission and transport error classes. SFTP
+`SSH_FX_NO_SUCH_FILE` from remote file operations follows the same typed result
+and bounded not-found retry path.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::ftp_download_command::tests -- --test-threads=1
+  22 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::sftp_download_command::tests -- --test-threads=1
+  16 passed, 0 failed
+cargo test -p aria2-core --all-features --lib
+  3416 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the typed remote-not-found command seam only. No live third-party
+FTP/SFTP server fixture was added in this checkpoint, and broader protocol
+status matrices, cross-protocol lifecycle E2E, original-client
+interoperability, and final workspace acceptance remain open. FTP, SFTP, and
+the overall migration therefore remain `PARTIAL`.
+
+## 2026-08-16 Metalink not-found retry checkpoint
+
+Metalink owns its direct-mirror and torrent-metaurl loops instead of routing
+their HTTP responses through the ordinary HTTP response command. The loops now
+apply the owning `RequestGroup`'s not-found counter to `ResourceNotFound`
+responses and stop with `MaxFileNotFound` at the configured zero-progress
+threshold. Transport, server, and other protocol failures retain their
+existing mirror or metaurl failover behavior.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::metalink_download_command -- --test-threads=1
+  20 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The focused localhost fixture serves two 404 mirrors and verifies that the
+second response produces `MaxFileNotFound` after exactly two requests. This
+closes the Metalink not-found counter seam only; session/follow graph variants,
+integrity-dispatch interface cleanup, live protocol interoperability, and
+cross-protocol lifecycle E2E remain open. Metalink and the overall migration
+therefore remain `PARTIAL`.

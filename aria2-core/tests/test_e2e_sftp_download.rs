@@ -9,10 +9,11 @@ use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
-use aria2_core::error::{Aria2Error, FatalError};
+use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
 use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::mock_sftp_server::MockSftpServer;
 use std::sync::Arc;
 
@@ -220,7 +221,39 @@ async fn e2e_sftp_maps_a_missing_remote_file_to_file_not_found() {
         .expect_err("a missing SFTP file must fail");
     assert!(matches!(
         error,
-        Aria2Error::Fatal(FatalError::FileNotFound { .. })
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+    ));
+}
+
+#[tokio::test]
+async fn e2e_sftp_max_file_not_found_stops_after_threshold() {
+    let server = MockSftpServer::start().await;
+    let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
+    let options = DownloadOptions::default();
+    let mut command = command_for(
+        &server,
+        server.password(),
+        "/files/missing.bin",
+        &options,
+        output_dir.path(),
+        "download.bin",
+        807,
+    );
+    command
+        .request_group()
+        .expect("SFTP command should expose its request group")
+        .recover_mut()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "max-file-not-found".to_string(),
+            serde_json::json!(2),
+        )]));
+
+    let error = execute_with_deadline(&mut command)
+        .await
+        .expect_err("the SFTP not-found threshold must terminate the retry loop");
+    assert!(matches!(
+        error,
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
     ));
 }
 

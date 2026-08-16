@@ -704,6 +704,33 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
         .await
         .expect("Rate-limited download should converge and succeed");
 
+    let range_requests = server
+        .take_request_log()
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .headers
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+                .map(|(_, value)| value)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(range_requests.len(), 6);
+    for (range, expected_count) in [
+        ("bytes=0-524287", 1),
+        ("bytes=524288-1048575", 1),
+        ("bytes=1048576-1572863", 2),
+        ("bytes=1572864-2097151", 2),
+    ] {
+        assert_eq!(
+            range_requests
+                .iter()
+                .filter(|request| *request == range)
+                .count(),
+            expected_count,
+            "unexpected request count for {range}"
+        );
+    }
     assert_eq!(std::fs::read(&out_path).unwrap(), data);
     assert!(rate_limited.load(Ordering::Acquire) > 0);
     assert!(max_active.load(Ordering::Acquire) >= 3);

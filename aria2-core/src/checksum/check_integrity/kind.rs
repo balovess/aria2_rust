@@ -2,7 +2,10 @@
 // CheckIntegrityKind — replaces C++ CheckIntegrityEntry hierarchy
 // ---------------------------------------------------------------------------
 
-use super::{BtCheckIntegrity, StreamCheckIntegrity};
+use super::{
+    BtCheckIntegrity, IntegrityFinishedAction, IntegrityIncompleteAction,
+    IntegrityTrailingGarbageAction, StreamCheckIntegrity,
+};
 
 /// CheckIntegrity entry kind — replaces the C++ `CheckIntegrityEntry` hierarchy.
 ///
@@ -76,7 +79,7 @@ impl CheckIntegrityKind {
     }
 
     /// Called when the download finishes successfully after integrity check.
-    pub fn on_download_finished(&self) {
+    pub fn on_download_finished(&self) -> IntegrityFinishedAction {
         match self {
             CheckIntegrityKind::Stream(s) => s.on_download_finished(),
             CheckIntegrityKind::Bt(b) => b.on_download_finished(),
@@ -84,7 +87,7 @@ impl CheckIntegrityKind {
     }
 
     /// Called when the download is incomplete after integrity check.
-    pub fn on_download_incomplete(&self) {
+    pub fn on_download_incomplete(&self) -> IntegrityIncompleteAction {
         match self {
             CheckIntegrityKind::Stream(s) => s.on_download_incomplete(),
             CheckIntegrityKind::Bt(b) => b.on_download_incomplete(),
@@ -92,7 +95,7 @@ impl CheckIntegrityKind {
     }
 
     /// Cut trailing garbage data beyond the expected total length.
-    pub fn cut_trailing_garbage(&self) {
+    pub fn cut_trailing_garbage(&self) -> IntegrityTrailingGarbageAction {
         match self {
             CheckIntegrityKind::Stream(s) => s.cut_trailing_garbage(),
             CheckIntegrityKind::Bt(b) => b.cut_trailing_garbage(),

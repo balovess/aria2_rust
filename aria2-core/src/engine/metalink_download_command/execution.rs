@@ -126,6 +126,19 @@ impl MetalinkDownloadCommand {
         }
     }
 
+    /// Apply the RequestGroup-owned not-found counter to Metalink HTTP errors.
+    ///
+    /// Metalink downloads own their mirror loop, so they do not pass through
+    /// the ordinary HTTP response command where aria2 increments this counter.
+    fn record_not_found_error(&self, error: Aria2Error) -> Aria2Error {
+        match error {
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+                self.group.recover().file_not_found_error()
+            }
+            error => error,
+        }
+    }
+
     async fn execute_file(
         &mut self,
         complete_group: bool,
@@ -319,8 +332,16 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(e) => {
+                    let e = self.record_not_found_error(e);
                     warn!("Mirror download failed {}: {}", url_entry.url, e);
                     if self.lifecycle_error().is_some() {
+                        global_registry().release(&resolved_output_path).await;
+                        return Err(e);
+                    }
+                    if matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                    ) {
                         global_registry().release(&resolved_output_path).await;
                         return Err(e);
                     }
@@ -485,7 +506,14 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(e) => {
+                    let e = self.record_not_found_error(e);
                     warn!(url = %mu.url, error = %e, "Torrent metaurl failed");
+                    if matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                    ) {
+                        return Err(e);
+                    }
                     last_err = Some(e);
                 }
             }
@@ -614,7 +642,14 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(error) => {
+                    let error = self.record_not_found_error(error);
                     warn!(url = %metadata_uri, error = %error, "Shared torrent metaurl failed");
+                    if matches!(
+                        error,
+                        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                    ) {
+                        return Err(error);
+                    }
                     last_err = Some(error);
                 }
             }
@@ -1089,6 +1124,7 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
 #[cfg(test)]
 mod http_status_tests {
     use super::*;
+    use crate::request::request_group::DownloadOptions;
 
     #[test]
     fn classifies_5xx_as_retryable_server_errors() {
@@ -1104,5 +1140,73 @@ mod http_status_tests {
             classify_metalink_http_status(404),
             Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn mirror_not_found_respects_request_group_limit() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("404 fixture should bind");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("404 request");
+                let mut request = [0u8; 2048];
+                let _ = stream.read(&mut request).await.expect("read 404 request");
+                server_count.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write 404 response");
+            }
+        });
+
+        let output_dir = tempfile::tempdir().expect("output directory");
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="payload.bin">
+    <size>1</size>
+    <url>{base_url}/first</url>
+    <url>{base_url}/second</url>
+  </file>
+</metalink>"#
+        );
+        let options = DownloadOptions {
+            dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ..DownloadOptions::default()
+        };
+        let mut command =
+            MetalinkDownloadCommand::new(GroupId::new(401), xml.as_bytes(), &options, None)
+                .expect("Metalink command should construct");
+        command
+            .group
+            .recover_mut()
+            .set_option_snapshot(std::collections::HashMap::from([(
+                "max-file-not-found".to_string(),
+                serde_json::json!("2"),
+            )]));
+
+        let error = command
+            .execute()
+            .await
+            .expect_err("second 404 must stop the group");
+        assert!(matches!(
+            error,
+            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        server.await.expect("404 fixture should finish");
     }
 }

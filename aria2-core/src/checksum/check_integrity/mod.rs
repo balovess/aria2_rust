@@ -44,6 +44,7 @@
 //! - `StreamCheckIntegrityEntry.h/.cc` — stream download integrity checking
 
 pub mod bt_check;
+pub mod callback;
 pub mod kind;
 pub mod man;
 pub mod stream_check;
@@ -55,6 +56,10 @@ mod tests;
 // Re-export all public items so that external code using
 // `crate::checksum::check_integrity::X` still works.
 pub use bt_check::BtCheckIntegrity;
+pub use callback::{
+    IntegrityFile, IntegrityFinishedAction, IntegrityIncompleteAction,
+    IntegrityTrailingGarbageAction,
+};
 pub use kind::CheckIntegrityKind;
 pub use man::{CheckIntegrityEntry, CheckIntegrityMan, CheckIntegrityTask, FileChunkValidator};
 pub use stream_check::StreamCheckIntegrity;

@@ -1,8 +1,12 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::download_engine::DownloadEngine;
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::error::{Aria2Error, RecoverableError};
-use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
+use aria2_core::request::request_group::{
+    DownloadOptions, DownloadStatus, FollowMode, GroupId, RequestGroup,
+};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use fixtures::test_server::{TestServer, medium_pattern, small_content};
 use std::path::Path;
@@ -14,6 +18,33 @@ async fn start_server() -> TestServer {
 
 fn tmp_dir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
+}
+
+async fn wait_for_http_engine_status(
+    group: &Arc<std::sync::RwLock<RequestGroup>>,
+    expected: DownloadStatus,
+) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if group.read().unwrap().status() == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HTTP engine did not reach the expected lifecycle state");
+}
+
+async fn wait_for_http_engine(
+    handle: tokio::task::JoinHandle<aria2_core::error::Result<()>>,
+    message: &str,
+) {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), handle)
+        .await
+        .expect(message)
+        .expect("HTTP engine task panicked");
+    assert!(result.is_ok(), "HTTP engine failed: {result:?}");
 }
 
 #[tokio::test]
@@ -252,6 +283,171 @@ async fn test_e2e_sequential_http_pause_interrupts_stalled_body_read() {
         .expect("pause must preserve a sequential HTTP checkpoint");
     assert!(checkpoint.completed_length() > 0);
     assert!(checkpoint.completed_length() < checkpoint.total_length());
+}
+
+#[tokio::test]
+async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "engine-sequential-pause.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path =
+        aria2_core::filesystem::control_file::ControlFile::control_path_for(&output_path);
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        use_head: false,
+        split: Some(1),
+        continue_download: true,
+        always_resume: false,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1003);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if tokio::fs::metadata(&output_path)
+                .await
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sequential HTTP engine did not make progress");
+
+    command_tx
+        .send(EngineCommand::Pause { gid })
+        .expect("HTTP pause command should be accepted");
+    wait_for_http_engine_status(&group, DownloadStatus::Paused).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Ok(Some(checkpoint)) =
+                aria2_core::filesystem::control_file::ControlFile::load(&control_path).await
+                && checkpoint.completed_length() > 0
+                && checkpoint.completed_length() < checkpoint.total_length()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("pause must persist the sequential HTTP control file");
+    let checkpoint = aria2_core::filesystem::control_file::ControlFile::load(&control_path)
+        .await
+        .unwrap()
+        .expect("pause must save a sequential HTTP checkpoint");
+    assert!(checkpoint.completed_length() > 0);
+    assert!(checkpoint.completed_length() < checkpoint.total_length());
+
+    command_tx
+        .send(EngineCommand::Unpause { gid })
+        .expect("HTTP unpause command should be accepted");
+    wait_for_http_engine(
+        engine_task,
+        "sequential HTTP engine did not finish after unpause",
+    )
+    .await;
+
+    assert_eq!(
+        tokio::fs::metadata(&output_path).await.unwrap().len(),
+        2 * 1024 * 1024
+    );
+    assert!(
+        !control_path.exists(),
+        "successful sequential HTTP completion must remove the control file"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_sequential_http_remove_preserves_control_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "engine-sequential-remove.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path =
+        aria2_core::filesystem::control_file::ControlFile::control_path_for(&output_path);
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        use_head: false,
+        split: Some(1),
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1004);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if tokio::fs::metadata(&output_path)
+                .await
+                .map(|metadata| metadata.len() > 0)
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("sequential HTTP engine did not make progress");
+
+    command_tx
+        .send(EngineCommand::RemoveDownload { gid })
+        .expect("HTTP remove command should be accepted");
+    wait_for_http_engine(engine_task, "sequential HTTP remove did not stop promptly").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Removed);
+    assert!(
+        output_path.exists(),
+        "remove must retain partial sequential HTTP output"
+    );
+    assert!(
+        control_path.exists(),
+        "remove must preserve the sequential HTTP control file"
+    );
 }
 
 #[tokio::test]
