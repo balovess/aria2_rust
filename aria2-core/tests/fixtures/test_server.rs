@@ -103,10 +103,24 @@ impl TestServer {
 
     async fn read_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
-        let mut buf = vec![0u8; 4096];
-        let n = stream.read(&mut buf).await.unwrap_or(0);
-        buf.truncate(n);
-        buf
+        const MAX_HEADER_SIZE: usize = 16 * 1024;
+        let mut request = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 1024];
+
+        while request.len() < MAX_HEADER_SIZE {
+            let n = stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+
+            let remaining = MAX_HEADER_SIZE - request.len();
+            request.extend_from_slice(&chunk[..n.min(remaining)]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+
+        request
     }
 
     async fn handle_async_request(

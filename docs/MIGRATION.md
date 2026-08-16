@@ -24,6 +24,83 @@ slice only. The migration remains `PARTIAL`; broader lifecycle, protocol
 interoperability, bindings, performance, and final workspace acceptance are
 still open.
 
+## 2026-08-16 Concurrent HTTP Save-Session Checkpoint
+
+The single-mirror concurrent HTTP owner now shares the explicit control-file
+flush helper with the multi-mirror owner. The helper is reached at startup,
+write, segment-completion, and cancellation-timer boundaries; it flushes the
+writer, updates the committed segment progress, saves the `.aria2` sidecar,
+and consumes the request only after the save succeeds. The regression waits
+for committed sidecar progress rather than transient in-flight progress before
+invoking the real `SaveSessionCommand` path.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range test_concurrent_save_session_flushes_requested_control_file -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1
+  9 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes the explicit concurrent HTTP save-session owner slice only. The
+migration remains `PARTIAL`; broader lifecycle, protocol interoperability,
+bindings, performance, and final workspace acceptance are still open.
+
+## 2026-08-16 Stopped-Result GID Uniqueness Checkpoint
+
+The stopped-result store now enforces the original `IndexedList` contract that
+each terminal result is keyed uniquely by GID. A replayed or racing lifecycle
+path is rejected without changing the first result or its FIFO position, so
+`tellStopped`, `getDownloadResult`, removal, and pruning cannot expose duplicate
+terminal entries for one task.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib request::request_group_man::stopped -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --lib request::request_group_man -- --test-threads=1
+  36 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes stopped-result key uniqueness only. The migration remains
+`PARTIAL`; broader lifecycle, protocol interoperability, bindings, performance,
+and final workspace acceptance are still open.
+
+## 2026-08-16 Retry And Cross-Protocol Fixture Audit
+
+The local retry audit found no implementation regression in the existing
+phase-2 paths. Concurrent HTTP Range retries and fallback, sequential gap
+retries with partial progress, FTP terminal protocol failures, and SFTP
+not-found/checksum/resume lifecycle cases all pass their Rust-owned fixtures.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1
+  9 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_gap_retry -- --test-threads=1
+  26 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  36 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  23 passed, 0 failed, 2 ignored
+~~~
+
+This closes only the local retry-fixture audit. Third-party servers,
+original-client interoperability, ignored network cases, broader protocol
+combinations, and final workspace acceptance remain open; the migration stays
+`PARTIAL`.
+
 ## 2026-08-16 Core HTTP lifecycle checkpoint
 
 The engine-level sequential HTTP regression now covers the complete

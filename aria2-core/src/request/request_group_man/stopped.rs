@@ -19,9 +19,18 @@ impl StoppedResults {
         }
     }
 
-    /// Add a download result.
-    pub fn add(&self, result: DownloadResult) {
-        self.results.recover_mut().push(result);
+    /// Add a download result if its GID is not already stored.
+    ///
+    /// The original `IndexedList` is keyed by GID and rejects duplicate
+    /// insertion. Keep the first terminal snapshot and its position in the
+    /// stopped-results FIFO when a lifecycle path races or is replayed.
+    pub fn add(&self, result: DownloadResult) -> bool {
+        let mut results = self.results.recover_mut();
+        if results.iter().any(|existing| existing.gid == result.gid) {
+            return false;
+        }
+        results.push(result);
+        true
     }
 
     /// Number of stored results.
@@ -114,16 +123,37 @@ mod tests {
     #[test]
     fn test_add_and_find() {
         let s = StoppedResults::new();
-        s.add(make_result(1));
-        s.add(make_result(2));
+        assert!(s.add(make_result(1)));
+        assert!(s.add(make_result(2)));
         assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn test_duplicate_gid_is_rejected_without_reordering() {
+        let s = StoppedResults::new();
+        assert!(s.add(make_result(1)));
+        assert!(s.add(make_result(2)));
+        assert!(!s.add(DownloadResult::new(
+            crate::request::request_group::GroupId(1),
+            crate::request::request_group::DownloadStatus::Error("later".to_string()),
+            crate::request::request_group::DownloadResultCode::UnknownError,
+        )));
+
+        let results = s.iter_snapshot();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].gid, crate::request::request_group::GroupId(1));
+        assert_eq!(
+            results[0].status,
+            crate::request::request_group::DownloadStatus::Complete
+        );
+        assert_eq!(results[1].gid, crate::request::request_group::GroupId(2));
     }
 
     #[test]
     fn test_purge() {
         let s = StoppedResults::new();
-        s.add(make_result(1));
-        s.add(make_result(2));
+        assert!(s.add(make_result(1)));
+        assert!(s.add(make_result(2)));
         assert_eq!(s.purge_all(), 2);
         assert!(s.is_empty());
     }
