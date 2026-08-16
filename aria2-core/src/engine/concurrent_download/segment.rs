@@ -151,6 +151,7 @@ pub async fn execute(
     };
     let total_inflight_bytes = Arc::new(AtomicU64::new(initial_completed));
     let mut completed_bytes = initial_completed;
+    super::flush_requested_control_file(dl, &mut writer, &mut ctrl_file, completed_bytes).await?;
 
     // Write channel: segment futures send chunks as they arrive,
     // the main loop drains them to disk via tokio::select!
@@ -337,6 +338,8 @@ pub async fn execute(
                 )))
             })?;
         }
+        super::flush_requested_control_file(dl, &mut writer, &mut ctrl_file, completed_bytes)
+            .await?;
 
         // Use tokio::select! to drain writes concurrently while waiting
         // for segment completions — prevents chunks from piling up in the
@@ -426,6 +429,13 @@ pub async fn execute(
                                 constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
                             )
                             .await;
+                        super::flush_requested_control_file(
+                            dl,
+                            &mut writer,
+                            &mut ctrl_file,
+                            completed_bytes,
+                        )
+                        .await?;
                     }
                     Err(e) => {
                         let e = if matches!(
@@ -533,11 +543,25 @@ pub async fn execute(
                         e
                     )))
                 })?;
+                super::flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    completed_bytes,
+                )
+                .await?;
             }
             // Periodic pause/remove check — ensures the download loop
             // detects aria2.pause / aria2.remove within ~200ms even
             // when segment futures are blocked on slow network reads.
             _ = cancel_tick.tick() => {
+                super::flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    completed_bytes,
+                )
+                .await?;
                 if let Err(e) = dl.check_cancelled() {
                     cancel_and_persist(
                         executor,

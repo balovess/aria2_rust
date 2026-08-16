@@ -23,34 +23,10 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::{ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count};
-
-async fn flush_requested_control_file(
-    dl: &ConcurrentDownloader,
-    writer: &mut CachedDiskWriter,
-    control_file: &mut Option<ControlFile>,
-    completed_bytes: u64,
-) -> Result<()> {
-    if control_file.is_none() || !dl.group.recover().is_save_control_file_requested() {
-        return Ok(());
-    }
-
-    writer.flush().await.map_err(|error| {
-        Aria2Error::FileIo(format!(
-            "Failed to flush requested concurrent checkpoint: {error}"
-        ))
-    })?;
-    if let Some(control_file) = control_file.as_mut() {
-        control_file.update_completed_length(completed_bytes);
-        control_file.save().await.map_err(|error| {
-            Aria2Error::FileIo(format!(
-                "Failed to save requested concurrent checkpoint: {error}"
-            ))
-        })?;
-    }
-    dl.group.recover().take_save_control_file_request();
-    Ok(())
-}
+use super::{
+    ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count,
+    flush_requested_control_file,
+};
 
 /// Run the multi-mirror concurrent download pipeline.
 pub async fn execute_with_coordinator(

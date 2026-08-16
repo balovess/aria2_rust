@@ -708,7 +708,20 @@ async fn test_concurrent_save_session_flushes_requested_control_file() {
     let task = tokio::spawn(async move { command.execute().await });
 
     wait_for_control_file(&control_path).await;
-    wait_for_progress(&group).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let committed = ControlFile::load(&control_path)
+                .await
+                .expect("concurrent checkpoint should remain readable")
+                .is_some_and(|control_file| control_file.completed_length() > 0);
+            if committed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("concurrent download did not commit a segment before session save");
 
     let session_path = dir.path().join("concurrent-save-session.txt");
     let mut save_session = SaveSessionCommand::new(session_path.clone(), manager);

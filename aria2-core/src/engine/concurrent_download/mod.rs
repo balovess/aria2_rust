@@ -8,6 +8,8 @@ use std::sync::Arc;
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::filesystem::control_file::ControlFile;
+use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::http::AuthResolveOptions;
 use crate::http::HttpRequestPolicy;
@@ -85,6 +87,33 @@ pub struct ConcurrentDownloader {
     /// When `Some`, tokens are acquired after the per-download limiter
     /// in `segment.rs` and `pipeline.rs`.
     pub(crate) global_limiter: Option<RateLimiter>,
+}
+
+pub(super) async fn flush_requested_control_file(
+    dl: &ConcurrentDownloader,
+    writer: &mut CachedDiskWriter,
+    control_file: &mut Option<ControlFile>,
+    completed_bytes: u64,
+) -> Result<()> {
+    if control_file.is_none() || !dl.group.recover().is_save_control_file_requested() {
+        return Ok(());
+    }
+
+    writer.flush().await.map_err(|error| {
+        Aria2Error::FileIo(format!(
+            "Failed to flush requested concurrent checkpoint: {error}"
+        ))
+    })?;
+    if let Some(control_file) = control_file.as_mut() {
+        control_file.update_completed_length(completed_bytes);
+        control_file.save().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to save requested concurrent checkpoint: {error}"
+            ))
+        })?;
+    }
+    dl.group.recover().take_save_control_file_request();
+    Ok(())
 }
 
 impl ConcurrentDownloader {
