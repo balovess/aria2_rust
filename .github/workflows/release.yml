@@ -215,7 +215,19 @@ jobs:
           cd bindings/python
           python -m pip install --upgrade build
           python -m build
+      - name: Check PyPI version
+        id: pypi-version
+        shell: bash
+        run: |
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' bindings/python/pyproject.toml | head -n 1)
+          if curl --fail --silent --show-error --location "https://pypi.org/pypi/Aria2_rust/$VERSION/json" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Aria2_rust@$VERSION is already published; skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Publish to PyPI
+        if: steps.pypi-version.outputs.exists != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: bindings/python/dist
@@ -245,7 +257,11 @@ jobs:
           test -n "$NODE_AUTH_TOKEN" || { echo "NPM_TOKEN is not configured" >&2; exit 1; }
           npm ci
           npm run build
-          npm publish --access public --provenance
+          if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
+            echo "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version") is already published; skipping."
+          else
+            npm publish --access public --provenance
+          fi
 
   docker:
     name: Publish Docker image
