@@ -21,6 +21,7 @@ use aria2_core::engine::bt_progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
 use aria2_core::engine::command::Command;
+use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
@@ -32,12 +33,14 @@ use aria2_core::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
 };
 use aria2_core::request::request_group::GroupId;
-use aria2_core::request::request_group::{DownloadOptions, FollowMode};
+use aria2_core::request::request_group::{DownloadOptions, FollowMode, RequestGroup};
+use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::mse_crypto::{MseCryptoMethod, MseCryptoState};
 use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
 
 use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
+use std::sync::Arc;
 
 // ===========================================================================
 // Metadata follow E2E
@@ -100,7 +103,7 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
     let info = {
         let group = group.recover();
         assert!(group.is_in_memory_download());
-        assert_eq!(group.in_memory_data(), Some(torrent));
+        assert_eq!(group.in_memory_data(), Some(torrent.clone()));
         assert_eq!(
             group.content_type().as_deref(),
             Some("application/x-bittorrent")
@@ -133,7 +136,101 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
         assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));
         assert!(child.belongs_to_gid().is_none());
         assert_eq!(child.options().follow_torrent, Some(FollowMode::Disabled));
+        assert_eq!(child.bt_metadata_data(), Some(torrent));
     }
+
+    server.shutdown().await;
+}
+
+/// Run the same metadata follow through DownloadEngine, including the
+/// tracker/web-seed child dispatch. A child whose first URI is an announce URL
+/// must still be constructed as a BitTorrent command from its in-memory
+/// metainfo.
+#[tokio::test]
+async fn follow_torrent_mem_http_engine_downloads_web_seed_child() {
+    let dir = setup_temp_dir();
+    let server = MockHttpServer::start()
+        .await
+        .expect("mock HTTP server should start");
+    let total_size = 4096;
+    let piece_length = 512;
+    let payload = fixtures::test_torrent_builder::generate_file_data(total_size);
+    let web_seed_url = format!("{}/payload.bin", server.base_url());
+    server.register_range_response("/payload.bin", &payload);
+
+    let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
+    let torrent = fixtures::test_torrent_builder::build_test_torrent_with_web_seeds(
+        "payload.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+        std::slice::from_ref(&web_seed_url),
+    );
+    let torrent_for_server = torrent.clone();
+    server.on_get("/source.torrent", move |_| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/x-bittorrent")
+            .header("Content-Length", torrent_for_server.len())
+            .body(full_body(torrent_for_server.clone()))
+            .unwrap()
+    });
+
+    let gid = GroupId::new(0x710);
+    let source_url = format!("{}/source.torrent", server.base_url());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        use_head: false,
+        dir: Some(dir.path().display().to_string()),
+        out: Some("source.torrent".to_string()),
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+    let parent = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![source_url],
+        options,
+    )));
+    let manager = Arc::new(RequestGroupMan::new());
+    manager.add_group_arc(Arc::clone(&parent));
+
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let engine_task = tokio::spawn(engine.run());
+
+    let child_gid = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if let Some(child_gid) = parent.recover().followed_by_gids().first().copied() {
+                break child_gid;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("engine did not create the followed torrent child");
+    let child = manager
+        .find_group(child_gid)
+        .expect("followed torrent child should remain managed while downloading");
+    assert_eq!(child.recover().bt_metadata_data(), Some(torrent.clone()));
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), engine_task)
+        .await
+        .expect("followed torrent engine task timed out")
+        .expect("followed torrent engine task panicked");
+    result.expect("followed torrent engine should complete successfully");
+
+    assert_eq!(parent.recover().status(), DownloadStatus::Complete);
+    assert_eq!(child.recover().status(), DownloadStatus::Complete);
+    assert_eq!(
+        std::fs::read(dir.path().join("payload.bin")).unwrap(),
+        payload
+    );
+    assert!(
+        !dir.path().join("source.torrent").exists(),
+        "follow-torrent=mem must not create the source torrent file"
+    );
 
     server.shutdown().await;
 }

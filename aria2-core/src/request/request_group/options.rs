@@ -695,7 +695,8 @@ impl DownloadOptions {
             seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
-                .and_then(|v| v.parse::<f64>().ok()),
+                .and_then(|v| v.parse::<f64>().ok())
+                .or(Some(1.0)),
             checksum: options.get("checksum").and_then(|v| {
                 v.split_once('=')
                     .map(|(algo, hash)| (algo.trim().to_string(), hash.trim().to_string()))

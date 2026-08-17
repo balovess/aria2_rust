@@ -69,12 +69,230 @@ substitutes for missing original behavior.
 | --- | --- |
 | Active phase | `phase-2-core-domain` (`in_progress`) |
 | Passed and locked phases | `phase-1-baseline-matrix` (`passed_locked`) |
-| Latest verification | 2026-08-17 in the current worktree based on `f71043c` (`dev`), including the current event-driven RequestGroup lifecycle notification tests, session TLS-option round-trip tests, HTTP retry-wait and concurrent adaptive-cooldown pause/remove E2E, all-features workspace regression, the C API focused tests, the Windows `aria2-core` cdylib/import-library build, FTP/SFTP retry-wait cancellation regressions, the active-slot drain regression, the RequestGroup-scoped integrity cancellation regression, and the shutdown-lifecycle, session-restart, control-path, session-iterator-error, session-stale-file, session-comment, stopped-result, piece-storage, digest-count integrity, control-file, RequestGroup lifecycle, terminal-progress, and pause/completion-race slices below; unrelated in-progress edits are preserved |
+| Latest verification | 2026-08-17 in the current worktree based on `02e3937` (`dev`) plus the uncommitted core lifecycle, HTTP, BitTorrent, Metalink, scheduler, and session-default fixes: `cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1` completed with exit code 0; `aria2-core` reports `3470 passed, 0 failed, 1 ignored` and all its integration test targets passed; the focused seed-option filter reports `35 passed, 0 failed`; `cargo clippy -p aria2-core --all-targets --all-features -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed; the earlier all-features workspace regression reported `aria2-protocol` `832 passed, 0 failed` and all four Rust packages passed all-targets/all-features Clippy with `-D warnings`; unrelated in-progress edits are preserved |
 | Current status | `PARTIAL`; phase 1 is locked, but the final acceptance and stop conditions are not met |
-| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; explicit pause/remove/halt regression coverage; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; session serialization of configured `certificate` and `private-key` paths; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized |
-| Next action | Audit remaining phase-2 RequestGroup pause/resume, retry, storage, and checksum seams, starting with one independently reproducible lifecycle gap; keep broader protocol interoperability and later phases closed |
-| Acceptance evidence | The checkpoint below records the focused lifecycle tests, HTTP and BitTorrent integrity E2E, the current `aria2-core` library result (`3463 passed, 0 failed, 1 ignored`), workspace regression, Clippy, formatting, and diff checks |
+| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; explicit pause/remove/halt regression coverage; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; session serialization of configured `certificate` and `private-key` paths; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; current core test and Clippy gates revalidated in the worktree |
+| Next action | Audit remaining phase-2 RequestGroup pause/resume, retry, storage, and checksum seams, starting with one independently reproducible cross-protocol lifecycle gap; keep broader protocol interoperability and later phases closed |
+| Acceptance evidence | The checkpoint below records the focused lifecycle tests, reserved-queue fairness regression, HTTP response classification tests, HTTP and BitTorrent integrity E2E, the current `aria2-core` library result (`3470 passed, 0 failed, 1 ignored`), the `aria2-protocol` library result (`832 passed, 0 failed`), the workspace regression command, all four `-D warnings` Clippy commands, formatting, and diff checks |
 | Remaining differences, risks, reopen conditions | Cross-protocol lifecycle combinations, original-client and third-party interoperability, bindings, measured performance, and final workspace acceptance remain open; reopen this checkpoint if any covered command bypasses the group-aware integrity entrypoint or a lifecycle test regresses |
+
+## 2026-08-17 Session Default Seed-Ratio Checkpoint
+
+`DownloadOptions::default().seed_ratio` is `Some(1.0)`, matching the
+`seed-ratio` option definition. Session serialization intentionally omits that
+default to keep the file compact; restoration now applies the same typed
+default when the key is absent or invalid. Explicit values, including
+`seed-time=0`, remain distinguishable and are not overwritten by this change.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib defaults_excluded -- --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib seed -- --test-threads=1
+  35 passed, 0 failed
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the typed default preservation slice at the session option
+boundary. Broader session restart combinations, cross-protocol lifecycle
+coverage, external interoperability, bindings, measured performance, and
+final workspace acceptance remain open. The active phase remains
+`phase-2-core-domain` (`in_progress`) and the migration remains `PARTIAL`.
+
+## 2026-08-17 RequestGroup Scheduler Fairness Checkpoint
+
+`RequestGroupMan::fill_from_reserver` inspects each group that was queued at the
+start of a promotion pass at most once. Paused or dependency-blocked groups are
+returned to the front of the reserved queue, while later runnable groups may
+still consume available concurrency slots. This prevents a blocked queue head
+from starving runnable work when `max-concurrent-downloads` is finite.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  exit code 0
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The regression `blocked_reserved_group_does_not_starve_later_runnable_group`
+covers a paused queue head followed by runnable work under a concurrency limit
+of one. This closes only the reserved-queue fairness slice; broader
+cross-protocol lifecycle combinations, external interoperability, bindings,
+measured performance, and final workspace acceptance remain open. The active
+phase remains `phase-2-core-domain` (`in_progress`) and the migration remains
+`PARTIAL`.
+
+## 2026-08-17 HttpResponseProcessor Retry Classification Checkpoint
+
+The standalone `HttpResponseProcessor` now accepts the Rust-owned `retry-wait`
+behavior through `with_retry_wait` instead of hardcoding a five-second value.
+It preserves `RetryableError` separately from fatal `Error`, so callers can
+make retry and terminal decisions without reconstructing the status policy.
+The processor only classifies the response; retry timing and attempt accounting
+remain owned by the download command.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib http::response_processor -- --test-threads=1
+  80 passed, 0 failed
+cargo test -p aria2-core --all-features --lib http::skip_response -- --test-threads=1
+  36 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3469 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+Rust-owned regressions cover configured 404 retries, 502/503 retry-wait
+gating, and always-retryable 504 responses. This closes only the independent
+HTTP response adapter boundary; broader protocol lifecycle combinations,
+external interoperability, bindings, measured performance, and final
+workspace acceptance remain open. The active phase remains
+`phase-2-core-domain` (`in_progress`) and the migration remains `PARTIAL`.
+
+## 2026-08-17 BitTorrent In-Memory Follow Dispatch Checkpoint
+
+BtTorrentPostDownloadHandler now stores the parsed torrent bytes on the
+generated child RequestGroup. task_spawner treats that metadata as a
+BitTorrent dispatch marker in addition to the bt:// URI scheme, so a child
+whose first URI is a tracker announce URL still uses BtDownloadCommand.
+This closes the real-engine follow-torrent=mem path without changing the
+tracker/web-seed URI list.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::bt_torrent_post_download_handler -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test deep_e2e_bittorrent follow_torrent_mem_http -- --test-threads=1
+  2 passed, 0 failed
+  parent and child completed, web-seed payload matched the fixture,
+  source .torrent was absent
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the BitTorrent metainfo-follow child metadata and dispatch
+slice. The active phase remains phase-2-core-domain (in_progress) and the
+migration remains PARTIAL; broader cross-protocol lifecycle coverage, external
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open.
+
+## 2026-08-17 Workspace Rust Regression Checkpoint
+
+The current `dev` checkout was revalidated after the core lifecycle changes.
+This locks only the local Rust workspace regression gate; it does not establish
+third-party protocol interoperability, original-client/browser compatibility,
+bindings, performance comparison, or final migration completion.
+
+Rust-owned verification:
+
+~~~text
+cargo test --workspace --all-features -j 1 --quiet -- --test-threads=1
+  exit code 0
+  aria2-core library: 3466 passed, 0 failed, 1 ignored
+  aria2-protocol library: 832 passed, 0 failed
+
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2-rpc --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2 --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+The active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`; cross-protocol lifecycle combinations, external interoperability,
+bindings, measured performance, and final workspace acceptance remain open.
+
+## 2026-08-17 HTTP-Date Compatibility Checkpoint
+
+`SimpleDateTime` now delegates HTTP-date parsing to the Rust-owned cookie/date
+parser, and both parsing and formatting use signed, proleptic-Gregorian epoch
+conversion. The shared path accepts IMF-fixdate, RFC 850 with two- or
+four-digit years, RFC1123 numeric-zone variants, and ANSI C asctime. It formats
+negative timestamps and the 2038 boundary correctly instead of relying on the
+previous approximate year loop.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib http::conditional_get -- --test-threads=1
+  8 passed, 0 failed
+cargo test -p aria2-core --all-features --lib http::cookie::tests_date -- --test-threads=1
+  9 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the HTTP-date conversion slice only. Conditional-request behavior
+through every protocol owner, third-party interoperability, bindings,
+measured performance, and final workspace acceptance remain open; the active
+phase remains `phase-2-core-domain` (`in_progress`) and the migration remains
+`PARTIAL`.
+
+## 2026-08-17 Metalink In-Memory Source Lifecycle Checkpoint
+
+`RequestGroupMan::add_group_arc` now applies the same memory-download
+initialization as the other group registration paths. A pre-constructed
+`follow-metalink=mem` group therefore keeps its Metalink source in memory,
+creates the child payload group, and does not leave the source `.meta4` file on
+disk.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib request::request_group_man::tests::add_group_arc_marks_memory_download_from_options -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --test test_e2e_metalink_lifecycle -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_metalink_lifecycle -- --test-threads=1
+  14 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the pre-constructed in-memory Metalink source lifecycle
+slice. Cross-protocol lifecycle combinations, external interoperability,
+bindings, measured performance, and final workspace acceptance remain open;
+the active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`.
 
 ## 2026-08-17 HTTP Retry-Wait Lifecycle Checkpoint
 

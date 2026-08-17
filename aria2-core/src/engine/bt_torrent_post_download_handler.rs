@@ -184,6 +184,7 @@ impl BtTorrentPostDownloadHandler {
         // Set BitTorrent-specific metadata on the child group.
         // This data will be used by BtDownloadCommand when the group
         // is promoted to active.
+        child_group.set_bt_metadata_data(torrent_data.to_vec());
         {
             child_group.bt_num_pieces.store(
                 meta.info.pieces.len() as u32,

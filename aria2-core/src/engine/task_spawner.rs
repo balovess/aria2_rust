@@ -196,6 +196,8 @@ async fn create_command_for_uri(
 ) -> crate::error::Result<Box<dyn Command>> {
     let dns_cache = &dependencies.dns_cache;
     let uri_lower = uri.to_lowercase();
+    #[cfg(feature = "bittorrent")]
+    let bt_metadata = group.recover().bt_metadata_data();
 
     // SFTP downloads use the engine-owned group, matching other v2 protocols.
     #[cfg(feature = "sftp")]
@@ -213,14 +215,12 @@ async fn create_command_for_uri(
         return Ok(Box::new(cmd));
     }
 
-    // BitTorrent torrent payloads. The group must already have a resolved
-    // DownloadContext, which is installed by BtDependency before promotion.
+    // BitTorrent torrent payloads. Followed torrent groups retain tracker and
+    // web-seed URIs, so their first URI is not necessarily `bt://`.
     #[cfg(feature = "bittorrent")]
-    if uri_lower.starts_with("bt://") {
+    if uri_lower.starts_with("bt://") || bt_metadata.is_some() {
         let output_dir = options.dir.as_deref();
-        let torrent_bytes = group
-            .recover()
-            .bt_metadata_data()
+        let torrent_bytes = bt_metadata
             .or_else(|| {
                 group
                     .recover()

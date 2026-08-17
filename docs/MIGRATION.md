@@ -1,5 +1,152 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-17 Session 默认 seed-ratio 检查点
+
+`DownloadOptions::default().seed_ratio` 为 `Some(1.0)`，与 `seed-ratio` 选项
+定义一致。session 为保持文件紧凑性会省略这个默认值；恢复路径现在在键缺失
+或值无效时恢复为同一个 typed 默认值。显式 `seed-ratio` 值以及
+`seed-time=0` 仍保持独立语义。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib defaults_excluded -- --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib seed -- --test-threads=1
+  35 passed, 0 failed
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭 session option boundary 的 typed 默认值恢复切片；更广泛的
+session 重启组合、跨协议生命周期、第三方/原版客户端互操作、bindings、实测
+性能和最终 workspace 验收仍未完成。当前阶段保持 `phase-2-core-domain`，
+整体迁移保持 `PARTIAL`。
+
+## 2026-08-17 RequestGroup 调度公平性检查点
+
+`RequestGroupMan::fill_from_reserver` 现在在每轮调度中最多检查开始时队列中的
+每个任务一次。暂停或依赖未解除的任务会回到 reserved 队列前端，但不会消耗
+可用并发槽位；因此并发上限为 1 时，队首被阻塞的任务不会阻塞后续可运行任务。
+原有的状态检查、依赖检查和队列顺序保持不变。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  exit code 0
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+新增 `blocked_reserved_group_does_not_starve_later_runnable_group` 回归测试，
+覆盖 paused 队首任务和后续可运行任务并存时的并发上限语义。本检查点只关闭
+reserved 队列的阻塞公平性切片；跨协议生命周期、第三方/原版客户端互操作、
+bindings、实测性能和最终 workspace 验收仍未完成，当前阶段保持
+`phase-2-core-domain`，整体迁移保持 `PARTIAL`。
+
+## 2026-08-17 HttpResponseProcessor 重试分类检查点
+
+独立 `HttpResponseProcessor` 现在通过 `with_retry_wait` 接收 Rust-owned 的
+`retry-wait` 行为配置，不再把重试等待硬编码为 5 秒。来自
+`HttpSkipResponseHandler` 的 `RetryableError` 不再被折叠成普通 `Error`，
+调用方可以区分可重试和致命的 HTTP 状态；处理器只负责分类，重试计时和
+尝试次数仍由下载命令负责。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib http::response_processor -- --test-threads=1
+  80 passed, 0 failed
+cargo test -p aria2-core --all-features --lib http::skip_response -- --test-threads=1
+  36 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3469 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+404 的配置重试、502/503 的 `retry-wait` 门控以及 504 的始终可重试分类均
+有回归覆盖。本检查点只关闭独立 HTTP 响应适配器的分类和配置边界；真实
+下载命令的更广泛协议生命周期、第三方/原版客户端互操作、bindings、实测
+性能和最终 workspace 验收仍未完成，当前阶段保持
+`phase-2-core-domain`，整体迁移保持 `PARTIAL`。
+
+## 2026-08-17 BitTorrent in-memory follow 分发检查点
+
+BtTorrentPostDownloadHandler 现在把解析出的 torrent 原始字节保存到生成的
+子 RequestGroup。引擎调度器除了识别 bt:// URI 外，也会识别携带
+BitTorrent metadata 的子组，因此 tracker/web-seed URI 排在首位时仍会进入
+BtDownloadCommand。这修复了 follow-torrent=mem 经过真实 DownloadEngine
+时被错误当作普通 HTTP 下载的问题。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::bt_torrent_post_download_handler -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test deep_e2e_bittorrent follow_torrent_mem_http -- --test-threads=1
+  2 passed, 0 failed
+  engine E2E: parent and child completed, web-seed payload verified,
+  source .torrent absent
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭 BitTorrent metainfo follow 的子组 metadata 传递和引擎
+分发切片；跨协议生命周期、第三方/原版客户端互操作、bindings、实测
+性能和最终 workspace 验收仍未完成。当前阶段保持
+phase-2-core-domain，整体迁移保持 PARTIAL。
+
+## 2026-08-17 HTTP-date 兼容性检查点
+
+`SimpleDateTime` 现在复用 Rust-owned 的 HTTP-date 解析器；格式化和解析
+统一使用有符号的 Gregorian/Unix epoch 换算。统一路径覆盖 IMF-fixdate、
+RFC 850 的两位和四位年份、RFC1123 数字时区变体以及 ANSI C asctime，且
+正确处理 1970 年前时间和 2038 边界。历史方法名
+`parse_rfc2822` 保留以维持现有 Rust API。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib http::conditional_get -- --test-threads=1
+  8 passed, 0 failed
+cargo test -p aria2-core --all-features --lib http::cookie::tests_date -- --test-threads=1
+  9 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭 HTTP-date 转换边界；更广泛的条件请求、跨协议生命
+周期、第三方/原版客户端互操作、bindings、实测性能和最终 workspace
+验收仍未完成，当前阶段保持 `phase-2-core-domain`，整体迁移保持
+`PARTIAL`。
+
 ## 2026-08-17 RequestGroup 生命周期事件驱动检查点
 
 RequestGroup 现在提供共享的 `tokio::sync::Notify` 生命周期通知。顺序和并行
@@ -461,10 +608,10 @@ git diff --check
 This closes only the FTP/SFTP retry-wait lifecycle boundary. Third-party
 servers, original-client interoperability, broader cross-protocol lifecycle
 combinations, bindings, measured performance evidence, and final workspace
-acceptance remain open. The standalone `HttpResponseProcessor` hardcoded retry
-wait remains an isolated unverified adapter gap because repository-wide source
-audit found no production caller and its public result currently collapses
-retryable and fatal classifications.
+acceptance remain open. The standalone `HttpResponseProcessor` adapter now has
+Rust-owned retry-wait configuration and preserves retryable versus fatal result
+classification; no production caller was found, so broader live protocol
+interoperability remains a separate open item.
 
 ## 2026-08-17 Shutdown Resume-State Checkpoint
 

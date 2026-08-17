@@ -701,4 +701,8 @@ fn test_download_options_to_map_defaults_excluded() {
     // enable_dht and enable_public_trackers default to true -> NOT saved
     assert!(!map.contains_key("enable-dht"));
     assert!(!map.contains_key("enable-public-trackers"));
+
+    // The omitted wire value must still restore aria2's typed default.
+    let restored = DownloadOptions::from_option_strings(&map);
+    assert_eq!(restored.seed_ratio, Some(1.0));
 }

@@ -163,6 +163,9 @@ impl RequestGroupMan {
             warn!(gid = gid.value(), "Ignoring stale terminal request group");
             return;
         }
+        if group.recover().options().uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
         if !self.register_group(Arc::clone(&group)) {
             warn!(gid = gid.value(), "Ignoring duplicate request group");
             return;
@@ -1024,6 +1027,28 @@ mod tests {
     }
 
     #[test]
+    fn add_group_arc_marks_memory_download_from_options() {
+        let man = RequestGroupMan::new();
+        let options = DownloadOptions {
+            follow_metalink: Some(crate::request::request_group::FollowMode::Memory),
+            ..DownloadOptions::default()
+        };
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(73),
+            vec!["http://example.com/index.meta4".to_string()],
+            options,
+        )));
+
+        assert!(!group.recover().is_in_memory_download());
+        man.add_group_arc(Arc::clone(&group));
+
+        assert!(
+            group.recover().is_in_memory_download(),
+            "pre-constructed groups must honor memory-backed metadata options"
+        );
+    }
+
+    #[test]
     fn control_file_save_requests_skip_terminal_groups() {
         let man = RequestGroupMan::new();
         let gids: Vec<_> = (0..6)
@@ -1446,6 +1471,43 @@ mod tests {
         assert_eq!(man.max_concurrent(), 10);
         man.set_max_concurrent(0); // unlimited
         assert_eq!(man.max_concurrent(), 0);
+    }
+
+    #[test]
+    fn blocked_reserved_group_does_not_starve_later_runnable_group() {
+        let man = RequestGroupMan::new();
+        man.set_max_concurrent(1);
+
+        let blocked = man
+            .add_group(
+                vec!["http://example.com/blocked.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.find_group(blocked)
+            .expect("blocked group should be registered")
+            .recover_mut()
+            .pause()
+            .unwrap();
+
+        let runnable = man
+            .add_group(
+                vec!["http://example.com/runnable.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].recover().gid(), runnable);
+        assert!(
+            man.find_group(blocked)
+                .unwrap()
+                .recover()
+                .status()
+                .is_paused()
+        );
+        assert_eq!(man.reserved.len(), 1);
     }
 
     /// Test find_group searches both active and reserved.

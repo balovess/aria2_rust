@@ -13,6 +13,7 @@ use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(feature = "bittorrent", test))]
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
