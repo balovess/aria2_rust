@@ -241,8 +241,17 @@ impl DownloadCommand {
                         )
                     });
                 if let Some((hashes, piece_len, hash_type)) = piece_info {
-                    let algo =
-                        HashType::from_str(&hash_type).unwrap_or(HashType::Sha1);
+                    let algo = if hash_type.is_empty() {
+                        // Empty piece-hash metadata is the legacy SHA-1
+                        // default used by BitTorrent-style contexts.
+                        HashType::Sha1
+                    } else {
+                        HashType::from_str(&hash_type).ok_or_else(|| {
+                            Aria2Error::Parse(format!(
+                                "unknown piece hash algorithm: {hash_type}"
+                            ))
+                        })?
+                    };
                     if let Some(task) = ci_man::file_task(
                         &self.output_path,
                         piece_len.max(1),

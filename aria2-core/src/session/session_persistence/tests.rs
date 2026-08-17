@@ -102,6 +102,30 @@ async fn test_session_save_creates_files() {
 }
 
 #[tokio::test]
+async fn test_session_save_removes_stale_resume_files() {
+    let session_dir = create_test_session_dir();
+    let persistence = SessionPersistence::new(&session_dir);
+    let groups = create_test_groups(1);
+    let resume_path = session_dir.join(format!(
+        "{}.aria2",
+        groups[0].recover().gid().to_hex_string()
+    ));
+
+    persistence.save_state(&groups).await.unwrap();
+    assert!(resume_path.exists());
+
+    let empty_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
+    persistence.save_state(&empty_groups).await.unwrap();
+
+    assert!(
+        !resume_path.exists(),
+        "an empty authoritative snapshot must remove stale resume files"
+    );
+
+    let _ = fs::remove_dir_all(&session_dir);
+}
+
+#[tokio::test]
 async fn test_generated_children_are_excluded_from_json_persistence() {
     let session_dir = create_test_session_dir();
     let persistence = SessionPersistence::new(&session_dir);

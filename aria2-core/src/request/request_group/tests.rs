@@ -196,6 +196,22 @@ fn test_set_get_completed_length() {
 }
 
 #[test]
+fn test_mark_complete_sets_completed_length_to_total() {
+    let group = RequestGroup::new(
+        GroupId::new(8),
+        vec!["http://example.com/complete.bin".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_total_length_atomic(4096);
+    group.set_completed_length(1024);
+
+    group.mark_complete();
+
+    assert!(group.status().is_completed());
+    assert_eq!(group.get_completed_length(), 4096);
+}
+
+#[test]
 fn test_validate_total_length() {
     let group = RequestGroup::new(
         GroupId(1),
@@ -723,6 +739,22 @@ fn test_download_result_preserves_effective_option_snapshot() {
         options.get("max-download-limit"),
         Some(&serde_json::json!("2048"))
     );
+}
+
+#[test]
+fn test_command_counter_does_not_underflow() {
+    let group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert_eq!(group.dec_commands(), 0);
+    assert_eq!(group.num_commands(), 0);
+
+    group.inc_commands();
+    assert_eq!(group.dec_commands(), 1);
+    assert_eq!(group.num_commands(), 0);
 }
 
 #[test]

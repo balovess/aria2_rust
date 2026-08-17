@@ -322,7 +322,7 @@ pub(crate) async fn run_engine_loop_with_receiver(
                 info!("Shutdown signal received");
                 // Process graceful halt
                 ctx.group_man
-                    .halt_all(crate::request::request_group::HaltReason::UserRequest);
+                    .halt_all(crate::request::request_group::HaltReason::ShutdownSignal);
                 halt_requested = true;
 
                 // Give running tasks a chance to finish gracefully.
@@ -699,17 +699,29 @@ async fn process_task_completions<R: CompletionQueue>(
                         let code = group.recover().get_last_error_code();
                         group.recover().mark_error_with_code(code, message);
                     } else {
-                        let halt_reason = group.recover().get_halt_reason();
-                        match halt_reason {
-                            crate::request::request_group::HaltReason::UserRequest => {
-                                group.recover().mark_removed();
-                            }
-                            crate::request::request_group::HaltReason::Timeout => {
-                                group.recover().mark_timeout();
-                            }
-                            crate::request::request_group::HaltReason::ShutdownSignal => {}
-                            crate::request::request_group::HaltReason::None => {
-                                group.recover_mut().mark_complete();
+                        let group_state = group.recover();
+                        let was_pause_requested =
+                            group_state.is_pause_requested() || group_state.is_paused_flag();
+                        let halt_reason = group_state.get_halt_reason();
+                        drop(group_state);
+
+                        if matches!(halt_reason, HaltReason::None) && was_pause_requested {
+                            // A pause can race with a command finishing cleanly.
+                            // Preserve the resumable state instead of turning
+                            // the pause into a terminal completion.
+                            group.recover().mark_paused();
+                        } else {
+                            match halt_reason {
+                                crate::request::request_group::HaltReason::UserRequest => {
+                                    group.recover().mark_removed();
+                                }
+                                crate::request::request_group::HaltReason::Timeout => {
+                                    group.recover().mark_timeout();
+                                }
+                                crate::request::request_group::HaltReason::ShutdownSignal => {}
+                                crate::request::request_group::HaltReason::None => {
+                                    group.recover_mut().mark_complete();
+                                }
                             }
                         }
                     }
@@ -1089,6 +1101,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_signal_preserves_active_group_for_resume() {
+        let ctx = test_ctx(true);
+        let gid = ctx
+            .group_man
+            .add_group(
+                vec!["http://example.com/shutdown-resume.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        ctx.group_man.fill_from_reserver();
+        let group_man = Arc::clone(&ctx.group_man);
+
+        // Deliver the shutdown signal before the first engine wait.
+        // The group is already active but has no command, so the test isolates
+        // the shutdown reason from protocol-specific cancellation behavior.
+        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        sd_tx.send(()).unwrap();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        run_engine_loop(ctx, cmd_rx, sd_rx, Duration::from_millis(5)).await;
+
+        let group = group_man
+            .find_group(gid)
+            .expect("group should remain visible");
+        assert_eq!(
+            group.recover().get_halt_reason(),
+            HaltReason::ShutdownSignal
+        );
+        assert_ne!(
+            group.recover().status(),
+            DownloadStatus::Removed,
+            "shutdown must not turn a resumable group into a user removal"
+        );
+        assert_eq!(
+            group.recover().create_download_result().code,
+            DownloadResultCode::InProgress
+        );
+    }
+
+    #[tokio::test]
     async fn keep_alive_without_halt_does_not_exit() {
         // The flip side: keep-alive must still hold the loop open when no halt
         // was requested, otherwise an idle RPC server would shut itself down.
@@ -1299,6 +1350,44 @@ mod tests {
             status,
             DownloadStatus::Paused,
             "a pause-induced task failure must keep the group Paused (resumable), not Error"
+        );
+    }
+
+    #[tokio::test]
+    async fn paused_task_success_keeps_group_paused() {
+        let ctx = test_ctx(false);
+        let gid = {
+            let man = &ctx.group_man;
+            let gid = man
+                .add_group(
+                    vec!["http://example.com/file.bin".to_string()],
+                    DownloadOptions::default(),
+                )
+                .unwrap();
+            man.fill_from_reserver();
+            man.pause_group(gid).unwrap();
+            man.find_group(gid).unwrap().recover().inc_commands();
+            gid
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
+        tx.send((gid, 1, TaskResult::Success)).unwrap();
+
+        let mut running_downloads = Vec::new();
+        let mut completed_generations = HashSet::new();
+        process_task_completions(
+            &ctx,
+            &mut rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+
+        let status = ctx.group_man.find_group(gid).unwrap().recover().status();
+        assert_eq!(
+            status,
+            DownloadStatus::Paused,
+            "a clean command completion must not make a paused group terminal"
         );
     }
 

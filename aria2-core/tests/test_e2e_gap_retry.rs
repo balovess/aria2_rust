@@ -358,14 +358,10 @@ async fn test_e2e_gap_pause_interrupts_stalled_body_read() {
     .unwrap();
 
     let command_task = tokio::spawn(async move { command.execute().await });
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
-            if server.slow_gap_attempts() >= 2 {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        server.wait_for_slow_gap_attempt(2),
+    )
     .await
     .expect("concurrent download did not enter sequential gap recovery");
 

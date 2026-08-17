@@ -74,6 +74,10 @@ pub struct IntegrityOutcome {
     pub verified_piece_indices: Vec<usize>,
 }
 
+fn expected_piece_count(total_length: u64, piece_length: u64) -> usize {
+    total_length.div_ceil(piece_length.max(1)) as usize
+}
+
 #[async_trait]
 pub trait CheckIntegrityTask: Send + Sync {
     /// Total byte length of the data being validated.
@@ -138,6 +142,15 @@ impl FileChunkValidator {
         expected_hex: Vec<String>,
         algo: HashType,
     ) -> Result<Self> {
+        if !expected_hex.is_empty()
+            && expected_hex.len() != expected_piece_count(total_length, piece_length)
+        {
+            return Err(Aria2Error::Parse(format!(
+                "piece digest count mismatch: expected {}, got {}",
+                expected_piece_count(total_length, piece_length),
+                expected_hex.len()
+            )));
+        }
         let expected: Vec<Vec<u8>> = expected_hex
             .iter()
             .map(|h| hex::decode(h).map_err(|e| Aria2Error::Io(format!("bad digest hex: {e}"))))
@@ -275,6 +288,15 @@ impl MultiFileChunkValidator {
         expected_hex: Vec<String>,
         algo: HashType,
     ) -> Result<Self> {
+        if !expected_hex.is_empty()
+            && expected_hex.len() != expected_piece_count(total_length, piece_length)
+        {
+            return Err(Aria2Error::Parse(format!(
+                "piece digest count mismatch: expected {}, got {}",
+                expected_piece_count(total_length, piece_length),
+                expected_hex.len()
+            )));
+        }
         let expected = expected_hex
             .iter()
             .map(|h| hex::decode(h).map_err(|e| Aria2Error::Io(format!("bad digest hex: {e}"))))
@@ -701,7 +723,16 @@ pub fn multi_file_task(
     expected_hex: Vec<String>,
     algo: HashType,
 ) -> Result<Option<Box<dyn CheckIntegrityTask>>> {
-    if expected_hex.is_empty() || total_length == 0 || files.is_empty() {
+    // A missing non-empty physical file is an incomplete payload, not an
+    // integrity-check I/O failure. Let the owning BT command enter its normal
+    // piece-download path, matching the single-file helper's behavior.
+    if expected_hex.is_empty()
+        || total_length == 0
+        || files.is_empty()
+        || files
+            .iter()
+            .any(|(path, length)| *length > 0 && !path.is_file())
+    {
         return Ok(None);
     }
     Ok(Some(Box::new(MultiFileChunkValidator::new(
@@ -743,7 +774,8 @@ pub async fn cut_multi_file_trailing_garbage(files: &[(PathBuf, u64)]) -> Result
 
 #[cfg(test)]
 mod trailing_garbage_tests {
-    use super::{cut_multi_file_trailing_garbage, cut_trailing_garbage};
+    use super::{cut_multi_file_trailing_garbage, cut_trailing_garbage, multi_file_task};
+    use crate::checksum::message_digest::HashType;
 
     #[tokio::test]
     async fn truncates_single_file_only_when_oversized() {
@@ -768,6 +800,25 @@ mod trailing_garbage_tests {
             .unwrap();
         assert_eq!(tokio::fs::metadata(first).await.unwrap().len(), 5);
         assert_eq!(tokio::fs::metadata(second).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn skips_multi_file_integrity_task_when_payload_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.bin");
+        let missing = dir.path().join("missing.bin");
+        tokio::fs::write(&present, b"abcd").await.unwrap();
+
+        let task = multi_file_task(
+            vec![(present, 4), (missing, 4)],
+            4,
+            8,
+            vec!["00".to_string(); 2],
+            HashType::Sha1,
+        )
+        .unwrap();
+
+        assert!(task.is_none());
     }
 }
 
@@ -955,6 +1006,38 @@ mod tests {
     }
 
     #[test]
+    fn test_file_validator_rejects_mismatched_piece_count() {
+        let result = FileChunkValidator::new(
+            PathBuf::from("/tmp/payload.bin"),
+            4,
+            8,
+            vec![sha1_hex(b"aaaa")],
+            HashType::Sha1,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Parse(message)) if message.contains("digest count mismatch")
+        ));
+    }
+
+    #[test]
+    fn test_multi_file_validator_rejects_mismatched_piece_count() {
+        let result = MultiFileChunkValidator::new(
+            vec![(PathBuf::from("/tmp/first.bin"), 8)],
+            4,
+            8,
+            vec![sha1_hex(b"aaaa")],
+            HashType::Sha1,
+        );
+
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Parse(message)) if message.contains("digest count mismatch")
+        ));
+    }
+
+    #[test]
     fn test_queue_semantics() {
         let mut man = CheckIntegrityMan::new();
         assert!(!man.is_picked());
@@ -1004,7 +1087,7 @@ mod tests {
                         PathBuf::from("/tmp/x"),
                         4,
                         8,
-                        vec!["aa".to_string()],
+                        vec!["aa".to_string(), "bb".to_string()],
                         HashType::Sha1,
                     )
                     .unwrap(),

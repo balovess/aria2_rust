@@ -85,7 +85,7 @@ impl DownloadStatus {
     }
 
     pub fn is_stopped(&self) -> bool {
-        !self.is_active() && !matches!(self, DownloadStatus::Removed)
+        !self.is_active()
     }
 
     pub fn as_str(&self) -> &'static str {

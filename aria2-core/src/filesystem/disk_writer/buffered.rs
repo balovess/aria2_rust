@@ -120,7 +120,9 @@ impl SeekableDiskWriter for CachedDiskWriter {
         }
 
         if data.len() >= DIRECT_WRITE_THRESHOLD {
-            // Large writes bypass the cache and go directly to the writer.
+            // Drain older cached ranges first. Otherwise a later flush could
+            // overwrite this newer direct write with stale bytes.
+            self.flush_cache().await?;
             self.writer.write_at(offset, data).await?;
         } else if let Some(ref cache) = self.cache {
             // Small writes go to the write-back cache.
@@ -155,7 +157,9 @@ impl SeekableDiskWriter for CachedDiskWriter {
         }
 
         if data.len() >= DIRECT_WRITE_THRESHOLD {
-            // Large writes bypass the cache - zero-copy to pwrite.
+            // Drain older cached ranges first. Otherwise a later flush could
+            // overwrite this newer direct write with stale bytes.
+            self.flush_cache().await?;
             self.writer.write_bytes_at(offset, data).await?;
         } else if let Some(ref cache) = self.cache {
             // Small writes go to the cache - zero-copy (move Bytes).

@@ -238,6 +238,24 @@ fn test_constants() {
     assert_eq!(constants::SFTP_SPEED_UPDATE_INTERVAL_MS, 500);
 }
 
+#[tokio::test]
+async fn retry_wait_is_interruptible_when_removed() {
+    let command = create_test_cmd();
+    command.group.write().unwrap().mark_removed();
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        command.wait_for_retry(Duration::from_secs(5)),
+    )
+    .await
+    .expect("removed retry wait should stop promptly");
+
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download cancelled by user"
+    ));
+}
+
 /// Helper to create a test command instance
 #[test]
 fn engine_owned_group_constructor_preserves_gid_and_options() {

@@ -190,6 +190,24 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
 }
 
 #[test]
+fn test_deserialize_ignores_comments_inside_entry() {
+    let input = r#"http://example.com/file.zip
+ GID=0000000000000001
+# A comment between session properties
+ split=4
+ TOTAL_LENGTH=1024
+
+"#;
+
+    let entries = deserialize(input).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].gid, 1);
+    assert_eq!(entries[0].options.get("split"), Some(&"4".to_string()));
+    assert_eq!(entries[0].total_length, 1024);
+}
+
+#[test]
 fn test_deserialize_empty_and_whitespace_only() {
     // Test edge cases: completely empty or whitespace-only input
     assert!(

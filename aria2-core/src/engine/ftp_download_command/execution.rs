@@ -143,7 +143,7 @@ impl Command for FtpDownloadCommand {
                             wait,
                             e
                         );
-                        tokio::time::sleep(wait).await;
+                        self.wait_for_retry(wait).await?;
 
                         // Reset state for retry
                         self.completed_bytes = 0;
@@ -193,6 +193,36 @@ impl Command for FtpDownloadCommand {
 }
 
 impl FtpDownloadCommand {
+    /// Wait between retry attempts while still honoring RequestGroup controls.
+    /// A plain sleep would delay pause/remove handling for the full configured
+    /// retry interval, which can be several minutes.
+    pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let halt_message = {
+                let group = self.group.recover();
+                if group.is_removed() {
+                    Some("Download cancelled by user")
+                } else if group.is_paused_flag() {
+                    Some("Download paused")
+                } else if group.is_force_halt_requested() || group.is_halt_requested() {
+                    Some("FTP download halted")
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = halt_message {
+                return Err(Aria2Error::DownloadFailed(message.into()));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
+        }
+    }
+
     /// Apply the optional remote timestamp after the output handle has been
     /// finalized. This mirrors the original post-download file-attribute
     /// update while keeping failures non-fatal, as aria2 does.

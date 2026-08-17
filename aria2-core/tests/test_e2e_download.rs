@@ -117,6 +117,10 @@ async fn test_e2e_http_check_integrity_applies_trailing_cleanup_plan() {
     group
         .write()
         .unwrap()
+        .set_total_length(content.len() as u64);
+    group
+        .write()
+        .unwrap()
         .set_download_context(Arc::new(context));
 
     let mut command = DownloadCommand::new_with_group(
@@ -134,6 +138,122 @@ async fn test_e2e_http_check_integrity_applies_trailing_cleanup_plan() {
 
     assert_eq!(std::fs::read(&output_path).unwrap(), content);
     assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+}
+
+#[tokio::test]
+async fn test_e2e_http_check_integrity_redownloads_corrupt_existing_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/files/small.bin", server.base_url());
+    let content = small_content().to_vec();
+    let output_path = dir.path().join("small.bin");
+    std::fs::write(&output_path, b"bad!").expect("write corrupt existing payload");
+
+    let mut context = DownloadContext::new(
+        content.len() as u32,
+        content.len() as u64,
+        output_path.to_string_lossy().into_owned(),
+    );
+    context.set_piece_hashes(
+        "sha-1".to_string(),
+        vec![MessageDigest::hash_hex(HashType::Sha1, &content)],
+    );
+
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        always_resume: false,
+        check_integrity: true,
+        continue_download: true,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1002),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_total_length(content.len() as u64);
+    group
+        .write()
+        .unwrap()
+        .set_download_context(Arc::new(context));
+
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create corrupt-file integrity command");
+    tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("corrupt-file integrity check must not hang")
+        .expect("corrupt-file integrity recovery must complete");
+
+    assert_eq!(std::fs::read(&output_path).unwrap(), content);
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+}
+
+#[tokio::test]
+async fn test_e2e_http_check_integrity_rejects_unknown_piece_hash_algorithm() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/files/small.bin", server.base_url());
+    let content = small_content().to_vec();
+    let output_path = dir.path().join("small.bin");
+    std::fs::write(&output_path, &content).expect("write existing payload");
+
+    let mut context = DownloadContext::new(
+        content.len() as u32,
+        content.len() as u64,
+        output_path.to_string_lossy().into_owned(),
+    );
+    context.set_piece_hashes("not-a-real-hash".to_string(), vec!["00".repeat(20)]);
+
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        check_integrity: true,
+        continue_download: true,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1003),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_total_length(content.len() as u64);
+    group
+        .write()
+        .unwrap()
+        .set_download_context(Arc::new(context));
+
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create unknown-hash integrity command");
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("unknown hash algorithm must not hang")
+        .expect_err("unknown piece hash algorithm must fail");
+
+    assert!(
+        matches!(
+            &error,
+            Aria2Error::Parse(message) if message.contains("unknown piece hash algorithm")
+        ),
+        "unexpected unknown-hash error: {error:?}"
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), content);
 }
 
 #[tokio::test]

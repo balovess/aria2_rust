@@ -191,6 +191,9 @@ impl BitfieldMan {
 
     /// Marks pieces as completed up to the given length.
     pub fn mark_pieces_done(&mut self, length: u64) {
+        if self.piece_length == 0 {
+            return;
+        }
         let num_pieces_done = (length / self.piece_length) as usize;
         for i in 0..std::cmp::min(num_pieces_done, self.num_pieces) {
             self.set_piece(i);
@@ -216,8 +219,12 @@ impl BitfieldMan {
     /// C++ also clears the use bitfield when setting the completion bitfield.
     /// This ensures stale use bits from a previous session don't persist.
     pub fn set_bitfield(&mut self, bitfield: &[u8]) {
-        let copy_len = std::cmp::min(bitfield.len(), self.bitfield.len());
-        self.bitfield[..copy_len].copy_from_slice(&bitfield[..copy_len]);
+        // Match C++ `BitfieldMan::setBitfield`: reject empty or mismatched
+        // buffers without changing either completion or in-use state.
+        if self.bitfield.is_empty() || bitfield.len() != self.bitfield.len() {
+            return;
+        }
+        self.bitfield.copy_from_slice(bitfield);
         // C++ clears useBitfield_ on setBitfield()
         for b in self.use_bitfield.iter_mut() {
             *b = 0;

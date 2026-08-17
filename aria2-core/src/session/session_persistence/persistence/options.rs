@@ -75,7 +75,17 @@ impl SessionPersistence {
             .await
             .map_err(|e| format!("Failed to read session dir: {}", e))?;
 
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        loop {
+            let Some(entry) = entries.next_entry().await.map_err(|error| {
+                format!(
+                    "Failed to enumerate session dir {} while cleaning up: {}",
+                    self.session_dir.display(),
+                    error
+                )
+            })?
+            else {
+                break;
+            };
             let path = entry.path();
             if let Err(e) = tokio::fs::remove_file(&path).await {
                 warn!(path = %path.display(), error = %e, "Failed to remove session file");

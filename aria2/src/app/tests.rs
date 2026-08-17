@@ -730,6 +730,40 @@ async fn test_save_session_on_shutdown() {
     );
 }
 
+#[tokio::test]
+async fn test_save_session_on_shutdown_clears_stale_file_without_groups() {
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let save_file = temp_dir.path().join("stale_shutdown_save.txt");
+    tokio::fs::write(&save_file, "http://stale.example/old.bin\n")
+        .await
+        .expect("write stale session");
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(save_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("clear session should succeed"),
+        Some(0)
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(&save_file)
+            .await
+            .expect("read cleared session"),
+        ""
+    );
+}
+
 /// Test 4: No save when save-session is not configured
 ///
 /// Verify that save_session_on_shutdown() returns Ok(None) when save-session is not configured

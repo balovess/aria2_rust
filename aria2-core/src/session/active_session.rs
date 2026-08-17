@@ -103,11 +103,6 @@ impl ActiveSessionManager {
             }
         }
 
-        if entries.is_empty() {
-            tracing::debug!("No active entries to save");
-            return Ok(0);
-        }
-
         // Save to file using atomic write strategy
         match session_serializer::save_to_file_with_entries(&self.session_path, &entries).await {
             Ok(_) => {
@@ -453,23 +448,34 @@ mod tests {
 
         let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
 
-        // Save empty list
+        let stale_group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(123),
+            vec!["http://stale.example/old.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+        manager
+            .save_session(&[stale_group])
+            .await
+            .expect("seed stale session");
+
+        // Save empty list to clear the stale entry.
         let empty_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = vec![];
         let result = manager.save_session(&empty_groups).await;
 
         assert!(result.is_ok(), "Saving empty list should succeed");
         assert_eq!(result.unwrap(), 0, "Should return 0 entries");
 
-        // File may not exist or may be empty (depending on implementation)
-        if session_path.exists() {
-            let content = tokio::fs::read_to_string(&session_path)
-                .await
-                .expect("Failed to read file");
-            assert!(
-                content.is_empty(),
-                "Empty group list should produce empty file"
-            );
-        }
+        assert!(
+            session_path.exists(),
+            "Saving an empty group list must clear stale session state"
+        );
+        let content = tokio::fs::read_to_string(&session_path)
+            .await
+            .expect("Failed to read file");
+        assert!(
+            content.is_empty(),
+            "Empty group list should produce an empty session file"
+        );
     }
 
     /// Test 9: Full flow when auto-save is triggered

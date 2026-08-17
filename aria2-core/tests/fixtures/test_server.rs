@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 const SMALL_CONTENT: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
 const MEDIUM_PATTERN: u8 = 0xAB;
@@ -13,6 +14,7 @@ pub struct TestServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     slow_gap_attempts: Arc<AtomicUsize>,
+    slow_gap_updates: watch::Sender<usize>,
     error_404_requests: Arc<AtomicUsize>,
     error_500_requests: Arc<AtomicUsize>,
 }
@@ -27,59 +29,50 @@ impl TestServer {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
         let slow_gap_attempts = Arc::new(AtomicUsize::new(0));
         let handler_slow_gap_attempts = Arc::clone(&slow_gap_attempts);
+        let (slow_gap_updates, _) = watch::channel(0usize);
+        let handler_slow_gap_updates = slow_gap_updates.clone();
+        let slow_gap_fallback_started = Arc::new(AtomicBool::new(false));
+        let handler_slow_gap_fallback_started = Arc::clone(&slow_gap_fallback_started);
         let error_404_requests = Arc::new(AtomicUsize::new(0));
         let handler_error_404_requests = Arc::clone(&error_404_requests);
         let error_500_requests = Arc::new(AtomicUsize::new(0));
         let handler_error_500_requests = Arc::clone(&error_500_requests);
 
         tokio::spawn(async move {
+            // A stalled response must not prevent the listener from accepting
+            // the other range requests in a concurrent-download test.
+            let mut connections = tokio::task::JoinSet::new();
             loop {
                 tokio::select! {
                     result = listener.accept() => {
                         match result {
-                            Ok((mut stream, _)) => {
-                                let request = Self::read_request(&mut stream).await;
-                                let request_str = String::from_utf8_lossy(&request);
-                                let first_line = request_str.lines().next().unwrap_or("");
-                                let mut parts = first_line.split(' ');
-                                parts.next();
-                                let path = parts.next().unwrap_or("");
-                                if path.starts_with("/files/timeout_")
-                                    || path.starts_with("/files/disconnect_")
-                                    || path == "/files/slow_stream_test.bin"
-                                    || path == "/files/slow_gap_test.bin"
-                                {
-                                    let _ = Self::handle_async_request(
-                                        &mut stream,
-                                        &request,
-                                        Arc::clone(&handler_slow_gap_attempts),
-                                    )
-                                    .await;
-                                } else {
-                                    if path == "/error/404"
-                                        || path == "/files/concurrent_404_test.bin"
-                                    {
-                                        handler_error_404_requests.fetch_add(1, Ordering::SeqCst);
-                                    } else if path == "/error/500" {
-                                        handler_error_500_requests.fetch_add(1, Ordering::SeqCst);
-                                    }
-                                    let response = Self::handle_request(&request);
-                                    let _ = stream.write_all(&response).await;
-                                    let _ = stream.flush().await;
-                                }
+                            Ok((stream, _)) => {
+                                connections.spawn(Self::handle_connection(
+                                    stream,
+                                    Arc::clone(&handler_slow_gap_attempts),
+                                    handler_slow_gap_updates.clone(),
+                                    Arc::clone(&handler_slow_gap_fallback_started),
+                                    Arc::clone(&handler_error_404_requests),
+                                    Arc::clone(&handler_error_500_requests),
+                                ));
                             }
                             Err(_) => break,
                         }
                     }
+                    Some(_) = connections.join_next() => {}
                     _ = &mut shutdown_rx => break,
                 }
             }
+
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         });
 
         TestServer {
             addr: actual_addr,
             shutdown: Some(shutdown_tx),
             slow_gap_attempts,
+            slow_gap_updates,
             error_404_requests,
             error_500_requests,
         }
@@ -91,6 +84,19 @@ impl TestServer {
 
     pub fn slow_gap_attempts(&self) -> usize {
         self.slow_gap_attempts.load(Ordering::SeqCst)
+    }
+
+    pub async fn wait_for_slow_gap_attempt(&self, expected: usize) {
+        let mut updates = self.slow_gap_updates.subscribe();
+        loop {
+            if *updates.borrow() >= expected {
+                return;
+            }
+            updates
+                .changed()
+                .await
+                .expect("test server gap progress sender must remain alive");
+        }
     }
 
     pub fn error_404_requests(&self) -> usize {
@@ -123,10 +129,51 @@ impl TestServer {
         request
     }
 
+    async fn handle_connection(
+        mut stream: tokio::net::TcpStream,
+        slow_gap_attempts: Arc<AtomicUsize>,
+        slow_gap_updates: watch::Sender<usize>,
+        slow_gap_fallback_started: Arc<AtomicBool>,
+        error_404_requests: Arc<AtomicUsize>,
+        error_500_requests: Arc<AtomicUsize>,
+    ) {
+        let request = Self::read_request(&mut stream).await;
+        let request_str = String::from_utf8_lossy(&request);
+        let first_line = request_str.lines().next().unwrap_or("");
+        let mut parts = first_line.split(' ');
+        parts.next();
+        let path = parts.next().unwrap_or("");
+        if path.starts_with("/files/timeout_")
+            || path.starts_with("/files/disconnect_")
+            || path == "/files/slow_stream_test.bin"
+            || path == "/files/slow_gap_test.bin"
+        {
+            let _ = Self::handle_async_request(
+                &mut stream,
+                &request,
+                slow_gap_attempts,
+                slow_gap_updates,
+                slow_gap_fallback_started,
+            )
+            .await;
+        } else {
+            if path == "/error/404" || path == "/files/concurrent_404_test.bin" {
+                error_404_requests.fetch_add(1, Ordering::SeqCst);
+            } else if path == "/error/500" {
+                error_500_requests.fetch_add(1, Ordering::SeqCst);
+            }
+            let response = Self::handle_request(&request);
+            let _ = stream.write_all(&response).await;
+            let _ = stream.flush().await;
+        }
+    }
+
     async fn handle_async_request(
         stream: &mut tokio::net::TcpStream,
         request: &[u8],
         slow_gap_attempts: Arc<AtomicUsize>,
+        slow_gap_updates: watch::Sender<usize>,
+        slow_gap_fallback_started: Arc<AtomicBool>,
     ) -> std::io::Result<()> {
         let request_str = String::from_utf8_lossy(request);
         let first_line = request_str.lines().next().unwrap_or("");
@@ -155,9 +202,11 @@ impl TestServer {
                 };
 
                 let end = end.min(TOTAL - 1);
-                if start >= TOTAL / 2 {
+                let stalled_attempt = if start >= TOTAL / 2 {
                     let attempt = slow_gap_attempts.fetch_add(1, Ordering::SeqCst) + 1;
                     if attempt == 1 {
+                        slow_gap_fallback_started.store(true, Ordering::Release);
+                        slow_gap_updates.send_replace(attempt);
                         stream
                             .write_all(
                                 b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */2097152\r\nContent-Length: 0\r\n\r\n",
@@ -165,7 +214,17 @@ impl TestServer {
                             .await?;
                         return stream.flush().await;
                     }
+                    Some(attempt)
+                } else if slow_gap_fallback_started.load(Ordering::Acquire)
+                    && start == 0
+                    && end + 1 == TOTAL
+                {
+                    Some(slow_gap_attempts.fetch_add(1, Ordering::SeqCst) + 1)
+                } else {
+                    None
+                };
 
+                if let Some(attempt) = stalled_attempt {
                     let header = format!(
                         "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: bytes {start}-{end}/{TOTAL}\r\nContent-Length: {}\r\n\r\n",
                         end - start + 1
@@ -178,11 +237,18 @@ impl TestServer {
 
                     let chunk = vec![0x6b; 64 * 1024];
                     let mut remaining = end - start + 1;
+                    let mut first_chunk = true;
                     while remaining > 0 {
                         let size = remaining.min(chunk.len());
                         stream.write_all(&chunk[..size]).await?;
                         stream.flush().await?;
                         remaining -= size;
+                        if first_chunk {
+                            // Signal only after the client can observe a
+                            // stalled body, rather than when headers arrive.
+                            slow_gap_updates.send_replace(attempt);
+                            first_chunk = false;
+                        }
                         if remaining > 0 {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }

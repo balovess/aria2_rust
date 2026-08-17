@@ -233,6 +233,9 @@ impl BitfieldMan {
         if !self.filter_enabled {
             return self.get_completed_length();
         }
+        if self.num_pieces == 0 {
+            return 0;
+        }
         let mut completed_length: u64 = 0;
         let last_index = self.num_pieces - 1;
         for i in 0..self.num_pieces {

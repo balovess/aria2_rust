@@ -163,10 +163,11 @@ impl super::RequestGroupMan {
     pub fn active_count(&self) -> usize {
         self.active
             .iter()
-            .filter(|entry| {
-                let g = entry.recover();
-                matches!(g.status(), DownloadStatus::Active) && !g.is_seed_only()
-            })
+            // A paused or terminal group remains in the active map until its
+            // last command reports completion. It still owns a concurrency
+            // slot during that drain window, so the scheduling count must be
+            // based on map ownership rather than the published status.
+            .filter(|entry| !entry.recover().is_seed_only())
             .count()
     }
 

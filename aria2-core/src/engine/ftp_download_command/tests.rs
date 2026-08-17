@@ -1,5 +1,7 @@
 //! Tests for FTP download command.
 
+use std::time::Duration;
+
 use super::control::{
     RawFtpControl, parse_epsv_response, parse_ftp_size_response, parse_pasv_response,
     urlencoding_decode,
@@ -37,6 +39,31 @@ fn test_retry_policy_comes_from_download_options() {
 
     assert_eq!(command.retry_policy.max_tries(), 7);
     assert_eq!(command.retry_policy.base_wait_ms, 3000);
+}
+
+#[tokio::test]
+async fn retry_wait_is_interruptible_when_paused() {
+    let command = FtpDownloadCommand::new(
+        GroupId::new(104),
+        "ftp://example.com/file.txt",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    command.group.write().unwrap().pause().unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        command.wait_for_retry(Duration::from_secs(5)),
+    )
+    .await
+    .expect("paused retry wait should stop promptly");
+
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
+    ));
 }
 
 #[test]

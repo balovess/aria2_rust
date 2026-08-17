@@ -1547,6 +1547,37 @@ mod tests {
     }
 
     #[test]
+    fn paused_group_with_inflight_command_keeps_its_concurrency_slot() {
+        let man = RequestGroupMan::new();
+        man.set_max_concurrent(1);
+        let first = man
+            .add_group(
+                vec!["http://example.com/first.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let second = man
+            .add_group(
+                vec!["http://example.com/second.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(man.fill_from_reserver().len(), 1);
+        let first_group = man.find_group(first).unwrap();
+        first_group.recover().inc_commands();
+        man.pause_group(first).unwrap();
+
+        assert_eq!(man.active_count(), 1);
+        assert!(
+            man.fill_from_reserver().is_empty(),
+            "a paused command still draining must retain its active slot"
+        );
+        assert!(man.find_group(second).is_some());
+        assert_eq!(man.reserved.len(), 1);
+    }
+
+    #[test]
     fn test_paused_reserved_group_is_not_promoted_until_unpaused() {
         let man = RequestGroupMan::new();
         let gid = man

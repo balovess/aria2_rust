@@ -320,6 +320,21 @@ fn test_set_bitfield_clears_use_and_adds_stats() {
 }
 
 #[test]
+fn test_set_bitfield_rejects_mismatched_length_without_mutation() {
+    let mut storage = DefaultPieceStorage::new(1024, 4096);
+    storage.get_missing_piece(0, &[], 0, 1).unwrap();
+    let before = storage.get_bitfield();
+
+    storage.set_bitfield(&[]);
+    assert_eq!(storage.get_bitfield(), before);
+    assert!(storage.is_piece_used(0));
+
+    storage.set_bitfield(&[0xFF, 0x00]);
+    assert_eq!(storage.get_bitfield(), before);
+    assert!(storage.is_piece_used(0));
+}
+
+#[test]
 fn test_mark_pieces_done_zero_clears() {
     let mut storage = DefaultPieceStorage::new(1024, 4096);
     storage.get_missing_piece(0, &[], 0, 1).unwrap();

@@ -19,9 +19,13 @@ impl super::RequestGroup {
 
     /// Decrement the in-flight command counter (when a task completes).
     /// Mirrors C++ `AbstractCommand` destructor decrementing `numCommand_`.
-    /// Returns the previous value.
+    /// Returns the previous value, or zero when the counter is already empty.
     pub fn dec_commands(&self) -> u32 {
-        self.num_commands.fetch_sub(1, Ordering::SeqCst)
+        self.num_commands
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                current.checked_sub(1)
+            })
+            .unwrap_or(0)
     }
 
     /// Get the current number of in-flight commands (lock-free).

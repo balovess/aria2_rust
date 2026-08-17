@@ -57,8 +57,13 @@ pub fn deserialize(text: &str) -> Result<Vec<SessionEntry>> {
     for raw_line in text.lines() {
         let line = raw_line.trim_end();
 
-        // Skip empty lines and comments
-        if line.is_empty() || line.starts_with('#') {
+        // Comments are ignored without changing the current entry. A blank
+        // line is the session format's entry separator.
+        if line.starts_with('#') {
+            continue;
+        }
+
+        if line.is_empty() {
             if in_entry && !current_text.is_empty() {
                 // End of current entry
                 match SessionEntry::deserialize_line(&current_text) {

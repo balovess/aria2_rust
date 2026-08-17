@@ -129,7 +129,11 @@ impl BitfieldMan {
     /// It also clamps `offset + length` to `totalLength`.
     pub fn is_bit_set_offset_range(&self, offset: u64, length: u64) -> bool {
         // C++: if(length <= 0 || totalLength_ <= offset) return false;
-        if length == 0 || offset >= self.total_length {
+        if length == 0
+            || offset >= self.total_length
+            || self.num_pieces == 0
+            || self.piece_length == 0
+        {
             return false;
         }
         // C++: if(totalLength_ < offset + length) length = totalLength_ - offset;

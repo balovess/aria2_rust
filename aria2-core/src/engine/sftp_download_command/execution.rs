@@ -513,7 +513,7 @@ impl Command for SftpDownloadCommand {
 
             attempts = attempts.saturating_add(1);
             let wait = self.retry_policy.compute_wait(attempts).unwrap_or_default();
-            tokio::time::sleep(wait).await;
+            self.wait_for_retry(wait).await?;
             self.completed_bytes = 0;
         }
     }
@@ -549,6 +549,36 @@ impl Command for SftpDownloadCommand {
 }
 
 impl SftpDownloadCommand {
+    /// Wait between retry attempts while still honoring RequestGroup controls.
+    /// A plain sleep would delay pause/remove handling for the full configured
+    /// retry interval, which can be several minutes.
+    pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let halt_message = {
+                let group = self.group.recover();
+                if group.is_removed() {
+                    Some("Download cancelled by user")
+                } else if group.is_paused_flag() {
+                    Some("Download paused")
+                } else if group.is_force_halt_requested() || group.is_halt_requested() {
+                    Some("SFTP download halted")
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = halt_message {
+                return Err(Aria2Error::DownloadFailed(message.into()));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
+        }
+    }
+
     async fn finalize_partial_writer(&mut self, writer: &mut Box<dyn DiskWriter>) {
         let _ = writer.finalize().await;
         self.flush_checkpoint().await;
