@@ -10,7 +10,9 @@ use aria2_core::engine::download_event_hooks::{
     DownloadEvent, DownloadEventHooks, DownloadEventListener,
 };
 use aria2_core::filesystem::control_file::ControlFile;
-use aria2_core::request::request_group::{DownloadOptions, GroupId, HaltReason};
+use aria2_core::request::request_group::{
+    DownloadOptions, DownloadResultCode, GroupId, HaltReason,
+};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -165,6 +167,7 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
             seed_time: Some(0.0),
             enable_dht: false,
             enable_public_trackers: false,
+            bt_stop_timeout: Some(0),
             ..DownloadOptions::default()
         },
         Some(dir.path().to_str().unwrap()),
@@ -182,6 +185,7 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
         .expect("halted BT command timed out")
         .expect("halted BT task panicked");
     assert!(result.is_err(), "halt should stop the command");
+    assert_eq!(group.recover().get_halt_reason(), HaltReason::UserRequest);
     let control_path = ControlFile::control_path_for(&dir.path().join("halt.bin"));
     let control_file = ControlFile::load(&control_path)
         .await
@@ -190,6 +194,46 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
     assert_eq!(control_file.total_length(), 1024 * 1024);
     assert_eq!(control_file.bitfield().len(), 8);
     tracker.wait_for_event("stopped").await;
+}
+
+#[tokio::test]
+async fn test_e2e_bt_stop_timeout_returns_timeout_result_without_peers() {
+    let dir = tmp_dir();
+    let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
+    let torrent_data = build_test_torrent(
+        "stop-timeout.bin",
+        1024 * 1024,
+        16 * 1024,
+        &tracker.announce_url(),
+    );
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(104),
+        &torrent_data,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            bt_stop_timeout: Some(1),
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let group = cmd.group_handle();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.execute())
+        .await
+        .expect("BT stop-timeout command timed out");
+    assert!(result.is_err(), "stop-timeout must stop a stalled download");
+
+    let group = group.recover();
+    assert_eq!(group.get_halt_reason(), HaltReason::Timeout);
+    assert_eq!(group.get_last_error_code(), DownloadResultCode::TimeOut);
+    assert_eq!(
+        group.create_download_result().code,
+        DownloadResultCode::TimeOut
+    );
 }
 
 #[tokio::test]
@@ -588,6 +632,47 @@ async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
             .any(|query| query.contains("event=started")),
         "default bt-hash-check-seed=true must enter the tracker lifecycle"
     );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_seed_unverified_skips_existing_payload_hash_check() {
+    let dir = tmp_dir();
+    let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
+    let torrent_data =
+        build_test_torrent("unverified-seed.bin", 1024, 512, &tracker.announce_url());
+    let output_path = dir.path().join("unverified-seed.bin");
+    let mut existing = [
+        expected_piece_data(0, 512, 1024),
+        expected_piece_data(1, 512, 1024),
+    ]
+    .concat();
+    existing[0] ^= 0xff;
+    std::fs::write(&output_path, &existing).unwrap();
+
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        check_integrity: true,
+        bt_seed_unverified: true,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(9110),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("unverified seed path timed out")
+        .expect("unverified seed path failed");
+
+    assert_eq!(std::fs::read(&output_path).unwrap(), existing);
+    assert!(command.group().status().is_completed());
 }
 
 #[tokio::test]

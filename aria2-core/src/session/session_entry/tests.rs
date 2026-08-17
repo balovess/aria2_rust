@@ -432,6 +432,7 @@ fn test_download_options_to_map_all_fields() {
         hash_check_only: false,
         bt_enable_hook_after_hash_check: true,
         bt_hash_check_seed: true,
+        bt_seed_unverified: true,
         bt_tracker: Some(vec![
             "https://tracker.example/announce".to_string(),
             "udp://tracker.example:6969".to_string(),
@@ -568,6 +569,7 @@ fn test_download_options_to_map_all_fields() {
     // BT
     assert_eq!(map.get("bt-force-encrypt").unwrap(), "true");
     assert_eq!(map.get("bt-require-crypto").unwrap(), "true");
+    assert_eq!(map.get("bt-seed-unverified").unwrap(), "true");
     assert_eq!(map.get("bt-max-peers").unwrap(), "64");
     assert_eq!(map.get("enable-dht").unwrap(), "false");
     assert_eq!(map.get("dht-listen-port").unwrap(), "6881-6999");
@@ -670,6 +672,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(restored.piece_length, Some(1024 * 1024));
     assert_eq!(restored.follow_torrent, Some(FollowMode::Memory));
     assert_eq!(restored.follow_metalink, Some(FollowMode::Disabled));
+    assert!(restored.bt_seed_unverified);
     assert!(!restored.ftp_pasv);
     assert_eq!(restored.http_user.as_deref(), Some("http-user"));
     assert!(restored.conditional_get);

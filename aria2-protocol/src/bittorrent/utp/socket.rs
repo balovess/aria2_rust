@@ -334,6 +334,29 @@ impl UtpSocket {
 
     /// Handle incoming SYN packet
     fn handle_syn(&mut self, packet: &UtpPacket, addr: SocketAddr) -> Result<(), UtpSocketError> {
+        // A SYN received on an address with an outgoing SynSent connection is
+        // that connection's SYN-ACK, not a new inbound connection.
+        if let Some(conn_id) = self.addr_to_conn.get(&addr).copied() {
+            let response_packets = {
+                let conn = self
+                    .connections
+                    .get_mut(&conn_id)
+                    .ok_or(UtpSocketError::ConnectionNotFound(conn_id))?;
+                if conn.state() != ConnectionState::SynSent {
+                    return Ok(());
+                }
+                conn.on_packet_received(packet)?
+            };
+
+            for response in response_packets {
+                self.send_packet(&response, addr)?;
+            }
+            self.timers.cancel_timer(conn_id, TimerType::ConnectTimeout);
+            self.timers
+                .set_timer(conn_id, TimerType::Keepalive, self.keepalive_interval);
+            return Ok(());
+        }
+
         if self.connections.len() >= MAX_CONNECTIONS {
             let reset = UtpPacket::reset(packet.connection_id);
             self.send_packet(&reset, addr)?;
@@ -795,5 +818,32 @@ mod tests {
         assert!(result.is_ok());
         let data = result.unwrap();
         assert!(data.is_empty());
+    }
+
+    #[test]
+    fn test_socket_routes_syn_ack_to_outgoing_connection() {
+        let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
+        let mut server = UtpSocket::bind("127.0.0.1:0").unwrap();
+        let connection_id = client.connect(server.local_addr()).unwrap();
+
+        for _ in 0..200 {
+            server.poll_recv().unwrap();
+            client.poll_recv().unwrap();
+            if client.connection_state(connection_id).unwrap() == ConnectionState::Established {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+
+        assert_eq!(
+            client.connection_state(connection_id).unwrap(),
+            ConnectionState::Established
+        );
+        assert_eq!(server.connection_count(), 1);
+        let server_connection_id = server.connection_ids()[0];
+        assert_eq!(
+            server.connection_state(server_connection_id).unwrap(),
+            ConnectionState::Established
+        );
     }
 }

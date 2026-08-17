@@ -926,24 +926,41 @@ impl MetalinkDownloadCommand {
 
     #[cfg(feature = "bittorrent")]
     async fn download_metadata_url(&self, url: &str) -> Result<Vec<u8>> {
-        let response = self.client.get(url).send().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("HTTP request failed: {e}"),
-            })
-        })?;
+        if let Some(error) = self.lifecycle_error() {
+            return Err(error);
+        }
+
+        let response = tokio::select! {
+            response = self.client.get(url).send() => response.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("HTTP request failed: {e}"),
+                })
+            })?,
+            _ = self.wait_for_lifecycle_change() => {
+                return Err(self.lifecycle_error().unwrap_or_else(|| {
+                    Aria2Error::DownloadFailed("Metalink metadata download halted".into())
+                }));
+            }
+        };
         let status = response.status();
         if !status.is_success() && status.as_u16() != 206 {
             return Err(classify_metalink_http_status(status.as_u16()));
         }
-        response
-            .bytes()
-            .await
-            .map(|bytes| bytes.to_vec())
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("HTTP metadata read failed: {e}"),
-                })
-            })
+
+        tokio::select! {
+            bytes = response.bytes() => bytes
+                .map(|bytes| bytes.to_vec())
+                .map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: format!("HTTP metadata read failed: {e}"),
+                    })
+                }),
+            _ = self.wait_for_lifecycle_change() => {
+                Err(self.lifecycle_error().unwrap_or_else(|| {
+                    Aria2Error::DownloadFailed("Metalink metadata download halted".into())
+                }))
+            }
+        }
     }
 
     async fn verify_file_hash(
@@ -1208,5 +1225,59 @@ mod http_status_tests {
         ));
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
         server.await.expect("404 fixture should finish");
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[tokio::test]
+    async fn slow_torrent_metadata_read_observes_pause() {
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::oneshot;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("metadata fixture should bind");
+        let url = format!("http://{}/payload.torrent", listener.local_addr().unwrap());
+        let (headers_tx, headers_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("metadata request");
+            let mut request = [0u8; 2048];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read metadata request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write metadata headers");
+            let _ = headers_tx.send(());
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+
+        let options = DownloadOptions::default();
+        let command = MetalinkDownloadCommand::new(
+            GroupId::new(402),
+            br#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><size>4</size><url>http://127.0.0.1/unused</url></file></metalink>"#,
+            &options,
+            None,
+        )
+        .expect("Metalink command should construct");
+        let group = Arc::clone(&command.group);
+        let command_task = tokio::spawn(async move { command.download_metadata_url(&url).await });
+
+        headers_rx.await.expect("metadata headers should be sent");
+        group.recover_mut().pause().expect("pause should succeed");
+
+        let result = tokio::time::timeout(Duration::from_secs(1), command_task)
+            .await
+            .expect("metadata read should stop promptly after pause")
+            .expect("metadata task should not panic")
+            .expect_err("paused metadata read must return an error");
+        assert!(matches!(
+            result,
+            Aria2Error::DownloadFailed(message) if message == "Download paused"
+        ));
+        server.abort();
     }
 }

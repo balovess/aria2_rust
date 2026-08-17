@@ -8,7 +8,7 @@ describe('Auth Integration', () => {
     const { url, stop } = await startMockServer({ token: 'mysecret' });
     const client = new Aria2Client(url, { token: 'mysecret' });
     const version = await client.getVersion();
-        expect(version.version).toBe('0.3.0');
+        expect(version.version).toBe('0.3.1');
     await client.close();
     await stop();
   });
@@ -25,7 +25,7 @@ describe('Auth Integration', () => {
     const { url, stop } = await startMockServer();
     const client = new Aria2Client(url);
     const version = await client.getVersion();
-        expect(version.version).toBe('0.3.0');
+        expect(version.version).toBe('0.3.1');
     await client.close();
     await stop();
   });

@@ -593,6 +593,10 @@ fn test_update_option_new_runtime_changeable() {
     assert!(group.update_option("bt-force-encrypt", serde_json::json!("true")));
     assert!(group.options().bt_force_encrypt);
 
+    // bt-seed-unverified
+    assert!(group.update_option("bt-seed-unverified", serde_json::json!("true")));
+    assert!(group.options().bt_seed_unverified);
+
     // Canonical reserved options without a dedicated execution field still
     // use the shared registry validator and remain visible after applying.
     assert!(group.update_option("allow-overwrite", serde_json::json!("true")));

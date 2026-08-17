@@ -492,6 +492,7 @@ impl BtDownloadCommand {
             hash_check_only: options.hash_check_only,
             bt_enable_hook_after_hash_check: options.bt_enable_hook_after_hash_check,
             bt_hash_check_seed: options.bt_hash_check_seed,
+            bt_seed_unverified: options.bt_seed_unverified,
             hash_check_completed: false,
             bt_complete_event_emitted: false,
 

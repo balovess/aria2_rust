@@ -35,14 +35,6 @@ jobs:
             exit 1
           fi
 
-          PYTHON_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' bindings/python/pyproject.toml | head -n 1)
-          NODE_VERSION=$(node -p "require('./bindings/nodejs/package.json').version")
-          if [ "$PYTHON_VERSION" != "$VERSION" ] || [ "$NODE_VERSION" != "$VERSION" ]; then
-            echo "All published package versions must match $VERSION" >&2
-            echo "Python: $PYTHON_VERSION; Node.js: $NODE_VERSION" >&2
-            exit 1
-          fi
-
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -133,27 +125,35 @@ jobs:
           set -euo pipefail
           test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN is not configured" >&2; exit 1; }
 
+          crate_version() {
+            local package="$1"
+            cargo metadata --no-deps --format-version 1 |
+              jq -r --arg package "$package" '.packages[] | select(.name == $package) | .version'
+          }
+
           crate_is_published() {
             local package="$1"
+            local version="$2"
             curl --fail --silent --show-error --location \
-              --user-agent "aria2-rust-release/$VERSION (https://github.com/balovess/aria2_rust)" \
-              "https://crates.io/api/v1/crates/$package/$VERSION" >/dev/null
+              --user-agent "aria2-rust-release/$version (https://github.com/balovess/aria2_rust)" \
+              "https://crates.io/api/v1/crates/$package/$version" >/dev/null
           }
 
           wait_for_published_crate() {
             local package="$1"
+            local version="$2"
             for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
-              if crate_is_published "$package"; then
+              if crate_is_published "$package" "$version"; then
                 return 0
               fi
 
               if [ "$attempt" -lt 12 ]; then
-                echo "$package@$VERSION is not visible in crates.io yet; retrying in 15 seconds..."
+                echo "$package@$version is not visible in crates.io yet; retrying in 15 seconds..."
                 sleep 15
               fi
             done
 
-            echo "$package@$VERSION did not become visible in crates.io" >&2
+            echo "$package@$version did not become visible in crates.io" >&2
             return 1
           }
 
@@ -173,12 +173,16 @@ jobs:
             return 1
           }
 
-          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
-
           publish_if_missing() {
             local package="$1"
-            if crate_is_published "$package"; then
-              echo "$package@$VERSION is already published; skipping."
+            local version
+            version="$(crate_version "$package")"
+            if [ -z "$version" ] || [ "$version" = "null" ]; then
+              echo "Unable to determine version for $package" >&2
+              return 1
+            fi
+            if crate_is_published "$package" "$version"; then
+              echo "$package@$version is already published; skipping."
               return 0
             fi
             cargo publish --dry-run -p "$package"
@@ -186,18 +190,19 @@ jobs:
           }
 
           publish_if_missing aria2-protocol
-          wait_for_published_crate aria2-protocol
+          wait_for_published_crate aria2-protocol "$(crate_version aria2-protocol)"
           verify_dependent_package aria2-core
           publish_if_missing aria2-core
-          wait_for_published_crate aria2-core
+          wait_for_published_crate aria2-core "$(crate_version aria2-core)"
           verify_dependent_package aria2-rpc
           publish_if_missing aria2-rpc
 
   publish-python:
-    name: Publish Python SDK
+    name: Publish Python SDK (optional)
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    continue-on-error: true
     environment: pypi
     permissions:
       id-token: write
@@ -233,11 +238,13 @@ jobs:
           packages-dir: bindings/python/dist
 
   publish-nodejs:
-    name: Publish Node.js SDK
+    name: Publish Node.js SDK (optional)
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    continue-on-error: true
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v5
@@ -249,12 +256,9 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Build and publish Node.js SDK
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd bindings/nodejs
-          test -n "$NODE_AUTH_TOKEN" || { echo "NPM_TOKEN is not configured" >&2; exit 1; }
           npm ci
           npm run build
           if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
@@ -300,7 +304,8 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: [prepare, build, publish-crates, publish-python, publish-nodejs, docker]
+    # Only platform builds and crate publication gate the binary release.
+    needs: [prepare, build, publish-crates]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
