@@ -1,5 +1,100 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-18 BitTorrent seeding 生命周期检查点
+
+`BtDownloadCommand::run_seeding_phase` 现在与所属 `RequestGroup` 的 lifecycle
+通知竞争执行。pause、remove 或 halt 时，先取消 seed manager，再等待一次其
+取消清理路径，确保 stopped announce 和会话资源清理完成，随后返回 typed
+lifecycle error；非终止通知会重新建立等待。错误在 `finalize_download` 之前
+返回，因此做种被中断的任务不会错误进入 `Complete`。
+
+Rust-owned 回归测试在修复前确认了空 peer 做种循环的具体症状：pause 和 remove
+都会在 1 秒超时。修复后两条路径都及时返回，并保留请求的非完成状态。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_seeding_phase_stops_on_pause_without_completion -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_seeding_phase_stops_on_remove_without_completion -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  35 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  所有 aria2-core integration test target 通过
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭 BitTorrent seeding 生命周期取消和禁止错误完成的切片；更广泛
+的跨协议生命周期组合、完整 BitTorrent scheduler/seeding parity、第三方/原版
+客户端互操作、bindings、实测性能和最终 workspace 验收仍未完成。当前阶段保持
+`phase-2-core-domain` (`in_progress`)，整体迁移保持 `PARTIAL`。
+
+## 2026-08-18 FTP/SFTP in-flight read 生命周期检查点
+
+FTP 和 SFTP 主数据循环现在把每次网络读取与所属 `RequestGroup` 的 lifecycle
+通知竞争执行。非终止通知（例如 save-session）只重试当前偏移；pause、remove
+或 shutdown 的真实 halt 会丢弃仍在等待的网络操作，刷新 writer 并保存控制文件，
+不再等待服务端排队中的 `ABOR`/`CLOSE` 响应。这样协议连接 drop 本身就是有界的
+取消路径。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  37 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  24 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download test_e2e_ftp_pause_interrupts_stalled_data_read -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download e2e_sftp_pause_interrupts_stalled_read -- --exact --test-threads=1
+  1 passed, 0 failed
+~~~
+
+本检查点只关闭 FTP/SFTP in-flight read 的 pause 生命周期和有界 halt 清理；
+更广泛的跨协议组合、第三方/原版客户端互操作、bindings、实测性能和最终
+workspace 验收仍未完成。当前阶段保持 `phase-2-core-domain`，整体迁移保持
+`PARTIAL`。
+
+## 2026-08-18 BitTorrent block-read 生命周期检查点
+
+BitTorrent piece loop 现在把低层 block read 与所属 `RequestGroup` 的 lifecycle
+通知竞争执行。pause、remove 或 shutdown 触发真实 halt 时，会及时 flush/close
+writer、保存当前 A2CF bitfield 后退出；session save 使用同一个通知但不是 halt，
+因此只重试当前 piece，让正常的已验证 piece 边界消费 checkpoint 请求，不会误终止
+命令。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_pause_interrupts_stalled_piece_read -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_save_session_flushes_requested_checkpoint -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  33 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭 BitTorrent in-flight block-read 生命周期和 session-save 交互切片；
+更广泛的跨协议 pause/remove 组合、seeding/scheduler parity、第三方/原版客户端
+互操作、bindings、实测性能和最终 workspace 验收仍未完成。当前阶段保持
+`phase-2-core-domain`，整体迁移保持 `PARTIAL`。
+
 ## 2026-08-17 Session 默认 seed-ratio 检查点
 
 `DownloadOptions::default().seed_ratio` 为 `Some(1.0)`，与 `seed-ratio` 选项

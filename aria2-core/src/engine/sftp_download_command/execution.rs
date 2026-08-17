@@ -325,10 +325,12 @@ impl SftpDownloadCommand {
             let to_read = (constants::SFTP_DISK_WRITE_CHUNK_SIZE as u64).min(remaining) as usize;
 
             // Read chunk from remote file at current offset
-            let data = match remote_file
-                .read_at(self.completed_bytes, to_read as u32)
-                .await
-            {
+            let lifecycle_notify = self.group.recover().lifecycle_notifier();
+            let lifecycle_changed = lifecycle_notify.notified();
+            tokio::pin!(lifecycle_changed);
+            lifecycle_changed.as_mut().enable();
+            let data = tokio::select! {
+                data = remote_file.read_at(self.completed_bytes, to_read as u32) => match data {
                 Ok(data) if data.is_empty() => {
                     debug!(
                         "[SFTP-CMD] EOF at offset {} (expected {})",
@@ -353,6 +355,24 @@ impl SftpDownloadCommand {
                     let _ = conn.disconnect().await;
                     let err = FileOpError::from(e);
                     return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
+                }
+                },
+                _ = &mut lifecycle_changed => {
+                    if let Err(error) = self.check_cancelled() {
+                        // CLOSE would be queued behind the stalled READ on
+                        // the same SFTP session. Dropping the handle and SSH
+                        // connection cancels the outstanding request without
+                        // waiting for a protocol response.
+                        drop(remote_file);
+                        self.finalize_partial_writer(&mut writer).await;
+                        self.flush_checkpoint().await;
+                        let _ = conn.disconnect().await;
+                        return Err(error);
+                    }
+
+                    // Save-session and other non-terminal lifecycle updates
+                    // leave the remote read alive; retry the current offset.
+                    continue;
                 }
             };
             let n = data.len();

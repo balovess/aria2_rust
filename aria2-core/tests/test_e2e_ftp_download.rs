@@ -773,6 +773,55 @@ async fn test_engine_ftp_pause_unpause_preserves_control_file() {
 }
 
 #[tokio::test]
+async fn test_e2e_ftp_pause_interrupts_stalled_data_read() {
+    let server = MockFtpServer::start_with_transfer_delay(Duration::from_secs(3)).await;
+    let dir = tmp_dir();
+    let output_name = "stalled.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = FtpDownloadCommand::new(
+        GroupId::new(410),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some(output_name),
+    )
+    .expect("FTP command should construct");
+    let group = command
+        .request_group()
+        .expect("FTP command should expose its request group");
+    let task = tokio::spawn(async move { command.execute().await });
+
+    wait_for_ftp_progress(&group).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    group
+        .recover_mut()
+        .pause()
+        .expect("FTP pause should be accepted");
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("paused FTP command remained in the stalled data read")
+        .expect("paused FTP task panicked");
+
+    assert!(result.is_err(), "pause should stop the current FTP command");
+    assert_eq!(group.recover().status(), DownloadStatus::Paused);
+    assert!(output_path.exists(), "pause should preserve FTP output");
+    assert!(
+        control_path.exists(),
+        "pause should preserve FTP checkpoint"
+    );
+}
+
+#[tokio::test]
 async fn test_engine_ftp_remove_preserves_partial_control_file() {
     let server = MockFtpServer::start_slow().await;
     let dir = tmp_dir();

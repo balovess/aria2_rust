@@ -1,6 +1,6 @@
 # Compatibility Status
 
-Last verified: 2026-08-17
+Last verified: 2026-08-18
 Reference implementation: aria2_original/  
 Binary package version: 0.3.2
 Library package versions: aria2-core 0.3.2, aria2-protocol 0.3.2, aria2-rpc 0.3.2
@@ -69,12 +69,81 @@ substitutes for missing original behavior.
 | --- | --- |
 | Active phase | `phase-2-core-domain` (`in_progress`) |
 | Passed and locked phases | `phase-1-baseline-matrix` (`passed_locked`) |
-| Latest verification | 2026-08-17 in the current worktree based on `02e3937` (`dev`) plus the uncommitted core lifecycle, HTTP, BitTorrent, Metalink, scheduler, and session-default fixes: `cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1` completed with exit code 0; `aria2-core` reports `3470 passed, 0 failed, 1 ignored` and all its integration test targets passed; the focused seed-option filter reports `35 passed, 0 failed`; `cargo clippy -p aria2-core --all-targets --all-features -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed; the earlier all-features workspace regression reported `aria2-protocol` `832 passed, 0 failed` and all four Rust packages passed all-targets/all-features Clippy with `-D warnings`; unrelated in-progress edits are preserved |
+| Latest verification | 2026-08-18 in the current worktree based on `02e3937` (`dev`) plus the uncommitted core lifecycle, HTTP, BitTorrent, Metalink, scheduler, session-default, BT block-read, FTP/SFTP in-flight read, and BitTorrent seeding lifecycle fixes: `cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1` completed with exit code 0; `aria2-core` reports `3470 passed, 0 failed, 1 ignored` and all its integration test targets passed; the all-features BitTorrent command target reports `35 passed, 0 failed, 2 ignored`, FTP reports `37 passed, 0 failed, 2 ignored`, and SFTP reports `24 passed, 0 failed, 2 ignored`; the focused seeding lifecycle target reports `2 passed, 0 failed`; `cargo clippy -p aria2-core --all-targets --all-features -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed; the earlier all-features workspace regression reported `aria2-protocol` `832 passed, 0 failed` and all four Rust packages passed all-targets/all-features Clippy with `-D warnings`; unrelated in-progress edits are preserved |
 | Current status | `PARTIAL`; phase 1 is locked, but the final acceptance and stop conditions are not met |
-| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; explicit pause/remove/halt regression coverage; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; session serialization of configured `certificate` and `private-key` paths; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; current core test and Clippy gates revalidated in the worktree |
+| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; explicit pause/remove/halt regression coverage; BitTorrent block reads now interrupt promptly on a real halt and leave a durable checkpoint, while non-halt lifecycle notifications such as save-session retry the current piece instead of terminating the command; BitTorrent seeding now races the owning RequestGroup lifecycle, cancels and drains the seed manager on pause/remove/halt, preserves stopped announce cleanup, and returns a lifecycle error before finalization; FTP and SFTP in-flight reads now observe lifecycle notifications and use bounded connection-drop cleanup on halt; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; session serialization of configured `certificate` and `private-key` paths; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; current core test and Clippy gates revalidated in the worktree |
 | Next action | Audit remaining phase-2 RequestGroup pause/resume, retry, storage, and checksum seams, starting with one independently reproducible cross-protocol lifecycle gap; keep broader protocol interoperability and later phases closed |
-| Acceptance evidence | The checkpoint below records the focused lifecycle tests, reserved-queue fairness regression, HTTP response classification tests, HTTP and BitTorrent integrity E2E, the current `aria2-core` library result (`3470 passed, 0 failed, 1 ignored`), the `aria2-protocol` library result (`832 passed, 0 failed`), the workspace regression command, all four `-D warnings` Clippy commands, formatting, and diff checks |
-| Remaining differences, risks, reopen conditions | Cross-protocol lifecycle combinations, original-client and third-party interoperability, bindings, measured performance, and final workspace acceptance remain open; reopen this checkpoint if any covered command bypasses the group-aware integrity entrypoint or a lifecycle test regresses |
+| Acceptance evidence | The checkpoint below records the focused lifecycle tests, reserved-queue fairness regression, HTTP response classification tests, HTTP, FTP, SFTP, and BitTorrent lifecycle/integrity/seeding E2E, the current `aria2-core` library result (`3470 passed, 0 failed, 1 ignored`), the `aria2-protocol` library result (`832 passed, 0 failed`), the workspace regression command, all four `-D warnings` Clippy commands, formatting, and diff checks |
+| Remaining differences, risks, reopen conditions | Cross-protocol lifecycle combinations, full BitTorrent scheduler/seeding parity, original-client and third-party interoperability, bindings, measured performance, and final workspace acceptance remain open; reopen this checkpoint if any covered command bypasses the group-aware lifecycle entrypoint or a lifecycle test regresses |
+
+## 2026-08-18 BitTorrent Seeding Lifecycle Checkpoint
+
+`BtDownloadCommand::run_seeding_phase` now races the seed manager against the
+owning `RequestGroup` lifecycle notification. Pause, remove, and halt cancel
+the manager, await its cancellation pass so stopped announce and session cleanup
+run, then return a typed lifecycle error. Non-terminal notifications are
+re-armed, and the error is returned before `finalize_download`, so a task cannot
+become `Complete` after seeding was interrupted.
+
+The Rust-owned regression first reproduced the pre-fix hang: both pause and
+remove timed out after one second while an empty-peer seed loop waited. After
+the fix, both cases return promptly and retain their requested non-complete
+state.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_seeding_phase_stops_on_pause_without_completion -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_seeding_phase_stops_on_remove_without_completion -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  35 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the BitTorrent seeding lifecycle cancellation and
+non-finalization slice. Broader cross-protocol lifecycle combinations, full
+BitTorrent scheduler/seeding parity, external interoperability, bindings,
+measured performance, and final workspace acceptance remain open. The active
+phase remains `phase-2-core-domain` (`in_progress`) and the migration remains
+`PARTIAL`.
+
+## 2026-08-18 FTP/SFTP In-Flight Read Lifecycle Checkpoint
+
+FTP and SFTP data loops now race each network read against the owning
+`RequestGroup` lifecycle notification. Non-terminal notifications such as
+save-session retry the current offset. A halt from pause, remove, or shutdown
+drops the pending network operation, finalizes the local writer, and persists
+the control file without waiting for a server-side `ABOR` or `CLOSE` response
+that may be queued behind the stalled read.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  37 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  24 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download test_e2e_ftp_pause_interrupts_stalled_data_read -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download e2e_sftp_pause_interrupts_stalled_read -- --exact --test-threads=1
+  1 passed, 0 failed
+~~~
+
+This closes only the FTP/SFTP in-flight read pause boundary and bounded halt
+cleanup. Broader cross-protocol combinations, external interoperability,
+bindings, measured performance, and final workspace acceptance remain open.
+The active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`.
 
 ## 2026-08-17 Session Default Seed-Ratio Checkpoint
 
@@ -107,6 +176,43 @@ boundary. Broader session restart combinations, cross-protocol lifecycle
 coverage, external interoperability, bindings, measured performance, and
 final workspace acceptance remain open. The active phase remains
 `phase-2-core-domain` (`in_progress`) and the migration remains `PARTIAL`.
+
+## 2026-08-17 BitTorrent Block-Read Lifecycle Checkpoint
+
+The BitTorrent piece loop now races each low-level block-read future against
+the owning `RequestGroup` lifecycle notification. A real halt from pause,
+remove, or shutdown flushes and closes the positioned writer, persists the
+current A2CF bitfield, and returns promptly. The shared notification is also
+used by save-session; non-halt notifications retry the interrupted piece so a
+requested checkpoint is consumed at the normal verified-piece boundary rather
+than terminating the command.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_pause_interrupts_stalled_piece_read -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_save_session_flushes_requested_checkpoint -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  33 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3470 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the BitTorrent in-flight block-read lifecycle slice and its
+save-session interaction. Broader cross-protocol pause/remove combinations,
+seeding and scheduler parity, external interoperability, bindings, measured
+performance, and final workspace acceptance remain open. The active phase
+remains `phase-2-core-domain` (`in_progress`) and the migration remains
+`PARTIAL`.
 
 ## 2026-08-17 RequestGroup Scheduler Fairness Checkpoint
 

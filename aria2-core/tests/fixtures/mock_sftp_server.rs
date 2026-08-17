@@ -57,6 +57,12 @@ impl MockSftpServer {
         Self::start_with_read_delay(Some(Duration::from_millis(50))).await
     }
 
+    /// Start a server with a caller-controlled delay before every READ reply.
+    /// This keeps a command inside one SFTP read while a lifecycle event fires.
+    pub async fn start_with_read_delay_for_test(delay: Duration) -> Self {
+        Self::start_with_read_delay(Some(delay)).await
+    }
+
     async fn start_with_read_delay(read_delay: Option<Duration>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

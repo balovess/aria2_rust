@@ -1000,30 +1000,77 @@ impl BtDownloadCommand {
             let mut piece_ok = false;
 
             // Phase 14 - B1: Use endgame-aware download when in endgame mode
-            let download_result = if endgame_state.is_endgame_active() {
-                info!(
-                    "[BT] Endgame: downloading piece {} with duplicate requests ({} peers available)",
-                    next_piece_idx,
-                    active_connections.len()
-                );
-                BtMessageHandler::download_piece_blocks_endgame_with_sources(
-                    active_connections,
-                    next_piece_idx as u32,
-                    actual_piece_len,
-                    num_blocks,
-                    &mut endgame_state,
-                    self.dht_engine.clone(),
-                )
-                .await
-            } else {
-                BtMessageHandler::download_piece_blocks_with_sources(
-                    active_connections,
-                    next_piece_idx as u32,
-                    actual_piece_len,
-                    num_blocks,
-                    self.dht_engine.clone(),
-                )
-                .await
+            // A block read can otherwise wait for the full protocol timeout
+            // after pause/remove. Keep the low-level message handler focused
+            // on peer I/O and let the owning RequestGroup interrupt the whole
+            // piece future through its lifecycle notification.
+            let lifecycle_notify = self.group.recover().lifecycle_notifier();
+            let lifecycle_wait = lifecycle_notify.notified();
+            tokio::pin!(lifecycle_wait);
+            lifecycle_wait.as_mut().enable();
+            let piece_download = async {
+                if endgame_state.is_endgame_active() {
+                    info!(
+                        "[BT] Endgame: downloading piece {} with duplicate requests ({} peers available)",
+                        next_piece_idx,
+                        active_connections.len()
+                    );
+                    BtMessageHandler::download_piece_blocks_endgame_with_sources(
+                        active_connections,
+                        next_piece_idx as u32,
+                        actual_piece_len,
+                        num_blocks,
+                        &mut endgame_state,
+                        self.dht_engine.clone(),
+                    )
+                    .await
+                } else {
+                    BtMessageHandler::download_piece_blocks_with_sources(
+                        active_connections,
+                        next_piece_idx as u32,
+                        actual_piece_len,
+                        num_blocks,
+                        self.dht_engine.clone(),
+                    )
+                    .await
+                }
+            };
+            let download_result = tokio::select! {
+                result = piece_download => result,
+                _ = &mut lifecycle_wait => {
+                    let halt_requested = {
+                        let group = self.group.recover();
+                        group.is_force_halt_requested() || group.is_halt_requested()
+                    };
+                    if !halt_requested {
+                        // Save-session and other non-terminal lifecycle
+                        // updates share this notifier. Retry the interrupted
+                        // piece so its normal completion boundary can consume
+                        // the requested checkpoint.
+                        continue;
+                    }
+
+                    writer.flush().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
+                    })?;
+                    writer.close().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                    })?;
+                    if let Some(checkpoint) = self.checkpoint.as_mut() {
+                        checkpoint
+                            .save(&piece_picker.export_bitfield(), self.completed_bytes)
+                            .await
+                            .map_err(|error| {
+                                Aria2Error::FileIo(format!(
+                                    "Failed to save halted BT checkpoint: {error}"
+                                ))
+                            })?;
+                        self.group.recover().take_save_control_file_request();
+                    }
+                    return Err(Aria2Error::DownloadFailed(
+                        "BitTorrent download halted".into(),
+                    ));
+                }
             };
 
             match download_result {

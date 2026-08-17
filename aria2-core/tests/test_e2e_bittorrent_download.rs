@@ -675,6 +675,159 @@ async fn test_e2e_bt_seed_unverified_skips_existing_payload_hash_check() {
     assert!(command.group().status().is_completed());
 }
 
+async fn assert_standalone_seeding_phase_stops_on_lifecycle_change(remove: bool) {
+    let dir = tmp_dir();
+    let torrent_data = build_test_torrent(
+        "seed-lifecycle.bin",
+        1024,
+        512,
+        "http://127.0.0.1:1/announce",
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent_data).unwrap();
+    let output_path = dir.path().join("seed-lifecycle.bin");
+    std::fs::write(&output_path, vec![0u8; 1024]).unwrap();
+    let options = DownloadOptions {
+        seed_time: None,
+        seed_ratio: None,
+        enable_dht: false,
+        enable_public_trackers: false,
+        file_allocation: Some("none".to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(if remove { 1053 } else { 1052 }),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let group = command.group_handle();
+    let task = tokio::spawn(async move {
+        command
+            .run_seeding_phase(
+                Vec::new(),
+                meta.info.piece_length,
+                meta.num_pieces() as u32,
+                meta.info_hash.bytes,
+            )
+            .await
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    if remove {
+        group.recover_mut().remove().unwrap();
+    } else {
+        group.recover_mut().pause().unwrap();
+    }
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("seeding phase did not stop after lifecycle change")
+        .expect("seeding phase task panicked");
+    let error = result.expect_err("lifecycle cancellation must not complete seeding");
+    let message = error.to_string();
+    if remove {
+        assert!(
+            message.contains("cancelled by user"),
+            "unexpected error: {message}"
+        );
+        assert!(group.recover().is_removed());
+    } else {
+        assert!(
+            message.contains("Download paused"),
+            "unexpected error: {message}"
+        );
+        assert!(group.recover().is_paused_flag());
+    }
+    assert!(!group.recover().status().is_completed());
+}
+
+#[tokio::test]
+async fn test_e2e_bt_seeding_phase_stops_on_pause_without_completion() {
+    assert_standalone_seeding_phase_stops_on_lifecycle_change(false).await;
+}
+
+#[tokio::test]
+async fn test_e2e_bt_seeding_phase_stops_on_remove_without_completion() {
+    assert_standalone_seeding_phase_stops_on_lifecycle_change(true).await;
+}
+
+#[tokio::test]
+async fn test_e2e_bt_pause_interrupts_stalled_piece_read() {
+    let dir = tmp_dir();
+    let total_size = 16 * 1024;
+    let piece_length = 16 * 1024;
+    let tracker = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "pause-stalled-read.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder).unwrap();
+    let peer = MockBtPeerServer::start_with_response_delay(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, piece_length, total_size)],
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    drop(tracker);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent(
+        "pause-stalled-read.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let options = DownloadOptions {
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(1051),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let group = command.group_handle();
+    let task = tokio::spawn(async move { command.execute().await });
+
+    for _ in 0..200 {
+        if !peer.requested_pieces().await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !peer.requested_pieces().await.is_empty(),
+        "the slow peer must receive a block request before pause"
+    );
+
+    let pause_started = std::time::Instant::now();
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .expect("paused BT command remained in the stalled block read")
+        .expect("paused BT task panicked");
+
+    assert!(result.is_err(), "pause should stop the current command");
+    assert!(pause_started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(group.recover().status().is_paused());
+
+    let output_path = dir.path().join("pause-stalled-read.bin");
+    let control_path = ControlFile::control_path_for(&output_path);
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("pause should write a valid checkpoint")
+        .expect("pause should leave a checkpoint");
+    assert_eq!(control_file.completed_pieces(), 0);
+}
+
 #[tokio::test]
 async fn test_e2e_bt_pause_then_resume_uses_checkpoint() {
     use aria2_core::request::request_group::DownloadStatus;

@@ -453,6 +453,60 @@ async fn e2e_engine_sftp_pause_unpause_preserves_control_file() {
 }
 
 #[tokio::test]
+async fn e2e_sftp_pause_interrupts_stalled_read() {
+    let server = MockSftpServer::start_with_read_delay_for_test(Duration::from_secs(3)).await;
+    let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
+    let output_name = "stalled.bin";
+    let output_path = output_dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let mut command = command_for(
+        &server,
+        server.password(),
+        server.file_path(),
+        &DownloadOptions::default(),
+        output_dir.path(),
+        output_name,
+        809,
+    );
+    let group = command
+        .request_group()
+        .expect("SFTP command should expose its request group");
+    let task = tokio::spawn(async move { command.execute().await });
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if server.read_requests() > 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("SFTP server did not receive a READ request");
+
+    group
+        .recover_mut()
+        .pause()
+        .expect("SFTP pause should be accepted");
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("paused SFTP command remained in the stalled read")
+        .expect("paused SFTP task panicked");
+
+    assert!(
+        result.is_err(),
+        "pause should stop the current SFTP command"
+    );
+    assert_eq!(group.recover().status(), DownloadStatus::Paused);
+    // The pause is issued before the first READ response, so no payload file
+    // is required yet; the control file is the durable resume boundary.
+    assert!(
+        control_path.exists(),
+        "pause should preserve SFTP checkpoint"
+    );
+}
+
+#[tokio::test]
 async fn e2e_engine_sftp_remove_preserves_partial_control_file() {
     let server = MockSftpServer::start_slow().await;
     let output_dir = tempfile::tempdir().expect("temporary output directory should exist");

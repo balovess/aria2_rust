@@ -700,7 +700,12 @@ impl FtpDownloadCommand {
                 )));
             }
 
-            let bytes_read = match data_stream.read(&mut buffer).await {
+            let lifecycle_notify = self.group.recover().lifecycle_notifier();
+            let lifecycle_changed = lifecycle_notify.notified();
+            tokio::pin!(lifecycle_changed);
+            lifecycle_changed.as_mut().enable();
+            let bytes_read = tokio::select! {
+                bytes_read = data_stream.read(&mut buffer) => match bytes_read {
                 Ok(bytes_read) => bytes_read,
                 Err(error) => {
                     use std::io::ErrorKind;
@@ -724,6 +729,41 @@ impl FtpDownloadCommand {
                     ctrl.abort_transfer().await;
                     ctrl.quit().await.ok();
                     return Err(FtpAttemptError::from(error));
+                }
+                },
+                _ = &mut lifecycle_changed => {
+                    let halted = {
+                        let group = self.group.recover();
+                        group.is_removed()
+                            || group.is_force_halt_requested()
+                            || group.is_halt_requested()
+                    };
+                    if !halted {
+                        // Save-session and other non-terminal lifecycle
+                        // notifications do not cancel an in-flight transfer.
+                        continue;
+                    }
+
+                    let halt_error = {
+                        let group = self.group.recover();
+                        if group.is_removed() {
+                            "Download cancelled by user"
+                        } else if group.is_paused_flag() {
+                            "Download paused"
+                        } else {
+                            "FTP download halted"
+                        }
+                    };
+                    drop(data_stream);
+                    self.finalize_partial_writer(&mut writer).await;
+                    self.flush_checkpoint().await;
+                    // The data connection may still be in a server-side
+                    // transfer. Dropping the control connection is the only
+                    // bounded cleanup here; waiting for ABOR/QUIT can block
+                    // behind the stalled data transfer.
+                    return Err(FtpAttemptError::from(Aria2Error::DownloadFailed(
+                        halt_error.into(),
+                    )));
                 }
             };
 
