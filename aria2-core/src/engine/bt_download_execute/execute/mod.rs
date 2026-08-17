@@ -242,13 +242,27 @@ impl Command for BtDownloadCommand {
             .set_bt_bitfield(checkpoint.bitfield().map(ToOwned::to_owned));
         self.checkpoint = Some(checkpoint);
 
+        // C++ `--bt-seed-unverified` marks an existing payload complete before
+        // the integrity command is scheduled. Keep hash-check-only explicit:
+        // it is a diagnostic request and must still validate the payload.
+        let seed_unverified = self.bt_seed_unverified && payload_exists && !self.hash_check_only;
+        let mut verified_piece_indices = if seed_unverified {
+            info!(
+                "bt-seed-unverified enabled; treating existing payload as complete without piece-hash validation"
+            );
+            self.completed_bytes = total_size;
+            self.progress.set_completed_length(total_size);
+            (0..num_pieces as usize).collect()
+        } else {
+            Vec::new()
+        };
+
         // --check-integrity: verify existing data against the torrent's piece
         // hashes before allocating/downloading (mirrors C++
         // CheckIntegrityMan + CheckIntegrityCommand).
-        let mut verified_piece_indices = Vec::new();
         let mut integrity_finished_action =
             crate::checksum::check_integrity::IntegrityFinishedAction::default();
-        if self.check_integrity {
+        if self.check_integrity && !seed_unverified {
             use crate::checksum::check_integrity::{IntegrityTrailingGarbageAction, man as ci_man};
             use crate::checksum::message_digest::HashType;
             use crate::util::rwlock_ext::RwLockRecover;

@@ -1,5 +1,166 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-17 BitTorrent `bt-stop-timeout` checkpoint
+
+The Rust BitTorrent piece loop now consumes the existing `bt-stop-timeout`
+option. It reads the live RequestGroup option each cycle, treats both an
+unset value and explicit `0` as disabled, and resets the no-progress checkpoint
+when completed piece bytes advance. When no peer or web-seed source is
+available, the loop remains alive for peer discovery so a configured timeout
+can apply. Expiry requests a force halt with `HaltReason::Timeout` and records
+`DownloadResultCode::TimeOut`, preserving the public timeout result mapping.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::bt_download_execute::execute::piece_download::tests -- --test-threads=1
+  2 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_stop_timeout_returns_timeout_result_without_peers -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  32 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the BitTorrent no-progress timeout slice. The active phase
+remains `phase-2-core-domain` (`in_progress`) and the migration remains
+`PARTIAL`; broader scheduler and seeding parity, dependency coverage,
+original-client and third-party interoperability, bindings, measured
+performance evidence, and final workspace acceptance remain open.
+
+## 2026-08-17 BitTorrent `bt-seed-unverified` checkpoint
+
+The Rust BitTorrent path now implements the original
+`bt-seed-unverified` behavior for an existing payload. The option defaults to
+`false`, is accepted by option-string parsing and runtime `changeOption`, and
+is serialized through the session option map. When enabled for an existing
+payload, the command marks all torrent pieces complete without validating their
+piece hashes and skips the piece writer, so the existing bytes are not
+rewritten. Explicit `hash-check-only` retains precedence and still validates
+the payload.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib request::request_group::options::tests -- --test-threads=1
+  PASS
+cargo test -p aria2-core --all-features --lib request::request_group::tests::test_update_option_new_runtime_changeable -- --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib session::session_entry::tests -- --test-threads=1
+  PASS
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  31 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The E2E fixture deliberately corrupts an existing payload, enables both
+`check-integrity` and `bt-seed-unverified`, and verifies successful completion
+with the corrupted bytes unchanged. This closes only the unverified-existing-
+payload BitTorrent slice; the active phase remains `phase-2-core-domain`
+(`in_progress`) and the migration remains `PARTIAL`. Broader scheduler and
+seeding parity, dependency coverage, original-client and third-party
+interoperability, bindings, measured performance evidence, and final workspace
+acceptance remain open.
+
+## 2026-08-17 Metalink torrent-metadata lifecycle checkpoint
+
+The Metalink BitTorrent metadata request now observes the owning
+`RequestGroup` lifecycle before connecting and while reading the response body.
+The request and body future are cancelled when the task is paused, removed, or
+halted, so a slow metadata server cannot keep the task alive until the full
+response or network timeout. Existing HTTP status classification and transport
+error behavior are unchanged.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::metalink_download_command::execution::http_status_tests -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_metalink_download -- --test-threads=1
+  18 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_metalink_lifecycle -- --test-threads=1
+  13 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  30 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3453 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the Metalink torrent-metadata lifecycle cancellation slice.
+The active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`; third-party and original-client interoperability,
+broader cross-protocol lifecycle combinations, bindings, measured performance
+evidence, and final workspace acceptance remain open.
+
+## 2026-08-17 Full Rust workspace test checkpoint
+
+The all-features Rust workspace test command completed successfully on the
+current worktree. It exercised every workspace crate's unit, integration, E2E,
+stress, performance, and doctest target selected by Cargo; ignored tests remain
+explicitly ignored and are not counted as passing evidence. The core library
+target in this aggregate reported `3453 passed, 0 failed, 1 ignored`.
+
+Rust-owned verification:
+
+~~~text
+cargo test --workspace --all-features -j 1 --quiet -- --test-threads=1
+  exit_code=0
+  all executed targets: passed; ignored tests retained their declared status
+~~~
+
+This closes the current Rust workspace aggregate test run only. Platform ABI
+matrices, Python/Node package and platform validation, original-client and
+browser-extension interoperability, measured aria2 C performance comparison,
+and final acceptance remain open; the active phase remains
+`phase-2-core-domain` (`in_progress`) and the migration remains `PARTIAL`.
+
+## 2026-08-17 BitTorrent uTP outgoing handshake checkpoint
+
+The uTP socket now routes a `StSyn` received from the address of an existing
+outgoing `SynSent` connection back through that connection's state machine. It
+therefore treats the packet as the expected SYN-ACK and reaches `Established`;
+new addresses retain the inbound-accept path. Before this correction, every
+SYN was treated as a new inbound connection and a socket-level outgoing uTP
+handshake could never complete. This is Rust-native BEP 29 state routing and
+does not change CLI/configuration, tracker, or BitTorrent wire fields.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-protocol --all-features --lib bittorrent::utp::socket::tests -- --test-threads=1
+  9 passed, 0 failed
+cargo test -p aria2-protocol --all-features --test utp_e2e_test -- --test-threads=1
+  53 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  30 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-protocol --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+This closes only the outgoing uTP socket-handshake routing slice. The active
+phase remains `phase-2-core-domain` (`in_progress`) and the migration remains
+`PARTIAL`; full BitTorrent scheduler/seeding parity, live original-client and
+third-party interoperability, bindings, measured performance evidence, and
+final workspace acceptance remain open.
+
 ## 2026-08-17 RequestGroup active-slot drain checkpoint
 
 The scheduler now counts every non-seed RequestGroup that remains in the active
@@ -1287,6 +1448,17 @@ This strengthens local cross-protocol evidence only. Full protocol lifecycle
 combinations, third-party services, platform coverage, browser/original-client
 interoperability, and the remaining phase-2 gates remain open; the overall
 migration remains `PARTIAL`.
+
+## 2026-08-17 Release Version Alignment To 0.3.1
+
+The release version is now aligned across the Rust workspace, the `aria2c`
+product identity, Python and Node.js package metadata, distribution manifests,
+installer fallbacks, and the Cargo/npm lock files. The release workflow now
+resolves the program release as `v0.3.1`, matching `aria2c --version` and the
+RPC `aria2.getVersion` value.
+
+The 2026-08-15 `0.3.0` entry below remains historical evidence for the previous
+release identity.
 
 ## 2026-08-15 Auto-save Checkpoint And 0.3.0 Release Identity
 

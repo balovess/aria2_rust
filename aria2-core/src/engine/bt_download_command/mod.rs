@@ -147,6 +147,8 @@ pub struct BtDownloadCommand {
     /// Continue into the BitTorrent peer/seed lifecycle after a complete
     /// payload passes `check-integrity`.
     pub(crate) bt_hash_check_seed: bool,
+    /// Treat an existing payload as complete without verifying piece hashes.
+    pub(crate) bt_seed_unverified: bool,
     /// Whether the current command completed from an integrity check rather
     /// than by downloading missing pieces.
     pub(crate) hash_check_completed: bool,

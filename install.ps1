@@ -5,7 +5,7 @@
 # Usage:
 #   irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
 #   or
-#   irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex; Install-Aria2Rust -Version "v0.3.0"
+#   irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex; Install-Aria2Rust -Version "v0.3.1"
 #
 # Options:
 #   -Version VERSION    Install a specific version (default: latest)
@@ -39,7 +39,7 @@ if ($Help) {
     Write-Host '  irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex'
     Write-Host ""
     Write-Host "  # Install specific version"
-    Write-Host '  irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex; Install-Aria2Rust -Version "v0.3.0"'
+    Write-Host '  irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex; Install-Aria2Rust -Version "v0.3.1"'
     Write-Host ""
     Write-Host "  # Install to custom directory"
     Write-Host '  irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex; Install-Aria2Rust -Prefix "C:\Tools\aria2-rust"'
@@ -130,8 +130,8 @@ function Install-Aria2Rust {
         Write-Info "Fetching latest version..."
         $Version = Get-LatestVersion
         if ([string]::IsNullOrEmpty($Version)) {
-            Write-Warning "Could not determine latest version, using v0.3.0"
-            $Version = "v0.3.0"
+            Write-Warning "Could not determine latest version, using v0.3.1"
+            $Version = "v0.3.1"
         }
     }
 

@@ -103,6 +103,9 @@ pub struct DownloadOptions {
     /// Continue into the BitTorrent seed lifecycle after a successful
     /// integrity check of a complete payload. The aria2 default is `true`.
     pub bt_hash_check_seed: bool,
+    /// Treat an existing BitTorrent payload as complete without verifying
+    /// piece hashes. This is the C++ `--bt-seed-unverified` option.
+    pub bt_seed_unverified: bool,
     /// Seeding time in seconds. C++ aria2 stores this as a float (minutes x 60).
     pub seed_time: Option<f64>,
     /// Seeding ratio threshold. Default: 1.0 (matches C++ PREF_SEED_RATIO default).
@@ -405,6 +408,7 @@ impl Default for DownloadOptions {
             hash_check_only: false,
             bt_enable_hook_after_hash_check: true,
             bt_hash_check_seed: true,
+            bt_seed_unverified: false,
             seed_time: None,
             seed_ratio: Some(1.0),
             checksum: None,
@@ -684,6 +688,10 @@ impl DownloadOptions {
                 .get("bt-hash-check-seed")
                 .map(|v| v == "true")
                 .unwrap_or(true),
+            bt_seed_unverified: options
+                .get("bt-seed-unverified")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
@@ -1195,6 +1203,7 @@ mod tests {
                 "false".to_string(),
             ),
             ("bt-hash-check-seed".to_string(), "false".to_string()),
+            ("bt-seed-unverified".to_string(), "true".to_string()),
             ("bt-remove-unselected-file".to_string(), "true".to_string()),
         ]);
 
@@ -1202,6 +1211,14 @@ mod tests {
 
         assert!(!options.bt_enable_hook_after_hash_check);
         assert!(!options.bt_hash_check_seed);
+        assert!(options.bt_seed_unverified);
         assert!(options.bt_remove_unselected_file);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn bt_seed_unverified_defaults_to_false() {
+        assert!(!DownloadOptions::default().bt_seed_unverified);
+        assert!(!DownloadOptions::from_option_strings(&HashMap::new()).bt_seed_unverified);
     }
 }

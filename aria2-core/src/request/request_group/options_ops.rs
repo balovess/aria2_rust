@@ -319,6 +319,10 @@ fn apply_rpc_option(
             opts.bt_hash_check_seed = rpc_option_bool(value, key)?;
             Ok(true)
         }
+        "bt-seed-unverified" => {
+            opts.bt_seed_unverified = rpc_option_bool(value, key)?;
+            Ok(true)
+        }
         "bt-remove-unselected-file" => {
             opts.bt_remove_unselected_file = rpc_option_bool(value, key)?;
             Ok(true)

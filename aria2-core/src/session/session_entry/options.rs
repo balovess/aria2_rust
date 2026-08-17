@@ -93,6 +93,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if !opts.bt_hash_check_seed {
         map.insert("bt-hash-check-seed".to_string(), "false".to_string());
     }
+    if opts.bt_seed_unverified {
+        map.insert("bt-seed-unverified".to_string(), "true".to_string());
+    }
     if let Some(ref v) = opts.metalink_version {
         map.insert("metalink-version".to_string(), v.clone());
     }

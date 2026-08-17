@@ -15,7 +15,7 @@ use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as Progress
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::BtPeerSnapshot;
+use crate::request::request_group::{BtPeerSnapshot, DownloadResultCode, HaltReason};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::types::{EndgameState, PeerKey};
@@ -59,6 +59,50 @@ struct NewPeerConnectionsContext<'a> {
     suggest_sent_counts: &'a mut HashMap<PeerKey, usize>,
     peer_tracker: &'a mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
     choking_algo: &'a mut Option<crate::engine::choking_algorithm::ChokingAlgorithm>,
+}
+
+/// Tracks consecutive BitTorrent time without a completed piece.
+///
+/// The original `BtStopDownloadCommand` observes the download periodically
+/// and resets its checkpoint when the measured download speed is positive.
+/// The piece loop already owns the authoritative completed-byte counter, so
+/// using it here avoids a stale cached speed keeping a stalled task alive.
+struct BtStopTimeoutState {
+    configured: Option<Duration>,
+    last_progress_at: Instant,
+    last_completed_bytes: u64,
+}
+
+impl BtStopTimeoutState {
+    fn new(now: Instant, completed_bytes: u64) -> Self {
+        Self {
+            configured: None,
+            last_progress_at: now,
+            last_completed_bytes: completed_bytes,
+        }
+    }
+
+    fn should_halt(
+        &mut self,
+        configured_seconds: Option<u64>,
+        completed_bytes: u64,
+        now: Instant,
+    ) -> bool {
+        let configured = configured_seconds
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs);
+        if configured != self.configured {
+            self.configured = configured;
+            self.last_progress_at = now;
+        }
+
+        if completed_bytes > self.last_completed_bytes {
+            self.last_completed_bytes = completed_bytes;
+            self.last_progress_at = now;
+        }
+
+        configured.is_some_and(|timeout| now.duration_since(self.last_progress_at) >= timeout)
+    }
 }
 
 impl BtDownloadCommand {
@@ -260,6 +304,14 @@ impl BtDownloadCommand {
         pex_send_interval_secs: u64,
         verified_piece_indices: &[usize],
     ) -> Result<()> {
+        // A complete integrity result or bt-seed-unverified path has no piece
+        // writes to perform. Return before opening a writer, which could
+        // truncate or otherwise rewrite an already-complete payload.
+        if verified_piece_indices.len() == num_pieces as usize {
+            info!("[BT] All torrent pieces are already complete; skipping piece writer");
+            return Ok(());
+        }
+
         // Single-file torrents are written with a positioned + cached writer:
         // BT downloads pieces out of order (RarestFirst etc.), so writes must
         // target the piece offset — the old sequential `write()` appended
@@ -418,6 +470,7 @@ impl BtDownloadCommand {
         // G1: Snub detection state - track last data received time per peer index
         let mut peer_last_data_time: HashMap<PeerKey, Instant> = HashMap::new();
         let mut last_snub_check = Instant::now();
+        let mut stop_timeout = BtStopTimeoutState::new(Instant::now(), self.completed_bytes);
 
         // Initialize last-data-time tracking for all active peers
         for conn in active_connections.iter() {
@@ -430,9 +483,28 @@ impl BtDownloadCommand {
             self.drain_incoming_peers(active_connections, piece_length, total_size);
             self.bt_runtime.set_connections(active_connections.len());
 
-            let halt_requested = {
+            let (halt_requested, stop_timeout_elapsed) = {
                 let group = self.group.recover();
-                group.is_force_halt_requested() || group.is_halt_requested()
+                let halt_requested = group.is_force_halt_requested() || group.is_halt_requested();
+                let stop_timeout_elapsed = !halt_requested
+                    && stop_timeout.should_halt(
+                        group.options().bt_stop_timeout,
+                        self.completed_bytes,
+                        Instant::now(),
+                    );
+                (halt_requested, stop_timeout_elapsed)
+            };
+            if stop_timeout_elapsed {
+                let group = self.group.recover();
+                let timeout_seconds = group.options().bt_stop_timeout.unwrap_or_default();
+                warn!(
+                    gid = group.gid().value(),
+                    timeout_seconds,
+                    "Stopping BitTorrent download after consecutive no-progress timeout"
+                );
+                group.request_force_halt(HaltReason::Timeout);
+                group.set_last_error(DownloadResultCode::TimeOut, "Download timed out");
+                continue;
             };
             if halt_requested {
                 writer.flush().await.map_err(|error| {
@@ -461,6 +533,16 @@ impl BtDownloadCommand {
                     endgame_state.exit_endgame();
                 }
                 break;
+            }
+
+            // With no connected peers, keep the torrent alive for tracker,
+            // DHT, PEX, or incoming-peer discovery. A configured
+            // `bt-stop-timeout` is checked at the top of each cycle and will
+            // terminate this wait when the no-progress interval expires.
+            if active_connections.is_empty() && web_seed_manager.is_none() {
+                debug!("[BT] No peers available, waiting for peer discovery...");
+                tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
+                continue;
             }
 
             // Phase 14 - B1: Check if we should enter endgame mode
@@ -982,5 +1064,32 @@ impl BtDownloadCommand {
             }
             *last_progress_save = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BtStopTimeoutState;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn zero_timeout_is_disabled() {
+        let start = Instant::now();
+        let mut state = BtStopTimeoutState::new(start, 0);
+
+        assert!(!state.should_halt(Some(0), 0, start + Duration::from_secs(60)));
+        assert!(!state.should_halt(None, 0, start + Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn completed_piece_progress_resets_timeout_checkpoint() {
+        let start = Instant::now();
+        let mut state = BtStopTimeoutState::new(start, 0);
+
+        assert!(!state.should_halt(Some(2), 0, start));
+        assert!(!state.should_halt(Some(2), 0, start + Duration::from_secs(1)));
+        assert!(!state.should_halt(Some(2), 1, start + Duration::from_secs(1)));
+        assert!(!state.should_halt(Some(2), 1, start + Duration::from_secs(2)));
+        assert!(state.should_halt(Some(2), 1, start + Duration::from_secs(3)));
     }
 }
