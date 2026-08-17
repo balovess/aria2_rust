@@ -236,9 +236,12 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Build and publish Node.js SDK
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd bindings/nodejs
+          test -n "$NODE_AUTH_TOKEN" || { echo "NPM_TOKEN is not configured" >&2; exit 1; }
           npm ci
           npm run build
           npm publish --access public --provenance
