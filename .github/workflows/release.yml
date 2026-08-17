@@ -120,7 +120,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: publish-crates
+          key: publish-crates-${{ needs.prepare.outputs.version }}
+          cache-target: false
+      - name: Clean stale package artifacts
+        shell: bash
+        run: rm -rf target/package
       - name: Publish crates.io packages
         shell: bash
         env:
