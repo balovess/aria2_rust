@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 
-use crate::engine::command::ProgressUpdate;
 use crate::engine::download_cookie::CookieHelper;
-use crate::engine::http_segment_downloader::{HttpSegmentDownloader, WriteChunk};
+use crate::engine::http_segment_downloader::{HttpSegmentDownloader, SegmentProgress, WriteChunk};
 use crate::error::Result;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
@@ -29,7 +28,7 @@ pub struct HttpSegmentRequest {
     pub offset: u64,
     pub length: u64,
     pub cookie_header: Option<String>,
-    pub progress_tx: mpsc::Sender<ProgressUpdate>,
+    pub(crate) progress: Arc<SegmentProgress>,
     pub write_tx: mpsc::Sender<WriteChunk>,
     pub expected_entity_length: u64,
 }
@@ -154,13 +153,13 @@ impl HttpSegmentRequestExecutor {
                 .with_auth_options(auth_options, netrc_path);
             downloader.clear_last_peer_addr();
             let result = downloader
-                .download_range_streaming(
+                .download_range_streaming_with_progress(
                     &request.url,
                     request.offset,
                     request.length,
                     request.cookie_header.as_deref(),
                     &[],
-                    Some(&request.progress_tx),
+                    Some(&request.progress),
                     &request.write_tx,
                     request.expected_entity_length,
                 )

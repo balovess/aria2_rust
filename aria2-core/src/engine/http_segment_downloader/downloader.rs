@@ -13,6 +13,7 @@ use tracing::debug;
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::engine::download_cookie::CookieHelper;
+use crate::engine::http_segment_downloader::progress::SegmentProgress;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
 use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
@@ -511,6 +512,58 @@ impl HttpSegmentDownloader {
         write_tx: &mpsc::Sender<WriteChunk>,
         expected_entity_length: u64,
     ) -> Result<u64> {
+        self.download_range_streaming_inner(
+            url,
+            offset,
+            length,
+            cookie_header,
+            headers,
+            progress_tx.map(StreamingProgress::Channel),
+            write_tx,
+            expected_entity_length,
+        )
+        .await
+    }
+
+    /// Streaming range download with lock-free progress aggregation for the
+    /// concurrent HTTP scheduler.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn download_range_streaming_with_progress(
+        &self,
+        url: &str,
+        offset: u64,
+        length: u64,
+        cookie_header: Option<&str>,
+        headers: &[(String, String)],
+        progress: Option<&SegmentProgress>,
+        write_tx: &mpsc::Sender<WriteChunk>,
+        expected_entity_length: u64,
+    ) -> Result<u64> {
+        self.download_range_streaming_inner(
+            url,
+            offset,
+            length,
+            cookie_header,
+            headers,
+            progress.map(StreamingProgress::Segment),
+            write_tx,
+            expected_entity_length,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_range_streaming_inner(
+        &self,
+        url: &str,
+        offset: u64,
+        length: u64,
+        cookie_header: Option<&str>,
+        headers: &[(String, String)],
+        progress: Option<StreamingProgress<'_>>,
+        write_tx: &mpsc::Sender<WriteChunk>,
+        expected_entity_length: u64,
+    ) -> Result<u64> {
         if length == 0 {
             return Ok(0);
         }
@@ -572,16 +625,25 @@ impl HttpSegmentDownloader {
             current_offset += chunk_len;
             total_written += chunk_len;
 
-            // Report per-chunk progress if a progress channel is provided
-            if let Some(tx) = progress_tx
+            // Report progress at the same byte threshold without scheduling a
+            // receiver task for every segment.
+            if progress.is_some()
                 && total_written - last_reported_progress >= constants::PROGRESS_UPDATE_BYTES as u64
             {
-                let update = ProgressUpdate {
-                    completed_bytes: offset + total_written,
-                    download_speed: 0,
-                    upload_speed: 0,
-                };
-                let _ = tx.send(update).await;
+                match progress {
+                    Some(StreamingProgress::Channel(tx)) => {
+                        let update = ProgressUpdate {
+                            completed_bytes: offset + total_written,
+                            download_speed: 0,
+                            upload_speed: 0,
+                        };
+                        let _ = tx.send(update).await;
+                    }
+                    Some(StreamingProgress::Segment(segment)) => {
+                        segment.record(total_written);
+                    }
+                    None => unreachable!("progress presence checked above"),
+                }
                 last_reported_progress = total_written;
             }
         }
@@ -603,6 +665,12 @@ impl HttpSegmentDownloader {
 
         Ok(total_written)
     }
+}
+
+#[derive(Clone, Copy)]
+enum StreamingProgress<'a> {
+    Channel(&'a mpsc::Sender<ProgressUpdate>),
+    Segment(&'a SegmentProgress),
 }
 
 #[cfg(test)]

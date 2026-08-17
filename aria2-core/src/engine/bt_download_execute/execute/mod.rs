@@ -43,16 +43,9 @@ impl BtDownloadCommand {
         &mut self,
         writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
         bitfield: &[u8],
+        piece_bytes: u64,
     ) -> Result<()> {
         let save_requested = self.group.recover().is_save_control_file_requested();
-        if save_requested {
-            writer.flush().await.map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to flush requested BitTorrent checkpoint: {error}"
-                ))
-            })?;
-        }
-
         let Some(checkpoint) = self.checkpoint.as_mut() else {
             if save_requested {
                 return Err(Aria2Error::FileIo(
@@ -62,8 +55,36 @@ impl BtDownloadCommand {
             return Ok(());
         };
 
+        self.checkpoint_bytes_since_save = self
+            .checkpoint_bytes_since_save
+            .saturating_add(piece_bytes);
+        let interval_elapsed = self.checkpoint_last_save.elapsed()
+            >= std::time::Duration::from_secs(crate::constants::BT_CHECKPOINT_SAVE_INTERVAL_SECS);
+        let bytes_threshold_reached = self.checkpoint_bytes_since_save
+            >= crate::constants::BT_CHECKPOINT_SAVE_BYTES;
+        if !save_requested && !interval_elapsed && !bytes_threshold_reached {
+            return Ok(());
+        }
+
+        if save_requested {
+            writer.flush().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to flush requested BitTorrent checkpoint: {error}"
+                ))
+            })?;
+        }
+
+        let save_started = std::time::Instant::now();
         match checkpoint.save(bitfield, self.completed_bytes).await {
             Ok(()) => {
+                self.checkpoint_bytes_since_save = 0;
+                self.checkpoint_last_save = std::time::Instant::now();
+                tracing::debug!(
+                    piece_bytes,
+                    save_ms = save_started.elapsed().as_millis() as u64,
+                    forced = save_requested,
+                    "BT checkpoint persisted"
+                );
                 if save_requested {
                     self.group.recover().take_save_control_file_request();
                 }

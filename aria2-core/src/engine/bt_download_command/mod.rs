@@ -252,6 +252,10 @@ pub struct BtDownloadCommand {
     pub(crate) bt_peer_route: Option<crate::engine::bt_peer_listener::BtPeerRouteHandle>,
     /// Rust-owned A2CF checkpoint for verified torrent pieces.
     pub(crate) checkpoint: Option<crate::engine::bt_checkpoint::BtCheckpoint>,
+    /// Bytes verified since the last durable torrent checkpoint.
+    pub(crate) checkpoint_bytes_since_save: u64,
+    /// Time at which the last durable torrent checkpoint completed.
+    pub(crate) checkpoint_last_save: Instant,
 }
 
 impl BtDownloadCommand {

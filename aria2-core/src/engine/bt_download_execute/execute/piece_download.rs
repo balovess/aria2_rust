@@ -1169,7 +1169,11 @@ impl BtDownloadCommand {
                             let g = self.group.recover();
                             g.set_bt_bitfield(Some(bitfield.clone()));
                         }
-                        self.persist_checkpoint_after_piece(&mut writer, &bitfield)
+                        self.persist_checkpoint_after_piece(
+                            &mut writer,
+                            &bitfield,
+                            piece_data_len as u64,
+                        )
                             .await?;
 
                         BtPeerInteraction::broadcast_have(

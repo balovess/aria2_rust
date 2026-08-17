@@ -555,6 +555,8 @@ impl BtDownloadCommand {
             )),
             bt_peer_route: None,
             checkpoint: None,
+            checkpoint_bytes_since_save: 0,
+            checkpoint_last_save: Instant::now(),
         };
         command.apply_context_paths()?;
         Ok(command)

@@ -67,7 +67,7 @@ pub(super) async fn try_web_seed_fallback(
                 }
 
                 cmd.completed_bytes += web_seed_len;
-                cmd.persist_checkpoint_after_piece(writer, &bitfield)
+                cmd.persist_checkpoint_after_piece(writer, &bitfield, web_seed_len)
                     .await?;
                 Ok(true)
             } else {

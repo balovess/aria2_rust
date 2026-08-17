@@ -10,10 +10,10 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::constants;
-use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate, WRITE_CHANNEL_CAPACITY};
+use crate::engine::command::WRITE_CHANNEL_CAPACITY;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
-use crate::engine::http_segment_downloader::WriteChunk;
+use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTracker, WriteChunk};
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
 };
@@ -246,7 +246,9 @@ pub async fn execute_with_coordinator(
     );
     let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut active: HashMap<u32, (usize, Instant)> = HashMap::new();
-    let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
+    let progress_tracker =
+        SegmentProgressTracker::new(coordinator.completed_bytes(), Arc::clone(&dl.progress));
+    let mut segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();
     // Lifecycle changes wake the scheduler even when all segment requests are
     // blocked on slow network reads.
     let lifecycle_notify = dl.group.recover().lifecycle_notifier();
@@ -265,7 +267,6 @@ pub async fn execute_with_coordinator(
                 dl.global_limiter.as_ref(),
                 &mut ctrl_file,
                 coordinator.completed_bytes(),
-                &mut progress_handles,
             )
             .await?;
             return Err(error);
@@ -305,14 +306,7 @@ pub async fn execute_with_coordinator(
             scheduling_attempts += 1;
             let key = authority_key(&mirror_url).unwrap_or_else(|| mirror_url.clone());
 
-            let (seg_progress_tx, mut seg_progress_rx) =
-                mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
-            let progress_for_listener = Arc::clone(&dl.progress);
-            let progress_handle = tokio::spawn(async move {
-                while let Some(update) = seg_progress_rx.recv().await {
-                    progress_for_listener.set_completed_length(update.completed_bytes);
-                }
-            });
+            let progress = progress_tracker.new_segment();
 
             let submitted = executor.try_submit(HttpSegmentRequest {
                 mirror_index: mirror_idx,
@@ -322,18 +316,18 @@ pub async fn execute_with_coordinator(
                 offset,
                 length,
                 cookie_header: dl.cookie_helper.build_cookie_header(&mirror_url),
-                progress_tx: seg_progress_tx,
+                progress: Arc::clone(&progress),
                 write_tx: write_tx.clone(),
                 expected_entity_length: total_length,
             });
             if !submitted {
-                progress_handle.abort();
+                segment_progress.remove(&seg_idx);
                 coordinator.requeue_segment(seg_idx);
                 break;
             }
 
             active.insert(seg_idx, (mirror_idx, Instant::now()));
-            progress_handles.insert(seg_idx, progress_handle);
+            segment_progress.insert(seg_idx, progress);
             tracing::debug!(
                 seg_idx,
                 mirror_idx,
@@ -400,9 +394,7 @@ pub async fn execute_with_coordinator(
                 let Some((mirror_idx, seg_start)) = active.remove(&seg_idx) else {
                     continue;
                 };
-                if let Some(progress_handle) = progress_handles.remove(&seg_idx) {
-                    let _ = progress_handle.await;
-                }
+                let segment_progress_for_result = segment_progress.remove(&seg_idx);
 
                 let result_authority_key = pool_result.authority_key.clone();
                 match pool_result.result {
@@ -440,6 +432,9 @@ pub async fn execute_with_coordinator(
                         }
                     }
                     Err(e) => {
+                        if let Some(progress) = segment_progress_for_result {
+                            progress.rollback();
+                        }
                         let e = if matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
@@ -469,7 +464,6 @@ pub async fn execute_with_coordinator(
                                 dl.global_limiter.as_ref(),
                                 &mut ctrl_file,
                                 coordinator.completed_bytes(),
-                                &mut progress_handles,
                             )
                             .await?;
                             return Err(e);
@@ -566,7 +560,6 @@ pub async fn execute_with_coordinator(
                         dl.global_limiter.as_ref(),
                         &mut ctrl_file,
                         coordinator.completed_bytes(),
-                        &mut progress_handles,
                     )
                     .await?;
                     return Err(error);
@@ -588,7 +581,6 @@ pub async fn execute_with_coordinator(
             dl.global_limiter.as_ref(),
             &mut ctrl_file,
             coordinator.completed_bytes(),
-            &mut progress_handles,
         )
         .await?;
     } else {
@@ -645,6 +637,13 @@ pub async fn execute_with_coordinator(
         dl.output_path.display(),
         dl.progress_updater.last_progress_update(),
         final_speed
+    );
+    let progress_stats = progress_tracker.stats();
+    tracing::debug!(
+        segments = progress_stats.segments,
+        progress_updates = progress_stats.updates,
+        progress_rollbacks = progress_stats.rollbacks,
+        "HTTP multi-mirror progress aggregation summary"
     );
     if let Some(control_file) = ctrl_file.as_mut() {
         control_file.update_completed_length(coordinator.completed_bytes());

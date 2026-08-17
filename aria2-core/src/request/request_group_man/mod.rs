@@ -386,10 +386,21 @@ impl RequestGroupMan {
 
     /// Remove a reserved group while the lifecycle transition lock is held.
     fn remove_reserved_group(&self, gid: GroupId) -> Result<()> {
-        if self.reserved.find_by_gid(gid).is_none() {
-            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+        let group_lock = self.reserved.find_by_gid(gid).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument(format!(
                 "GID {} not found",
                 gid.value()
+            ))
+        })?;
+
+        // Match aria2_original's removeDownload() contract: a reserved group
+        // whose dependency is unresolved cannot be removed independently. The
+        // prerequisite graph must first reach a terminal state so the manager
+        // can resolve or fail the dependent payload coherently.
+        if !group_lock.recover().is_dependency_resolved() {
+            return Err(crate::error::Aria2Error::InvalidArgument(format!(
+                "GID#{} cannot be removed now",
+                gid.to_hex_string()
             )));
         }
 
@@ -1384,6 +1395,41 @@ mod tests {
                 .map(|result| result.code),
             Some(crate::request::request_group::DownloadResultCode::BittorrentParseError)
         );
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn test_remove_rejects_dependency_blocked_metalink_payload() {
+        let man = RequestGroupMan::new();
+        let metadata_gid = GroupId::new(50);
+        let payload_gid = GroupId::new(51);
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            metadata_gid,
+            payload_gid,
+        )
+        .unwrap();
+        man.add_metalink_graph(graph).unwrap();
+
+        let error = man
+            .remove_group(payload_gid)
+            .expect_err("an unresolved dependency cannot be removed yet");
+        assert!(
+            error.to_string().contains("cannot be removed now"),
+            "unexpected remove error: {error}"
+        );
+        let force_error = man
+            .force_remove_group(payload_gid)
+            .expect_err("force-remove must also respect an unresolved dependency");
+        assert!(
+            force_error.to_string().contains("cannot be removed now"),
+            "unexpected force-remove error: {force_error}"
+        );
+        assert!(man.find_group(metadata_gid).is_some());
+        assert!(man.find_group(payload_gid).is_some());
+        assert_eq!(man.stopped_count(), 0);
     }
 
     #[test]
