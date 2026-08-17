@@ -24,3 +24,6 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aria2_rust_client"]

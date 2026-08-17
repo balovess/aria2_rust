@@ -120,7 +120,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: publish-crates
+          key: publish-crates-${{ needs.prepare.outputs.version }}
+          cache-target: false
+      - name: Clean stale package artifacts
+        shell: bash
+        run: rm -rf target/package
       - name: Publish crates.io packages
         shell: bash
         env:
@@ -129,16 +133,39 @@ jobs:
           set -euo pipefail
           test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN is not configured" >&2; exit 1; }
 
+          crate_is_published() {
+            local package="$1"
+            curl --fail --silent --show-error --location \
+              "https://crates.io/api/v1/crates/$package/$VERSION" >/dev/null
+          }
+
+          wait_for_published_crate() {
+            local package="$1"
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              if crate_is_published "$package"; then
+                return 0
+              fi
+
+              if [ "$attempt" -lt 12 ]; then
+                echo "$package@$VERSION is not visible in crates.io yet; retrying in 15 seconds..."
+                sleep 15
+              fi
+            done
+
+            echo "$package@$VERSION did not become visible in crates.io" >&2
+            return 1
+          }
+
           verify_dependent_package() {
             local package="$1"
-            for attempt in 1 2 3 4 5 6; do
+            for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
               if cargo publish --dry-run -p "$package"; then
                 return 0
               fi
 
-              if [ "$attempt" -lt 6 ]; then
-                echo "$package is not indexed yet; retrying in 10 seconds..."
-                sleep 10
+              if [ "$attempt" -lt 12 ]; then
+                echo "$package is not indexed yet; retrying in 15 seconds..."
+                sleep 15
               fi
             done
 
@@ -149,7 +176,7 @@ jobs:
 
           publish_if_missing() {
             local package="$1"
-            if cargo info "$package@$VERSION" >/dev/null 2>&1; then
+            if crate_is_published "$package"; then
               echo "$package@$VERSION is already published; skipping."
               return 0
             fi
@@ -158,10 +185,10 @@ jobs:
           }
 
           publish_if_missing aria2-protocol
-          sleep 30
+          wait_for_published_crate aria2-protocol
           verify_dependent_package aria2-core
           publish_if_missing aria2-core
-          sleep 30
+          wait_for_published_crate aria2-core
           verify_dependent_package aria2-rpc
           publish_if_missing aria2-rpc
 
@@ -209,9 +236,12 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Build and publish Node.js SDK
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           cd bindings/nodejs
+          test -n "$NODE_AUTH_TOKEN" || { echo "NPM_TOKEN is not configured" >&2; exit 1; }
           npm ci
           npm run build
           npm publish --access public --provenance
