@@ -122,6 +122,12 @@ pub enum RecoverableError {
     #[error("HTTP protocol error: {message}")]
     HttpProtocolError { message: String },
 
+    #[error("Resource not found")]
+    ResourceNotFound,
+
+    #[error("Reached max-file-not-found limit")]
+    MaxFileNotFound,
+
     #[error("HTTP authentication failed: {message}")]
     HttpAuthFailed { message: String },
 

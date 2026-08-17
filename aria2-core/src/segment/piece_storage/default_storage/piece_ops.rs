@@ -249,7 +249,9 @@ impl PieceStorage for DefaultPieceStorage {
         // C++: bitfieldMan_->setBitfield(bitfield, bitfieldLength);
         //      addPieceStats(bitfield, bitfieldLength);
         // C++ setBitfield() also clears the use bitfield.
-        self.bfman.clear_all_use_bit();
+        if bitfield.len() != self.bfman.bitfield_length() {
+            return;
+        }
         self.bfman.set_bitfield(bitfield);
         self.add_piece_stats(bitfield);
         // C++: streamPieceSelector_->onBitfieldInit()

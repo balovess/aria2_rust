@@ -69,10 +69,39 @@ fn test_bitfield_man_set_bitfield() {
 }
 
 #[test]
+fn test_bitfield_man_rejects_mismatched_set_bitfield_without_mutation() {
+    let mut bfman = BitfieldMan::new(1024, 4096);
+    bfman.set_piece(0);
+    bfman.set_use_piece(1);
+    let before = bfman.bitfield().to_vec();
+
+    bfman.set_bitfield(&[]);
+    assert_eq!(bfman.bitfield(), before.as_slice());
+    assert!(bfman.has_piece(0));
+    assert!(bfman.is_use_piece(1));
+
+    bfman.set_bitfield(&[0xFF, 0x00]);
+    assert_eq!(bfman.bitfield(), before.as_slice());
+    assert!(bfman.has_piece(0));
+    assert!(bfman.is_use_piece(1));
+}
+
+#[test]
 fn test_bitfield_man_zero_length() {
     let bfman = BitfieldMan::new(0, 0);
     assert_eq!(bfman.num_pieces(), 0);
     assert!(bfman.is_all_complete()); // vacuously true
+}
+
+#[test]
+fn test_bitfield_man_zero_piece_length_operations_are_safe() {
+    let mut bfman = BitfieldMan::new(0, 4096);
+    bfman.mark_pieces_done(4096);
+    assert_eq!(bfman.count_missing_pieces(), 0);
+    assert!(!bfman.is_bit_set_offset_range(0, 1));
+
+    bfman.enable_filter();
+    assert_eq!(bfman.get_filtered_completed_length(), 0);
 }
 
 // ── BitfieldMan bit manipulation tests ──────────────────────────────

@@ -370,8 +370,7 @@ fn test_stream_check_integrity_on_download_finished_noop() {
     let ctx = make_dctx(1024, 4096);
     let ps = make_ps(1024, 4096);
     let s = StreamCheckIntegrity::new(ctx, ps, false);
-    // Should not panic
-    s.on_download_finished();
+    assert_eq!(s.on_download_finished(), IntegrityFinishedAction::default());
 }
 
 #[test]
@@ -379,23 +378,47 @@ fn test_stream_check_integrity_on_download_incomplete() {
     let ctx = make_dctx(1024, 4096);
     let ps = make_ps(1024, 4096);
     let s = StreamCheckIntegrity::new(ctx, ps, false);
-    // Should not panic
-    s.on_download_incomplete();
+    let action = s.on_download_incomplete();
+    assert!(action.reset_piece_storage);
+    assert_eq!(action.file_allocation.as_ref().unwrap().len(), 1);
+    assert_eq!(action.file_allocation.unwrap()[0].length, 4096);
+}
+
+#[test]
+fn test_integrity_incomplete_action_applies_piece_storage_reset() {
+    use crate::segment::piece_storage::{
+        DefaultPieceStorage, PieceStorage, StreamPieceSelectorKind,
+    };
+
+    let ctx = make_dctx(1024, 4096);
+    let ps = make_ps(1024, 4096);
+    let action = StreamCheckIntegrity::new(ctx, ps, false).on_download_incomplete();
+
+    let mut storage = DefaultPieceStorage::new(1024, 4096);
+    storage.set_stream_piece_selector(StreamPieceSelectorKind::Geom);
+    storage.set_bitfield(&[0b1100_0000]);
+    storage.mark_piece_missing(0);
+
+    // Leave the geometric selector stale, then apply the owner-side plan.
+    // The reset must make the newly missing first piece selectable again.
+    action.apply_piece_storage(&mut storage);
+
+    let piece = storage
+        .get_missing_piece(0, &[0], 0, 1)
+        .expect("the reset selector should return the first missing piece");
+    assert_eq!(piece.index(), 0);
 }
 
 #[test]
 fn test_stream_check_integrity_hash_check_only_skips_allocation() {
-    // This test verifies the hash_check_only path logic.
-    // The actual file allocation dispatch is TODO, but we verify
-    // the method runs without panic for both branches.
     let ctx1 = make_dctx(1024, 4096);
     let ps1 = make_ps(1024, 4096);
     let ctx2 = make_dctx(1024, 4096);
     let ps2 = make_ps(1024, 4096);
     let s_with = StreamCheckIntegrity::new(ctx1, ps1, true);
     let s_without = StreamCheckIntegrity::new(ctx2, ps2, false);
-    s_with.on_download_incomplete();
-    s_without.on_download_incomplete();
+    assert!(s_with.on_download_incomplete().file_allocation.is_none());
+    assert!(s_without.on_download_incomplete().file_allocation.is_some());
 }
 
 // ── BtCheckIntegrity tests ────────────────────────────────────────────
@@ -430,9 +453,55 @@ fn test_bt_check_integrity_on_download_handlers() {
     let ctx = make_dctx(1024, 4096);
     let ps = make_ps(1024, 4096);
     let b = BtCheckIntegrity::new(ctx, ps);
-    // Should not panic
-    b.on_download_finished();
-    b.on_download_incomplete();
+    assert!(b.on_download_finished().file_allocation.is_some());
+    let incomplete = b.on_download_incomplete();
+    assert!(incomplete.reset_piece_storage);
+    assert!(incomplete.file_allocation.is_some());
+}
+
+#[test]
+fn test_bt_check_integrity_options_gate_dispatch() {
+    let ctx = make_dctx(1024, 4096);
+    let ps = make_ps(1024, 4096);
+    let b = BtCheckIntegrity::new_with_options(ctx, ps, true, false, true);
+
+    let finished = b.on_download_finished();
+    assert!(finished.file_allocation.is_none());
+    assert!(finished.run_completion_hook);
+    assert!(b.on_download_incomplete().file_allocation.is_none());
+}
+
+#[test]
+fn test_integrity_callback_trailing_garbage_lists_physical_files() {
+    let ctx = make_dctx(1024, 4096);
+    let ps = make_ps(1024, 4096);
+    let stream = StreamCheckIntegrity::new(ctx, ps, false);
+
+    let action = stream.cut_trailing_garbage();
+    assert_eq!(action.files.len(), 1);
+    assert_eq!(
+        action.files[0].path.to_string_lossy(),
+        "/tmp/test_check_integrity.bin"
+    );
+    assert_eq!(action.files[0].length, 4096);
+}
+
+#[tokio::test]
+async fn test_integrity_callback_trailing_garbage_applies_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("payload.bin");
+    tokio::fs::write(&path, vec![0u8; 12]).await.unwrap();
+    let ctx = Arc::new(crate::download::DownloadContext::new(
+        1024,
+        8,
+        path.to_string_lossy().into_owned(),
+    ));
+    let ps = make_ps(1024, 8);
+    let action = StreamCheckIntegrity::new(ctx, ps, false).cut_trailing_garbage();
+
+    action.apply().await.unwrap();
+
+    assert_eq!(tokio::fs::metadata(path).await.unwrap().len(), 8);
 }
 
 // ── Cross-cutting: ValidatorKind after PieceHashValidator assignment ───

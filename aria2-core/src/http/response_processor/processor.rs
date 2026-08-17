@@ -248,7 +248,7 @@ impl HttpResponseProcessor {
         // Build a skip_response handler and delegate to it
         let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT)
             .with_http_auth_challenge(true)
-            .with_max_file_not_found(0)
+            .with_max_file_not_found(self.config.max_file_not_found)
             .with_retry_wait(5);
 
         // Convert HttpResponseHead into the HttpResponse type expected

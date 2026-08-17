@@ -17,6 +17,27 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::SequentialDownloader;
 use super::auth_retry::{AuthRetryOutcome, AuthRetryRequest};
 
+async fn finalize_cancelled_download(
+    writer: &mut Box<dyn DiskWriter>,
+    control_file: &mut Option<ControlFile>,
+    completed_bytes: u64,
+) {
+    // Finalize before persisting progress so the control file never claims
+    // bytes that are still only buffered in the writer.
+    if let Err(error) = writer.finalize().await {
+        tracing::warn!("Sequential: finalize on cancellation failed: {}", error);
+    }
+    if let Some(control_file) = control_file {
+        control_file.update_completed_length(completed_bytes);
+        if let Err(error) = control_file.save().await {
+            tracing::warn!(
+                "Sequential: control file save on pause/remove failed: {}",
+                error
+            );
+        }
+    }
+}
+
 impl SequentialDownloader {
     /// Main entry point for sequential HTTP download.
     ///
@@ -194,9 +215,14 @@ impl SequentialDownloader {
                     Some(loc) => loc,
                     None => {
                         tracing::warn!(status_code, "Redirect response without Location header");
-                        return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                            format!("HTTP {} redirect without Location header", status_code),
-                        )));
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::HttpProtocolError {
+                                message: format!(
+                                    "HTTP {} redirect without Location header",
+                                    status_code
+                                ),
+                            },
+                        ));
                     }
                 };
 
@@ -209,9 +235,14 @@ impl SequentialDownloader {
                 let target_url = match target_url {
                     Ok(u) => u.to_string(),
                     Err(e) => {
-                        return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
-                            format!("Failed to resolve redirect URL '{}': {}", location, e),
-                        )));
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::HttpProtocolError {
+                                message: format!(
+                                    "Failed to resolve redirect URL '{}': {}",
+                                    location, e
+                                ),
+                            },
+                        ));
                     }
                 };
 
@@ -328,6 +359,9 @@ impl SequentialDownloader {
             }
 
             if !status.is_success() && status_code != 206 {
+                if status_code == 404 {
+                    return Err(self.classify_file_not_found());
+                }
                 if status_code >= 500 {
                     return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
                         code: status_code,
@@ -518,30 +552,20 @@ impl SequentialDownloader {
         let mut ctrl_bytes_since_save: u64 = 0;
         let ctrl_save_interval = (actual_total / 10).max(1024 * 1024); // save every ~10% or 1MB
 
-        while let Some(chunk) = stream.next().await {
+        while let Some(chunk) = tokio::select! {
+            chunk = stream.next() => chunk,
+            cancellation = self.wait_for_cancellation() => {
+                let error = cancellation.expect_err("cancellation watcher must not complete successfully");
+                finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
+                return Err(error);
+            }
+        } {
             // Check whether the task was removed between chunks. This is the
             // primary cancellation signal: `aria2.remove` /
             // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
             // which `is_removed()` observes without blocking.
             if let Err(e) = self.check_cancelled() {
-                // Finalize before persisting progress so the control file never
-                // claims bytes that are still only buffered in the writer.
-                if let Err(finalize_err) = writer.finalize().await {
-                    tracing::warn!(
-                        "Sequential: finalize on cancellation failed: {}",
-                        finalize_err
-                    );
-                }
-                // ADR-0001: Save control file before exiting on pause/remove.
-                if let Some(ref mut cf) = ctrl_file {
-                    cf.update_completed_length(completed_bytes);
-                    if let Err(save_err) = cf.save().await {
-                        tracing::warn!(
-                            "Sequential: control file save on pause/remove failed: {}",
-                            save_err
-                        );
-                    }
-                }
+                finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
                 return Err(e);
             }
 
@@ -561,14 +585,22 @@ impl SequentialDownloader {
 
                 // ADR-0001: Periodically update control file with progress.
                 ctrl_bytes_since_save += piece.len() as u64;
-                if ctrl_bytes_since_save >= ctrl_save_interval {
-                    if let Some(ref mut cf) = ctrl_file {
+                if let Some(ref mut cf) = ctrl_file {
+                    let save_requested = self.group.recover().take_save_control_file_request();
+                    if save_requested {
+                        writer.flush().await.map_err(|error| {
+                            Aria2Error::FileIo(format!(
+                                "Failed to flush requested sequential checkpoint: {error}"
+                            ))
+                        })?;
+                    }
+                    if save_requested || ctrl_bytes_since_save >= ctrl_save_interval {
                         cf.update_completed_length(completed_bytes);
                         if let Err(e) = cf.save().await {
                             tracing::warn!("Sequential: control file save failed: {}", e);
                         }
+                        ctrl_bytes_since_save = 0;
                     }
-                    ctrl_bytes_since_save = 0;
                 }
 
                 self.progress_updater

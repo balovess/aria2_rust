@@ -110,6 +110,19 @@ impl SequentialDownloader {
         }
     }
 
+    pub(crate) fn classify_file_not_found(&self) -> Aria2Error {
+        self.group.recover().file_not_found_error()
+    }
+
+    fn should_retry(&self, attempt: u32, error: &Aria2Error, policy: &RetryPolicy) -> bool {
+        policy.should_retry(attempt, error)
+            || (matches!(
+                error,
+                Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound)
+            ) && policy.can_retry_after(attempt.saturating_add(1))
+                && self.group.recover().can_retry_file_not_found())
+    }
+
     // ── Range / gap utility functions ─────────────────────────────────
 
     pub fn merge_ranges(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
@@ -211,7 +224,7 @@ impl SequentialDownloader {
             );
             let error = result.error.expect("error was checked above");
 
-            if !retry_policy.should_retry(attempt, &error) {
+            if !self.should_retry(attempt, &error, retry_policy) {
                 return Err(error);
             }
             debug_assert!(!retry_policy.is_exhausted(attempt.saturating_add(1)));
@@ -247,7 +260,7 @@ impl SequentialDownloader {
                         attempt.saturating_add(1),
                         e
                     );
-                    let should_retry = retry_policy.should_retry(attempt, &e);
+                    let should_retry = self.should_retry(attempt, &e, retry_policy);
                     if !should_retry {
                         return Err(e);
                     }

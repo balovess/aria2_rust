@@ -306,6 +306,31 @@ use crate::util::rwlock_ext::RwLockRecover;
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "bittorrent", feature = "metalink"))]
+    #[test]
+    fn test_build_handler_chain_respects_follow_modes() {
+        let disabled = DownloadOptions {
+            follow_torrent: Some(FollowMode::Disabled),
+            follow_metalink: Some(FollowMode::Disabled),
+            ..Default::default()
+        };
+        assert!(build_handler_chain(&disabled).is_empty());
+
+        let memory = DownloadOptions {
+            follow_torrent: Some(FollowMode::Memory),
+            follow_metalink: Some(FollowMode::Memory),
+            ..Default::default()
+        };
+        assert_eq!(build_handler_chain(&memory).len(), 2);
+
+        let mixed = DownloadOptions {
+            follow_torrent: Some(FollowMode::Follow),
+            follow_metalink: Some(FollowMode::Disabled),
+            ..Default::default()
+        };
+        assert_eq!(build_handler_chain(&mixed).len(), 1);
+    }
+
     struct MockHandler {
         name_str: &'static str,
         can_handle_result: bool,

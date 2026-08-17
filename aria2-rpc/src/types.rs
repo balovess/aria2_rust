@@ -1069,6 +1069,7 @@ mod tests {
     fn test_download_status_variants() {
         assert!(DownloadStatus::Active.is_active());
         assert!(DownloadStatus::Complete.is_stopped());
+        assert!(DownloadStatus::Removed.is_stopped());
         assert_eq!(DownloadStatus::Error("test".to_string()).as_str(), "error");
     }
 

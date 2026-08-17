@@ -1182,11 +1182,41 @@ async fn e2e_add_uri_with_options() {
 
 #[tokio::test]
 async fn e2e_full_lifecycle_all_methods() {
+    // A refused upstream can finish before the next RPC request reaches the
+    // engine. Keep one accepted connection open so pause tests the lifecycle
+    // transition instead of platform-dependent connection-refused timing.
+    let upstream = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind lifecycle upstream fixture");
+    let upstream_port = upstream
+        .local_addr()
+        .expect("lifecycle upstream address")
+        .port();
+    let (accepted_tx, accepted_rx) = oneshot::channel();
+    let upstream_task = tokio::spawn(async move {
+        let (socket, _) = upstream
+            .accept()
+            .await
+            .expect("accept lifecycle upstream connection");
+        let _ = accepted_tx.send(());
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        drop(socket);
+    });
+
     let (base, _guard) = start_test_server_with_max_concurrent(None, 0).await;
     let client = Client::new();
 
     // 1. addUri
-    let gid = add_uri(&client, &base, "http://127.0.0.1:1/lifecycle").await;
+    let gid = add_uri(
+        &client,
+        &base,
+        &format!("http://127.0.0.1:{upstream_port}/lifecycle"),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(2), accepted_rx)
+        .await
+        .expect("download should connect to the lifecycle upstream fixture")
+        .expect("lifecycle upstream fixture should accept the download connection");
 
     // 2. tellStatus (active)
     let status = rpc_call(&client, &base, "aria2.tellStatus", json![[&gid]]).await;
@@ -1282,6 +1312,7 @@ async fn e2e_full_lifecycle_all_methods() {
     // 16. purgeDownloadResult
     let purge = rpc_call(&client, &base, "aria2.purgeDownloadResult", json!([])).await;
     assert_success(&purge);
+    upstream_task.abort();
 }
 
 #[tokio::test]

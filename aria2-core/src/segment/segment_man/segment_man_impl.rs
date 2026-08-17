@@ -30,7 +30,8 @@ use super::peer_stat::PeerStat;
 ///   to the caller; `SegmentMan` tracks only (cuid, index) pairs
 /// - Does not depend on `DownloadContext` directly (uses piece_length and
 ///   total_length fields instead)
-/// - WrDiskCache flush support is TODO (will be added with the cache module)
+/// - Write-back ordering is owned by the active `CachedDiskWriter` seam;
+///   this facade does not own a disk writer or piece-local cache
 pub struct SegmentMan {
     /// Piece storage backend (optional — set after construction)
     pub(crate) piece_storage: Option<Box<dyn PieceStorage + Send>>,

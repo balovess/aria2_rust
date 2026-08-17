@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::request::request_group::DownloadOptions;
+use crate::request::request_group::{DownloadOptions, FollowMode};
 use crate::session::session_entry::{SessionEntry, download_options_to_map};
 
 #[test]
@@ -523,8 +523,8 @@ fn test_download_options_to_map_all_fields() {
         enable_rpc: false,
         pause: false,
         // Follow options
-        follow_torrent: None,
-        follow_metalink: None,
+        follow_torrent: Some(FollowMode::Memory),
+        follow_metalink: Some(FollowMode::Disabled),
         // Event hooks
         on_download_start: None,
         on_download_complete: None,
@@ -593,6 +593,8 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("bt-remove-unselected-file").unwrap(), "true");
     assert_eq!(map.get("enable-utp").unwrap(), "true");
     assert_eq!(map.get("utp-listen-port").unwrap(), "6882");
+    assert_eq!(map.get("follow-torrent").unwrap(), "mem");
+    assert_eq!(map.get("follow-metalink").unwrap(), "false");
 
     // Connection and authentication options
     assert_eq!(map.get("piece-length").unwrap(), "1048576");
@@ -666,6 +668,8 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(restored.dht_listen_port.as_deref(), Some("6881-6999"));
     assert!(!restored.metalink_enable_unique_protocol);
     assert_eq!(restored.piece_length, Some(1024 * 1024));
+    assert_eq!(restored.follow_torrent, Some(FollowMode::Memory));
+    assert_eq!(restored.follow_metalink, Some(FollowMode::Disabled));
     assert!(!restored.ftp_pasv);
     assert_eq!(restored.http_user.as_deref(), Some("http-user"));
     assert!(restored.conditional_get);

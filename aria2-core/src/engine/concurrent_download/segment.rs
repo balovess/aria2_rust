@@ -24,7 +24,7 @@ use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::{ConcurrentDownloadResult, ConcurrentDownloader};
+use super::{ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count};
 
 /// Run the single-mirror concurrent download pipeline.
 ///
@@ -42,7 +42,9 @@ pub async fn execute(
     }
 
     let options = dl.group.recover().options_arc();
-    let split = (options.split.unwrap_or(constants::DEFAULT_SPLIT) as usize).max(1);
+    let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+    let min_split_size = dl.group.recover().effective_min_split_size();
+    let split = effective_segment_count(total_length, requested_split, min_split_size);
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
@@ -52,8 +54,10 @@ pub async fn execute(
     let seg_size = total_length.div_ceil(split as u64).max(1);
 
     tracing::info!(
-        "Concurrent download started: split={}, max_conn={}, segment_size={} bytes, total={}",
+        "Concurrent download started: split={}, requested_split={}, min_split_size={}, max_conn={}, segment_size={} bytes, total={}",
         split,
+        requested_split,
+        min_split_size,
         max_conn,
         seg_size,
         total_length
@@ -147,6 +151,7 @@ pub async fn execute(
     };
     let total_inflight_bytes = Arc::new(AtomicU64::new(initial_completed));
     let mut completed_bytes = initial_completed;
+    super::flush_requested_control_file(dl, &mut writer, &mut ctrl_file, completed_bytes).await?;
 
     // Write channel: segment futures send chunks as they arrive,
     // the main loop drains them to disk via tokio::select!
@@ -333,6 +338,8 @@ pub async fn execute(
                 )))
             })?;
         }
+        super::flush_requested_control_file(dl, &mut writer, &mut ctrl_file, completed_bytes)
+            .await?;
 
         // Use tokio::select! to drain writes concurrently while waiting
         // for segment completions — prevents chunks from piling up in the
@@ -422,9 +429,49 @@ pub async fn execute(
                                 constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
                             )
                             .await;
+                        super::flush_requested_control_file(
+                            dl,
+                            &mut writer,
+                            &mut ctrl_file,
+                            completed_bytes,
+                        )
+                        .await?;
                     }
                     Err(e) => {
+                        let e = if matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                        ) {
+                            dl.group.recover().file_not_found_error()
+                        } else {
+                            e
+                        };
                         tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                        let is_file_not_found = matches!(
+                            &e,
+                            Aria2Error::Recoverable(
+                                RecoverableError::ResourceNotFound
+                                    | RecoverableError::MaxFileNotFound
+                            )
+                        );
+                        let file_not_found_retry_allowed = !matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                        ) && dl.group.recover().can_retry_file_not_found();
+                        if is_file_not_found && !file_not_found_retry_allowed {
+                            cancel_and_persist(
+                                executor,
+                                &mut write_rx,
+                                &mut writer,
+                                limiter.as_ref(),
+                                dl.global_limiter.as_ref(),
+                                &mut ctrl_file,
+                                completed_bytes,
+                                &mut progress_handles,
+                            )
+                            .await?;
+                            return Err(e);
+                        }
                         let is_capacity_limited = matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::ServerError { code })
@@ -496,11 +543,25 @@ pub async fn execute(
                         e
                     )))
                 })?;
+                super::flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    completed_bytes,
+                )
+                .await?;
             }
             // Periodic pause/remove check — ensures the download loop
             // detects aria2.pause / aria2.remove within ~200ms even
             // when segment futures are blocked on slow network reads.
             _ = cancel_tick.tick() => {
+                super::flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    completed_bytes,
+                )
+                .await?;
                 if let Err(e) = dl.check_cancelled() {
                     cancel_and_persist(
                         executor,

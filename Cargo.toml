@@ -8,7 +8,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.9"
+version = "0.3.0"
 edition = "2024"
 authors = ["aria2-rust contributors"]
 license = "GPL-2.0-or-later"
@@ -30,9 +30,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 bytes = "1.5"
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-aria2-protocol = { path = "aria2-protocol", version = "0.2.9" }
-aria2-core = { path = "aria2-core", version = "0.2.9" }
-aria2-rpc = { path = "aria2-rpc", version = "0.2.9" }
+aria2-protocol = { path = "aria2-protocol", version = "0.3.0" }
+aria2-core = { path = "aria2-core", version = "0.3.0" }
+aria2-rpc = { path = "aria2-rpc", version = "0.3.0" }
 
 # Cross-crate: unify to workspace-level
 reqwest = { version = "0.13", default-features = false }

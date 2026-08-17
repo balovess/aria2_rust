@@ -49,6 +49,31 @@ fn test_generated_child_groups_are_not_saved() {
     assert!(group_to_entry(&child.recover()).is_none());
 }
 
+#[test]
+fn test_group_session_entry_preserves_min_split_size_snapshot() {
+    let group = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(3),
+        vec!["http://example.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    )));
+    group.recover_mut().set_option_snapshot(HashMap::from([(
+        "min-split-size".to_string(),
+        serde_json::json!("10M"),
+    )]));
+
+    let entry = group_to_entry(&group.recover()).expect("waiting group should be serializable");
+    assert_eq!(
+        entry.options.get("min-split-size"),
+        Some(&"10M".to_string())
+    );
+
+    let restored = deserialize(&entry.serialize()).expect("session entry should deserialize");
+    assert_eq!(
+        restored[0].options.get("min-split-size"),
+        Some(&"10M".to_string())
+    );
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn ordinary_follow_child_keeps_plain_session_identity() {
@@ -162,6 +187,24 @@ http://mirror1.com/app.exe	http://mirror2.com/app.exe	http://mirror3.com/app.exe
         entries[2].options.get("max-connection-per-server").unwrap(),
         "4"
     );
+}
+
+#[test]
+fn test_deserialize_ignores_comments_inside_entry() {
+    let input = r#"http://example.com/file.zip
+ GID=0000000000000001
+# A comment between session properties
+ split=4
+ TOTAL_LENGTH=1024
+
+"#;
+
+    let entries = deserialize(input).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].gid, 1);
+    assert_eq!(entries[0].options.get("split"), Some(&"4".to_string()));
+    assert_eq!(entries[0].total_length, 1024);
 }
 
 #[test]

@@ -231,12 +231,12 @@ class TestGetVersion:
     @pytest.mark.asyncio
     async def test_returns_version_info(self, client, mock_transport):
         mock_transport.send_request.return_value = {
-            "version": "0.2.9",
+            "version": "0.3.0",
             "enabledFeatures": ["Async DNS", "BitTorrent"],
         }
         result = await client.get_version()
         assert isinstance(result, VersionInfo)
-        assert result.version == "0.2.9"
+        assert result.version == "0.3.0"
         assert "Async DNS" in result.enabled_features
 
 

@@ -325,11 +325,6 @@ impl App {
         // filesystem I/O, otherwise RPC mutations can be blocked at shutdown.
         let groups = self.request_man.list_groups();
 
-        if groups.is_empty() {
-            info!("No active download tasks, skipping session save");
-            return Ok(Some(0));
-        }
-
         match mgr.save_session(&groups).await {
             Ok(n) => {
                 info!("Successfully saved {} entries to {}", n, save_path);

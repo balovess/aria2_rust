@@ -476,6 +476,42 @@ async fn test_cached_writer_out_of_order_writes_land_at_offsets() {
     );
 }
 
+/// Regression: a large direct write must be ordered after older cached bytes
+/// so a later flush cannot overwrite the direct write with stale data.
+#[tokio::test]
+async fn test_large_write_flushes_pending_cache_before_bypass() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large-write-order.bin");
+    let large_len = 1024 * 1024;
+    let large = vec![b'B'; large_len];
+
+    let mut writer = CachedDiskWriter::new(&path, Some(large_len as u64), Some(4));
+    writer.open().await.unwrap();
+    writer.write_at(0, b"small").await.unwrap();
+    writer.write_at(0, &large).await.unwrap();
+    writer.flush().await.unwrap();
+
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&content[..5], b"BBBBB");
+}
+
+#[tokio::test]
+async fn test_large_bytes_write_flushes_pending_cache_before_bypass() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("large-bytes-write-order.bin");
+    let large_len = 1024 * 1024;
+    let large = bytes::Bytes::from(vec![b'C'; large_len]);
+
+    let mut writer = CachedDiskWriter::new(&path, Some(large_len as u64), Some(4));
+    writer.open().await.unwrap();
+    writer.write_at(0, b"small").await.unwrap();
+    writer.write_bytes_at(0, large).await.unwrap();
+    writer.flush().await.unwrap();
+
+    let content = tokio::fs::read(&path).await.unwrap();
+    assert_eq!(&content[..5], b"CCCCC");
+}
+
 /// Sequential DefaultDiskWriter is the control: appending out of order
 /// corrupts the file — this documents why BT must not use it.
 #[tokio::test]

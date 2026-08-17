@@ -11,6 +11,18 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{GapDownloadResult, SequentialDownloader};
 
+fn classify_gap_http_status(status_code: u16, range_header: &str) -> Aria2Error {
+    match status_code {
+        416 => Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
+            range: range_header.to_string(),
+        }),
+        500.. => Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code }),
+        _ => Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: format!("HTTP error: {status_code}"),
+        }),
+    }
+}
+
 impl SequentialDownloader {
     /// Download only the missing byte ranges (gaps) for a partially-completed
     /// file. Each gap is fetched with a separate Range request.
@@ -83,7 +95,18 @@ impl SequentialDownloader {
                 &[],
             );
 
-            let response = match request.send().await {
+            let response = match tokio::select! {
+                result = request.send() => result,
+                cancellation = self.wait_for_cancellation() => {
+                    let error = cancellation.expect_err(
+                        "cancellation watcher must not complete successfully",
+                    );
+                    return GapDownloadResult {
+                        completed_gaps,
+                        error: Some(error),
+                    };
+                }
+            } {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(
@@ -112,15 +135,10 @@ impl SequentialDownloader {
                     range_header
                 );
                 Self::cleanup_partial_gap(&mut writer, gap_start, 0).await;
-                let error = if status.as_u16() >= 500 {
-                    Aria2Error::Recoverable(RecoverableError::ServerError {
-                        code: status.as_u16(),
-                    })
+                let error = if status.as_u16() == 404 {
+                    self.classify_file_not_found()
                 } else {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "HTTP error: {}",
-                        status
-                    )))
+                    classify_gap_http_status(status.as_u16(), &range_header)
                 };
                 return GapDownloadResult {
                     completed_gaps,
@@ -132,7 +150,19 @@ impl SequentialDownloader {
             let mut stream_offset = gap_start;
             let mut bytes_downloaded = 0u64;
 
-            while let Some(chunk_result) = stream.next().await {
+            while let Some(chunk_result) = tokio::select! {
+                chunk_result = stream.next() => chunk_result,
+                cancellation = self.wait_for_cancellation() => {
+                    let error = cancellation.expect_err(
+                        "cancellation watcher must not complete successfully",
+                    );
+                    Self::cleanup_partial_gap(&mut writer, gap_start, bytes_downloaded).await;
+                    return GapDownloadResult {
+                        completed_gaps,
+                        error: Some(error),
+                    };
+                }
+            } {
                 // Check whether the task was removed between chunks. This is
                 // the primary cancellation signal: `aria2.remove` /
                 // `aria2.forceRemove` sets the RequestGroup status to
@@ -294,5 +324,36 @@ impl SequentialDownloader {
                 e
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_416_as_range_failure() {
+        assert!(matches!(
+            classify_gap_http_status(416, "bytes=10-20"),
+            Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { range })
+                if range == "bytes=10-20"
+        ));
+    }
+
+    #[test]
+    fn classifies_5xx_as_server_failure() {
+        assert!(matches!(
+            classify_gap_http_status(503, "bytes=10-20"),
+            Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
+        ));
+    }
+
+    #[test]
+    fn classifies_other_http_statuses_as_protocol_failures() {
+        assert!(matches!(
+            classify_gap_http_status(404, "bytes=10-20"),
+            Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message })
+                if message == "HTTP error: 404"
+        ));
     }
 }

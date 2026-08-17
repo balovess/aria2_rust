@@ -119,10 +119,10 @@ describe('GlobalStat', () => {
 describe('VersionInfo', () => {
   it('can create a valid VersionInfo object', () => {
     const info: VersionInfo = {
-      version: '0.2.9',
+      version: '0.3.0',
       enabledFeatures: ['Async DNS', 'BitTorrent'],
     };
-    expect(info.version).toBe('0.2.9');
+    expect(info.version).toBe('0.3.0');
     expect(info.enabledFeatures).toHaveLength(2);
   });
 });

@@ -217,8 +217,15 @@ impl DownloadCommand {
             // before allocating/downloading (mirrors C++ CheckIntegrityMan +
             // CheckIntegrityCommand). No-op when there is nothing to validate.
             if self.check_integrity && total_length > 0 {
-                use crate::checksum::check_integrity::man as ci_man;
-                ci_man::cut_trailing_garbage(&self.output_path, total_length).await?;
+                use crate::checksum::check_integrity::{
+                    man as ci_man, IntegrityTrailingGarbageAction,
+                };
+                IntegrityTrailingGarbageAction::single_file(
+                    self.output_path.clone(),
+                    total_length,
+                )
+                .apply()
+                .await?;
                 use crate::checksum::message_digest::HashType;
                 // Extract owned data first so the RwLock guard is dropped
                 // before any await (guard is not Send).
@@ -234,8 +241,17 @@ impl DownloadCommand {
                         )
                     });
                 if let Some((hashes, piece_len, hash_type)) = piece_info {
-                    let algo =
-                        HashType::from_str(&hash_type).unwrap_or(HashType::Sha1);
+                    let algo = if hash_type.is_empty() {
+                        // Empty piece-hash metadata is the legacy SHA-1
+                        // default used by BitTorrent-style contexts.
+                        HashType::Sha1
+                    } else {
+                        HashType::from_str(&hash_type).ok_or_else(|| {
+                            Aria2Error::Parse(format!(
+                                "unknown piece hash algorithm: {hash_type}"
+                            ))
+                        })?
+                    };
                     if let Some(task) = ci_man::file_task(
                         &self.output_path,
                         piece_len.max(1),
@@ -304,7 +320,13 @@ impl DownloadCommand {
             }
 
             let options = self.group.recover().options_arc();
-            let split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+            let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
+            let min_split_size = self.group.recover().effective_min_split_size();
+            let split = crate::engine::concurrent_download::effective_segment_count(
+                total_length,
+                requested_split,
+                min_split_size,
+            ) as u16;
 
             let cookie_helper = self.create_cookie_helper();
             let progress_updater = self.create_progress_updater();
@@ -650,13 +672,40 @@ impl DownloadCommand {
         Ok(())
     }
 
-    /// Download a metadata source into a memory buffer.
+    /// Download a metadata source into a memory buffer, retrying 404s when
+    /// `max-file-not-found` permits another attempt.
+    async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
+        let options = self.group.recover().options_arc();
+        let mut attempt = 0u32;
+        loop {
+            match self.execute_in_memory_attempt(uri).await {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        &error,
+                        Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound)
+                    ) && self.group.recover().can_retry_file_not_found()
+                        && (options.max_retries == 0
+                            || attempt.saturating_add(1) < options.max_retries) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                    if options.retry_wait > 0 {
+                        tokio::time::sleep(std::time::Duration::from_secs(options.retry_wait))
+                            .await;
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Download one metadata source into a memory buffer.
     ///
     /// This is the Rust equivalent of aria2's memory pre-download handler:
     /// the response is streamed into an owned `Vec<u8>`, no output path is
     /// opened, and the post-download handler consumes the buffer before the
     /// parent group is demoted.
-    async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
+    async fn execute_in_memory_attempt(&mut self, uri: &str) -> Result<()> {
         self.check_cancelled()?;
 
         // A JSON/session restore may already carry the completed metadata
@@ -699,6 +748,9 @@ impl DownloadCommand {
         })?;
         let status = response.status();
         if !status.is_success() {
+            if status.as_u16() == 404 {
+                return Err(self.group.recover().file_not_found_error());
+            }
             if status.is_server_error() {
                 return Err(Aria2Error::Recoverable(
                     crate::error::RecoverableError::ServerError {
@@ -727,7 +779,17 @@ impl DownloadCommand {
         let mut stream = response.bytes_stream();
         let mut completed = 0u64;
 
-        while let Some(chunk) = stream.next().await {
+        loop {
+            let chunk = tokio::select! {
+                chunk = stream.next() => chunk,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                    self.check_cancelled()?;
+                    continue;
+                }
+            };
+            let Some(chunk) = chunk else {
+                break;
+            };
             self.check_cancelled()?;
             let chunk = chunk.map_err(|error| {
                 Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {

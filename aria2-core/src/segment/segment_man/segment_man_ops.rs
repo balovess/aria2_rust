@@ -279,7 +279,9 @@ impl SegmentMan {
 
         trace!(index = piece_index, cuid, "SegmentMan: attaching segment");
 
-        // TODO: Flush WrDiskCache when implemented
+        // The active BitTorrent path owns write-back ordering in
+        // `CachedDiskWriter`; this compatibility facade does not own a disk
+        // writer or piece-local cache.
 
         // Mark piece as used by segment
         piece.set_used_by_segment(true);

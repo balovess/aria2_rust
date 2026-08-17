@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine::resume_data::ResumeData;
-use crate::request::request_group::{DownloadOptions, GroupId, MetadataInfo, RequestGroup};
+use crate::request::request_group::{
+    DownloadOptions, FollowMode, GroupId, MetadataInfo, RequestGroup,
+};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Helper to create a temporary directory for tests
@@ -96,6 +98,30 @@ async fn test_session_save_creates_files() {
     }
 
     // Clean up
+    let _ = fs::remove_dir_all(&session_dir);
+}
+
+#[tokio::test]
+async fn test_session_save_removes_stale_resume_files() {
+    let session_dir = create_test_session_dir();
+    let persistence = SessionPersistence::new(&session_dir);
+    let groups = create_test_groups(1);
+    let resume_path = session_dir.join(format!(
+        "{}.aria2",
+        groups[0].recover().gid().to_hex_string()
+    ));
+
+    persistence.save_state(&groups).await.unwrap();
+    assert!(resume_path.exists());
+
+    let empty_groups: Vec<Arc<std::sync::RwLock<RequestGroup>>> = Vec::new();
+    persistence.save_state(&empty_groups).await.unwrap();
+
+    assert!(
+        !resume_path.exists(),
+        "an empty authoritative snapshot must remove stale resume files"
+    );
+
     let _ = fs::remove_dir_all(&session_dir);
 }
 
@@ -392,6 +418,55 @@ async fn test_metadata_provenance_roundtrip_via_json_persistence() {
                 .as_ref()
         )
     );
+
+    let _ = fs::remove_dir_all(&session_dir);
+}
+
+#[tokio::test]
+async fn test_follow_mode_variants_roundtrip_via_persistence() {
+    let session_dir = create_test_session_dir();
+    let persistence = SessionPersistence::new(&session_dir);
+    let modes = [
+        (FollowMode::Follow, FollowMode::Disabled),
+        (FollowMode::Disabled, FollowMode::Follow),
+        (FollowMode::Memory, FollowMode::Memory),
+    ];
+    let groups = modes
+        .iter()
+        .enumerate()
+        .map(|(index, &(follow_torrent, follow_metalink))| {
+            Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                GroupId::new(0x400 + index as u64),
+                vec![format!("https://example.test/metadata-{index}.bin")],
+                DownloadOptions {
+                    follow_torrent: Some(follow_torrent),
+                    follow_metalink: Some(follow_metalink),
+                    ..Default::default()
+                },
+            )))
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(persistence.save_state(&groups).await.unwrap(), modes.len());
+
+    let mut restored = Vec::new();
+    assert_eq!(
+        SessionPersistence::new(&session_dir)
+            .load_state(&mut restored)
+            .await
+            .unwrap(),
+        modes.len()
+    );
+
+    for (index, &(follow_torrent, follow_metalink)) in modes.iter().enumerate() {
+        let group = restored
+            .iter()
+            .find(|group| group.recover().gid() == GroupId::new(0x400 + index as u64))
+            .expect("follow-mode group should be restored");
+        let options = group.recover().options().clone();
+        assert_eq!(options.follow_torrent, Some(follow_torrent));
+        assert_eq!(options.follow_metalink, Some(follow_metalink));
+    }
 
     let _ = fs::remove_dir_all(&session_dir);
 }

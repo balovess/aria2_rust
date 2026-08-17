@@ -450,6 +450,7 @@ impl BtDownloadCommand {
                                 "Failed to save halted BT checkpoint: {error}"
                             ))
                         })?;
+                    self.group.recover().take_save_control_file_request();
                 }
                 return Err(Aria2Error::DownloadFailed(
                     "BitTorrent download halted".into(),
@@ -812,12 +813,8 @@ impl BtDownloadCommand {
                             let g = self.group.recover();
                             g.set_bt_bitfield(Some(bitfield.clone()));
                         }
-                        if let Some(checkpoint) = self.checkpoint.as_mut()
-                            && let Err(error) =
-                                checkpoint.save(&bitfield, self.completed_bytes).await
-                        {
-                            tracing::warn!(%error, "Failed to save BT checkpoint after piece completion");
-                        }
+                        self.persist_checkpoint_after_piece(&mut writer, &bitfield)
+                            .await?;
 
                         BtPeerInteraction::broadcast_have(
                             active_connections,

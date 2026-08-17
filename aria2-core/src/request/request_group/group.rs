@@ -145,6 +145,10 @@ pub struct RequestGroup {
     /// resuming. Mirrors C++ `RequestGroup::resumeFailureCount_`.
     pub resume_failure_count: AtomicU32,
 
+    /// Number of HTTP/FTP not-found responses observed for this group.
+    /// Mirrors C++ `RequestGroup::fileNotFoundCount_`.
+    pub file_not_found_count: AtomicU32,
+
     /// Whether saving the .aria2 control file is currently enabled.
     /// Disabled during hash checking to prevent corrupt state.
     pub save_control_file_enabled: std::sync::RwLock<std::sync::atomic::AtomicBool>,
@@ -252,6 +256,7 @@ impl RequestGroup {
             connection_contexts: std::sync::RwLock::new(Vec::new()),
             command_failure: AtomicBool::new(false),
             resume_failure_count: AtomicU32::new(0),
+            file_not_found_count: AtomicU32::new(0),
             save_control_file_enabled: std::sync::RwLock::new(std::sync::atomic::AtomicBool::new(
                 true,
             )),

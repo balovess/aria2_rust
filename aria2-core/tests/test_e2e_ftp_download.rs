@@ -3,6 +3,7 @@ use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::error::{Aria2Error, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
@@ -494,12 +495,40 @@ async fn test_e2e_ftp_550_not_found() {
 
     let result = cmd.execute().await;
     assert!(result.is_err(), "550应返回错误");
-    let err_msg = format!("{:?}", result.err());
-    assert!(
-        err_msg.contains("FileNotFound") || err_msg.contains("not found"),
-        "应为FileNotFound错误: {}",
-        err_msg
-    );
+    assert!(matches!(
+        result,
+        Err(Aria2Error::Recoverable(RecoverableError::ResourceNotFound))
+    ));
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_max_file_not_found_stops_after_threshold() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let addr = server.addr();
+    let url = format!("ftp://127.0.0.1:{}/files/notfound", addr.port());
+
+    let mut cmd = FtpDownloadCommand::new(
+        GroupId::new(6),
+        &url,
+        &DownloadOptions::default(),
+        dir.path().to_str(),
+        None,
+    )
+    .expect("FtpDownloadCommand should construct");
+    cmd.request_group()
+        .expect("FTP command should expose its request group")
+        .recover_mut()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "max-file-not-found".to_string(),
+            serde_json::json!(2),
+        )]));
+
+    let result = cmd.execute().await;
+    assert!(matches!(
+        result,
+        Err(Aria2Error::Recoverable(RecoverableError::MaxFileNotFound))
+    ));
 }
 
 #[tokio::test]

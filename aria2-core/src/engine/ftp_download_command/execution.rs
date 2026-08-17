@@ -91,9 +91,15 @@ impl Command for FtpDownloadCommand {
                 Err(attempt_error) => {
                     self.flush_checkpoint().await;
                     let FtpAttemptError {
-                        source: e,
+                        source: mut e,
                         failed_control,
                     } = attempt_error;
+                    if matches!(
+                        e,
+                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                    ) {
+                        e = self.group.recover().file_not_found_error();
+                    }
                     let reject_control = matches!(
                         e,
                         Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
@@ -112,15 +118,20 @@ impl Command for FtpDownloadCommand {
                         );
                     }
                     // Check if this is a retry-worthy error
-                    let is_retryable_error = matches!(
-                        &e,
-                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { .. })
-                            | Aria2Error::Recoverable(RecoverableError::Timeout)
-                    );
-                    let should_retry = is_retryable_error
-                        && self
+                    let should_retry = match &e {
+                        Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+                            self.retry_policy
+                                .can_retry_after(attempts.saturating_add(1))
+                                && self.group.recover().can_retry_file_not_found()
+                        }
+                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            ..
+                        })
+                        | Aria2Error::Recoverable(RecoverableError::Timeout) => self
                             .retry_policy
-                            .can_retry_after(attempts.saturating_add(1));
+                            .can_retry_after(attempts.saturating_add(1)),
+                        _ => false,
+                    };
 
                     if should_retry {
                         attempts = attempts.saturating_add(1);
@@ -132,7 +143,7 @@ impl Command for FtpDownloadCommand {
                             wait,
                             e
                         );
-                        tokio::time::sleep(wait).await;
+                        self.wait_for_retry(wait).await?;
 
                         // Reset state for retry
                         self.completed_bytes = 0;
@@ -182,6 +193,36 @@ impl Command for FtpDownloadCommand {
 }
 
 impl FtpDownloadCommand {
+    /// Wait between retry attempts while still honoring RequestGroup controls.
+    /// A plain sleep would delay pause/remove handling for the full configured
+    /// retry interval, which can be several minutes.
+    pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let halt_message = {
+                let group = self.group.recover();
+                if group.is_removed() {
+                    Some("Download cancelled by user")
+                } else if group.is_paused_flag() {
+                    Some("Download paused")
+                } else if group.is_force_halt_requested() || group.is_halt_requested() {
+                    Some("FTP download halted")
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = halt_message {
+                return Err(Aria2Error::DownloadFailed(message.into()));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
+        }
+    }
+
     /// Apply the optional remote timestamp after the output handle has been
     /// finalized. This mirrors the original post-download file-attribute
     /// update while keeping failures non-fatal, as aria2 does.
@@ -213,6 +254,7 @@ impl FtpDownloadCommand {
 
     pub(super) async fn flush_checkpoint(&mut self) {
         if let Some(checkpoint) = self.checkpoint.as_mut() {
+            let _ = self.group.recover().take_save_control_file_request();
             checkpoint.update(self.completed_bytes, true).await;
         }
     }
@@ -702,7 +744,10 @@ impl FtpDownloadCommand {
             }
             self.completed_bytes += bytes_read as u64;
             if let Some(checkpoint) = self.checkpoint.as_mut() {
-                checkpoint.update(self.completed_bytes, false).await;
+                let save_requested = self.group.recover().take_save_control_file_request();
+                checkpoint
+                    .update(self.completed_bytes, save_requested)
+                    .await;
             }
 
             // Update progress in request group

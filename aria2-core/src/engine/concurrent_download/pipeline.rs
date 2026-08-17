@@ -23,7 +23,10 @@ use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::{ConcurrentDownloadResult, ConcurrentDownloader};
+use super::{
+    ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count,
+    flush_requested_control_file,
+};
 
 /// Run the multi-mirror concurrent download pipeline.
 pub async fn execute_with_coordinator(
@@ -33,13 +36,14 @@ pub async fn execute_with_coordinator(
     resume_state: &ResumeState,
     max_retries_per_segment: u32,
 ) -> Result<ConcurrentDownloadResult> {
-    let split = (dl
+    let requested_split = dl
         .group
         .recover()
         .options()
         .split
-        .unwrap_or(constants::DEFAULT_SPLIT) as usize)
-        .max(1);
+        .unwrap_or(constants::DEFAULT_SPLIT);
+    let min_split_size = dl.group.recover().effective_min_split_size();
+    let split = effective_segment_count(total_length, requested_split, min_split_size);
     let segment_size = total_length.div_ceil(split as u64).max(1);
     let max_conn = dl
         .group
@@ -200,6 +204,13 @@ pub async fn execute_with_coordinator(
             tracing::warn!(%error, "Failed to save initial multi-mirror control file");
         }
     }
+    flush_requested_control_file(
+        dl,
+        &mut writer,
+        &mut ctrl_file,
+        coordinator.completed_bytes(),
+    )
+    .await?;
     let ctrl_save_interval = (total_length / num_pieces as u64).max(1);
     let mut ctrl_bytes_since_save = 0u64;
 
@@ -334,6 +345,13 @@ pub async fn execute_with_coordinator(
                 )))
             })?;
         }
+        flush_requested_control_file(
+            dl,
+            &mut writer,
+            &mut ctrl_file,
+            coordinator.completed_bytes(),
+        )
+        .await?;
 
         if coordinator.is_complete() {
             break;
@@ -408,7 +426,40 @@ pub async fn execute_with_coordinator(
                         }
                     }
                     Err(e) => {
+                        let e = if matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                        ) {
+                            dl.group.recover().file_not_found_error()
+                        } else {
+                            e
+                        };
                         tracing::warn!(seg_idx, mirror_idx, error = %e, "Pooled segment download failed");
+                        let is_file_not_found = matches!(
+                            &e,
+                            Aria2Error::Recoverable(
+                                RecoverableError::ResourceNotFound
+                                    | RecoverableError::MaxFileNotFound
+                            )
+                        );
+                        let file_not_found_retry_allowed = !matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                        ) && dl.group.recover().can_retry_file_not_found();
+                        if is_file_not_found && !file_not_found_retry_allowed {
+                            super::segment::cancel_and_persist(
+                                executor,
+                                &mut write_rx,
+                                &mut writer,
+                                None,
+                                dl.global_limiter.as_ref(),
+                                &mut ctrl_file,
+                                coordinator.completed_bytes(),
+                                &mut progress_handles,
+                            )
+                            .await?;
+                            return Err(e);
+                        }
                         let error_code = super::server_stat_error_code(&e);
                         let is_capacity_limited = matches!(
                             &e,
@@ -461,6 +512,13 @@ pub async fn execute_with_coordinator(
                         constants::HTTP_SPEED_UPDATE_INTERVAL_MS,
                     )
                     .await;
+                flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    coordinator.completed_bytes(),
+                )
+                .await?;
             }
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
@@ -469,8 +527,22 @@ pub async fn execute_with_coordinator(
                         e
                     )))
                 })?;
+                flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    coordinator.completed_bytes(),
+                )
+                .await?;
             }
             _ = cancel_tick.tick() => {
+                flush_requested_control_file(
+                    dl,
+                    &mut writer,
+                    &mut ctrl_file,
+                    coordinator.completed_bytes(),
+                )
+                .await?;
                 if let Err(error) = dl.check_cancelled() {
                     super::segment::cancel_and_persist(
                         executor,

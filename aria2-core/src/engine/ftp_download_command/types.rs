@@ -385,8 +385,8 @@ impl FtpDownloadCommand {
         self.global_limiter = Some(limiter);
     }
 
-    /// Classify FTP response code to determine error handling strategy
-    #[allow(dead_code)] // Must remain: will be used when FTP retry-with-classification logic is integrated into execute_single_attempt
+    /// Classify an FTP response code using the public download error contract.
+    #[allow(dead_code)]
     pub(super) fn classify_ftp_error(&self, code: u16, message: &str) -> Aria2Error {
         match code {
             // Positive responses (should not be errors)
@@ -423,9 +423,7 @@ impl FtpDownloadCommand {
             532 => Aria2Error::Fatal(FatalError::PermissionDenied {
                 path: "Account required for storing file".into(),
             }),
-            550 => Aria2Error::Fatal(FatalError::FileNotFound {
-                path: self.remote_path.clone(),
-            }),
+            550 => Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
             551 => Aria2Error::Fatal(FatalError::Config(format!(
                 "Page type unknown: {}",
                 message
@@ -441,15 +439,13 @@ impl FtpDownloadCommand {
             _ => {
                 // Check message content for hints about error type
                 let msg_lower = message.to_lowercase();
-                if msg_lower.contains("not found")
-                    || msg_lower.contains("no such")
-                    || msg_lower.contains("access denied")
+                if msg_lower.contains("not found") || msg_lower.contains("no such") {
+                    Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+                } else if msg_lower.contains("access denied")
                     || msg_lower.contains("permission")
+                    || msg_lower.contains("login")
+                    || msg_lower.contains("auth")
                 {
-                    Aria2Error::Fatal(FatalError::FileNotFound {
-                        path: self.remote_path.clone(),
-                    })
-                } else if msg_lower.contains("login") || msg_lower.contains("auth") {
                     Aria2Error::Fatal(FatalError::PermissionDenied {
                         path: format!("{}:{}", self.host, self.port),
                     })

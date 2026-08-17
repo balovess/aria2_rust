@@ -155,7 +155,7 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(0),
             min: Some(0),
-            description: "Max number of 404 not-found attempts (0=unlimited)".into(),
+            description: "Max number of 404 not-found attempts (0=stop immediately)".into(),
             category: OptionCategory::General,
             ..Default::default()
         });

@@ -77,11 +77,12 @@ impl DownloadControlFlags {
 
     /// Request a graceful halt.
     ///
-    /// Sets `halt_requested` and clears `pause_requested` (matching C++
+    /// Sets `halt_requested` and clears both pause flags (matching C++
     /// behavior where halt takes precedence over pause).
     pub fn request_halt(&self) {
         self.halt_requested.store(true, Ordering::Release);
         self.pause_requested.store(false, Ordering::Release);
+        self.force_pause_requested.store(false, Ordering::Release);
     }
 
     /// Request a forced halt (abort immediately).
@@ -91,6 +92,7 @@ impl DownloadControlFlags {
         self.halt_requested.store(true, Ordering::Release);
         self.force_halt_requested.store(true, Ordering::Release);
         self.pause_requested.store(false, Ordering::Release);
+        self.force_pause_requested.store(false, Ordering::Release);
     }
 
     /// Check whether a graceful halt has been requested.
@@ -208,6 +210,11 @@ impl DownloadControlFlags {
         self.save_control_requested.load(Ordering::Acquire)
     }
 
+    /// Consume one pending control-file save request.
+    pub fn take_save_control_request(&self) -> bool {
+        self.save_control_requested.swap(false, Ordering::AcqRel)
+    }
+
     /// Clear the save control flag after processing.
     pub fn clear_save_control(&self) {
         self.save_control_requested.store(false, Ordering::Release);
@@ -283,12 +290,26 @@ mod tests {
     #[test]
     fn test_halt_clears_pause() {
         let flags = DownloadControlFlags::new();
-        flags.request_pause();
+        flags.request_force_pause();
         assert!(flags.is_pause_requested());
+        assert!(flags.is_force_pause_requested());
 
         flags.request_halt();
         assert!(!flags.is_pause_requested());
+        assert!(!flags.is_force_pause_requested());
         assert!(flags.is_halt_requested());
+    }
+
+    #[test]
+    fn test_force_halt_clears_pause() {
+        let flags = DownloadControlFlags::new();
+        flags.request_force_pause();
+        flags.request_force_halt();
+
+        assert!(!flags.is_pause_requested());
+        assert!(!flags.is_force_pause_requested());
+        assert!(flags.is_halt_requested());
+        assert!(flags.is_force_halt_requested());
     }
 
     #[test]

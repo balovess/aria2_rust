@@ -77,6 +77,7 @@ impl super::RequestGroupMan {
         gid: crate::request::request_group::GroupId,
         result: crate::request::request_group::DownloadResult,
     ) -> bool {
+        let _lifecycle = self.lifecycle_guard();
         if let Some((_, group)) = self.active.remove(&gid) {
             self.unregister_group(gid);
             // Release runtime resources (C++ `releaseRuntimeResource()`).
@@ -118,6 +119,7 @@ impl super::RequestGroupMan {
     ///
     /// Returns the number of groups re-queued.
     pub fn requeue_non_terminal_groups(&self, event_hooks: Option<&DownloadEventHooks>) -> usize {
+        let _lifecycle = self.lifecycle_guard();
         let mut to_move: Vec<(GroupId, Arc<std::sync::RwLock<RequestGroup>>)> = Vec::new();
 
         for entry in self.active.iter() {
@@ -252,8 +254,17 @@ impl super::RequestGroupMan {
                 Vec::new()
             };
 
+            // Post-download processing may add followed-by child GIDs to a
+            // completed parent. Refresh the result after that mutation so
+            // stopped/RPC consumers see the complete relationship graph.
+            let result = if matches!(status, DownloadStatus::Complete) {
+                dg.group.recover().create_download_result()
+            } else {
+                dg.result
+            };
+
             // Now demote the group (releases download context, etc.)
-            self.demote_group(gid, dg.result);
+            self.demote_group(gid, result);
 
             // ── Insert child groups into reserved queue ─────────────────
             // C++: `insertReservedGroup(0, nextGroups)` inserts at front

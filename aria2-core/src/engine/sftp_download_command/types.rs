@@ -10,6 +10,7 @@ use tracing::info;
 
 use crate::constants;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::http::auth::netrc::find_netrc_file;
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
@@ -37,6 +38,8 @@ pub struct SftpDownloadCommand {
     pub(super) started: bool,
     /// Total bytes completed so far (for progress tracking)
     pub(super) completed_bytes: u64,
+    /// Retry policy for remote not-found responses.
+    pub(super) retry_policy: RetryPolicy,
     /// Remote server hostname or IP
     pub(super) host: String,
     /// Remote server port (typically 22)
@@ -145,6 +148,10 @@ impl SftpDownloadCommand {
             output_path: path,
             started: false,
             completed_bytes: 0,
+            retry_policy: RetryPolicy::new(
+                options.max_retries,
+                options.retry_wait.saturating_mul(1000),
+            ),
             host: parsed.host,
             port: parsed.port,
             username,
@@ -183,6 +190,10 @@ impl SftpDownloadCommand {
             output_path: std::path::PathBuf::from(dir).join(filename),
             started: false,
             completed_bytes: 0,
+            retry_policy: RetryPolicy::new(
+                options.max_retries,
+                options.retry_wait.saturating_mul(1000),
+            ),
             host: parsed.host,
             port: parsed.port,
             username,
@@ -437,9 +448,9 @@ impl SftpDownloadCommand {
     /// Map a FileOpError to the appropriate Aria2Error for engine-level handling.
     pub(super) fn map_file_op_error(err: &FileOpError, host: &str, path: &str) -> Aria2Error {
         match err {
-            FileOpError::NotFound { .. } => Aria2Error::Fatal(FatalError::FileNotFound {
-                path: path.to_string(),
-            }),
+            FileOpError::NotFound { .. } => {
+                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+            }
             FileOpError::PermissionDenied { .. } => {
                 Aria2Error::Fatal(FatalError::PermissionDenied {
                     path: format!("{}:{}", host, path),

@@ -257,9 +257,6 @@ impl RpcEngine {
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
         let enqueue_command = if let Some(group_man) = &self.group_man {
             let man = group_man;
-            if man.group_by_hex(&gid).is_none() {
-                return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
-            }
             man.remove_group(gid_parsed)
                 .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
             // Reserved groups are removed synchronously and are already in the
@@ -299,11 +296,6 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
-        if let Some(group_man) = &self.group_man
-            && group_man.group_by_hex(&gid).is_none()
-        {
-            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
-        }
         if let Some(group_man) = &self.group_man {
             group_man
                 .pause_group(gid_parsed)
@@ -372,11 +364,6 @@ impl RpcEngine {
         })?;
         let gid_parsed = GroupId::from_hex_string(&gid)
             .ok_or_else(|| JsonRpcError::InvalidParams("Invalid GID".into()))?;
-        if let Some(group_man) = &self.group_man
-            && group_man.group_by_hex(&gid).is_none()
-        {
-            return Err(JsonRpcError::RpcExecution(format!("GID {gid} not found")));
-        }
         // Commit the externally visible transition before returning the RPC
         // response. The original aria2 contract changes a paused group to
         // WAITING synchronously, then requests a queue check. The engine

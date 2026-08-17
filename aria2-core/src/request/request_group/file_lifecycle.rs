@@ -51,6 +51,17 @@ impl super::RequestGroup {
         true
     }
 
+    /// Consume a control-file save request after the protocol owner has
+    /// persisted its current in-memory checkpoint.
+    pub fn take_save_control_file_request(&self) -> bool {
+        self.control_flags.take_save_control_request()
+    }
+
+    /// Check whether a protocol-owned control file needs a forced save.
+    pub fn is_save_control_file_requested(&self) -> bool {
+        self.control_flags.is_save_control_requested()
+    }
+
     /// Request removal of the .aria2 control file.
     pub fn remove_control_file(&self) {
         self.control_flags.request_remove_control();

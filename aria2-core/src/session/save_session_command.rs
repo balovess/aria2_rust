@@ -36,6 +36,7 @@ impl Command for SaveSessionCommand {
         self.status = CommandStatus::Running;
         debug!("Starting session save to {}", self.path.display());
 
+        self.request_group_man.request_control_file_saves();
         let groups = self.request_group_man.list_groups();
         session_serializer::save_to_file(&self.path, &groups).await?;
 

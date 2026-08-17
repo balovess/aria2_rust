@@ -196,6 +196,22 @@ fn test_set_get_completed_length() {
 }
 
 #[test]
+fn test_mark_complete_sets_completed_length_to_total() {
+    let group = RequestGroup::new(
+        GroupId::new(8),
+        vec!["http://example.com/complete.bin".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_total_length_atomic(4096);
+    group.set_completed_length(1024);
+
+    group.mark_complete();
+
+    assert!(group.status().is_completed());
+    assert_eq!(group.get_completed_length(), 4096);
+}
+
+#[test]
 fn test_validate_total_length() {
     let group = RequestGroup::new(
         GroupId(1),
@@ -420,6 +436,31 @@ fn test_download_options_choking_config_clone() {
     assert_eq!(cloned.bt_snubbed_timeout, Some(90));
 }
 
+#[test]
+fn test_effective_min_split_size_uses_task_snapshot_and_runtime_override() {
+    let mut group = RequestGroup::new(
+        GroupId::new(12),
+        vec!["http://example.com/file.bin".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert_eq!(
+        group.effective_min_split_size(),
+        crate::constants::DEFAULT_MIN_SPLIT_SIZE
+    );
+
+    group.set_option_snapshot(std::collections::HashMap::from([(
+        "min-split-size".to_string(),
+        serde_json::json!("10M"),
+    )]));
+    assert_eq!(group.effective_min_split_size(), 10 * 1024 * 1024);
+
+    group
+        .try_update_option("min-split-size", serde_json::json!("4M"))
+        .expect("min-split-size should accept a valid reserved-task update");
+    assert_eq!(group.effective_min_split_size(), 4 * 1024 * 1024);
+}
+
 // ==================== BT Metadata Tests ====================
 
 #[test]
@@ -623,6 +664,55 @@ fn test_effective_option_snapshot_overlays_only_applied_runtime_changes() {
 }
 
 #[test]
+fn test_file_not_found_limit_uses_effective_group_options() {
+    let mut group = RequestGroup::new(
+        GroupId::new(44),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([(
+        "max-file-not-found".to_string(),
+        serde_json::json!("3"),
+    )]));
+
+    assert_eq!(group.max_file_not_found(), 3);
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::ResourceNotFound
+    );
+    assert!(group.can_retry_file_not_found());
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::ResourceNotFound
+    );
+    assert!(group.can_retry_file_not_found());
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::MaxFileNotFound
+    );
+    assert!(!group.can_retry_file_not_found());
+}
+
+#[test]
+fn test_file_not_found_zero_stops_without_retry() {
+    let mut group = RequestGroup::new(
+        GroupId::new(45),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+    group.set_option_snapshot(std::collections::HashMap::from([(
+        "max-file-not-found".to_string(),
+        serde_json::json!("0"),
+    )]));
+
+    assert_eq!(
+        group.record_file_not_found(),
+        DownloadResultCode::ResourceNotFound
+    );
+    assert!(!group.can_retry_file_not_found());
+}
+
+#[test]
 fn test_download_result_preserves_effective_option_snapshot() {
     let mut group = RequestGroup::new(
         GroupId::new(43),
@@ -649,6 +739,22 @@ fn test_download_result_preserves_effective_option_snapshot() {
         options.get("max-download-limit"),
         Some(&serde_json::json!("2048"))
     );
+}
+
+#[test]
+fn test_command_counter_does_not_underflow() {
+    let group = RequestGroup::new(
+        GroupId::new(1),
+        vec!["http://example.com/file".to_string()],
+        DownloadOptions::default(),
+    );
+
+    assert_eq!(group.dec_commands(), 0);
+    assert_eq!(group.num_commands(), 0);
+
+    group.inc_commands();
+    assert_eq!(group.dec_commands(), 1);
+    assert_eq!(group.num_commands(), 0);
 }
 
 #[test]

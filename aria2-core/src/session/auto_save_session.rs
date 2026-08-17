@@ -107,7 +107,10 @@ impl Command for AutoSaveSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::progress_checkpoint::ProgressCheckpoint;
+    use crate::filesystem::control_file::ControlFile;
     use crate::request::request_group::DownloadOptions;
+    use crate::util::rwlock_ext::RwLockRecover;
 
     #[tokio::test]
     async fn test_auto_save_creation() {
@@ -209,5 +212,38 @@ mod tests {
         assert!(!auto.is_dirty(), "After save dirty flag should be reset");
 
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn auto_save_request_is_consumed_by_checkpoint_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        let session = dir.path().join("session.txt");
+        tokio::fs::write(&output, [0u8; 4]).await.unwrap();
+
+        let man = Arc::new(RequestGroupMan::new());
+        let gid = man
+            .add_group(
+                vec!["http://example.com/payload.bin".into()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group = man.get_group(gid).unwrap();
+        let mut checkpoint = ProgressCheckpoint::open(&output, 4, 0).await;
+        group.recover().set_completed_length(4);
+
+        let mut auto = AutoSaveSession::new(session, Duration::ZERO, man);
+        auto.mark_dirty();
+        auto.execute().await.unwrap();
+
+        assert!(group.recover().is_save_control_file_requested());
+        let save_requested = group.recover().take_save_control_file_request();
+        checkpoint.update(4, save_requested).await;
+
+        let saved = ControlFile::load(&ControlFile::control_path_for(&output))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.completed_length(), 4);
     }
 }

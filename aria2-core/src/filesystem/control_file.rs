@@ -75,12 +75,18 @@ impl ControlFile {
         num_pieces: usize,
     ) -> Result<Self> {
         if ctrl_path.exists() {
-            Self::load(ctrl_path).await?.ok_or_else(|| {
+            let mut control_file = Self::load(ctrl_path).await?.ok_or_else(|| {
                 Aria2Error::FileIo(format!(
                     "Failed to load control file: {}",
                     ctrl_path.display()
                 ))
-            })
+            })?;
+            // The serialized A2CF bitfield stores bytes, not the caller's
+            // logical piece count. Restore that count at the typed open seam
+            // so trailing bits and short final pieces are interpreted using
+            // the current download layout.
+            control_file.normalize_bitfield(num_pieces);
+            Ok(control_file)
         } else {
             let bitfield_len = num_pieces.div_ceil(8);
             Ok(Self {
@@ -273,10 +279,24 @@ impl ControlFile {
     pub fn mark_piece_done(&mut self, index: usize) {
         let byte_index = index / 8;
         let bit_index = index % 8;
-        if byte_index < self.bitfield.len() {
+        if index < self.num_pieces && byte_index < self.bitfield.len() {
             self.bitfield[byte_index] |= 1 << (7 - bit_index);
             self.completed_length = self.calculate_completed();
         }
+    }
+
+    fn normalize_bitfield(&mut self, num_pieces: usize) {
+        self.num_pieces = num_pieces;
+        self.bitfield.resize(num_pieces.div_ceil(8), 0);
+
+        if let Some(last_byte) = self.bitfield.last_mut() {
+            let valid_bits = num_pieces % 8;
+            if valid_bits != 0 {
+                *last_byte &= u8::MAX << (8 - valid_bits);
+            }
+        }
+
+        self.completed_length = self.calculate_completed();
     }
 
     pub fn is_piece_done(&self, index: usize) -> bool {
@@ -294,12 +314,17 @@ impl ControlFile {
     }
 
     fn calculate_completed(&self) -> u64 {
-        let bits = self.completed_pieces() as u64;
         if self.total_length == 0 || self.num_pieces == 0 {
             return 0;
         }
-        let piece_size = self.total_length / self.num_pieces as u64;
-        bits * piece_size
+        let piece_size = self.total_length.div_ceil(self.num_pieces as u64);
+        (0..self.num_pieces)
+            .filter(|&index| self.is_piece_done(index))
+            .map(|index| {
+                let offset = index as u64 * piece_size;
+                self.total_length.saturating_sub(offset).min(piece_size)
+            })
+            .sum()
     }
 
     pub fn update_completed_length(&mut self, length: u64) {
@@ -308,7 +333,7 @@ impl ControlFile {
 
     pub fn control_path_for(output_path: &Path) -> PathBuf {
         let mut p = output_path.to_path_buf();
-        p.set_extension(".aria2");
+        p.set_extension("aria2");
         p
     }
 }
@@ -324,6 +349,14 @@ fn u64_from_le(b: &[u8]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_control_path_uses_aria2_suffix() {
+        assert_eq!(
+            ControlFile::control_path_for(Path::new("payload.bin")),
+            PathBuf::from("payload.aria2")
+        );
+    }
 
     #[tokio::test]
     async fn test_control_file_new_and_save() {
@@ -366,6 +399,57 @@ mod tests {
         assert_eq!(loaded.completed_pieces(), 3);
         assert!(loaded.is_piece_done(0));
         assert!(loaded.is_piece_done(7));
+    }
+
+    #[tokio::test]
+    async fn test_control_file_piece_completion_handles_short_final_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short_final.aria2");
+
+        let mut cf = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
+        cf.mark_piece_done(0);
+        cf.mark_piece_done(2);
+
+        assert_eq!(cf.completed_length(), 6);
+        assert!(!cf.is_piece_done(3));
+    }
+
+    #[tokio::test]
+    async fn test_control_file_reload_restores_logical_piece_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reload_piece_count.aria2");
+
+        let mut cf = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
+        cf.mark_piece_done(0);
+        cf.save().await.unwrap();
+
+        let mut loaded = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
+        loaded.mark_piece_done(2);
+
+        assert_eq!(loaded.completed_length(), 6);
+        assert!(!loaded.is_piece_done(3));
+    }
+
+    #[tokio::test]
+    async fn test_control_file_reload_normalizes_legacy_piece_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("normalize_piece_count.aria2");
+
+        let mut old = ControlFile::open_or_create(&path, 10, 5).await.unwrap();
+        old.mark_piece_done(0);
+        old.mark_piece_done(1);
+        old.mark_piece_done(4);
+        old.save().await.unwrap();
+
+        let loaded = ControlFile::open_or_create(&path, 10, 3).await.unwrap();
+
+        assert_eq!(loaded.bitfield(), &[0b1100_0000]);
+        assert_eq!(loaded.completed_pieces(), 2);
+        assert!(loaded.is_piece_done(0));
+        assert!(loaded.is_piece_done(1));
+        assert!(!loaded.is_piece_done(2));
+        assert!(!loaded.is_piece_done(3));
+        assert_eq!(loaded.completed_length(), 8);
     }
 
     #[tokio::test]

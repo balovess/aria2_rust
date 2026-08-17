@@ -1,5 +1,6 @@
 //! Core save/load logic for SessionPersistence.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -55,6 +56,8 @@ impl SessionPersistence {
             })?;
 
         let mut saved = 0usize;
+        let mut can_prune_stale_files = true;
+        let mut saved_files = HashSet::new();
 
         for group_lock in groups.iter() {
             let group = group_lock.recover();
@@ -70,6 +73,7 @@ impl SessionPersistence {
                     let path = self.session_dir.join(&file_name);
 
                     if let Err(e) = resume_data.save_to_file(&path) {
+                        can_prune_stale_files = false;
                         warn!(
                             gid = %resume_data.gid,
                             error = %e,
@@ -78,6 +82,7 @@ impl SessionPersistence {
                         continue;
                     }
                     saved += 1;
+                    saved_files.insert(file_name);
                     debug!(
                         gid = %resume_data.gid,
                         path = %path.display(),
@@ -85,6 +90,7 @@ impl SessionPersistence {
                     );
                 }
                 Err(e) => {
+                    can_prune_stale_files = false;
                     debug!(
                         gid = %group.gid().value(),
                         error = %e,
@@ -96,6 +102,14 @@ impl SessionPersistence {
 
         // Save global options summary
         self.save_global_options(groups).await?;
+
+        // A successful session snapshot is authoritative. Remove resume
+        // files from older snapshots, but keep them when a current entry
+        // could not be serialized so a transient failure cannot erase the
+        // last recoverable state.
+        if can_prune_stale_files {
+            remove_stale_resume_files(&self.session_dir, &saved_files).await?;
+        }
 
         // Persist canonical cookies using aria2's Netscape-compatible format.
         let cookie_path = self.session_dir.join("cookies.txt");
@@ -182,7 +196,17 @@ impl SessionPersistence {
             )
         })?;
 
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        loop {
+            let Some(entry) = entries.next_entry().await.map_err(|error| {
+                format!(
+                    "Failed to enumerate session dir {} while loading state: {}",
+                    self.session_dir.display(),
+                    error
+                )
+            })?
+            else {
+                break;
+            };
             let path = entry.path();
 
             // Only process .aria2 files
@@ -451,6 +475,47 @@ impl SessionPersistence {
             }
         }))
     }
+}
+
+async fn remove_stale_resume_files(
+    session_dir: &Path,
+    retained_files: &HashSet<String>,
+) -> Result<(), String> {
+    let mut entries = tokio::fs::read_dir(session_dir).await.map_err(|error| {
+        format!(
+            "Failed to read session dir {} while pruning stale files: {}",
+            session_dir.display(),
+            error
+        )
+    })?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        format!(
+            "Failed to enumerate session dir {} while pruning stale files: {}",
+            session_dir.display(),
+            error
+        )
+    })? {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "aria2")
+            && !retained_files.contains(file_name)
+        {
+            tokio::fs::remove_file(&path).await.map_err(|error| {
+                format!(
+                    "Failed to remove stale session file {}: {}",
+                    path.display(),
+                    error
+                )
+            })?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Recreate the metadata prerequisite for a persisted Metalink torrent graph.

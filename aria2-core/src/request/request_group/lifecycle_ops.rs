@@ -200,8 +200,10 @@ impl super::RequestGroup {
     /// `Arc<std::sync::RwLock<RequestGroup>>` without needing a write lock
     /// on the outer guard.
     pub fn mark_complete(&self) {
+        let total = self.progress.total_length();
         *self.status.recover_mut() = DownloadStatus::Complete;
         *self.end_time.recover_mut() = Some(std::time::Instant::now());
+        self.progress.set_completed_length(total);
         tracing::info!(gid = self.gid.value(), "Marked download as complete");
         self.notify_terminal_event(DownloadEvent::Complete);
     }

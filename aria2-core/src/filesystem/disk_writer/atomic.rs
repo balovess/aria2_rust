@@ -72,6 +72,20 @@ impl DiskWriter for DefaultDiskWriter {
         Ok(())
     }
 
+    async fn flush(&mut self) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        if let Some(file) = self.file.as_mut() {
+            file.flush()
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+            file.sync_data()
+                .await
+                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     async fn finalize(&mut self) -> Result<Vec<u8>> {
         if let Some(mut file) = self.file.take() {
             use tokio::io::AsyncWriteExt;
@@ -127,6 +141,10 @@ impl Default for ByteArrayDiskWriter {
 impl DiskWriter for ByteArrayDiskWriter {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
         self.buffer.extend_from_slice(data);
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<()> {
         Ok(())
     }
 

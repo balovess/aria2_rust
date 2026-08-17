@@ -1,0 +1,9 @@
+/adr/
+/migration/
+/superpowers/
+/aria2_next_diff_catalog.md
+/bt_gap_analysis.md
+/detect-bare-hostname-fallback-adr.md
+/engine-loop-performance.md
+/ftp_connection_gap_analysis.md
+/http_ftp_gap_analysis.md
