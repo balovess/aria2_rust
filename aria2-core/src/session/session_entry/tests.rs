@@ -491,8 +491,8 @@ fn test_download_options_to_map_all_fields() {
         no_want_digest_header: true,
         check_certificate: false,
         ca_certificate: Some("/tmp/ca.pem".to_string()),
-        certificate: None,
-        private_key: None,
+        certificate: Some("/tmp/client.pem".to_string()),
+        private_key: Some("/tmp/client.key".to_string()),
         min_tls_version: Some("TLSv1.3".to_string()),
         // Metalink
         metalink_version: None,
@@ -649,6 +649,8 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("no-want-digest-header").unwrap(), "true");
     assert_eq!(map.get("check-certificate").unwrap(), "false");
     assert_eq!(map.get("ca-certificate").unwrap(), "/tmp/ca.pem");
+    assert_eq!(map.get("certificate").unwrap(), "/tmp/client.pem");
+    assert_eq!(map.get("private-key").unwrap(), "/tmp/client.key");
     assert_eq!(map.get("min-tls-version").unwrap(), "TLSv1.3");
 
     // The same canonical string map is consumed by session restoration.
@@ -659,6 +661,8 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(restored.max_resume_failure_tries, 2);
     assert_eq!(restored.cookie_file.as_deref(), Some("/tmp/cookies.txt"));
     assert_eq!(restored.bt_max_peers, 64);
+    assert_eq!(restored.certificate.as_deref(), Some("/tmp/client.pem"));
+    assert_eq!(restored.private_key.as_deref(), Some("/tmp/client.key"));
     assert_eq!(
         restored.bt_tracker,
         Some(vec![

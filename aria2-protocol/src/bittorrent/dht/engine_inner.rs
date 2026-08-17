@@ -39,8 +39,9 @@ impl DhtEngine {
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
         let context = Arc::clone(&self.context);
-        let socket = context.socket.clone();
+        let socket = context.socket.shared_socket();
         let tracker = Arc::clone(&context.tracker);
+        let tracker_notify = tracker.change_notifier();
         let handler_self_id = context.handler_self_id;
 
         let handle = tokio::spawn(async move {
@@ -53,32 +54,44 @@ impl DhtEngine {
                     break;
                 }
 
-                let recv_result = tokio::select! {
+                let timeout_wait = async {
+                    match tracker.next_timeout() {
+                        Some(timeout) => tokio::time::sleep(timeout).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                };
+                tokio::pin!(timeout_wait);
+                let transaction_changed = tracker_notify.notified();
+                tokio::pin!(transaction_changed);
+                transaction_changed.as_mut().enable();
+
+                tokio::select! {
                     result = shutdown_rx.changed() => {
                         if result.is_ok() {
                             info!("DHT receive loop shutting down");
                         }
                         break;
                     }
-                    result = socket.recv_with_timeout(&mut buf, Duration::from_secs(1)) => {
-                        result
+                    result = socket.recv_from(&mut buf) => {
+                        match result {
+                            Ok((len, from)) if len > 0 => {
+                                context
+                                    .process_inbound_message(&buf[..len], from, &tracker, &handler)
+                                    .await;
+                            }
+                            Ok(_) => { /* empty packet, ignore */ }
+                            Err(e) => {
+                                debug!("DHT recv error: {}", e);
+                                break;
+                            }
+                        }
                     }
-                };
-
-                match recv_result {
-                    Ok((len, from)) if len > 0 => {
-                        context
-                            .process_inbound_message(&buf[..len], from, &tracker, &handler)
-                            .await;
-                    }
-                    Ok(_) => { /* empty packet, ignore */ }
-                    Err(e) if e.contains("timeout") => { /* normal timeout, continue */ }
-                    Err(e) => {
-                        debug!("DHT recv error: {}", e);
+                    _ = &mut timeout_wait => {}
+                    _ = &mut transaction_changed => {
+                        continue;
                     }
                 }
 
-                // Process transaction timeouts
                 let timed_out = tracker.handle_timeouts();
                 for (addr, _query_type, node_id) in timed_out {
                     context.handle_timeout(addr, node_id).await;
@@ -170,9 +183,6 @@ impl DhtEngineContext {
                 debug!(addr = %node.addr, "Bootstrap ping failed: {}", e);
             }
         }
-
-        // Wait briefly for responses, then do a find_node for our own ID
-        tokio::time::sleep(Duration::from_secs(2)).await;
 
         // Add any responding bootstrap nodes to routing table
         {

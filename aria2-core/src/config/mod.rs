@@ -88,6 +88,20 @@ impl ConfigManager {
         }
     }
 
+    /// Create a configuration manager with identity defaults supplied by an
+    /// embedding product. Standalone core users should use [`Self::new`].
+    pub fn new_with_identity(user_agent: impl Into<String>, peer_agent: impl Into<String>) -> Self {
+        let mut registry = OptionRegistry::new();
+        registry
+            .set_default_value("user-agent", OptionValue::Str(user_agent.into()))
+            .expect("the built-in user-agent option must be registered");
+
+        // `peer-agent` is feature-gated in the core registry, so a non-
+        // BitTorrent build simply keeps the standalone registry shape.
+        let _ = registry.set_default_value("peer-agent", OptionValue::Str(peer_agent.into()));
+        Self::new_with_registry(registry)
+    }
+
     /// Create a `ConfigManager` with a custom `OptionRegistry`.
     ///
     /// Use this when you need to register custom options beyond the
@@ -377,6 +391,22 @@ mod tests {
         assert!(!mgr.has_errors());
         let dir = mgr.get_global_str("dir").await;
         assert!(dir.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_embedding_identity_overrides_only_identity_defaults() {
+        let mgr = ConfigManager::new_with_identity("aria2-rust/9.9.9", "aria2-rust/9.9.9");
+
+        assert_eq!(
+            mgr.get_global_str("user-agent").await.as_deref(),
+            Some("aria2-rust/9.9.9")
+        );
+        #[cfg(feature = "bittorrent")]
+        assert_eq!(
+            mgr.get_global_str("peer-agent").await.as_deref(),
+            Some("aria2-rust/9.9.9")
+        );
+        assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
     }
 
     #[tokio::test]

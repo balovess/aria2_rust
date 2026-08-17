@@ -25,6 +25,7 @@ pub struct RpcEngine {
     pub(crate) engine_cmd_tx: Option<EngineCommandSender>,
     pub(crate) session_info: SessionInfo,
     pub(crate) save_session_path: Option<std::path::PathBuf>,
+    pub(crate) product_version: String,
 }
 
 impl RpcEngine {
@@ -63,7 +64,17 @@ impl RpcEngine {
             engine_cmd_tx: Some(engine_cmd_tx.into()),
             session_info: SessionInfo::new(),
             save_session_path: None,
+            product_version: env!("CARGO_PKG_VERSION").to_string(),
         }
+    }
+
+    /// Set the embedding product version reported by `aria2.getVersion`.
+    ///
+    /// Standalone library users keep the `aria2-rpc` package version by
+    /// default; the `aria2` binary injects its own release version.
+    pub fn with_product_version(mut self, version: impl Into<String>) -> Self {
+        self.product_version = version.into();
+        self
     }
 
     /// Chainable builder method to set authentication config.
@@ -401,6 +412,15 @@ mod tests {
             resp.result.expect("getVersion result"),
             crate::types::VersionInfo::from_env().to_json_value()
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_version_uses_embedding_product_version() {
+        let engine = RpcEngine::new().with_product_version("9.9.9");
+        let req = JsonRpcRequest::new("aria2.getVersion", serde_json::json!([])).with_id(1);
+        let resp = engine.handle_request(&req).await;
+        let result = resp.result.expect("getVersion result");
+        assert_eq!(result["version"], "9.9.9");
     }
 
     #[tokio::test]

@@ -138,7 +138,7 @@ impl super::RequestGroup {
     }
 
     // ── Atomic Progress Accessors (for session persistence) ─────────────
-    // These use AtomicU64 for lock-free reads, suitable for frequent polling.
+    // These use AtomicU64 for lock-free snapshot reads and updates.
 
     /// Set completed length using atomic store (lock-free).
     pub fn set_completed_length(&self, val: u64) {

@@ -167,12 +167,15 @@ pub async fn execute(
         max_conn,
     );
 
-    // Pause/remove check interval — allows the download loop to detect
-    // aria2.pause / aria2.remove within ~200ms even when segment
-    // futures are blocked on slow network reads.
-    let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+    // Lifecycle changes wake the scheduler even when all segment requests are
+    // blocked on slow network reads.
+    let lifecycle_notify = dl.group.recover().lifecycle_notifier();
 
     loop {
+        let lifecycle_changed = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_changed);
+        lifecycle_changed.as_mut().enable();
+
         // Check whether the task was removed. This is the primary
         // cancellation signal: aria2.remove / aria2.forceRemove sets
         // the RequestGroup status to Removed, which is_removed()
@@ -305,7 +308,7 @@ pub async fn execute(
                 );
             }
             if let Some(wait) = adaptive.cooldown_remaining() {
-                tokio::time::sleep(wait).await;
+                dl.wait_for_retry(wait).await?;
                 continue;
             }
             if manager.has_failed_segments() && !manager.has_pending_segments() {
@@ -551,10 +554,9 @@ pub async fn execute(
                 )
                 .await?;
             }
-            // Periodic pause/remove check — ensures the download loop
-            // detects aria2.pause / aria2.remove within ~200ms even
-            // when segment futures are blocked on slow network reads.
-            _ = cancel_tick.tick() => {
+            // Lifecycle changes wake the loop immediately, even when segment
+            // futures are blocked on slow network reads.
+            _ = &mut lifecycle_changed => {
                 super::flush_requested_control_file(
                     dl,
                     &mut writer,

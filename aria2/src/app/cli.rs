@@ -106,8 +106,8 @@ impl FromStr for HelpRequest {
 /// `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
-    name = aria2_protocol::identity::PRODUCT_NAME,
-    version = aria2_protocol::identity::PRODUCT_VERSION,
+    name = crate::identity::PRODUCT_NAME,
+    version = crate::identity::PRODUCT_VERSION,
     disable_help_flag = true,
     disable_version_flag = true,
     disable_help_subcommand = true,
@@ -301,6 +301,7 @@ fn matches_help_tag(arg: &Arg, name: &str, tag: &str) -> bool {
 const BASIC_HELP_OPTIONS: &[&str] = &[
     "allow-piece-length-change",
     "always-resume",
+    "auto-save-interval",
     "bt-max-peers",
     "check-integrity",
     "continue",
@@ -413,7 +414,7 @@ pub struct GeneralArgs {
     #[arg(long = "save-session-interval")]
     pub save_session_interval: Option<u64>,
 
-    /// Auto-save interval
+    /// Save a control file (*.aria2) every N seconds during downloads
     #[arg(long = "auto-save-interval")]
     pub auto_save_interval: Option<u64>,
 
@@ -1740,8 +1741,8 @@ pub struct AdvancedArgs {
 pub(crate) fn product_banner_title() -> String {
     format!(
         "{} version {}",
-        aria2_protocol::identity::PRODUCT_NAME,
-        aria2_protocol::identity::PRODUCT_VERSION
+        crate::identity::PRODUCT_NAME,
+        crate::identity::PRODUCT_VERSION
     )
 }
 
@@ -1768,8 +1769,8 @@ mod banner_tests {
             product_banner_title(),
             format!(
                 "{} version {}",
-                aria2_protocol::identity::PRODUCT_NAME,
-                aria2_protocol::identity::PRODUCT_VERSION
+                crate::identity::PRODUCT_NAME,
+                crate::identity::PRODUCT_VERSION
             )
         );
     }

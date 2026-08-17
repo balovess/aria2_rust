@@ -200,6 +200,36 @@ async fn test_check_cancelled_returns_err_after_remove() {
 }
 
 #[tokio::test]
+async fn test_retry_wait_is_interruptible_when_paused() {
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(12),
+        vec!["http://example.com/metadata.torrent".to_string()],
+        DownloadOptions::default(),
+    )));
+    let command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        "http://example.com/metadata.torrent",
+        &DownloadOptions::default(),
+        None,
+        None,
+    )
+    .expect("DownloadCommand::new_with_group should succeed");
+    group.recover_mut().pause().unwrap();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        command.wait_for_retry(std::time::Duration::from_secs(5)),
+    )
+    .await
+    .expect("paused retry wait should stop promptly");
+
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
+    ));
+}
+
+#[tokio::test]
 async fn proxy_client_leaves_redirects_for_the_download_flow() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;

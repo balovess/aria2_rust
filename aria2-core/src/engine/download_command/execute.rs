@@ -261,7 +261,13 @@ impl DownloadCommand {
                     )? {
                         let gid = self.group.recover().gid().value();
                         info!(gid, "Checking integrity of existing data against piece hashes");
-                        let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
+                        let outcome = ci_man::enqueue_with_outcome_for_group(
+                            &ci_man::shared(),
+                            Arc::clone(&self.group),
+                            task,
+                        )
+                        .await?;
+                        let ok = outcome.verified;
                         if !ok {
                             warn!(
                                 gid,
@@ -690,12 +696,24 @@ impl DownloadCommand {
                 {
                     attempt = attempt.saturating_add(1);
                     if options.retry_wait > 0 {
-                        tokio::time::sleep(std::time::Duration::from_secs(options.retry_wait))
-                            .await;
+                        self.wait_for_retry(Duration::from_secs(options.retry_wait))
+                            .await?;
                     }
                 }
                 Err(error) => return Err(error),
             }
+        }
+    }
+
+    /// Wait between metadata retries while still honoring RequestGroup
+    /// pause, remove, and halt requests.
+    pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let notifier = self.group.recover().lifecycle_notifier();
+        let notified = notifier.notified();
+        self.check_cancelled()?;
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => self.check_cancelled(),
+            _ = notified => self.check_cancelled(),
         }
     }
 
@@ -778,11 +796,17 @@ impl DownloadCommand {
         };
         let mut stream = response.bytes_stream();
         let mut completed = 0u64;
+        let lifecycle_notify = self.group.recover().lifecycle_notifier();
 
         loop {
+            let lifecycle_changed = lifecycle_notify.notified();
+            tokio::pin!(lifecycle_changed);
+            lifecycle_changed.as_mut().enable();
+            self.check_cancelled()?;
+
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
+                _ = lifecycle_changed => {
                     self.check_cancelled()?;
                     continue;
                 }

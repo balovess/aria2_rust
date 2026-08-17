@@ -1,11 +1,10 @@
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::engine::bt_download_command::{
-    BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES, PEER_CONNECTION_DELAY_MS,
-};
+use crate::engine::bt_download_command::{BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES};
 use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
@@ -103,9 +102,191 @@ impl BtStopTimeoutState {
 
         configured.is_some_and(|timeout| now.duration_since(self.last_progress_at) >= timeout)
     }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.configured
+            .map(|timeout| self.last_progress_at + timeout)
+    }
+}
+
+enum PeerWaitEvent {
+    Incoming(crate::engine::bt_peer_listener::IncomingPeer),
+    PeerMessage {
+        index: usize,
+        result: Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>>,
+    },
+    Wake,
 }
 
 impl BtDownloadCommand {
+    fn next_peer_event_deadline(
+        &self,
+        active_connection_count: usize,
+        stop_timeout_deadline: Option<Instant>,
+    ) -> Instant {
+        let now = Instant::now();
+        let mut deadline = now + Duration::from_secs(24 * 60 * 60);
+
+        if self.dht_engine.is_some()
+            && let Some(delay) = self
+                .dht_periodic_lookup
+                .next_lookup_delay(active_connection_count)
+        {
+            deadline = deadline.min(now + delay);
+        }
+        if let Some(delay) = self
+            .tracker_announcer
+            .as_ref()
+            .and_then(|announcer| announcer.next_default_announce_delay())
+        {
+            deadline = deadline.min(now + delay);
+        }
+        if let Some(stop_timeout_deadline) = stop_timeout_deadline {
+            deadline = deadline.min(stop_timeout_deadline);
+        }
+        deadline
+    }
+
+    /// Wait for a peer/discovery event instead of waking on a fixed short
+    /// delay. Network messages are read concurrently from all active peers;
+    /// tracker and DHT timers are only used at their protocol deadlines.
+    async fn wait_for_peer_event(
+        &mut self,
+        active_connections: &mut [BtPeerConn],
+        deadline: Instant,
+    ) -> PeerWaitEvent {
+        let completion_notify = self.dht_periodic_lookup.completion_notifier();
+        let completion_wait = completion_notify.notified();
+        let lifecycle_notify = self.group.recover().lifecycle_notifier();
+        let lifecycle_wait = lifecycle_notify.notified();
+        let mut incoming_receiver = self.incoming_peers.take();
+        let deadline_wait = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+        tokio::pin!(deadline_wait);
+
+        let mut peer_reads = active_connections
+            .iter_mut()
+            .enumerate()
+            .map(|(index, connection)| async move { (index, connection.read_message().await) })
+            .collect::<futures::stream::FuturesUnordered<_>>();
+
+        let event = tokio::select! {
+            incoming = async {
+                match incoming_receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending::<Option<crate::engine::bt_peer_listener::IncomingPeer>>().await,
+                }
+            } => match incoming {
+                Some(incoming) => PeerWaitEvent::Incoming(incoming),
+                None => {
+                    incoming_receiver = None;
+                    PeerWaitEvent::Wake
+                }
+            },
+            peer = peer_reads.next(), if !peer_reads.is_empty() => {
+                peer.map_or(PeerWaitEvent::Wake, |(index, result)| {
+                    PeerWaitEvent::PeerMessage { index, result }
+                })
+            },
+            _ = completion_wait => PeerWaitEvent::Wake,
+            _ = lifecycle_wait => PeerWaitEvent::Wake,
+            _ = &mut deadline_wait => PeerWaitEvent::Wake,
+        };
+
+        drop(peer_reads);
+        self.incoming_peers = incoming_receiver;
+        event
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_peer_wait_event(
+        event: PeerWaitEvent,
+        active_connections: &mut Vec<BtPeerConn>,
+        peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        pex_enabled_peers: &mut HashSet<PeerKey>,
+        peer_last_data_time: &mut HashMap<PeerKey, Instant>,
+        allowed_fast_sent_peers: &mut HashMap<PeerKey, HashSet<u32>>,
+        suggest_sent_counts: &mut HashMap<PeerKey, usize>,
+        endgame_state: &mut EndgameState,
+        choking_algo: Option<&mut crate::engine::choking_algorithm::ChokingAlgorithm>,
+        peer_storage: &std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
+    ) -> Option<crate::engine::bt_peer_listener::IncomingPeer> {
+        match event {
+            PeerWaitEvent::Incoming(incoming) => return Some(incoming),
+            PeerWaitEvent::PeerMessage { index, result } => {
+                let failed_address = {
+                    let connection = active_connections.get_mut(index)?;
+                    let peer_key = PeerKey::from_peer(&connection.ip_addr, connection.port);
+                    match result {
+                        Ok(Some(message)) => {
+                            let before = connection
+                                .session_resource
+                                .as_ref()
+                                .map(|resource| resource.bitfield().to_vec());
+                            match message {
+                                aria2_protocol::bittorrent::message::types::BtMessage::Have {
+                                    piece_index,
+                                } => connection.update_peer_bitfield(piece_index as usize, 1),
+                                aria2_protocol::bittorrent::message::types::BtMessage::Bitfield {
+                                    data,
+                                } => connection.set_peer_bitfield(&data),
+                                aria2_protocol::bittorrent::message::types::BtMessage::HaveAll => {
+                                    connection.mark_seeder()
+                                }
+                                aria2_protocol::bittorrent::message::types::BtMessage::HaveNone => {
+                                    connection.set_peer_bitfield(&[])
+                                }
+                                aria2_protocol::bittorrent::message::types::BtMessage::Choke => {
+                                    connection.stats.peer_choking = true;
+                                }
+                                aria2_protocol::bittorrent::message::types::BtMessage::Unchoke => {
+                                    connection.stats.peer_choking = false;
+                                }
+                                _ => {}
+                            }
+                            let after = connection
+                                .session_resource
+                                .as_ref()
+                                .map(|resource| resource.bitfield().to_vec());
+                            if before != after
+                                && let (Some(peer_key), Some(bitfield)) =
+                                    (peer_key, after.as_deref())
+                            {
+                                peer_tracker.update_peer_bitfield(
+                                    &BtPeerInteraction::peer_tracker_key(connection),
+                                    bitfield,
+                                );
+                                peer_last_data_time.insert(peer_key, Instant::now());
+                            }
+                            None
+                        }
+                        Ok(None) | Err(_) => {
+                            connection.disconnected_gracefully = true;
+                            connection.remote_endpoint()
+                        }
+                    }
+                };
+                if let Some(address) = failed_address {
+                    Self::remove_failed_peers(
+                        active_connections,
+                        &[address],
+                        choking_algo,
+                        pex_enabled_peers,
+                        peer_last_data_time,
+                        allowed_fast_sent_peers,
+                        suggest_sent_counts,
+                        endgame_state,
+                        peer_tracker,
+                        peer_storage,
+                    );
+                }
+            }
+            PeerWaitEvent::Wake => {}
+        }
+        None
+    }
+
     // Parameters are individually meaningful; grouping into a struct would
     // reduce clarity for this inner download loop.
     #[allow(clippy::too_many_arguments)]
@@ -535,16 +716,6 @@ impl BtDownloadCommand {
                 break;
             }
 
-            // With no connected peers, keep the torrent alive for tracker,
-            // DHT, PEX, or incoming-peer discovery. A configured
-            // `bt-stop-timeout` is checked at the top of each cycle and will
-            // terminate this wait when the no-progress interval expires.
-            if active_connections.is_empty() && web_seed_manager.is_none() {
-                debug!("[BT] No peers available, waiting for peer discovery...");
-                tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
-                continue;
-            }
-
             // Phase 14 - B1: Check if we should enter endgame mode
             let endgame_candidates = piece_picker.endgame_candidates();
             if !endgame_candidates.is_empty() && !endgame_state.is_endgame_active() {
@@ -689,8 +860,8 @@ impl BtDownloadCommand {
             }
 
             // DHTGetPeersCommand counterpart. The lookup runs in a background
-            // task and this poll never waits on network I/O, so DHT timeouts do
-            // not stall piece scheduling or halt detection.
+            // task and publishes its result through an event slot, so DHT
+            // timeouts do not stall piece scheduling or halt detection.
             self.dht_periodic_lookup
                 .set_peer_limits(self.bt_runtime.min_peers(), self.bt_runtime.max_peers());
             let mut dht_peers = Vec::new();
@@ -746,6 +917,38 @@ impl BtDownloadCommand {
                     .on_lookup_completed(self.tracked_peer_count());
             }
 
+            // With no connected peers, keep the torrent alive for tracker,
+            // DHT, PEX, or incoming-peer discovery. The wait is driven by a
+            // socket/message event, a lifecycle notification, a completed DHT
+            // lookup, or the next protocol/stop-timeout deadline.
+            if active_connections.is_empty() && web_seed_manager.is_none() {
+                debug!("[BT] No peers available, waiting for peer discovery...");
+                let deadline = self
+                    .next_peer_event_deadline(active_connections.len(), stop_timeout.deadline());
+                let event = self.wait_for_peer_event(active_connections, deadline).await;
+                let incoming = Self::apply_peer_wait_event(
+                    event,
+                    active_connections,
+                    &mut peer_tracker,
+                    pex_enabled_peers,
+                    &mut peer_last_data_time,
+                    &mut self.allowed_fast_sent_peers,
+                    &mut self.suggest_sent_counts,
+                    &mut endgame_state,
+                    self.choking_algo.as_mut(),
+                    &self.peer_storage,
+                );
+                if let Some(incoming) = incoming {
+                    self.admit_incoming_peer(
+                        active_connections,
+                        incoming,
+                        piece_length,
+                        total_size,
+                    );
+                }
+                continue;
+            }
+
             let remaining = piece_picker.remaining_count();
             let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
 
@@ -753,7 +956,31 @@ impl BtDownloadCommand {
                 Some(idx) => idx,
                 None => {
                     tracing::debug!("[BT] No piece available, waiting...");
-                    tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
+                    let deadline = self.next_peer_event_deadline(
+                        active_connections.len(),
+                        stop_timeout.deadline(),
+                    );
+                    let event = self.wait_for_peer_event(active_connections, deadline).await;
+                    let incoming = Self::apply_peer_wait_event(
+                        event,
+                        active_connections,
+                        &mut peer_tracker,
+                        pex_enabled_peers,
+                        &mut peer_last_data_time,
+                        &mut self.allowed_fast_sent_peers,
+                        &mut self.suggest_sent_counts,
+                        &mut endgame_state,
+                        self.choking_algo.as_mut(),
+                        &self.peer_storage,
+                    );
+                    if let Some(incoming) = incoming {
+                        self.admit_incoming_peer(
+                            active_connections,
+                            incoming,
+                            piece_length,
+                            total_size,
+                        );
+                    }
                     continue;
                 }
             };

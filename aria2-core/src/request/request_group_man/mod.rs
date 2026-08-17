@@ -17,6 +17,7 @@ use dashmap::mapref::entry::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use reserved::{PositionMode, ReservedQueue};
@@ -25,7 +26,9 @@ use stopped::StoppedResults;
 pub use reserved::PositionMode as ChangePositionMode;
 
 use super::global_net_stat::GlobalNetStat;
-use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
+use super::request_group::{
+    ActivitySignal, DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
+};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph;
 use crate::error::Result;
@@ -79,6 +82,12 @@ pub struct RequestGroupMan {
 
     /// Session transfer counters shared by all registered groups.
     global_net_stat: Arc<GlobalNetStat>,
+
+    /// Wakes consumers waiting for the manager to become empty or non-empty.
+    download_finished_notify: Arc<Notify>,
+
+    /// Wakes snapshot observers when a group or its progress changes.
+    activity_signal: Arc<ActivitySignal>,
 }
 
 impl RequestGroupMan {
@@ -98,6 +107,8 @@ impl RequestGroupMan {
             global_download_limit: std::sync::RwLock::new(None),
             global_upload_limit: std::sync::RwLock::new(None),
             global_net_stat: Arc::new(GlobalNetStat::default()),
+            download_finished_notify: Arc::new(Notify::new()),
+            activity_signal: Arc::new(ActivitySignal::new()),
         }
     }
 
@@ -327,13 +338,16 @@ impl RequestGroupMan {
                 "position must not be negative for absolute modes".to_string(),
             ));
         }
-        self.reserved
+        let position = self
+            .reserved
             .change_position(gid, pos, mode)
             .ok_or_else(|| {
                 crate::error::Aria2Error::InvalidArgument(
                     "group is not in the reserved queue".to_string(),
                 )
-            })
+            })?;
+        self.activity_signal.notify();
+        Ok(position)
     }
 
     // ── Group Removal ───────────────────────────────────────────────────
@@ -904,10 +918,14 @@ impl RequestGroupMan {
         let gid = group.recover().gid();
         match self.groups.entry(gid) {
             Entry::Vacant(entry) => {
-                group
-                    .recover_mut()
-                    .set_global_net_stat(Arc::clone(&self.global_net_stat));
+                {
+                    let mut group = group.recover_mut();
+                    group.set_global_net_stat(Arc::clone(&self.global_net_stat));
+                    group.attach_activity_signal(Arc::clone(&self.activity_signal));
+                }
                 entry.insert(group);
+                self.download_finished_notify.notify_waiters();
+                self.activity_signal.notify();
                 true
             }
             Entry::Occupied(_) => false,
@@ -917,6 +935,22 @@ impl RequestGroupMan {
     /// Remove a group from the canonical index after it has left the manager.
     fn unregister_group(&self, gid: GroupId) {
         self.groups.remove(&gid);
+        self.download_finished_notify.notify_waiters();
+        self.activity_signal.notify();
+    }
+
+    /// Return the event signal for live group and progress snapshots.
+    pub fn activity_signal(&self) -> Arc<ActivitySignal> {
+        Arc::clone(&self.activity_signal)
+    }
+
+    /// Return the notification source for changes to the manager's group set.
+    ///
+    /// Callers must still read [`download_finished`](Self::download_finished)
+    /// after every wake; the notification is only a wake-up mechanism and is
+    /// not the source of truth.
+    pub fn download_finished_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.download_finished_notify)
     }
 
     /// Check whether all downloads are finished (no active, no reserved).
@@ -1063,6 +1097,41 @@ mod tests {
         stats.update_download(7);
 
         assert_eq!(stats.session_download_length_for_test(), 7);
+    }
+
+    #[tokio::test]
+    async fn activity_signal_wakes_for_registration_and_progress_changes() {
+        let man = RequestGroupMan::new();
+        let activity = man.activity_signal();
+        let mut observed = activity.generation();
+
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            activity.wait_for_change(&mut observed),
+        )
+        .await
+        .expect("group registration must wake activity observers");
+        assert!(man.find_group(gid).is_some());
+
+        let group = man.find_group(gid).expect("registered group");
+        let previous_generation = observed;
+        group.recover().update_progress(1);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            activity.wait_for_change(&mut observed),
+        )
+        .await
+        .expect("progress changes must wake activity observers");
+        assert!(observed > previous_generation);
+        assert_eq!(group.recover().get_completed_length(), 1);
     }
 
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]

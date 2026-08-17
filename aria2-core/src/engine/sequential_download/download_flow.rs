@@ -39,6 +39,33 @@ async fn finalize_cancelled_download(
 }
 
 impl SequentialDownloader {
+    async fn flush_requested_control_file(
+        &self,
+        writer: &mut Box<dyn DiskWriter>,
+        control_file: &mut Option<ControlFile>,
+        completed_bytes: u64,
+    ) -> Result<bool> {
+        if !self.group.recover().is_save_control_file_requested() {
+            return Ok(false);
+        }
+
+        writer.flush().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to flush requested sequential checkpoint: {error}"
+            ))
+        })?;
+        if let Some(control_file) = control_file {
+            control_file.update_completed_length(completed_bytes);
+            control_file.save().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to save requested sequential checkpoint: {error}"
+                ))
+            })?;
+        }
+        self.group.recover().take_save_control_file_request();
+        Ok(true)
+    }
+
     /// Main entry point for sequential HTTP download.
     ///
     /// Handles redirect loop, auth challenge, 304 Not Modified, and
@@ -552,14 +579,36 @@ impl SequentialDownloader {
         let mut ctrl_bytes_since_save: u64 = 0;
         let ctrl_save_interval = (actual_total / 10).max(1024 * 1024); // save every ~10% or 1MB
 
-        while let Some(chunk) = tokio::select! {
-            chunk = stream.next() => chunk,
-            cancellation = self.wait_for_cancellation() => {
-                let error = cancellation.expect_err("cancellation watcher must not complete successfully");
-                finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
-                return Err(error);
-            }
-        } {
+        let lifecycle_notifier = self.group.recover().lifecycle_notifier();
+        loop {
+            let next_chunk = {
+                let lifecycle_changed = lifecycle_notifier.notified();
+                tokio::pin!(lifecycle_changed);
+                lifecycle_changed.as_mut().enable();
+                tokio::select! {
+                    chunk = stream.next() => chunk,
+                    _ = &mut lifecycle_changed => {
+                        if let Err(error) = self.check_cancelled() {
+                            finalize_cancelled_download(
+                                &mut writer,
+                                &mut ctrl_file,
+                                completed_bytes,
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                        self.flush_requested_control_file(
+                            &mut writer,
+                            &mut ctrl_file,
+                            completed_bytes,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            };
+            let Some(chunk) = next_chunk else { break };
+
             // Check whether the task was removed between chunks. This is the
             // primary cancellation signal: `aria2.remove` /
             // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
@@ -585,22 +634,17 @@ impl SequentialDownloader {
 
                 // ADR-0001: Periodically update control file with progress.
                 ctrl_bytes_since_save += piece.len() as u64;
-                if let Some(ref mut cf) = ctrl_file {
-                    let save_requested = self.group.recover().take_save_control_file_request();
-                    if save_requested {
-                        writer.flush().await.map_err(|error| {
-                            Aria2Error::FileIo(format!(
-                                "Failed to flush requested sequential checkpoint: {error}"
-                            ))
-                        })?;
+                let save_requested = self
+                    .flush_requested_control_file(&mut writer, &mut ctrl_file, completed_bytes)
+                    .await?;
+                if let Some(cf) = ctrl_file.as_mut()
+                    && (save_requested || ctrl_bytes_since_save >= ctrl_save_interval)
+                {
+                    cf.update_completed_length(completed_bytes);
+                    if let Err(e) = cf.save().await {
+                        tracing::warn!("Sequential: control file save failed: {}", e);
                     }
-                    if save_requested || ctrl_bytes_since_save >= ctrl_save_interval {
-                        cf.update_completed_length(completed_bytes);
-                        if let Err(e) = cf.save().await {
-                            tracing::warn!("Sequential: control file save failed: {}", e);
-                        }
-                        ctrl_bytes_since_save = 0;
-                    }
+                    ctrl_bytes_since_save = 0;
                 }
 
                 self.progress_updater

@@ -563,20 +563,24 @@ impl DhtEngine {
             std::mem::take(&mut *background_tasks)
         };
 
-        // Give tasks a chance to observe the shared signal before aborting a
-        // maintenance operation that is currently awaiting network I/O.
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
-        while !tasks.iter().all(tokio::task::JoinHandle::is_finished)
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-
+        // Give tasks a bounded opportunity to observe the shared signal before
+        // aborting a maintenance operation that is currently awaiting network
+        // I/O. JoinSet removes completed tasks as it drains them, so a timeout
+        // can resume with only the still-running tasks and never double-awaits
+        // a completed JoinHandle.
+        let mut join_set = tokio::task::JoinSet::new();
         for task in tasks {
-            if !task.is_finished() {
-                task.abort();
-            }
-            let _ = task.await;
+            join_set.spawn(async move {
+                let _ = task.await;
+            });
+        }
+        let wait_for_tasks = async { while join_set.join_next().await.is_some() {} };
+        if tokio::time::timeout(Duration::from_millis(100), wait_for_tasks)
+            .await
+            .is_err()
+        {
+            join_set.abort_all();
+            while join_set.join_next().await.is_some() {}
         }
 
         self.context.inner.write().await.state = DhtEngineState::ShuttingDown;

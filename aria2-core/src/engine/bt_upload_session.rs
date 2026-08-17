@@ -136,131 +136,129 @@ impl BtUploadSession {
 
         let round_uploaded = self.uploaded_bytes;
 
-        loop {
-            match self.conn.read_message().await {
-                Ok(Some(msg)) => {
-                    if let Some(validator) = &self.message_validator
-                        && let Err(error) = validator.validate(&msg)
-                    {
-                        warn!("Invalid BitTorrent upload message: {}", error);
-                        self.is_dead = true;
-                        break;
-                    }
-                    match msg {
-                        BtMessage::Request { request } => {
-                            if !self.am_choke_state && self.peer_interested {
-                                debug!(
-                                    "Upload request: piece={}, offset={}, len={}",
-                                    request.index, request.begin, request.length
-                                );
+        match self.conn.read_message().await {
+            Ok(Some(msg)) => {
+                if let Some(validator) = &self.message_validator
+                    && let Err(error) = validator.validate(&msg)
+                {
+                    warn!("Invalid BitTorrent upload message: {}", error);
+                    self.is_dead = true;
+                    return Ok(self.uploaded_bytes - round_uploaded);
+                }
+                match msg {
+                    BtMessage::Request { request } => {
+                        if !self.am_choke_state && self.peer_interested {
+                            debug!(
+                                "Upload request: piece={}, offset={}, len={}",
+                                request.index, request.begin, request.length
+                            );
 
-                                let data = provider.get_piece_data(
-                                    request.index,
-                                    request.begin,
-                                    request.length,
-                                );
-                                if let Some(piece_data) = data {
-                                    let data_len = piece_data.len() as u64;
-                                    if let Some(ref lim) = self.upload_limiter {
-                                        lim.acquire_upload(data_len).await;
-                                    }
-                                    if let Some(ref lim) = self.global_upload_limiter
-                                        && lim.is_upload_limited()
-                                    {
-                                        lim.acquire_upload(data_len).await;
-                                    }
-                                    self.conn.send_message(&BtMessage::Piece {
+                            let data = provider.get_piece_data(
+                                request.index,
+                                request.begin,
+                                request.length,
+                            );
+                            if let Some(piece_data) = data {
+                                let data_len = piece_data.len() as u64;
+                                if let Some(ref lim) = self.upload_limiter {
+                                    lim.acquire_upload(data_len).await;
+                                }
+                                if let Some(ref lim) = self.global_upload_limiter
+                                    && lim.is_upload_limited()
+                                {
+                                    lim.acquire_upload(data_len).await;
+                                }
+                                self.conn.send_message(&BtMessage::Piece {
                                         index: request.index,
                                         begin: request.begin,
                                         data: piece_data,
                                     }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
                                         crate::error::RecoverableError::TemporaryNetworkFailure { message: e.to_string() }
                                     ))?;
-                                    self.uploaded_bytes += data_len;
-                                } else {
-                                    warn!(
-                                        "No data for piece {} at offset {}",
-                                        request.index, request.begin
-                                    );
-                                }
+                                self.uploaded_bytes += data_len;
                             } else {
-                                debug!(
-                                    "Ignoring request: choked={} interested={}",
-                                    self.am_choke_state, self.peer_interested
+                                warn!(
+                                    "No data for piece {} at offset {}",
+                                    request.index, request.begin
                                 );
                             }
-                        }
-                        BtMessage::Interested => {
-                            self.peer_interested = true;
-                            if !self.am_choke_state {
-                                self.conn.send_unchoke().await.ok();
-                            }
-                        }
-                        BtMessage::NotInterested => {
-                            self.peer_interested = false;
-                        }
-                        BtMessage::Choke => {
-                            debug!("Peer choked us");
-                        }
-                        BtMessage::Unchoke => {
-                            debug!("Peer unchoked us");
-                        }
-                        BtMessage::Have { piece_index } => {
-                            debug!("Peer has piece {}", piece_index);
-                        }
-                        BtMessage::Cancel { request } => {
+                        } else {
                             debug!(
-                                "Peer cancelled request for piece {} offset {}",
-                                request.index, request.begin
-                            );
-                        }
-                        BtMessage::Piece { .. } => {
-                            debug!("Unexpected Piece from peer during seeding");
-                        }
-                        BtMessage::Bitfield { .. } => {}
-                        BtMessage::KeepAlive => {}
-                        BtMessage::Port { port: _ } => {}
-                        BtMessage::AllowedFast { index } => {
-                            debug!("Received AllowedFast for piece {}", index);
-                        }
-                        BtMessage::Reject {
-                            index,
-                            offset,
-                            length,
-                        } => {
-                            debug!(
-                                "Received Reject for piece {} offset {} len {}",
-                                index, offset, length
-                            );
-                        }
-                        BtMessage::Suggest { index } => {
-                            debug!("Received Suggest for piece {}", index);
-                        }
-                        BtMessage::HaveAll => {
-                            debug!("Received HaveAll");
-                        }
-                        BtMessage::HaveNone => {
-                            debug!("Received HaveNone");
-                        }
-                        BtMessage::Extended { ext_id, payload } => {
-                            debug!(
-                                "Received Extended message: ext_id={}, payload_len={}",
-                                ext_id,
-                                payload.len()
+                                "Ignoring request: choked={} interested={}",
+                                self.am_choke_state, self.peer_interested
                             );
                         }
                     }
+                    BtMessage::Interested => {
+                        self.peer_interested = true;
+                        if !self.am_choke_state {
+                            self.conn.send_unchoke().await.ok();
+                        }
+                    }
+                    BtMessage::NotInterested => {
+                        self.peer_interested = false;
+                    }
+                    BtMessage::Choke => {
+                        debug!("Peer choked us");
+                    }
+                    BtMessage::Unchoke => {
+                        debug!("Peer unchoked us");
+                    }
+                    BtMessage::Have { piece_index } => {
+                        debug!("Peer has piece {}", piece_index);
+                    }
+                    BtMessage::Cancel { request } => {
+                        debug!(
+                            "Peer cancelled request for piece {} offset {}",
+                            request.index, request.begin
+                        );
+                    }
+                    BtMessage::Piece { .. } => {
+                        debug!("Unexpected Piece from peer during seeding");
+                    }
+                    BtMessage::Bitfield { .. } => {}
+                    BtMessage::KeepAlive => {}
+                    BtMessage::Port { port: _ } => {}
+                    BtMessage::AllowedFast { index } => {
+                        debug!("Received AllowedFast for piece {}", index);
+                    }
+                    BtMessage::Reject {
+                        index,
+                        offset,
+                        length,
+                    } => {
+                        debug!(
+                            "Received Reject for piece {} offset {} len {}",
+                            index, offset, length
+                        );
+                    }
+                    BtMessage::Suggest { index } => {
+                        debug!("Received Suggest for piece {}", index);
+                    }
+                    BtMessage::HaveAll => {
+                        debug!("Received HaveAll");
+                    }
+                    BtMessage::HaveNone => {
+                        debug!("Received HaveNone");
+                    }
+                    BtMessage::Extended { ext_id, payload } => {
+                        debug!(
+                            "Received Extended message: ext_id={}, payload_len={}",
+                            ext_id,
+                            payload.len()
+                        );
+                    }
                 }
-                Ok(None) => {
-                    debug!("EOF from peer, marking session as dead");
-                    self.is_dead = true;
-                    break;
-                }
-                Err(e) => {
-                    warn!("Read error from upload peer: {}, marking dead", e);
-                    self.is_dead = true;
-                    break;
-                }
+            }
+            Ok(None) => {
+                debug!("EOF from peer, marking session as dead");
+                self.is_dead = true;
+                return Ok(self.uploaded_bytes - round_uploaded);
+            }
+            Err(e) => {
+                warn!("Read error from upload peer: {}, marking dead", e);
+                self.is_dead = true;
+                return Ok(self.uploaded_bytes - round_uploaded);
             }
         }
 

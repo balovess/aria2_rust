@@ -75,12 +75,16 @@ impl App {
                     None
                 }
             });
+        let auto_save_interval = self
+            .get_opt_i64("auto-save-interval")
+            .await
+            .and_then(|v| (v > 0).then_some(std::time::Duration::from_secs(v as u64)));
 
+        engine.set_auto_save_interval(auto_save_interval);
+        engine.set_request_group_man(self.request_man.clone());
         if let Some(path) = save_session_path {
             engine.set_save_session(path, save_session_interval, self.request_man.clone());
         }
-
-        engine.set_request_group_man(self.request_man.clone());
         *self.engine.lock().await = Some(engine);
         info!("Engine initialization complete");
     }
@@ -316,7 +320,7 @@ impl App {
     ///
     /// * `keep_alive` - If true, the engine stays alive with no pending commands
     ///   (used for RPC listen mode).
-    /// * `show_progress` - If true, periodically poll and render download
+    /// * `show_progress` - If true, wait for download activity and render
     ///   progress to stdout via the [`ConsoleProgressReporter`].
     pub async fn run_engine(
         &self,

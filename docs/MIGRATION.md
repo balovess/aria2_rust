@@ -1,5 +1,172 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-17 RequestGroup 生命周期事件驱动检查点
+
+RequestGroup 现在提供共享的 `tokio::sync::Notify` 生命周期通知。顺序和并行
+HTTP、FTP、SFTP，以及内存元数据重试等待，都通过 `tokio::select!` 同时等待
+配置的 retry deadline 和生命周期通知；顺序下载的取消等待也使用同一信号。
+原来的 50ms 状态轮询已删除。状态和原子控制标志仍是事实来源，通知只负责
+唤醒等待者，让等待者重新检查状态。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::sequential_download::tests::retry_wait_wakes_when_removed_after_wait_starts -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib request::request_group -- --test-threads=1
+  119 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭生命周期等待的事件驱动改造。协议调度、性能采样、测试
+fixture 和外部 C API 轮询仍属于独立审计项；当前阶段保持
+`phase-2-core-domain` (`in_progress`)，整体迁移保持 `PARTIAL`。
+
+## 2026-08-17 HTTP retry-wait 生命周期检查点
+
+顺序 HTTP 下载的重试等待现在通过 RequestGroup 感知的
+`SequentialDownloader::wait_for_retry` seam。等待期间会以有界间隔检查
+pause、remove 和 halt 状态，因此一次失败的 HTTP 请求不会让任务在完整的
+`retry-wait` 配置时间内失去响应。新增的 Rust-owned E2E 使用本地 500 响应
+fixture，在真实生产重试等待窗口中分别验证 pause 和 remove；两个任务都能
+及时结束，并保留预期的生命周期错误和状态。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  40 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭真实 HTTP retry-wait 的 pause/remove 生命周期切片；FTP 和
+SFTP 的 retry-wait 证据另行记录。更广泛的跨协议生命周期、原版客户端或
+第三方互操作、bindings、实测性能证据和最终 workspace 验收仍未完成。当前
+阶段保持 `phase-2-core-domain` (`in_progress`)，整体迁移保持 `PARTIAL`。
+
+## 2026-08-17 Concurrent HTTP adaptive-cooldown 生命周期检查点
+
+并行 HTTP range 下载现在通过 RequestGroup 感知的 retry wait 处理 429/503
+自适应并发 cooldown。单源分段循环和多镜像 pipeline 都会以有界间隔检查
+pause、remove 和 halt，而不是在整个 cooldown 时间内阻塞。Rust-owned E2E
+使用本地真实 range server，在一个请求排空的同时返回容量错误，然后在
+生成的 cooldown 中分别验证 pause 和 remove。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --test test_http_adaptive_concurrency_e2e -- --test-threads=1
+  7 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+本检查点只关闭并行 HTTP adaptive-cooldown 的 pause/remove 生命周期切片。
+当前阶段保持 `phase-2-core-domain` (`in_progress`)，整体迁移保持 `PARTIAL`；
+更广泛的跨协议生命周期、原版客户端或第三方互操作、bindings、实测性能
+证据和最终 workspace 验收仍未完成。
+
+## 2026-08-17 Session TLS Option Round-Trip Checkpoint
+
+The session option map now preserves configured `certificate` and
+`private-key` paths alongside `ca-certificate` and the other HTTP options.
+`DownloadOptions::from_option_strings` already consumed these canonical names;
+the missing serializer entries meant a restored task silently lost its client
+identity paths. The Rust path now matches the relevant aria2_original
+`SessionSerializer` boundary, which writes every defined initial task option.
+Only the file paths are persisted; certificate and key contents are not copied
+into the session file.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib session::session_entry::tests::test_download_options_to_map_all_fields -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_session -- --test-threads=1
+  13 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the configured TLS client-identity session round-trip slice.
+The active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`; broader session lifecycle combinations,
+cross-protocol behavior, original-client interoperability, bindings, measured
+performance evidence, and final workspace acceptance remain open.
+
+## 2026-08-17 RequestGroup-scoped integrity cancellation checkpoint
+
+Pre-download piece-hash validation now observes the lifecycle of its owning
+`RequestGroup`. `CheckIntegrityMan::cancel_gid` removes matching queued work
+and notifies its waiter, while an active entry is cooperatively cancelled
+between validation chunks. The group-aware enqueue path checks for removal,
+pause, and halt every 10 ms, cancels the matching manager entry, waits for
+worker cleanup, and returns the lifecycle-specific error. HTTP and BitTorrent
+download commands now use this path for their existing-payload integrity
+checks.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity::man::tests -- --test-threads=1
+  14 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_download test_e2e_http_check_integrity -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download integrity -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3460 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the RequestGroup-scoped pre-download integrity cancellation
+boundary for the covered HTTP and BitTorrent commands. It does not close
+broader cross-protocol lifecycle combinations, original-client or third-party
+interoperability, bindings, measured performance evidence, or final workspace
+acceptance; the active phase remains `phase-2-core-domain` (`in_progress`) and
+the migration remains `PARTIAL`.
+
+## 2026-08-17 Current Rust Workspace Regression Checkpoint
+
+The current worktree, including `aria2-core 0.3.2` and the scoped integrity
+cancellation changes, passed the all-features Rust workspace regression. This
+is a workspace compatibility gate only; ignored tests retain their declared
+status and do not count as passing evidence.
+
+Rust-owned verification:
+
+~~~text
+cargo test --workspace --all-features -j 1 --quiet -- --test-threads=1
+  exit_code=0; all executed targets passed; ignored tests retained their declared status
+  aria2-core library target: 3460 passed, 0 failed, 1 ignored
+~~~
+
+This does not close Python/Node package validation, platform ABI matrices,
+original-client or browser-extension interoperability, measured performance,
+or final acceptance. The active phase remains `phase-2-core-domain`
+(`in_progress`) and the migration remains `PARTIAL`.
+
 ## 2026-08-17 BitTorrent `bt-stop-timeout` checkpoint
 
 The Rust BitTorrent piece loop now consumes the existing `bt-stop-timeout`
@@ -1449,13 +1616,15 @@ combinations, third-party services, platform coverage, browser/original-client
 interoperability, and the remaining phase-2 gates remain open; the overall
 migration remains `PARTIAL`.
 
-## 2026-08-17 Release Version Alignment To 0.3.1
+## 2026-08-17 Independent Crate Versions And Binary Release Identity
 
-The release version is now aligned across the Rust workspace, the `aria2c`
-product identity, Python and Node.js package metadata, distribution manifests,
-installer fallbacks, and the Cargo/npm lock files. The release workflow now
-resolves the program release as `v0.3.1`, matching `aria2c --version` and the
-RPC `aria2.getVersion` value.
+The four Rust workspace members now own explicit package versions. The
+`aria2` package is the binary release source for `aria2c --version`, the
+startup banner, RPC `aria2.getVersion`, binary identity defaults, release tags,
+and binary distribution artifacts. Library package versions remain independent;
+their path dependency ranges describe API compatibility and are not release
+tags for the binary. The release workflow validates all member versions but
+reads the binary release only from `aria2/Cargo.toml`.
 
 The 2026-08-15 `0.3.0` entry below remains historical evidence for the previous
 release identity.

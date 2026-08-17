@@ -1,3 +1,4 @@
+mod activity;
 mod bt_peer_snapshot;
 mod dependency;
 pub mod download_result;
@@ -28,6 +29,7 @@ pub use crate::config::runtime::{
     ChangeableKind, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
     is_option_changeable,
 };
+pub use activity::ActivitySignal;
 pub use bt_peer_snapshot::BtPeerSnapshot;
 #[cfg(feature = "bittorrent")]
 pub use dependency::BtDependencyResolution;

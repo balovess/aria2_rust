@@ -311,7 +311,7 @@ impl RpcEngine {
 
     /// Handle `aria2.getVersion` - Get version information with enabled features.
     pub fn handle_version(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
-        let version_info = VersionInfo::from_env();
+        let version_info = VersionInfo::from_version(self.product_version.clone());
         JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
             version_info.to_json_value(),

@@ -247,9 +247,15 @@ pub async fn execute_with_coordinator(
     let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut active: HashMap<u32, (usize, Instant)> = HashMap::new();
     let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
-    let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+    // Lifecycle changes wake the scheduler even when all segment requests are
+    // blocked on slow network reads.
+    let lifecycle_notify = dl.group.recover().lifecycle_notifier();
 
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
+        let lifecycle_changed = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_changed);
+        lifecycle_changed.as_mut().enable();
+
         if let Err(error) = dl.check_cancelled() {
             super::segment::cancel_and_persist(
                 executor,
@@ -363,7 +369,7 @@ pub async fn execute_with_coordinator(
                 .filter_map(|c| c.cooldown_remaining())
                 .max()
             {
-                tokio::time::sleep(wait).await;
+                dl.wait_for_retry(wait).await?;
                 continue;
             }
             if coordinator.has_failed_segments() {
@@ -375,8 +381,16 @@ pub async fn execute_with_coordinator(
                 ));
             }
             if coordinator.has_pending_segments() {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
+                let message = if coordinator.any_mirror_available() {
+                    "HTTP segment scheduler made no progress"
+                } else {
+                    "HTTP segment download has no available mirrors"
+                };
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: message.into(),
+                    },
+                ));
             }
         }
 
@@ -535,7 +549,7 @@ pub async fn execute_with_coordinator(
                 )
                 .await?;
             }
-            _ = cancel_tick.tick() => {
+            _ = &mut lifecycle_changed => {
                 flush_requested_control_file(
                     dl,
                     &mut writer,

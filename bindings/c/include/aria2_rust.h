@@ -52,7 +52,7 @@ Aria2RustSession *aria2_rust_session_new(const Aria2RustKeyValue *options,
 int32_t aria2_rust_session_final(Aria2RustSession *session);
 void aria2_rust_session_free(Aria2RustSession *session);
 
-/* mode 0 waits for all current downloads; mode 1 performs one poll. */
+/* mode 0 waits for all current downloads; mode 1 runs one event turn. */
 int32_t aria2_rust_run(Aria2RustSession *session, uint32_t mode);
 
 int32_t aria2_rust_add_uri(Aria2RustSession *session, const char *const *uris,

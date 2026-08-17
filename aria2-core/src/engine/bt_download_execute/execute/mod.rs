@@ -85,45 +85,56 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
     ) {
-        let Some(receiver) = self.incoming_peers.as_mut() else {
+        let Some(mut receiver) = self.incoming_peers.take() else {
             return;
         };
         while let Ok(incoming) = receiver.try_recv() {
-            let endpoint = incoming.endpoint;
-            let mut conn = match incoming.connection {
-                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(
-                    connection,
-                ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
-                    *connection,
-                    endpoint,
-                ),
-                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
-                    connection,
-                ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_encrypted(
-                    *connection,
-                    endpoint,
-                ),
-            };
-            let remote_peer_id = conn.remote_peer_id();
-            if remote_peer_id == Some(self.local_peer_id)
-                || remote_peer_id.is_some_and(|peer_id| {
-                    active_connections
-                        .iter()
-                        .any(|active| active.peer_id == Some(peer_id))
-                })
-            {
-                self.peer_storage
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
-                info!(%endpoint, "Rejected incoming self or duplicate BitTorrent peer");
-                continue;
-            }
-            conn.allocate_session_resource(piece_length, total_size);
-            active_connections.push(conn);
-            self.bt_runtime.set_connections(active_connections.len());
-            info!("[BT] Admitted incoming peer {}", endpoint);
+            self.admit_incoming_peer(active_connections, incoming, piece_length, total_size);
         }
+        self.incoming_peers = Some(receiver);
+    }
+
+    pub(super) fn admit_incoming_peer(
+        &mut self,
+        active_connections: &mut Vec<crate::engine::bt_peer_connection::BtPeerConn>,
+        incoming: crate::engine::bt_peer_listener::IncomingPeer,
+        piece_length: u32,
+        total_size: u64,
+    ) {
+        let endpoint = incoming.endpoint;
+        let mut conn = match incoming.connection {
+            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(connection) => {
+                crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
+                    *connection,
+                    endpoint,
+                )
+            }
+            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
+                connection,
+            ) => crate::engine::bt_peer_connection::BtPeerConn::from_incoming_encrypted(
+                *connection,
+                endpoint,
+            ),
+        };
+        let remote_peer_id = conn.remote_peer_id();
+        if remote_peer_id == Some(self.local_peer_id)
+            || remote_peer_id.is_some_and(|peer_id| {
+                active_connections
+                    .iter()
+                    .any(|active| active.peer_id == Some(peer_id))
+            })
+        {
+            self.peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
+            info!(%endpoint, "Rejected incoming self or duplicate BitTorrent peer");
+            return;
+        }
+        conn.allocate_session_resource(piece_length, total_size);
+        active_connections.push(conn);
+        self.bt_runtime.set_connections(active_connections.len());
+        info!("[BT] Admitted incoming peer {}", endpoint);
     }
 }
 
@@ -297,7 +308,12 @@ impl Command for BtDownloadCommand {
                     gid,
                     "Checking integrity of existing data against piece hashes"
                 );
-                let outcome = ci_man::enqueue_with_outcome(&ci_man::shared(), gid, task).await?;
+                let outcome = ci_man::enqueue_with_outcome_for_group(
+                    &ci_man::shared(),
+                    Arc::clone(&self.group),
+                    task,
+                )
+                .await?;
                 verified_piece_indices = outcome.verified_piece_indices;
                 if !outcome.failed_piece_indices.is_empty() {
                     warn!(

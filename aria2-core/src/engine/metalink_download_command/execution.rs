@@ -916,11 +916,12 @@ impl MetalinkDownloadCommand {
     }
 
     async fn wait_for_lifecycle_change(&self) {
-        loop {
-            if self.lifecycle_error().is_some() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+        let notifier = self.group.recover().lifecycle_notifier();
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.lifecycle_error().is_none() {
+            notified.await;
         }
     }
 

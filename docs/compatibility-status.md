@@ -2,14 +2,16 @@
 
 Last verified: 2026-08-17
 Reference implementation: aria2_original/  
-Rust workspace version: 0.3.1
-Public product identity: aria2-rust 0.3.1
+Binary package version: 0.3.2
+Library package versions: aria2-core 0.3.2, aria2-protocol 0.3.2, aria2-rpc 0.3.2
+Public product identity: aria2-rust 0.3.2
 
-All product-version surfaces are owned by this workspace release source:
-CLI `--version`, the startup banner, RPC `aria2.getVersion`, default HTTP and
-BitTorrent identities, SDK metadata, distribution metadata, and installer
-fallbacks resolve to `aria2-rust 0.3.1`. Protocol-format versions such as JSON-
-RPC `2.0`, Metalink `3.0`/`4.0`, SFTP `3`, and internal persistence-format
+The binary release source is `aria2/Cargo.toml`. The CLI `--version`, startup
+banner, and RPC `aria2.getVersion` resolve to the `aria2` package version;
+binary configuration defaults inject the same version into HTTP and BitTorrent
+client identities. `aria2-core`, `aria2-protocol`, and `aria2-rpc` own their
+library package versions independently. Protocol-format versions such as
+JSON-RPC `2.0`, Metalink `3.0`/`4.0`, SFTP `3`, and internal persistence-format
 versions are intentionally separate from product identity.
 
 This is the current status source for the migration. The file-level records
@@ -48,8 +50,9 @@ such as browser extensions. A Rust implementation is not compatible merely
 because it exposes a similarly named method.
 
 Product identity is an intentional documented exception: `aria2.getVersion`,
-the CLI version action, default User-Agent values, and BitTorrent peer identity
-identify `aria2-rust` at the current workspace version. Their surrounding wire
+the CLI version action, binary default User-Agent values, and binary BitTorrent
+peer identity identify `aria2-rust` at the current `aria2` package version.
+Standalone libraries retain their own package defaults. Their surrounding wire
 formats and protocol behaviour remain compatible.
 
 Internal modules may be redesigned around Rust ownership, typed errors,
@@ -66,8 +69,186 @@ substitutes for missing original behavior.
 | --- | --- |
 | Active phase | `phase-2-core-domain` (`in_progress`) |
 | Passed and locked phases | `phase-1-baseline-matrix` (`passed_locked`) |
-| Latest verification | 2026-08-17 in the current worktree based on `f71043c` (`dev`), including the full all-features workspace library/test run, the C API focused tests, the Windows `aria2-core` cdylib/import-library build, FTP/SFTP retry-wait cancellation regressions, the active-slot drain regression, and the shutdown-lifecycle, session-restart, control-path, session-iterator-error, session-stale-file, session-comment, stopped-result, piece-storage, digest-count integrity, control-file, RequestGroup lifecycle, terminal-progress, and pause/completion-race slices below; unrelated in-progress edits are preserved |
+| Latest verification | 2026-08-17 in the current worktree based on `f71043c` (`dev`), including the current event-driven RequestGroup lifecycle notification tests, session TLS-option round-trip tests, HTTP retry-wait and concurrent adaptive-cooldown pause/remove E2E, all-features workspace regression, the C API focused tests, the Windows `aria2-core` cdylib/import-library build, FTP/SFTP retry-wait cancellation regressions, the active-slot drain regression, the RequestGroup-scoped integrity cancellation regression, and the shutdown-lifecycle, session-restart, control-path, session-iterator-error, session-stale-file, session-comment, stopped-result, piece-storage, digest-count integrity, control-file, RequestGroup lifecycle, terminal-progress, and pause/completion-race slices below; unrelated in-progress edits are preserved |
 | Current status | `PARTIAL`; phase 1 is locked, but the final acceptance and stop conditions are not met |
+| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; explicit pause/remove/halt regression coverage; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; session serialization of configured `certificate` and `private-key` paths; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized |
+| Next action | Audit remaining phase-2 RequestGroup pause/resume, retry, storage, and checksum seams, starting with one independently reproducible lifecycle gap; keep broader protocol interoperability and later phases closed |
+| Acceptance evidence | The checkpoint below records the focused lifecycle tests, HTTP and BitTorrent integrity E2E, the current `aria2-core` library result (`3463 passed, 0 failed, 1 ignored`), workspace regression, Clippy, formatting, and diff checks |
+| Remaining differences, risks, reopen conditions | Cross-protocol lifecycle combinations, original-client and third-party interoperability, bindings, measured performance, and final workspace acceptance remain open; reopen this checkpoint if any covered command bypasses the group-aware integrity entrypoint or a lifecycle test regresses |
+
+## 2026-08-17 HTTP Retry-Wait Lifecycle Checkpoint
+
+## 2026-08-17 Event-Driven RequestGroup Lifecycle Checkpoint
+
+RequestGroup lifecycle control now exposes a shared `tokio::sync::Notify`.
+Sequential, concurrent HTTP, FTP, SFTP, and in-memory metadata retry waits use
+`tokio::select!` between the configured retry deadline and that notification.
+Sequential cancellation waits use the same signal. The 50ms polling slices
+were removed; the status and atomic control flags remain the source of truth,
+and notifications only wake waiters so they can re-check state safely.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::sequential_download::tests::retry_wait_wakes_when_removed_after_wait_starts -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib request::request_group -- --test-threads=1
+  119 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the event-driven lifecycle waiting slice. Periodic timers that
+serve protocol scheduling, performance sampling, test fixtures, or external C
+API polling remain separate audit items; the migration remains `PARTIAL`.
+
+Sequential HTTP retry loops now wait through the RequestGroup-aware
+`SequentialDownloader::wait_for_retry` seam. The wait checks pause, remove, and
+halt state at bounded intervals, so a failed HTTP attempt cannot leave a task
+unresponsive for the full configured `retry-wait`. Rust-owned E2E coverage uses
+the local 500-response fixture and exercises both pause and remove during the
+real production retry window; both tasks stop promptly and preserve their
+expected lifecycle error and status.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  40 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the real HTTP retry-wait pause/remove slice. FTP and SFTP
+retry-wait evidence is recorded separately; broader cross-protocol lifecycle
+combinations, original-client or third-party interoperability, bindings,
+measured performance evidence, and final workspace acceptance remain open.
+The active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`.
+
+## 2026-08-17 Concurrent HTTP Adaptive-Cooldown Lifecycle Checkpoint
+
+Concurrent HTTP range downloads now route the 429/503 adaptive-concurrency
+cooldown through the RequestGroup-aware retry wait. Both the single-authority
+segment loop and the multi-mirror pipeline check pause, remove, and halt state
+at bounded intervals instead of sleeping for the entire configured cooldown.
+Rust-owned E2E coverage uses a real local range server that emits capacity
+responses while one request drains, then verifies pause and remove during the
+resulting cooldown.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_http_adaptive_concurrency_e2e -- --test-threads=1
+  7 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the concurrent HTTP adaptive-cooldown pause/remove slice.
+The active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`; broader cross-protocol lifecycle combinations,
+original-client or third-party interoperability, bindings, measured
+performance evidence, and final workspace acceptance remain open.
+
+## 2026-08-17 Session TLS Option Round-Trip Checkpoint
+
+The session option map now preserves configured `certificate` and
+`private-key` paths alongside `ca-certificate` and the other HTTP options.
+`DownloadOptions::from_option_strings` already consumed these canonical names;
+the missing serializer entries meant a restored task silently lost its client
+identity paths. The Rust path now matches the relevant aria2_original
+`SessionSerializer` boundary, which writes every defined initial task option.
+Only the file paths are persisted; certificate and key contents are not copied
+into the session file.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib session::session_entry::tests::test_download_options_to_map_all_fields -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_session -- --test-threads=1
+  13 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the configured TLS client-identity session round-trip slice.
+The active phase remains `phase-2-core-domain` (`in_progress`) and the
+migration remains `PARTIAL`; broader session lifecycle combinations,
+cross-protocol behavior, original-client interoperability, bindings, measured
+performance evidence, and final workspace acceptance remain open.
+
+## 2026-08-17 RequestGroup-Scoped Integrity Cancellation Checkpoint
+
+Pre-download piece-hash validation now observes the lifecycle of its owning
+`RequestGroup`. `CheckIntegrityMan::cancel_gid` removes matching queued work
+and notifies its waiter, while an active entry is cooperatively cancelled
+between validation chunks. The group-aware enqueue path checks for removal,
+pause, and halt every 10 ms, cancels the matching manager entry, waits for
+worker cleanup, and returns the lifecycle-specific error. HTTP and BitTorrent
+download commands now use this path for their existing-payload integrity
+checks.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity::man::tests -- --test-threads=1
+  14 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_download test_e2e_http_check_integrity -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download integrity -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3460 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the RequestGroup-scoped pre-download integrity cancellation
+boundary for the covered HTTP and BitTorrent commands. It does not close
+broader cross-protocol lifecycle combinations, original-client or third-party
+interoperability, bindings, measured performance evidence, or final workspace
+acceptance; the active phase remains `phase-2-core-domain` (`in_progress`) and
+the migration remains `PARTIAL`.
+
+## 2026-08-17 Current Rust Workspace Regression Checkpoint
+
+The current worktree, including `aria2-core 0.3.2` and the scoped integrity
+cancellation changes, passed the all-features Rust workspace regression. This
+is a workspace compatibility gate only; ignored tests retain their declared
+status and do not count as passing evidence.
+
+Rust-owned verification:
+
+~~~text
+cargo test --workspace --all-features -j 1 --quiet -- --test-threads=1
+  exit_code=0; all executed targets passed; ignored tests retained their declared status
+  aria2-core library target: 3460 passed, 0 failed, 1 ignored
+~~~
+
+This does not close Python/Node package validation, platform ABI matrices,
+original-client or browser-extension interoperability, measured performance,
+or final acceptance. The active phase remains `phase-2-core-domain`
+(`in_progress`) and the migration remains `PARTIAL`.
 
 ## 2026-08-17 BitTorrent `bt-stop-timeout` Checkpoint
 
@@ -1496,11 +1677,13 @@ reference data, or any recorded worktree path is added, removed, or moved.
 
 ## 2026-08-14 Independent Product Identity Guard
 
-The product identity boundary is covered at both public entry points. The CLI
-`-v` action and RPC `aria2.getVersion.version` resolve to
-`aria2_protocol::identity::PRODUCT_VERSION`, while the CLI output must not
-reintroduce the upstream C++ version-report text. This check changes no option
-definition, default value, config-file behavior, or user configuration.
+The product identity boundary is covered at both public entry points. At this
+historical checkpoint, the CLI `-v` action and RPC
+`aria2.getVersion.version` resolved to the protocol identity constant. The
+current implementation keeps the same guard while sourcing the binary value
+from `aria2::identity`; the CLI output must not reintroduce the upstream C++
+version-report text. This check changes no option definition, default value,
+config-file behavior, or user configuration.
 
 Verification on 2026-08-14:
 
@@ -2636,11 +2819,11 @@ negotiation explicit: disabled by default and enabled only for the configured
 download option. This includes the standalone protocol HTTP client used by
 tracker code, Metalink, concurrent downloads, web seeds, and tracker clients.
 
-The project emits one product identity. The Cargo package version
-(`aria2-rust` 0.3.1 on this checkout), CLI version action and startup banner,
-RPC `getVersion`,
-default HTTP/tracker User-Agent, BitTorrent peer agent, and BitTorrent
-extension handshake use the same release source.
+The binary emits one product identity. The `aria2` package version
+(`aria2-rust` 0.3.2 on this checkout), CLI version action and startup banner,
+RPC `getVersion`, and binary configuration defaults for HTTP/tracker
+User-Agent and BitTorrent peer agent use the same release source. Standalone
+library defaults are package-owned and may use a different version.
 
 The upstream C++ version-report text is not part of this product. It has been
 removed because it would falsely claim the upstream implementation and linked
@@ -2665,7 +2848,7 @@ the implementation to report an upstream aria2 version.
 
 The CLI help and completion usage also retain `aria2c` for existing scripts,
 while `--version` reports the independent `aria2-rust` product name and
-workspace version.
+`aria2/Cargo.toml` version.
 
 The hidden optimization options also preserve the original case-sensitive
 configuration contract: `optimize-concurrent-downloads-coeffA` defaults to
@@ -2674,16 +2857,17 @@ Lowercase spellings are not aliases. This is an external option compatibility
 fix; it does not change the independent `aria2-rust` product identity or
 version policy.
 
-The workspace is also version-consistent: all four Rust member crates use the
-workspace package version, all internal path dependency constraints target
-0.3.1, distribution manifests and SDK package metadata use 0.3.1, and active
-installer fallbacks and examples use `aria2-rust/0.3.1`. Code-generated output
+The workspace now validates independent package versions: every member has an
+explicit `version = "..."`, while internal path dependency constraints express
+compatible library APIs rather than a shared release number. Binary tags and
+distribution metadata use the `aria2` package version. Code-generated output
 and test fixtures must not emit an upstream aria2 product version. External
 input fixtures use neutral client or generator labels when a version field is
 needed. Wire-protocol versions such as JSON-RPC `2.0`, Metalink `3.0`/`4.0`,
 and SFTP version `3` are format versions, not product identity.
 
-- `user-agent` and `peer-agent` registry defaults use `aria2-rust/0.3.1`.
+- Binary `user-agent` and `peer-agent` defaults use `aria2-rust/0.3.2`.
+  Standalone core/protocol registry defaults use their library-owned identity.
   The peer-ID prefix is `A2-RUST-`; the default peer ID is generated once per
   process and remains exactly 20 bytes.
 - RPC message shapes, method names, authentication, errors, notifications,

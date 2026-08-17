@@ -673,8 +673,8 @@ fn regression_v_triggers_version() {
     assert!(
         version_output.starts_with(&format!(
             "{} {}",
-            aria2_protocol::identity::PRODUCT_NAME,
-            aria2_protocol::identity::PRODUCT_VERSION
+            aria2::identity::PRODUCT_NAME,
+            aria2::identity::PRODUCT_VERSION
         )),
         "--version must use the product version number"
     );
@@ -1087,6 +1087,10 @@ fn regression_registry_default_values() {
         &OptionValue::Int(60)
     );
     assert_eq!(
+        registry.get("auto-save-interval").unwrap().default_value(),
+        &OptionValue::Int(60)
+    );
+    assert_eq!(
         registry.get("check-certificate").unwrap().default_value(),
         &OptionValue::Bool(true)
     );
@@ -1307,6 +1311,22 @@ fn regression_split_range_validation() {
     let mut parser3 = ConfigParser::new();
     parser3.parse_cli_args(&["--split=100"]);
     assert_eq!(parser3.get_i64("split").unwrap(), 100);
+}
+
+/// Test: auto-save-interval keeps aria2's 0..600 second range.
+#[test]
+fn regression_auto_save_interval_range_validation() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--auto-save-interval=0"]);
+    assert_eq!(parser.get_i64("auto-save-interval"), Some(0));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--auto-save-interval=600"]);
+    assert_eq!(parser.get_i64("auto-save-interval"), Some(600));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--auto-save-interval=601"]);
+    assert!(parser.has_errors());
 }
 
 /// Test: max-connection-per-server range validation (1-16).

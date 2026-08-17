@@ -198,7 +198,7 @@ impl BtTorrentPostDownloadHandler {
         // If pause requested (PREF_PAUSE_METADATA), mark the child group.
         // C++: `rg->setPauseRequested(true)` when keepRunning && pause_metadata
         if self.pause_requested {
-            child_group.control_flags.request_pause();
+            child_group.request_pause();
         }
 
         let child = Arc::new(std::sync::RwLock::new(child_group));

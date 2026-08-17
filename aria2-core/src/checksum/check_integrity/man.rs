@@ -39,18 +39,17 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::{RwLock, oneshot};
+use tokio::sync::{Notify, RwLock, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::checksum::message_digest::{HashType, MessageDigest};
 use crate::error::{Aria2Error, Result};
-
-/// How long the worker sleeps when the queue is empty before polling again.
-const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+use crate::request::request_group::RequestGroup;
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Error reported when a queued integrity check is cancelled (engine halt).
 fn cancelled_error() -> Aria2Error {
@@ -403,6 +402,7 @@ impl CheckIntegrityTask for MultiFileChunkValidator {
 /// Lightweight metadata of the entry currently being validated.
 #[derive(Debug, Clone)]
 struct PickedMeta {
+    gid: u64,
     total_length: u64,
     cancelled: Arc<AtomicBool>,
     progress: Arc<std::sync::atomic::AtomicU64>,
@@ -441,6 +441,7 @@ pub struct CheckIntegrityMan {
     picked: Option<PickedMeta>,
     max_concurrent: usize,
     active_count: usize,
+    wake: Arc<Notify>,
 }
 
 impl CheckIntegrityMan {
@@ -451,6 +452,7 @@ impl CheckIntegrityMan {
             picked: None,
             max_concurrent: 1,
             active_count: 0,
+            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -461,6 +463,7 @@ impl CheckIntegrityMan {
             picked: None,
             max_concurrent: max_concurrent.max(1),
             active_count: 0,
+            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -472,6 +475,7 @@ impl CheckIntegrityMan {
             "Integrity check entry queued"
         );
         self.queue.push_back(entry);
+        self.wake.notify_one();
     }
 
     /// Pick the next entry, moving it out. `None` when the queue is empty or
@@ -485,6 +489,7 @@ impl CheckIntegrityMan {
         debug!(gid = entry.gid, "Integrity check entry picked by worker");
         let total = entry.task.total_length();
         self.picked = Some(PickedMeta {
+            gid: entry.gid,
             total_length: total,
             cancelled: Arc::clone(&entry.cancelled),
             progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -497,6 +502,7 @@ impl CheckIntegrityMan {
     pub fn drop_picked(&mut self) {
         if self.picked.take().is_some() {
             self.active_count = self.active_count.saturating_sub(1);
+            self.wake.notify_one();
         }
     }
 
@@ -543,6 +549,47 @@ impl CheckIntegrityMan {
         if let Some(meta) = self.picked.as_ref() {
             meta.cancelled.store(true, Ordering::Relaxed);
         }
+        self.wake.notify_one();
+    }
+
+    /// Cancel integrity work belonging to one RequestGroup.
+    ///
+    /// Queued entries are removed and their waiters are notified immediately.
+    /// A picked entry is marked for cooperative cancellation; the worker
+    /// observes the flag between validation chunks and still owns its final
+    /// cleanup and completion notification.
+    pub fn cancel_gid(&mut self, gid: u64) -> bool {
+        let mut cancelled = false;
+        let mut retained = VecDeque::with_capacity(self.queue.len());
+
+        while let Some(entry) = self.queue.pop_front() {
+            if entry.gid == gid {
+                entry.mark_cancelled();
+                if let Some(tx) = entry.done_tx {
+                    let _ = tx.send(Err(cancelled_error()));
+                }
+                cancelled = true;
+            } else {
+                retained.push_back(entry);
+            }
+        }
+        self.queue = retained;
+
+        if let Some(meta) = self.picked.as_ref()
+            && meta.gid == gid
+        {
+            meta.cancelled.store(true, Ordering::Relaxed);
+            cancelled = true;
+        }
+
+        if cancelled {
+            self.wake.notify_one();
+        }
+        cancelled
+    }
+
+    fn wake_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.wake)
     }
 }
 
@@ -597,6 +644,11 @@ pub fn shared_with_concurrency(max: usize) -> SharedCheckIntegrityMan {
 /// then notify the waiter with the validation outcome.
 async fn worker_loop(man: SharedCheckIntegrityMan) {
     debug!("Check integrity worker started");
+    let wake = {
+        let guard = man.read().await;
+        guard.wake_notifier()
+    };
+
     loop {
         let entry = {
             let mut guard = man.write().await;
@@ -604,7 +656,9 @@ async fn worker_loop(man: SharedCheckIntegrityMan) {
         };
 
         let Some(mut entry) = entry else {
-            tokio::time::sleep(IDLE_POLL_INTERVAL).await;
+            // Queue insertion and cancellation both notify this waiter. The
+            // worker therefore consumes no timer wakeups while idle.
+            wake.notified().await;
             continue;
         };
 
@@ -846,16 +900,148 @@ pub async fn cancel_all(man: &SharedCheckIntegrityMan) {
     man.write().await.cancel_all();
 }
 
+/// Cancel integrity validation for one RequestGroup.
+pub async fn cancel_gid(man: &SharedCheckIntegrityMan, gid: u64) -> bool {
+    man.write().await.cancel_gid(gid)
+}
+
+fn request_group_cancellation_error(group: &RequestGroup) -> Option<Aria2Error> {
+    if group.is_removed() {
+        Some(Aria2Error::DownloadFailed(
+            "Download cancelled by user".to_string(),
+        ))
+    } else if group.is_paused_flag() {
+        Some(Aria2Error::DownloadFailed("Download paused".to_string()))
+    } else if group.is_force_halt_requested() || group.is_halt_requested() {
+        Some(Aria2Error::DownloadFailed("Download halted".to_string()))
+    } else {
+        None
+    }
+}
+
+/// Queue an integrity check while observing its owning RequestGroup.
+///
+/// The validator worker remains the owner of validation state, but lifecycle
+/// control belongs to the RequestGroup. The group's lifecycle notification
+/// wakes this waiter immediately when pause/remove/halt changes state.
+pub async fn enqueue_with_outcome_for_group(
+    man: &SharedCheckIntegrityMan,
+    group: Arc<std::sync::RwLock<RequestGroup>>,
+    task: Box<dyn CheckIntegrityTask>,
+) -> Result<IntegrityOutcome> {
+    let gid = group.recover().gid().value();
+    let lifecycle_notify = group.recover().lifecycle_notifier();
+    let mut validation = Box::pin(enqueue_with_outcome(man, gid, task));
+
+    loop {
+        let lifecycle_changed = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_changed);
+        lifecycle_changed.as_mut().enable();
+
+        let cancellation_error = {
+            let group_guard = group.recover();
+            request_group_cancellation_error(&group_guard)
+        };
+        if let Some(error) = cancellation_error {
+            cancel_gid(man, gid).await;
+            let _ = validation.await;
+            return Err(error);
+        }
+
+        tokio::select! {
+            result = &mut validation => return result,
+            _ = &mut lifecycle_changed => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::request::request_group::GroupId;
+    use async_trait::async_trait;
     use std::path::PathBuf;
+    use std::time::Duration;
+
+    struct SlowIntegrityTask {
+        remaining_chunks: usize,
+        current_length: u64,
+    }
+
+    #[async_trait]
+    impl CheckIntegrityTask for SlowIntegrityTask {
+        fn total_length(&self) -> u64 {
+            (self.remaining_chunks as u64 + 1) * 1024
+        }
+
+        fn current_length(&self) -> u64 {
+            self.current_length
+        }
+
+        fn is_finished(&self) -> bool {
+            self.remaining_chunks == 0
+        }
+
+        async fn validate_chunk(&mut self) -> Result<()> {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            self.remaining_chunks -= 1;
+            self.current_length += 1024;
+            Ok(())
+        }
+
+        fn passed(&self) -> bool {
+            self.is_finished()
+        }
+    }
 
     fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aria2_ci_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    async fn run_active_cancellation(
+        trigger: impl FnOnce(&Arc<std::sync::RwLock<RequestGroup>>),
+    ) -> Result<IntegrityOutcome> {
+        let man = shared_with_concurrency(1);
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(5),
+            vec!["http://example.test/payload".to_string()],
+            crate::request::request_group::DownloadOptions::default(),
+        )));
+        let man_for_validation = Arc::clone(&man);
+        let group_for_validation = Arc::clone(&group);
+        let validation = tokio::spawn(async move {
+            enqueue_with_outcome_for_group(
+                &man_for_validation,
+                group_for_validation,
+                Box::new(SlowIntegrityTask {
+                    remaining_chunks: 100,
+                    current_length: 0,
+                }),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if man.read().await.is_picked() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("integrity validation should become active");
+
+        trigger(&group);
+        let result = tokio::time::timeout(Duration::from_secs(1), validation)
+            .await
+            .expect("lifecycle cancellation should be prompt")
+            .expect("validation task should not panic");
+        assert_eq!(man.read().await.active_count(), 0);
+        result
     }
 
     fn sha1_hex(data: &[u8]) -> String {
@@ -974,6 +1160,45 @@ mod tests {
         assert_eq!(outcome.failed_piece_indices, vec![1]);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_group_pause_cancels_active_integrity_validation() {
+        let result = run_active_cancellation(|group| {
+            group.write().unwrap().pause().unwrap();
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_group_remove_cancels_active_integrity_validation() {
+        let result = run_active_cancellation(|group| {
+            group.write().unwrap().remove().unwrap();
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::DownloadFailed(message)) if message == "Download cancelled by user"
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_group_halt_cancels_active_integrity_validation() {
+        let result = run_active_cancellation(|group| {
+            group
+                .read()
+                .unwrap()
+                .request_halt(crate::request::request_group::HaltReason::UserRequest);
+        })
+        .await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::DownloadFailed(message)) if message == "Download halted"
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1101,6 +1326,33 @@ mod tests {
         man.blocking_write().cancel_all();
         assert_eq!(man.blocking_read().count_in_queue(), 0);
         assert!(rx1.blocking_recv().unwrap().is_err());
+    }
+
+    #[test]
+    fn test_cancel_gid_notifies_only_matching_queued_entry() {
+        let mut man = CheckIntegrityMan::new();
+        let (target_tx, target_rx) = oneshot::channel();
+        let (other_tx, mut other_rx) = oneshot::channel();
+
+        for (gid, done_tx) in [(7, target_tx), (8, other_tx)] {
+            man.push_entry(CheckIntegrityEntry {
+                gid,
+                task: Box::new(SlowIntegrityTask {
+                    remaining_chunks: 1,
+                    current_length: 0,
+                }),
+                created_at: Instant::now(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                done_tx: Some(done_tx),
+            });
+        }
+
+        assert!(man.cancel_gid(7));
+        assert_eq!(man.count_in_queue(), 1);
+        assert!(target_rx.blocking_recv().unwrap().is_err());
+        assert!(other_rx.try_recv().is_err());
+        assert_eq!(man.take_next_owned().unwrap().gid, 8);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

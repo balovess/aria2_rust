@@ -29,9 +29,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          bash scripts/sync-version.sh
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' aria2/Cargo.toml | head -n 1)
           if [ -z "$VERSION" ]; then
-            echo "Unable to determine the workspace version" >&2
+            echo "Unable to determine the aria2 binary version" >&2
             exit 1
           fi
 

@@ -269,7 +269,7 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
             // If pause requested (PREF_PAUSE_METADATA), mark the child group.
             // C++: `rg->setPauseRequested(true)` when keepRunning && pause_metadata
             if self.pause_requested {
-                group.recover().control_flags.request_pause();
+                group.recover().request_pause();
             }
         }
 

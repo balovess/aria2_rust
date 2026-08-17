@@ -1,8 +1,8 @@
-//! Console Progress Reporter — periodic download progress output
+//! Console Progress Reporter — event-driven download progress output
 //!
-//! Polls `RequestGroupMan` at a fixed interval and renders active download
-//! progress to stdout using the `ProgressBar` UI component. Designed to run
-//! as a background `tokio` task alongside the download engine.
+//! Waits for `RequestGroupMan` activity and renders active download progress
+//! to stdout using the `ProgressBar` UI component. Rendering is throttled by a
+//! deadline, but an idle reporter does not wake up on a fixed interval.
 //!
 //! # Display
 //!
@@ -16,17 +16,17 @@
 //! ```
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
-use tokio::time::sleep;
+use tokio::time::sleep_until;
 
 use crate::ui::progress_bar::{ProgressBar, TaskProgress, TaskStatus};
 use aria2_core::request::request_group::DownloadStatus;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 
-/// Console progress reporter that periodically polls `RequestGroupMan`
-/// and renders active download progress to stdout.
+/// Console progress reporter that renders active download progress after
+/// manager activity, with a bounded render rate.
 pub struct ConsoleProgressReporter {
     group_man: Arc<RequestGroupMan>,
     interval: Duration,
@@ -61,37 +61,63 @@ impl ConsoleProgressReporter {
 
     /// Run the reporting loop until the stop signal is received.
     ///
-    /// Polls `RequestGroupMan` at the configured interval and renders progress
-    /// to stdout. On stop, moves the cursor past the last output block.
+    /// The initial snapshot is rendered immediately. Later snapshots are
+    /// driven by activity events and delayed only when the render throttle is
+    /// active. On stop, moves the cursor past the last output block.
     pub async fn run(&mut self) {
         let stop_rx = self
             .stop_rx
             .take()
             .expect("ConsoleProgressReporter::run called twice");
-        // Pin the receiver so we can poll it with `&mut` in the select loop.
         tokio::pin!(stop_rx);
+        let activity = self.group_man.activity_signal();
+        let mut observed_generation = activity.generation();
+        let initial_rendered = self.tick().await;
+        let mut last_render_at = initial_rendered.then(Instant::now);
+        let mut render_deadline = None;
 
         loop {
+            if let Some(deadline) = render_deadline.take() {
+                let deadline_wait = sleep_until(tokio::time::Instant::from_std(deadline));
+                tokio::pin!(deadline_wait);
+                tokio::select! {
+                    biased;
+                    _ = &mut stop_rx => break,
+                    _ = &mut deadline_wait => {
+                        let rendered = self.tick().await;
+                        last_render_at = rendered.then(Instant::now);
+                    }
+                }
+                continue;
+            }
+
+            let activity_wait = activity.wait_for_change(&mut observed_generation);
+            tokio::pin!(activity_wait);
             tokio::select! {
                 biased;
-                _ = &mut stop_rx => {
-                    // Channel closed or signal sent -> exit.
-                    if self.last_line_count > 0 {
-                        // Move past the rendered block so the shell prompt
-                        // appears cleanly below the progress output.
-                        println!();
+                _ = &mut stop_rx => break,
+                _ = &mut activity_wait => {
+                    let now = Instant::now();
+                    let can_render = last_render_at
+                        .map(|last| now.duration_since(last) >= self.interval)
+                        .unwrap_or(true);
+                    if can_render {
+                        let rendered = self.tick().await;
+                        last_render_at = rendered.then(Instant::now);
+                    } else if let Some(last) = last_render_at {
+                        render_deadline = Some(last + self.interval);
                     }
-                    break;
-                }
-                _ = sleep(self.interval) => {
-                    self.tick().await;
                 }
             }
         }
+
+        if self.last_line_count > 0 {
+            println!();
+        }
     }
 
-    /// Single poll-render cycle.
-    async fn tick(&mut self) {
+    /// Render one current snapshot.
+    async fn tick(&mut self) -> bool {
         let all_groups = self.group_man.all_groups();
 
         // Build TaskProgress list from active/waiting groups.
@@ -141,7 +167,7 @@ impl ConsoleProgressReporter {
                 self.last_line_count = 0;
                 self.has_rendered = false;
             }
-            return;
+            return false;
         }
 
         // Render with a fresh ProgressBar each tick.
@@ -162,6 +188,7 @@ impl ConsoleProgressReporter {
 
         self.last_line_count = line_count;
         self.has_rendered = true;
+        true
     }
 
     /// Clear the previously rendered output block from the terminal.

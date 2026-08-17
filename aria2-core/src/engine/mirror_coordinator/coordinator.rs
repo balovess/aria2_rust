@@ -340,6 +340,11 @@ impl MirrorCoordinator {
         self.segment_manager.has_pending_segments()
     }
 
+    /// Whether at least one mirror can accept another segment immediately.
+    pub fn any_mirror_available(&self) -> bool {
+        self.segment_manager.any_mirror_available()
+    }
+
     /// Get download progress as a percentage.
     pub fn progress(&self) -> f64 {
         self.segment_manager.progress()

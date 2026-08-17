@@ -310,7 +310,11 @@ impl Aria2RustSession {
                     .pause()
                     .map_err(|error| error.to_string())?;
             }
-            man.add_group_arc(group);
+            man.add_group_arc(Arc::clone(&group));
+            if let Err(error) = self.command_tx.send(EngineCommand::AddDownload { group }) {
+                let _ = man.remove_group_by_id(gid);
+                return Err(error.to_string());
+            }
             Ok::<_, String>(gid.value())
         }?;
         Ok(gid)
@@ -318,23 +322,29 @@ impl Aria2RustSession {
 
     fn run(&mut self, mode: u32) -> i32 {
         let keep_running = self.keep_running;
+        let request_man = Arc::clone(&self.request_man);
         self.runtime.block_on(async {
             if mode == 1 {
-                if !keep_running && self.request_man.download_finished() {
+                if !keep_running && request_man.download_finished() {
                     return 0;
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                return if keep_running || !self.request_man.download_finished() {
+                tokio::task::yield_now().await;
+                return if keep_running || !request_man.download_finished() {
                     1
                 } else {
                     0
                 };
             }
+
+            let notifier = request_man.download_finished_notifier();
             loop {
-                if self.request_man.download_finished() {
+                let notified = notifier.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if request_man.download_finished() {
                     return 0;
                 }
-                tokio::time::sleep(Duration::from_millis(20)).await;
+                notified.await;
             }
         })
     }
@@ -655,7 +665,9 @@ pub unsafe extern "C" fn aria2_rust_add_uri(
     })
 }
 
-/// Poll the engine. Mode 0 waits for all downloads; mode 1 performs one poll.
+/// Advance the engine. Mode 0 waits for all downloads; mode 1 yields once to
+/// let queued engine commands run and then returns the current keep-running
+/// state without an arbitrary wall-clock delay.
 ///
 /// # Safety
 /// `session` must point to a live session and must not be accessed through

@@ -25,6 +25,7 @@ pub mod peer_stats;
 #[cfg(test)]
 pub mod peer_stats_tests;
 pub mod post_download_handler;
+mod process_wait;
 pub(crate) mod progress_checkpoint;
 pub mod range_prober;
 pub mod resume_data;

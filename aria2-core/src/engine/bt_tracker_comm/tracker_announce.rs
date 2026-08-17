@@ -124,6 +124,11 @@ impl TrackerAnnouncer {
         self.announce.is_default_announce_ready()
     }
 
+    /// Return the delay until the next protocol-defined periodic announce.
+    pub fn next_default_announce_delay(&self) -> Option<std::time::Duration> {
+        self.announce.next_default_announce_delay()
+    }
+
     /// Return the tracker selected for the next announce attempt.
     pub fn current_tracker_url(&self) -> Option<&str> {
         self.announce.announce_list().get_announce()

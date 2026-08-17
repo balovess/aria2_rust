@@ -300,6 +300,12 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.ca_certificate {
         map.insert("ca-certificate".to_string(), v.clone());
     }
+    if let Some(ref v) = opts.certificate {
+        map.insert("certificate".to_string(), v.clone());
+    }
+    if let Some(ref v) = opts.private_key {
+        map.insert("private-key".to_string(), v.clone());
+    }
     if let Some(ref v) = opts.min_tls_version {
         map.insert("min-tls-version".to_string(), v.clone());
     }

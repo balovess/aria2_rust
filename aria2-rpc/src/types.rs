@@ -666,6 +666,15 @@ impl VersionInfo {
     /// protocol support available in the current build. The list reflects
     /// which protocols and capabilities aria2-core is compiled with.
     pub fn from_env() -> Self {
+        Self::from_version(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// Create version information for an embedding product.
+    ///
+    /// Library callers default to the `aria2-rpc` package version through
+    /// [`Self::from_env`]. The `aria2` binary passes its own release version
+    /// here so RPC `getVersion` reports the binary product that is running.
+    pub fn from_version(version: impl Into<String>) -> Self {
         // Keep the order and names used by C++ FeatureConfig::strSupportedFeature().
         let mut features = vec!["Async DNS"];
         #[cfg(feature = "bittorrent")]
@@ -678,7 +687,7 @@ impl VersionInfo {
         features.push("SFTP");
 
         Self {
-            version: aria2_protocol::identity::PRODUCT_VERSION.to_string(),
+            version: version.into(),
             enabled_features: features.into_iter().map(|s| s.to_string()).collect(),
         }
     }

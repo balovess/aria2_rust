@@ -18,7 +18,7 @@ use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
-use crate::session::auto_save_session::AutoSaveSession;
+use crate::session::auto_save_coordinator::AutoSaveCoordinator;
 #[cfg(feature = "bittorrent")]
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerCatalogConfig};
 
@@ -34,8 +34,9 @@ pub struct DownloadEngine {
     pub(crate) global_limiter: Option<RateLimiter>,
     pub(crate) save_session_path: Option<PathBuf>,
     pub(crate) save_session_interval: Option<Duration>,
+    pub(crate) auto_save_interval: Option<Duration>,
     pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
-    pub(crate) auto_save: Option<Arc<Mutex<AutoSaveSession>>>,
+    pub(crate) auto_save: Option<Arc<Mutex<AutoSaveCoordinator>>>,
     /// FTP connection pool for connection reuse across FTP downloads.
     /// Created during engine initialization and passed down via dependency injection.
     pub(crate) ftp_pool: Arc<FtpConnectionPool>,
@@ -89,6 +90,7 @@ impl DownloadEngine {
             global_limiter: None,
             save_session_path: None,
             save_session_interval: None,
+            auto_save_interval: None,
             request_group_man: None,
             auto_save: None,
             ftp_pool: Arc::new(FtpConnectionPool::new(
@@ -131,7 +133,8 @@ impl DownloadEngine {
     }
 
     pub fn set_request_group_man(&mut self, man: Arc<RequestGroupMan>) {
-        self.request_group_man = Some(man);
+        self.request_group_man = Some(Arc::clone(&man));
+        self.refresh_auto_save(man);
     }
 
     pub fn set_save_session(
@@ -142,15 +145,13 @@ impl DownloadEngine {
     ) {
         self.save_session_path = Some(path.clone());
         self.save_session_interval = interval;
-        self.request_group_man = Some(man);
+        self.request_group_man = Some(Arc::clone(&man));
+        self.refresh_auto_save(man);
 
-        if let (Some(interval), Some(man_ref)) = (interval, &self.request_group_man) {
-            let path_clone = path.clone();
-            let auto_save = AutoSaveSession::new(path, interval, man_ref.clone());
-            self.auto_save = Some(Arc::new(Mutex::new(auto_save)));
+        if let Some(interval) = interval {
             info!(
                 "Auto-save session enabled: path={}, interval={:.1}s",
-                path_clone.display(),
+                path.display(),
                 interval.as_secs_f64()
             );
         } else {
@@ -158,11 +159,33 @@ impl DownloadEngine {
         }
     }
 
+    pub fn set_auto_save_interval(&mut self, interval: Option<Duration>) {
+        self.auto_save_interval = interval;
+        if let Some(man) = self.request_group_man.clone() {
+            self.refresh_auto_save(man);
+        }
+    }
+
+    fn refresh_auto_save(&mut self, man: Arc<RequestGroupMan>) {
+        let session = self
+            .save_session_path
+            .clone()
+            .zip(self.save_session_interval);
+        // Keep the coordinator even when both intervals are disabled. Its
+        // shutdown path still requests the final protocol-owned checkpoints,
+        // matching aria2's guarantee that stopping saves control files.
+        self.auto_save = Some(Arc::new(Mutex::new(AutoSaveCoordinator::new(
+            man,
+            session,
+            self.auto_save_interval,
+        ))));
+    }
+
     pub fn mark_session_dirty(&self) {
         if let Some(ref auto_save) = self.auto_save
             && let Ok(auto) = auto_save.try_lock()
         {
-            auto.mark_dirty();
+            auto.mark_session_dirty();
         }
     }
 

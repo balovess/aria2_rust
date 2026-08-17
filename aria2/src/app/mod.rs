@@ -60,7 +60,10 @@ pub struct App {
 impl App {
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
-        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
+            crate::identity::DEFAULT_USER_AGENT,
+            crate::identity::DEFAULT_PEER_AGENT,
+        )));
         let request_man = Arc::new(RequestGroupMan::new());
 
         Self {

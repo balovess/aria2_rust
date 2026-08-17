@@ -4,6 +4,7 @@ mod pipeline;
 mod segment;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
@@ -170,6 +171,18 @@ impl ConcurrentDownloader {
                 Err(Aria2Error::DownloadFailed("Download halted".into()))
             }
             _ => Ok(()),
+        }
+    }
+
+    /// Wait for adaptive HTTP retry cooldown without delaying RequestGroup
+    /// pause, remove, or halt controls.
+    pub(crate) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let notifier = self.group.recover().lifecycle_notifier();
+        let notified = notifier.notified();
+        self.check_cancelled()?;
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => self.check_cancelled(),
+            _ = notified => self.check_cancelled(),
         }
     }
 

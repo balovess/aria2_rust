@@ -938,7 +938,7 @@ async fn regression_change_position_modifies_position() {
 /// Test: aria2.getVersion returns version and enabledFeatures.
 #[tokio::test]
 async fn regression_get_version_format() {
-    let engine = RpcEngine::new();
+    let engine = RpcEngine::new().with_product_version(aria2::identity::PRODUCT_VERSION);
 
     let req = make_request("aria2.getVersion", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -949,7 +949,7 @@ async fn regression_get_version_format() {
     assert!(version.get("version").is_some(), "version field required");
     assert_eq!(
         version.get("version").and_then(serde_json::Value::as_str),
-        Some(aria2_protocol::identity::PRODUCT_VERSION),
+        Some(aria2::identity::PRODUCT_VERSION),
         "getVersion must expose the independent Rust product version"
     );
     assert!(

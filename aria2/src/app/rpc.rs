@@ -253,6 +253,7 @@ impl App {
             .collect();
 
         let rpc_engine = RpcEngine::new()
+            .with_product_version(crate::identity::PRODUCT_VERSION)
             .with_auth_middleware(RpcAuthMiddleware::new(&secret))
             .with_group_man(group_man)
             .with_engine_cmd_tx(engine_cmd_tx)

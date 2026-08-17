@@ -100,6 +100,43 @@ export async function startFileServer(): Promise<{ url: string; stop: () => Prom
   });
 }
 
+export async function startDelayedRpcServer(
+  delayMs = 100,
+): Promise<{ url: string; stop: () => Promise<void> }> {
+  const server: Server = createServer((req, res) => {
+    req.resume();
+    req.once('end', () => {
+      setTimeout(() => {
+        if (res.destroyed) {
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            result: { version: '0.3.1' },
+            id: 1,
+          }),
+        );
+      }, delayMs);
+    });
+  });
+
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = typeof addr === 'object' && addr ? addr.port : 8080;
+      resolve({
+        url: 'http://127.0.0.1:' + port + '/jsonrpc',
+        stop: () =>
+          new Promise<void>((res, rej) => {
+            server.close((err) => (err ? rej(err) : res()));
+          }),
+      });
+    });
+  });
+}
+
 export interface Aria2ServerResult {
   url: string;
   stop: () => Promise<void>;

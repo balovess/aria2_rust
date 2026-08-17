@@ -17,7 +17,6 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::path::PathBuf;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl App {
@@ -52,10 +51,7 @@ impl App {
 
         info!("Restoring download tasks from session file: {}", input_file);
 
-        let mgr = ActiveSessionManager::new(
-            session_path.clone(),
-            Duration::from_secs(60), // Default interval, not used during restore
-        );
+        let mgr = ActiveSessionManager::new(session_path.clone());
 
         let entries = match mgr.load_session().await {
             Ok(entries) => entries,
@@ -312,13 +308,7 @@ impl App {
         info!("Saving session to: {}", save_path);
 
         let session_path = PathBuf::from(&save_path);
-        let interval = self
-            .get_opt_i64("save-session-interval")
-            .await
-            .unwrap_or(crate::constants::DEFAULT_SAVE_SESSION_INTERVAL_SECS as i64)
-            .max(crate::constants::MIN_SESSION_INTERVAL_SECS as i64); // At least 1 second
-
-        let mgr = ActiveSessionManager::new(session_path, Duration::from_secs(interval as u64));
+        let mgr = ActiveSessionManager::new(session_path);
 
         // Snapshot group handles before the asynchronous file write. The
         // manager lock must not be held while session serialization performs

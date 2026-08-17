@@ -116,7 +116,7 @@ impl super::RequestGroupMan {
                     DownloadStatus::Waiting => {
                         g.clear_command_failure();
                         g.start().ok(); // Sets status to Active
-                        g.control_flags.clear_pause();
+                        g.clear_pause();
                         false
                     }
                     DownloadStatus::Paused => true,
@@ -149,7 +149,7 @@ impl super::RequestGroupMan {
         // ── Re-insert pending groups at front of reserved queue ─────────
         // C++: `reservedGroups_.insert(reservedGroups_.begin(), ...)`
         // Pending groups (paused / dependency-blocked) go back to the front
-        // so they are checked again on the next tick.
+        // so the next scheduling pass can re-evaluate them.
         for group in pending.into_iter().rev() {
             self.reserved.push_front(group);
         }

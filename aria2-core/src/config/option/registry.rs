@@ -36,6 +36,23 @@ impl OptionRegistry {
         }
     }
 
+    /// Override a registered option's built-in default value.
+    ///
+    /// Embedding applications can use this for product-owned defaults while
+    /// keeping the core library's standalone defaults unchanged.
+    pub fn set_default_value(
+        &mut self,
+        name: &str,
+        value: super::types::OptionValue,
+    ) -> Result<(), String> {
+        let definition = self
+            .options
+            .get_mut(Self::canonical_name(name))
+            .ok_or_else(|| format!("unknown option '{}'", name))?;
+        definition.default_value = value;
+        Ok(())
+    }
+
     pub fn get(&self, name: &str) -> Option<&OptionDef> {
         self.options.get(Self::canonical_name(name))
     }

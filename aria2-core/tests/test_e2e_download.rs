@@ -326,6 +326,104 @@ async fn test_e2e_max_file_not_found_retries_and_preserves_result_code() {
 }
 
 #[tokio::test]
+async fn test_e2e_http_retry_wait_is_interruptible_when_paused() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/error/500", server.base_url());
+    let options = DownloadOptions {
+        max_retries: 2,
+        retry_wait: 5,
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2004),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create HTTP retry-wait pause command");
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if server.error_500_requests() >= 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HTTP retry-wait test did not observe the first failed request");
+
+    group.recover_mut().pause().unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), command_task)
+        .await
+        .expect("pause must interrupt the real HTTP retry wait")
+        .expect("HTTP retry-wait pause task panicked");
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
+    ));
+    assert!(group.read().unwrap().status().is_paused());
+}
+
+#[tokio::test]
+async fn test_e2e_http_retry_wait_is_interruptible_when_removed() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let url = format!("{}/error/500", server.base_url());
+    let options = DownloadOptions {
+        max_retries: 2,
+        retry_wait: 5,
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(2005),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command = DownloadCommand::new_with_group(
+        Arc::clone(&group),
+        &url,
+        &options,
+        dir.path().to_str(),
+        None,
+    )
+    .expect("create HTTP retry-wait remove command");
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if server.error_500_requests() >= 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("HTTP retry-wait test did not observe the first failed request");
+
+    group.recover_mut().mark_removed();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), command_task)
+        .await
+        .expect("remove must interrupt the real HTTP retry wait")
+        .expect("HTTP retry-wait remove task panicked");
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download cancelled by user"
+    ));
+    assert!(group.read().unwrap().is_removed());
+}
+
+#[tokio::test]
 async fn test_e2e_concurrent_max_file_not_found_preserves_result_code() {
     let server = start_server().await;
     let dir = tmp_dir();
