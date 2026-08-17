@@ -136,6 +136,7 @@ jobs:
           crate_is_published() {
             local package="$1"
             curl --fail --silent --show-error --location \
+              --user-agent "aria2-rust-release/$VERSION (https://github.com/balovess/aria2_rust)" \
               "https://crates.io/api/v1/crates/$package/$VERSION" >/dev/null
           }
 
