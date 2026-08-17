@@ -1,5 +1,5 @@
 {
-  "name": "aria2-rust",
+  "name": "@aria2-rust/aria2-rust",
   "version": "0.3.0",
   "description": "Production-grade Node.js client for aria2-rust JSON-RPC & WebSocket interface",
   "main": "./dist/index.js",
