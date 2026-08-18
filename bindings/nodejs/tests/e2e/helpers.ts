@@ -114,7 +114,7 @@ export async function startDelayedRpcServer(
         res.end(
           JSON.stringify({
             jsonrpc: '2.0',
-            result: { version: '0.3.1' },
+            result: { version: '0.3.2' },
             id: 1,
           }),
         );

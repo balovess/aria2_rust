@@ -1,5 +1,67 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-18 package and bindings verification checkpoint
+
+The workspace package and SDK release identity is now synchronized at `0.3.2`.
+This includes the four Rust package manifests and lockfile, Python and Node.js
+metadata and fixtures, examples, README, Homebrew/Scoop metadata, and the
+fallback version shown by the install scripts. The Node.js HTTP E2E scenarios
+use distinct output names so `--continue=true` cannot reuse another scenario's
+control file. The Python Windows E2E fixture discards child process logs so an
+unread stdout/stderr pipe cannot block concurrent RPC requests.
+
+Rust-owned and SDK verification:
+
+~~~text
+Node.js TypeScript typecheck: PASS
+Node.js Vitest: 13 files, 123 passed
+Python pytest: 137 passed in 38.93s
+aria2-core all-features library: 3511 passed, 0 failed, 1 ignored
+~~~
+
+The active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`; broader protocol/lifecycle combinations, measured performance, and
+final workspace acceptance remain open.
+
+## 2026-08-18 BitTorrent engine force-halt checkpoint
+
+The engine task spawner now lets a constructed protocol command finish its
+own lifecycle cleanup after `ForceHaltAll(ShutdownSignal)` updates the owning
+`RequestGroup`. Previously the shared cancellation token could drop the
+BitTorrent execute future before its writer flush and Rust-owned A2CF checkpoint
+save ran. The cancellation token still aborts command construction that has not
+finished, while active protocol commands observe the group lifecycle and retain
+their resumable state.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_engine_bt_force_halt_preserves_resume_state -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  37 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  43 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  43 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  30 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3511 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the BitTorrent active force-halt checkpoint slice. Broader
+cross-protocol lifecycle combinations, dependency graph and scheduler parity,
+original-client interoperability, bindings, measured performance, and final
+workspace acceptance remain open. The active phase remains
+`phase-2-core-domain` and the migration remains `PARTIAL`.
+
 ## 2026-08-18 BitTorrent metadata piece retry-budget checkpoint
 
 BitTorrent `ut_metadata` piece timeout and reject handling now treats

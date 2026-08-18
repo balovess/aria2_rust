@@ -25,6 +25,9 @@ pub use runtime::{
 };
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 
+#[cfg(test)]
+mod contract_tests;
+
 /// Emitted when a global option value changes via `set_global_option`.
 ///
 /// Subscribers can listen for these events via `ConfigManager::subscribe_changes()`.

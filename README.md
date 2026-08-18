@@ -214,15 +214,15 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-14): the current focused evidence includes
+Verification snapshot (2026-08-18): the current focused evidence includes
 the CLI, RPC, protocol, BitTorrent, Metalink, FTP/SFTP, Node.js, and Python
 regression/E2E suites recorded in
 [docs/compatibility-status.md](docs/compatibility-status.md). The workspace
 command `cargo test --workspace --all-targets --no-run` also compiles all Rust
 test and benchmark targets. Node.js reports 123 passed and Python reports 137
-passed on this host. Under the current `0.2.9`, the version entry point,
+passed on this host. Under the current `0.3.2`, the version entry point,
 application tests, Clippy, and the targeted parser/RPC regressions pass;
-`aria2c --version` reports `aria2-rust 0.2.9`, and all Rust members and SDK
+`aria2c --version` reports `aria2-rust 0.3.2`, and all Rust members and SDK
 metadata resolve to that product version. Existing `check-certificate`,
 `ca-certificate`, `certificate`, and `private-key` configuration values are
 handled by the Rust HTTP transport across primary HTTP/HTTPS downloads,

@@ -14,6 +14,7 @@ use tracing::{debug, info, trace, warn};
 use crate::constants;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError, Result};
+use crate::request::request_group::AtomicProgress;
 
 use super::super::types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES,
@@ -403,6 +404,7 @@ fn mark_peer_failed(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_attempt(
     workers: &mut PeerWorkers<'_>,
     event_rx: &mut mpsc::Receiver<PeerEvent>,
@@ -411,6 +413,7 @@ async fn run_attempt(
     num_blocks: u32,
     peer_addresses: &[Option<SocketAddr>],
     has_piece: &[bool],
+    network_activity: Option<&AtomicProgress>,
 ) -> AttemptOutcome {
     let block_count = piece_length.div_ceil(BLOCK_SIZE);
     if num_blocks != block_count {
@@ -525,6 +528,11 @@ async fn run_attempt(
                                 if end > piece_data.len() || completed[entry.request.block_index as usize] {
                                     continue;
                                 }
+                                if !data.is_empty()
+                                    && let Some(progress) = network_activity
+                                {
+                                    progress.record_network_activity();
+                                }
                                 piece_data[start..end].copy_from_slice(&data);
                                 completed[entry.request.block_index as usize] = true;
                                 completed_blocks += 1;
@@ -635,13 +643,13 @@ async fn run_attempt(
 }
 
 impl BtMessageHandler {
-    /// Download a piece with a bounded per-peer request window.
-    pub(super) async fn download_piece_blocks_pipelined_with_sources(
+    pub(super) async fn download_piece_blocks_pipelined_with_sources_and_activity(
         connections: &mut [BtPeerConn],
         piece_index: u32,
         piece_length: u32,
         num_blocks: u32,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
     ) -> Result<PieceDownloadResult> {
         for retry in 0..MAX_RETRIES {
             info!(
@@ -677,6 +685,7 @@ impl BtMessageHandler {
                 num_blocks,
                 &peer_addresses,
                 &has_piece,
+                network_activity,
             )
             .await;
             workers.shutdown(&mut event_rx).await;

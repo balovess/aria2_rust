@@ -1030,6 +1030,57 @@ async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
 }
 
 #[tokio::test]
+async fn test_engine_timeout_tracks_concurrent_range_payload_activity() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 47);
+    server.register_slow_range_response("/timeout-activity", &data, 64 * 1024, 300);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let output_name = "concurrent-timeout-activity.bin";
+    let url = make_url(&server.base_url(), "/timeout-activity");
+    let mut options = make_options(Some(4), Some(2), &dir.path().to_string_lossy(), output_name);
+    options.timeout = Some(1);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(410),
+        vec![url],
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
+
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("concurrent timeout command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_group_status(&group, DownloadStatus::Active).await;
+    wait_for_engine(
+        engine_task,
+        "concurrent HTTP payload activity must extend the inactivity timeout",
+    )
+    .await;
+
+    assert_eq!(
+        tokio::fs::read(dir.path().join(output_name)).await.unwrap(),
+        data
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
     let server = MockHttpServer::start()
         .await

@@ -201,6 +201,9 @@ impl FtpDownloadCommand {
             if bytes_read == 0 {
                 break;
             }
+            // Refresh the inactivity clock when bytes arrive from the proxy,
+            // before any disk write or rate limiting can delay the loop.
+            self.group.recover().record_network_activity();
             if let Err(error) = writer.write(&buffer[..bytes_read]).await {
                 self.finalize_partial_writer(&mut writer).await;
                 return Err(FtpAttemptError::from(error));

@@ -199,9 +199,7 @@ impl ConfigParser {
                 let c = arg.chars().nth(1).unwrap();
                 let opt_name = self
                     .registry
-                    .all()
-                    .values()
-                    .find(|def| def.short_name() == Some(c))
+                    .get_by_short_name(c)
                     .map(|def| def.name().to_string());
                 if let Some(name) = opt_name {
                     if self

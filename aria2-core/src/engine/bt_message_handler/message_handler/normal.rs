@@ -2,6 +2,7 @@
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::request::request_group::AtomicProgress;
 use tracing::{debug, trace, warn};
 
 use super::super::types::{
@@ -334,12 +335,32 @@ impl BtMessageHandler {
         num_blocks: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<super::super::types::PieceDownloadResult> {
-        Self::download_piece_blocks_pipelined_with_sources(
+        Self::download_piece_blocks_with_sources_and_activity(
             connections,
             piece_index,
             piece_length,
             num_blocks,
             dht_engine,
+            None,
+        )
+        .await
+    }
+
+    pub async fn download_piece_blocks_with_sources_and_activity(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<super::super::types::PieceDownloadResult> {
+        Self::download_piece_blocks_pipelined_with_sources_and_activity(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            dht_engine,
+            network_activity,
         )
         .await
     }

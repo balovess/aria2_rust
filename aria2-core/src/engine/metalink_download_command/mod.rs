@@ -655,7 +655,6 @@ pub(crate) fn build_http_client(options: &DownloadOptions) -> Result<reqwest::Cl
     let client_tls = crate::http::client_identity::ClientTlsConfig::from_download_options(options);
     let builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
-        .timeout(Duration::from_secs(300))
         .gzip(options.http_accept_gzip)
         .user_agent(crate::constants::USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(5));

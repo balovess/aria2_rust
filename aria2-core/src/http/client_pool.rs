@@ -39,9 +39,6 @@ static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
         .connect_timeout(Duration::from_secs(
             crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
         ))
-        .timeout(Duration::from_secs(
-            crate::constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-        ))
         // reqwest enables gzip negotiation by default when its gzip feature
         // is compiled in. aria2 enables it only for --http-accept-gzip.
         .gzip(false)

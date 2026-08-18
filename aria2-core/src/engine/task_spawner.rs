@@ -86,13 +86,12 @@ pub(crate) fn spawn_download_task(
             ) => {
                 match command_result {
                     Ok(mut cmd) => {
-                        let result = tokio::select! {
-                            result = cmd.execute() => result,
-                            _ = task_shutdown.cancelled() => {
-                                cmd.shutdown().await;
-                                Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
-                            }
-                        };
+                        // Once a command has been constructed, its protocol
+                        // loop owns lifecycle cleanup. Force-halt and remove
+                        // already update the RequestGroup, so dropping the
+                        // execute future here would bypass writer flushing and
+                        // protocol-specific checkpoints.
+                        let result = cmd.execute().await;
                         (result, cmd.connection_context())
                     }
                     Err(error) => (Err(error), None),

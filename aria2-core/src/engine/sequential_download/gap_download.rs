@@ -199,6 +199,10 @@ impl SequentialDownloader {
                     }
                 };
 
+                if !data.is_empty() {
+                    self.progress.record_network_activity();
+                }
+
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
                 }

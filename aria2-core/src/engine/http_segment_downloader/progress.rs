@@ -75,6 +75,12 @@ impl SegmentProgressTracker {
 }
 
 impl SegmentProgress {
+    /// Refresh the group-level I/O inactivity clock for a received range
+    /// chunk. This is independent of the coarser display progress threshold.
+    pub(crate) fn record_network_activity(&self) {
+        self.tracker.progress.record_network_activity();
+    }
+
     /// Record a monotonic byte count relative to this segment's range.
     pub(crate) fn record(&self, downloaded: u64) {
         let previous = loop {

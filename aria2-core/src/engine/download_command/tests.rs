@@ -1,10 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::engine::command::{Command, ProgressUpdate};
 use crate::engine::download_command::DownloadCommand;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError};
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl DownloadCommand {
@@ -117,6 +118,80 @@ fn in_memory_metadata_retry_classification_matches_http_contract() {
         0,
         true,
     ));
+}
+
+#[tokio::test]
+async fn in_memory_http_records_each_payload_chunk_for_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let first_chunk = vec![b'A'; 16 * 1024];
+    let second_chunk = vec![b'B'; 16 * 1024];
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn({
+        let first_chunk = first_chunk.clone();
+        let second_chunk = second_chunk.clone();
+        async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        first_chunk.len() + second_chunk.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            stream.write_all(&first_chunk).await.unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            stream.write_all(&second_chunk).await.unwrap();
+            stream.shutdown().await.unwrap();
+        }
+    });
+
+    let url = format!("http://{address}/metadata");
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(9001),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let mut command =
+        DownloadCommand::new_with_group(Arc::clone(&group), &url, &options, None, None).unwrap();
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if group.recover().completed_length() >= first_chunk.len() as u64 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("in-memory HTTP did not receive its first payload chunk");
+    let first_activity = group.recover().last_network_activity();
+
+    tokio::time::timeout(Duration::from_secs(5), command_task)
+        .await
+        .expect("in-memory HTTP command did not complete")
+        .expect("in-memory HTTP command panicked")
+        .expect("in-memory HTTP command failed");
+    server.await.unwrap();
+
+    assert!(
+        group.recover().last_network_activity() > first_activity,
+        "each non-empty in-memory HTTP chunk must refresh the inactivity clock"
+    );
 }
 
 #[test]

@@ -26,6 +26,19 @@ impl OptionRegistry {
 
     pub fn register(&mut self, def: OptionDef) {
         let name = def.name().to_owned();
+        if let Some(short_name) = def.short_name()
+            && let Some(existing) = self
+                .options
+                .values()
+                .find(|existing| existing.short_name() == Some(short_name))
+        {
+            panic!(
+                "duplicate short option '-{}' for '{}' and '{}'",
+                short_name,
+                existing.name(),
+                name
+            );
+        }
         match self.options.entry(name) {
             Entry::Vacant(entry) => {
                 entry.insert(def);
@@ -55,6 +68,17 @@ impl OptionRegistry {
 
     pub fn get(&self, name: &str) -> Option<&OptionDef> {
         self.options.get(Self::canonical_name(name))
+    }
+
+    /// Return the option bound to a short command-line spelling.
+    ///
+    /// Short names are validated for uniqueness during registration, so every
+    /// lookup has at most one result and CLI parsers do not need to reimplement
+    /// the registry traversal.
+    pub fn get_by_short_name(&self, short_name: char) -> Option<&OptionDef> {
+        self.options
+            .values()
+            .find(|definition| definition.short_name() == Some(short_name))
     }
 
     /// Parse a value received from a JSON/XML-RPC or FFI adapter using the

@@ -5,6 +5,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 use crate::engine::bt_download_execute::EndgameState;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::request::request_group::AtomicProgress;
 use tracing::{debug, info, warn};
 
 use super::super::types::{
@@ -102,6 +103,27 @@ impl BtMessageHandler {
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            None,
+        )
+        .await
+    }
+
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -113,6 +135,7 @@ impl BtMessageHandler {
             dht_engine,
             &mut peer_bytes,
             &mut failed_peers,
+            network_activity,
         )
         .await?;
         Ok(PieceDownloadResult {
@@ -152,6 +175,7 @@ impl BtMessageHandler {
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         peer_bytes: &mut Vec<PeerDownloadBytes>,
         failed_peers: &mut Vec<std::net::SocketAddr>,
+        network_activity: Option<&AtomicProgress>,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
         for _retry in 0..MAX_RETRIES {
@@ -200,6 +224,11 @@ impl BtMessageHandler {
                     Ok(result) if result.success => {
                         failed_peers.extend(result.failed_peers);
                         if let Some(data) = result.data {
+                            if !data.is_empty()
+                                && let Some(progress) = network_activity
+                            {
+                                progress.record_network_activity();
+                            }
                             if let Some(peer_index) = result.peer_index
                                 && let Some(peer) = connections.get(peer_index)
                                 && let Ok(ip) = peer.ip_addr.parse()

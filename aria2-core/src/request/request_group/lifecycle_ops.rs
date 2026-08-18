@@ -42,6 +42,7 @@ impl super::RequestGroup {
 
         *status = DownloadStatus::Active;
         *start_time = Some(std::time::Instant::now());
+        self.progress.reset_network_activity();
         self.notify_lifecycle_changed();
 
         tracing::info!("Starting download task #{}", self.gid.value());
@@ -307,10 +308,10 @@ impl super::RequestGroup {
         }
     }
 
-    /// Per-command timeout duration. Returns `None` for no timeout.
+    /// Per-command I/O inactivity timeout. Returns `None` for no timeout.
     ///
-    /// Mirrors C++ `RequestGroup::timeout_`. Currently derived from
-    /// download options; may be overridden per-group in the future.
+    /// Mirrors C++ `RequestGroup::timeout_`. The engine refreshes this clock
+    /// only when the protocol receives non-empty payload bytes.
     pub fn timeout(&self) -> Option<std::time::Duration> {
         self.options.timeout.map(std::time::Duration::from_secs)
     }

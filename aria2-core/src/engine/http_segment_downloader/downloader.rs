@@ -6,7 +6,6 @@
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -239,10 +238,7 @@ impl HttpSegmentDownloader {
             let request = self.request_policy.apply_with_basic_auth(
                 self.client
                     .get(current_url.as_str())
-                    .header("Range", range_header)
-                    .timeout(Duration::from_secs(
-                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                    )),
+                    .header("Range", range_header),
                 request_cookie_header,
                 headers,
                 authorization.as_deref(),
@@ -339,10 +335,7 @@ impl HttpSegmentDownloader {
                 let retry_request = self.request_policy.apply(
                     self.client
                         .get(current_url.as_str())
-                        .header("Range", range_header)
-                        .timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                        )),
+                        .header("Range", range_header),
                     retry_cookie_header,
                     &[(header_name.to_string(), authorization_header)],
                 );
@@ -595,6 +588,11 @@ impl HttpSegmentDownloader {
                 })
             })?;
             let chunk_len = bytes.len() as u64;
+            if chunk_len > 0
+                && let Some(StreamingProgress::Segment(segment)) = progress
+            {
+                segment.record_network_activity();
+            }
             if total_written.saturating_add(chunk_len) > length {
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
@@ -676,6 +674,7 @@ enum StreamingProgress<'a> {
 mod tests {
     use super::*;
     use crate::http::auth::AuthResolveOptions;
+    use std::time::Duration;
 
     fn has_header(request: &str, name: &str, value: &str) -> bool {
         request.lines().any(|line| {

@@ -137,9 +137,9 @@ struct RunningDownload {
     shutdown: Option<CancellationToken>,
     /// Stable identity of this command instance, independent of its GID.
     generation: CommandGeneration,
-    /// Instant the task was spawned.
-    started: Instant,
-    /// Per-command timeout. `None` means the task never times out.
+    /// Instant at which the last network payload was received.
+    last_activity: Instant,
+    /// Inactivity timeout. `None` means the task never times out.
     timeout: Option<Duration>,
 }
 
@@ -422,7 +422,7 @@ fn promote_reserved_groups(
                         _handle: handle,
                         shutdown: Some(shutdown_tx),
                         generation,
-                        started: Instant::now(),
+                        last_activity: Instant::now(),
                         timeout,
                     },
                 ));
@@ -1018,7 +1018,7 @@ async fn process_task_completions<R: CompletionQueue>(
 }
 
 /// Return the earliest maintenance deadline that can be derived from live
-/// engine state. With no command timeout and no pending save, the engine has
+/// engine state. With no inactivity timeout and no pending save, the engine has
 /// no maintenance timer and waits only for notifications.
 async fn next_maintenance_deadline(
     ctx: &EngineLoopContext,
@@ -1029,7 +1029,7 @@ async fn next_maintenance_deadline(
         .filter_map(|(_, running)| {
             running
                 .timeout
-                .and_then(|timeout| running.started.checked_add(timeout))
+                .and_then(|timeout| running.last_activity.checked_add(timeout))
         })
         .min();
 
@@ -1066,14 +1066,24 @@ async fn run_deadline_maintenance(
     running_downloads: &mut [(GroupId, RunningDownload)],
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
-    // Abort tasks whose per-command timeout has elapsed.
-    // Mirrors C++ per-command timeout (though C++ handles this differently
-    // via the Command::STATUS_ACTIVE mechanism).
+    // Abort tasks whose configured inactivity timeout has elapsed. The
+    // timestamp comes from the protocol data path, not from disk progress;
+    // payload may be buffered, verified, or waiting for a writer.
     let now = Instant::now();
     let mut timed_out = Vec::new();
     for (gid, rd) in running_downloads.iter_mut() {
+        let last_network_activity = ctx
+            .group_man
+            .find_group(*gid)
+            .map(|group| group.recover().last_network_activity());
+        if let Some(last_network_activity) = last_network_activity
+            && last_network_activity > rd.last_activity
+        {
+            rd.last_activity = last_network_activity;
+        }
+
         if let Some(timeout) = rd.timeout
-            && now.duration_since(rd.started) >= timeout
+            && now.duration_since(rd.last_activity) >= timeout
         {
             // The group is now responsible for graceful shutdown. Clear the
             // deadline so a slow cleanup cannot turn the event loop into a
@@ -2062,7 +2072,7 @@ mod tests {
                 _handle: handle,
                 shutdown: Some(CancellationToken::new()),
                 generation: 1,
-                started: Instant::now(),
+                last_activity: Instant::now(),
                 timeout: None,
             },
         )];

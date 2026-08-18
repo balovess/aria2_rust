@@ -955,6 +955,9 @@ impl MetalinkDownloadCommand {
                 self.flush_checkpoint().await;
                 return Err(lifecycle_error);
             }
+            if !bytes.is_empty() {
+                self.group.recover().record_network_activity();
+            }
             if let Err(error) = writer.write(&bytes).await {
                 self.finalize_partial_writer(&mut writer).await;
                 return Err(Aria2Error::FileIo(format!(

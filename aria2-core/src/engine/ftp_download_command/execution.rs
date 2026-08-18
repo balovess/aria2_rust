@@ -781,6 +781,8 @@ impl FtpDownloadCommand {
                 break;
             }
 
+            self.group.recover().record_network_activity();
+
             // Write to disk (with rate limiting if enabled)
             if let Err(error) = writer.write(&buffer[..bytes_read]).await {
                 drop(data_stream);

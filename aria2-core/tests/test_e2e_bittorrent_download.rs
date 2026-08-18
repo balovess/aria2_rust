@@ -9,12 +9,14 @@ use aria2_core::engine::bt_progress_info_file::{
 };
 use aria2_core::engine::bt_tracker_comm::TrackerAnnouncer;
 use aria2_core::engine::command::Command;
+use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::download_event_hooks::{
     DownloadEvent, DownloadEventHooks, DownloadEventListener,
 };
+use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{
-    DownloadOptions, DownloadResultCode, GroupId, HaltReason,
+    DownloadOptions, DownloadResultCode, DownloadStatus, GroupId, HaltReason, RequestGroup,
 };
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::save_session_command::SaveSessionCommand;
@@ -196,6 +198,121 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
         .expect("halted BT download should leave its checkpoint on disk");
     assert_eq!(control_file.total_length(), 1024 * 1024);
     assert_eq!(control_file.bitfield().len(), 8);
+    tracker.wait_for_event("stopped").await;
+}
+
+#[tokio::test]
+async fn test_e2e_engine_bt_force_halt_preserves_resume_state() {
+    let dir = tmp_dir();
+    let total_size = 1024 * 1024;
+    let piece_length = 16 * 1024;
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = build_test_torrent(
+        "engine-force-halt.bin",
+        total_size,
+        piece_length,
+        &placeholder_tracker.announce_url(),
+    );
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("force-halt torrent should parse");
+    let peer = MockBtPeerServer::start_with_response_delay(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, piece_length, total_size); 64],
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    drop(placeholder_tracker);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent(
+        "engine-force-halt.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let options = DownloadOptions {
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1100);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec!["bt://engine-force-halt".to_string()],
+        options,
+    )));
+    group.recover().set_bt_metadata_data(torrent_data);
+
+    let manager = Arc::new(RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("BT engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if group.recover().status() == DownloadStatus::Active {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("BT engine did not promote the group");
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !peer.requested_pieces().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("BT peer did not receive a piece request");
+
+    command_tx
+        .send(EngineCommand::ForceHaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .expect("BT force-halt command should be accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(10), engine_task)
+        .await
+        .expect("BT force-halt engine did not stop")
+        .expect("BT force-halt engine task panicked")
+        .expect("BT force-halt engine returned an error");
+
+    {
+        let group_state = group.read().unwrap();
+        assert_eq!(group_state.get_halt_reason(), HaltReason::ShutdownSignal);
+        assert_eq!(
+            group_state.create_download_result().code,
+            DownloadResultCode::InProgress
+        );
+        assert_ne!(
+            group_state.status(),
+            DownloadStatus::Removed,
+            "force shutdown must keep the BT task resumable"
+        );
+    }
+
+    let output_path = dir.path().join("engine-force-halt.bin");
+    let control_path = ControlFile::control_path_for(&output_path);
+    let control_file = ControlFile::load(&control_path)
+        .await
+        .expect("BT force-halt control file should be readable")
+        .expect("BT force-halt must preserve its control file");
+    assert_eq!(control_file.total_length(), total_size);
+    assert_eq!(control_file.bitfield().len(), 8);
+    assert!(
+        control_file.completed_length() < total_size,
+        "force-halt should leave resumable partial progress"
+    );
     tracker.wait_for_event("stopped").await;
 }
 

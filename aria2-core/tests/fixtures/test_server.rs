@@ -156,6 +156,7 @@ impl TestServer {
         if path.starts_with("/files/timeout_")
             || path.starts_with("/files/disconnect_")
             || path == "/files/slow_stream_test.bin"
+            || path == "/files/tiny_stream_test.bin"
             || path == "/files/slow_gap_test.bin"
         {
             let _ = Self::handle_async_request(
@@ -290,6 +291,25 @@ impl TestServer {
                     stream.write_all(&chunk).await?;
                     stream.flush().await?;
                     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                Ok(())
+            }
+            "/files/tiny_stream_test.bin" => {
+                const TOTAL: usize = 32 * 1024;
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {TOTAL}\r\n\r\n"
+                );
+                stream.write_all(header.as_bytes()).await?;
+                stream.flush().await?;
+                if request_str.starts_with("HEAD ") {
+                    return Ok(());
+                }
+
+                let chunk = vec![0x61; 512];
+                for _ in 0..(TOTAL / chunk.len()) {
+                    stream.write_all(&chunk).await?;
+                    stream.flush().await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
                 Ok(())
             }

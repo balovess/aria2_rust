@@ -29,8 +29,14 @@ pub(super) async fn try_web_seed_fallback(
         next_piece_idx
     );
 
-    match ws_mgr.request_piece(next_piece_idx as u32).await {
+    match ws_mgr
+        .request_piece_with_activity(next_piece_idx as u32, Some(cmd.progress.as_ref()))
+        .await
+    {
         Ok(web_seed_data) => {
+            if !web_seed_data.is_empty() {
+                cmd.progress.record_network_activity();
+            }
             info!(
                 "[BT] Piece {} downloaded from web seed ({} bytes)",
                 next_piece_idx,

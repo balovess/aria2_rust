@@ -384,6 +384,7 @@ impl SftpDownloadCommand {
                 }
             };
             let n = data.len();
+            self.group.recover().record_network_activity();
 
             // Write chunk to local disk via disk writer
             if let Err(e) = writer.write(&data).await {

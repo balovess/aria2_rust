@@ -565,6 +565,139 @@ async fn test_e2e_sequential_http_pause_interrupts_stalled_body_read() {
 }
 
 #[tokio::test]
+async fn test_e2e_engine_timeout_is_inactivity_not_total_download_duration() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "timeout-inactivity.bin";
+    let output_path = dir.path().join(output_name);
+    let url = format!("{}/files/slow_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        timeout: Some(2),
+        use_head: false,
+        split: Some(1),
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1002);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP timeout regression command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    wait_for_http_engine(
+        engine_task,
+        "a continuously progressing HTTP download must outlive its timeout value",
+    )
+    .await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+    assert_eq!(
+        tokio::fs::metadata(&output_path).await.unwrap().len(),
+        2 * 1024 * 1024
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_timeout_uses_network_activity_below_progress_threshold() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "tiny-timeout-inactivity.bin";
+    let output_path = dir.path().join(output_name);
+    let url = format!("{}/files/tiny_stream_test.bin", server.base_url());
+    let options = DownloadOptions {
+        timeout: Some(1),
+        use_head: false,
+        split: Some(1),
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1004);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("tiny HTTP timeout regression command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    wait_for_http_engine(
+        engine_task,
+        "a continuously active small HTTP stream must not hit its idle timeout",
+    )
+    .await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+    assert_eq!(
+        tokio::fs::metadata(&output_path).await.unwrap().len(),
+        32 * 1024
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_timeout_stops_response_with_no_payload() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "timeout-no-payload.bin";
+    let url = format!("{}/files/timeout_test.bin", server.base_url());
+    let options = DownloadOptions {
+        timeout: Some(1),
+        use_head: false,
+        split: Some(1),
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1005);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("no-payload timeout command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
+    wait_for_http_engine(engine_task, "a response with no payload must time out").await;
+
+    assert_eq!(group.read().unwrap().get_halt_reason(), HaltReason::Timeout);
+    assert!(matches!(
+        group.read().unwrap().status(),
+        DownloadStatus::Error(_)
+    ));
+}
+
+#[tokio::test]
 async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() {
     let server = start_server().await;
     let dir = tmp_dir();

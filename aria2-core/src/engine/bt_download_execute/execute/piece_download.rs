@@ -1040,22 +1040,24 @@ impl BtDownloadCommand {
                         next_piece_idx,
                         active_connections.len()
                     );
-                    BtMessageHandler::download_piece_blocks_endgame_with_sources(
+                    BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity(
                         active_connections,
                         next_piece_idx as u32,
                         actual_piece_len,
                         num_blocks,
                         &mut endgame_state,
                         self.dht_engine.clone(),
+                        Some(self.progress.as_ref()),
                     )
                     .await
                 } else {
-                    BtMessageHandler::download_piece_blocks_with_sources(
+                    BtMessageHandler::download_piece_blocks_with_sources_and_activity(
                         active_connections,
                         next_piece_idx as u32,
                         actual_piece_len,
                         num_blocks,
                         self.dht_engine.clone(),
+                        Some(self.progress.as_ref()),
                     )
                     .await
                 }

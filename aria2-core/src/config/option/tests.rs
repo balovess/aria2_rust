@@ -403,6 +403,22 @@ fn test_registry_rejects_duplicate_definitions() {
     reg.register(OptionDef::new("duplicate", OptionType::Boolean));
 }
 
+#[test]
+#[should_panic(expected = "duplicate short option '-s'")]
+fn test_registry_rejects_duplicate_short_options() {
+    let mut reg = OptionRegistry::new();
+    reg.register(OptionDef {
+        name: "first-short-option".into(),
+        short_name: Some('s'),
+        ..OptionDef::new("first-short-option", OptionType::String)
+    });
+    reg.register(OptionDef {
+        name: "second-short-option".into(),
+        short_name: Some('s'),
+        ..OptionDef::new("second-short-option", OptionType::String)
+    });
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn test_bt_tracker_definition_matches_original_overwrite_semantics() {

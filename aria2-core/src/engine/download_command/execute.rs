@@ -835,6 +835,11 @@ impl DownloadCommand {
                     message: error.to_string(),
                 })
             })?;
+            if !chunk.is_empty() {
+                // The timeout tracks transport activity, independently of
+                // buffering and the coarser displayed progress counter.
+                self.progress.record_network_activity();
+            }
             completed = completed.saturating_add(chunk.len() as u64);
             data.extend_from_slice(&chunk);
             self.progress.set_completed_length(completed);

@@ -625,6 +625,9 @@ impl SequentialDownloader {
                     message: e.to_string(),
                 })
             })?;
+            if !data.is_empty() {
+                self.progress.record_network_activity();
+            }
 
             let mut offset = 0usize;
             while offset < data.len() {
