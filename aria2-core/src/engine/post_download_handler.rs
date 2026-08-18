@@ -54,12 +54,6 @@ pub struct CompletedDownloadInfo {
     pub in_memory_data: Option<Vec<u8>>,
     /// Base URI from the first file entry's spent URIs (for Metalink).
     pub base_uri: Option<String>,
-    /// Effective source URI used for the completed download.
-    ///
-    /// In-memory metadata downloads do not create a DownloadContext, so
-    /// base_uri is unavailable even though the source URI is still needed
-    /// for extension-based post-download handler matching.
-    pub source_uri: Option<String>,
 }
 
 /// Trait for post-download handlers that create child request groups.
@@ -264,7 +258,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
     let options = group.options_arc();
     let initial_source_uri = group.uris().first().cloned();
 
-    let (content_type, file_path, base_uri, source_uri, in_memory_download, in_memory_data) =
+    let (content_type, file_path, base_uri, in_memory_download, in_memory_data) =
         if let Some(dctx) = group.download_context.recover().as_ref() {
             let fp = dctx.first_file_path().map(|s| s.to_string());
 
@@ -277,7 +271,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
                     .cloned()
                     .or_else(|| entry.remaining_uris().front().cloned())
             });
-            let source_uri = base_uri.clone().or(initial_source_uri.clone());
+            let base_uri = base_uri.or(initial_source_uri.clone());
 
             // C++ uses an explicit RequestGroup flag set by the memory
             // pre-download handler. Do not infer this from an empty path:
@@ -286,11 +280,10 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
             let in_mem = group.is_in_memory_download();
             let data = group.in_memory_data();
 
-            (group.content_type(), fp, base_uri, source_uri, in_mem, data)
+            (group.content_type(), fp, base_uri, in_mem, data)
         } else {
             (
                 group.content_type(),
-                None,
                 None,
                 initial_source_uri,
                 group.is_in_memory_download(),
@@ -306,7 +299,6 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
         in_memory_download,
         in_memory_data,
         base_uri,
-        source_uri,
     }
 }
 
@@ -395,7 +387,6 @@ mod tests {
             in_memory_download: false,
             in_memory_data: None,
             base_uri: None,
-            source_uri: None,
         }
     }
 

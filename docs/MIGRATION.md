@@ -4193,3 +4193,41 @@ git diff --check
 The package metadata and lockfile remain synchronized at `aria2-core` version
 `0.3.2`. This checkpoint closes only reserved-queue force-halt cleanup; the
 active phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Concurrent HTTP range retry and mirror failover checkpoint
+
+The concurrent HTTP range pipeline now applies the shared retry classification
+to each segment. HTTP 500 and other terminal HTTP errors end the current URI;
+HTTP 504 remains retryable; HTTP 502/503 require the configured `retry-wait`;
+and HTTP 404 retains the owning `RequestGroup`'s `max-file-not-found` handling.
+When a terminal segment failure has another available URI, the segment moves to
+that mirror with a reset retry count, so the replacement mirror does not inherit
+the failed URI's retry budget. Capacity-limited 429/503 responses continue to
+use adaptive requeueing.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1 --nocapture
+  12 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::concurrent_download -- --test-threads=1
+  5 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::concurrent_segment_manager -- --test-threads=1
+  23 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::retry_policy -- --test-threads=1
+  18 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3508 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This checkpoint closes only the concurrent HTTP range terminal-classification
+and terminal-mirror-failover slice. Cross-protocol error combinations,
+original-client and third-party interoperability, bindings, measured
+performance, and final workspace acceptance remain open. The active phase
+remains `phase-2-core-domain` and the migration remains `PARTIAL`.

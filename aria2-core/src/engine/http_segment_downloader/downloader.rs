@@ -76,12 +76,11 @@ fn classify_range_status(status: reqwest::StatusCode, range_header: &str) -> Opt
             message: format!("authentication failed: HTTP {status}"),
         })),
         404 => Some(Aria2Error::Recoverable(RecoverableError::ResourceNotFound)),
-        429 => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
-            code: status_code,
-        })),
-        500.. => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
-            code: status_code,
-        })),
+        code if code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&code) => {
+            Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code,
+            }))
+        }
         400.. => Some(Aria2Error::Recoverable(
             RecoverableError::HttpProtocolError {
                 message: format!("HTTP error: {status}"),
@@ -800,6 +799,12 @@ mod tests {
             classify_range_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "bytes=0-9"),
             Some(Aria2Error::Recoverable(RecoverableError::ServerError {
                 code: 429
+            }))
+        ));
+        assert!(matches!(
+            classify_range_status(reqwest::StatusCode::REQUEST_TIMEOUT, "bytes=0-9"),
+            Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 408
             }))
         ));
     }

@@ -236,7 +236,7 @@ impl PostDownloadHandler for BtTorrentPostDownloadHandler {
         Self::can_handle_with_source_uri(
             info.content_type.as_deref(),
             info.file_path.as_deref(),
-            info.source_uri.as_deref(),
+            info.base_uri.as_deref(),
         )
     }
 

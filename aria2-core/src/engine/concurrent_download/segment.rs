@@ -16,6 +16,7 @@ use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTra
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
 };
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -48,6 +49,10 @@ pub async fn execute(
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
         .clamp(1, 16) as usize;
+    let retry_policy = RetryPolicy::new(
+        max_retries_per_segment,
+        options.retry_wait.saturating_mul(1000),
+    );
     let authority_key = authority_key(uri).unwrap_or_else(|| uri.to_string());
     let mut adaptive = HttpAdaptiveConcurrency::new(max_conn, options.retry_wait);
     let seg_size = total_length.div_ceil(split as u64).max(1);
@@ -455,6 +460,26 @@ pub async fn execute(
                             }
                         } else {
                             consecutive_416_count = 0;
+                        }
+                        let retry_count = manager.segment_retry_count(seg_idx);
+                        let retry_allowed = super::should_retry_segment(
+                            &retry_policy,
+                            retry_count,
+                            &e,
+                            file_not_found_retry_allowed,
+                        );
+                        if !retry_allowed {
+                            cancel_and_persist(
+                                executor,
+                                &mut write_rx,
+                                &mut writer,
+                                limiter.as_ref(),
+                                dl.global_limiter.as_ref(),
+                                &mut ctrl_file,
+                                completed_bytes,
+                            )
+                            .await?;
+                            return Err(e);
                         }
                         if is_capacity_limited && adaptive.preserve_retry_budget() {
                             manager.requeue_segment(seg_idx);

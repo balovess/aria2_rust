@@ -551,13 +551,7 @@ impl Command for SftpDownloadCommand {
                 }
                 error => error,
             };
-            let should_retry = matches!(
-                &error,
-                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-            ) && self
-                .retry_policy
-                .can_retry_after(attempts.saturating_add(1))
-                && self.group.recover().can_retry_file_not_found();
+            let should_retry = self.should_retry_error(attempts, &error);
             if !should_retry {
                 return Err(error);
             }
@@ -600,6 +594,22 @@ impl Command for SftpDownloadCommand {
 }
 
 impl SftpDownloadCommand {
+    /// Apply the shared total-attempt policy to SFTP failures.
+    ///
+    /// Remote not-found responses use the separate `max-file-not-found`
+    /// counter. Connection, timeout, and other transient transport failures
+    /// use the same retry classification as the HTTP and FTP commands.
+    pub(super) fn should_retry_error(&self, attempts: u32, error: &Aria2Error) -> bool {
+        match error {
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+                self.retry_policy
+                    .can_retry_after(attempts.saturating_add(1))
+                    && self.group.recover().can_retry_file_not_found()
+            }
+            _ => self.retry_policy.should_retry(attempts, error),
+        }
+    }
+
     /// Wait between retry attempts while still honoring RequestGroup controls.
     /// A plain sleep would delay pause/remove handling for the full configured
     /// retry interval, which can be several minutes.

@@ -759,6 +759,9 @@ fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 404 => {
             DownloadResultCode::ResourceNotFound
         }
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 500 => {
+            DownloadResultCode::HttpProtocolError
+        }
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 503 => {
             DownloadResultCode::HttpServiceUnavailable
         }
@@ -1898,6 +1901,12 @@ mod tests {
                 code: 404
             })),
             DownloadResultCode::ResourceNotFound
+        );
+        assert_eq!(
+            map_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 500
+            })),
+            DownloadResultCode::HttpProtocolError
         );
         for code in [502, 503, 504] {
             assert_eq!(

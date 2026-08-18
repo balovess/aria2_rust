@@ -14,6 +14,7 @@ use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::error::{Aria2Error, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
 use aria2_core::request::request_group_man::RequestGroupMan;
@@ -25,7 +26,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::e2e_helpers::mock_http_server::{Body, MockHttpServer, Request, Response, StatusCode};
+use crate::e2e_helpers::mock_http_server::{
+    Body, Incoming, MockHttpServer, Request, Response, StatusCode, empty_body, full_body,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -161,6 +164,82 @@ async fn wait_for_engine(
 /// to trigger the concurrent download path.
 fn register_range_with_head(server: &MockHttpServer, path: &str, body: &[u8]) {
     server.register_range_response(path, body);
+}
+
+fn range_response(req: &Request<Incoming>, body: &[u8]) -> Response<Body> {
+    let Some(range) = req
+        .headers()
+        .get("Range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.split_once('-'))
+    else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(empty_body())
+            .unwrap();
+    };
+    let Ok(start) = range.0.parse::<usize>() else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(empty_body())
+            .unwrap();
+    };
+    let Ok(end) = range.1.parse::<usize>() else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(empty_body())
+            .unwrap();
+    };
+    if start > end || end >= body.len() {
+        return Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .body(empty_body())
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header("Accept-Ranges", "bytes")
+        .header(
+            "Content-Range",
+            format!("bytes={start}-{end}/{}", body.len()),
+        )
+        .header("Content-Length", end - start + 1)
+        .body(full_body(body[start..=end].to_vec()))
+        .unwrap()
+}
+
+fn make_multi_mirror_command(
+    gid: GroupId,
+    uris: Vec<String>,
+    options: &DownloadOptions,
+    output_dir: &str,
+    output_name: &str,
+) -> DownloadCommand {
+    let first_uri = uris
+        .first()
+        .expect("multi-mirror download needs a URI")
+        .clone();
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        uris,
+        options.clone(),
+    )));
+    group
+        .write()
+        .unwrap()
+        .set_option_snapshot(std::collections::HashMap::from([(
+            "min-split-size".to_string(),
+            serde_json::json!("1M"),
+        )]));
+    DownloadCommand::new_with_group(
+        group,
+        &first_uri,
+        options,
+        Some(output_dir),
+        Some(output_name),
+    )
+    .expect("Failed to create multi-mirror DownloadCommand")
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +418,224 @@ async fn test_concurrent_download_multiple_range_requests() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: Multi-mirror concurrent resume restores the control-file bitfield
+// Test 4: Terminal HTTP errors do not retry the same concurrent mirror
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_concurrent_http_500_is_terminal() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 2 * 1024 * 1024;
+    let range_attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&range_attempts);
+    server.on_get(
+        "/terminal-500",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", file_size)
+                    .body(empty_body())
+                    .unwrap();
+            }
+            attempts_for_handler.fetch_add(1, Ordering::AcqRel);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(empty_body())
+                .unwrap()
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let mut options = make_options(
+        Some(4),
+        Some(2),
+        &dir.path().to_string_lossy(),
+        "terminal-500.bin",
+    );
+    options.max_retries = 3;
+    options.retry_wait = 1;
+    let url = make_url(&server.base_url(), "/terminal-500");
+    let mut command = make_concurrent_command(
+        GroupId::new(406),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some("terminal-500.bin"),
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("terminal HTTP 500 must not wait for retry backoff");
+    assert!(matches!(
+        result,
+        Err(Aria2Error::Recoverable(RecoverableError::ServerError {
+            code: 500
+        }))
+    ));
+    assert!(range_attempts.load(Ordering::Acquire) > 0);
+    assert!(
+        range_attempts.load(Ordering::Acquire) <= 4,
+        "terminal 500 must not retry a range: {} attempts",
+        range_attempts.load(Ordering::Acquire)
+    );
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Gateway Timeout retries and then completes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_concurrent_http_504_retries_successfully() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 71);
+    let range_attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&range_attempts);
+    let body_for_handler = data.clone();
+    server.on_get(
+        "/retry-504",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", body_for_handler.len())
+                    .body(empty_body())
+                    .unwrap();
+            }
+            let attempt = attempts_for_handler.fetch_add(1, Ordering::AcqRel);
+            if attempt == 0 {
+                return Response::builder()
+                    .status(StatusCode::GATEWAY_TIMEOUT)
+                    .body(empty_body())
+                    .unwrap();
+            }
+            range_response(req, &body_for_handler)
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let url = make_url(&server.base_url(), "/retry-504");
+    let mut options = make_options(
+        Some(4),
+        Some(2),
+        &dir.path().to_string_lossy(),
+        "retry-504.bin",
+    );
+    options.max_retries = 2;
+    options.retry_wait = 0;
+    let mut command = make_concurrent_command(
+        GroupId::new(407),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some("retry-504.bin"),
+    );
+
+    command
+        .execute()
+        .await
+        .expect("HTTP 504 should retry and complete");
+    assert_eq!(
+        tokio::fs::read(dir.path().join("retry-504.bin"))
+            .await
+            .unwrap(),
+        data
+    );
+    assert!(
+        range_attempts.load(Ordering::Acquire) >= 3,
+        "one 504 plus two successful ranges should be observed, got {}",
+        range_attempts.load(Ordering::Acquire)
+    );
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Terminal failure on one mirror fails over to a healthy mirror
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_concurrent_http_500_fails_over_to_next_mirror() {
+    let bad_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start bad mirror");
+    let good_server = MockHttpServer::start()
+        .await
+        .expect("Failed to start good mirror");
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 83);
+    let bad_attempts = Arc::new(AtomicUsize::new(0));
+    let bad_attempts_for_handler = Arc::clone(&bad_attempts);
+    bad_server.on_get(
+        "/mirror-failover-500",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", file_size)
+                    .body(empty_body())
+                    .unwrap();
+            }
+            bad_attempts_for_handler.fetch_add(1, Ordering::AcqRel);
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(empty_body())
+                .unwrap()
+        },
+    );
+    register_range_with_head(&good_server, "/mirror-failover-500", &data);
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let mut options = make_options(
+        Some(4),
+        Some(2),
+        &dir.path().to_string_lossy(),
+        "mirror-failover-500.bin",
+    );
+    options.max_retries = 1;
+    let bad_url = make_url(&bad_server.base_url(), "/mirror-failover-500");
+    let good_url = make_url(&good_server.base_url(), "/mirror-failover-500");
+    let mut command = make_multi_mirror_command(
+        GroupId::new(408),
+        vec![bad_url, good_url],
+        &options,
+        &dir.path().to_string_lossy(),
+        "mirror-failover-500.bin",
+    );
+
+    command
+        .execute()
+        .await
+        .expect("a terminal mirror error should fail over to the next mirror");
+    assert_eq!(
+        tokio::fs::read(dir.path().join("mirror-failover-500.bin"))
+            .await
+            .unwrap(),
+        data
+    );
+    assert!(bad_attempts.load(Ordering::Acquire) > 0);
+    let good_range_count = good_server
+        .take_request_log()
+        .into_iter()
+        .filter(has_range_header)
+        .count();
+    assert!(
+        good_range_count > 0,
+        "healthy mirror must receive range requests after terminal failover"
+    );
+    bad_server.shutdown().await;
+    good_server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Multi-mirror concurrent resume restores the control-file bitfield
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

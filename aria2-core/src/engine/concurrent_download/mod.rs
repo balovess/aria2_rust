@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::download_progress::ProgressUpdater;
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -54,6 +55,26 @@ pub(crate) fn server_stat_error_code(error: &Aria2Error) -> u16 {
         ) => 404,
         Aria2Error::Recoverable(RecoverableError::Timeout) => 408,
         _ => crate::constants::HTTP_DEFAULT_ERROR_CODE,
+    }
+}
+
+/// Apply the shared retry classification to one concurrent Range failure.
+///
+/// A 404 is governed by the request group's separate `max-file-not-found`
+/// counter. Range 416 remains eligible for the concurrent scheduler's
+/// existing fallback threshold; all other errors use the same allowlist as
+/// sequential HTTP and protocol retry paths.
+pub(crate) fn should_retry_segment(
+    retry_policy: &RetryPolicy,
+    retry_count: u32,
+    error: &Aria2Error,
+    file_not_found_retry_allowed: bool,
+) -> bool {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => file_not_found_retry_allowed,
+        Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. }) => true,
+        Aria2Error::Recoverable(RecoverableError::MaxFileNotFound) => false,
+        _ => retry_policy.should_retry(retry_count, error),
     }
 }
 
@@ -242,7 +263,8 @@ impl ConcurrentDownloader {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_segment_count, server_stat_error_code};
+    use super::{effective_segment_count, server_stat_error_code, should_retry_segment};
+    use crate::engine::retry_policy::RetryPolicy;
     use crate::error::{Aria2Error, RecoverableError};
 
     #[test]
@@ -277,6 +299,61 @@ mod tests {
             )),
             crate::constants::HTTP_DEFAULT_ERROR_CODE
         );
+    }
+
+    #[test]
+    fn concurrent_retry_classification_matches_shared_policy() {
+        let no_wait = RetryPolicy::new(3, 0);
+        let with_wait = RetryPolicy::new(3, 1_000);
+        let server_error = |code| Aria2Error::Recoverable(RecoverableError::ServerError { code });
+
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &server_error(500),
+            false
+        ));
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &server_error(503),
+            false
+        ));
+        assert!(should_retry_segment(
+            &with_wait,
+            0,
+            &server_error(503),
+            false
+        ));
+        assert!(should_retry_segment(&no_wait, 0, &server_error(504), false));
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+                message: "401".to_string(),
+            }),
+            false
+        ));
+        assert!(!should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+            false
+        ));
+        assert!(should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+            true
+        ));
+        assert!(should_retry_segment(
+            &no_wait,
+            0,
+            &Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
+                range: "bytes=0-9".to_string(),
+            }),
+            false
+        ));
     }
 
     #[test]

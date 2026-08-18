@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::engine::command::{Command, ProgressUpdate};
 use crate::engine::download_command::DownloadCommand;
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -28,6 +29,94 @@ impl DownloadCommand {
             panic!("test called send_progress_update but no sender is set");
         }
     }
+}
+
+#[test]
+fn in_memory_metadata_retry_classification_matches_http_contract() {
+    let policy = RetryPolicy::new(2, 0);
+    let server_error = |code| Aria2Error::Recoverable(RecoverableError::ServerError { code });
+
+    assert!(super::execute::should_retry_in_memory_error(
+        &server_error(504),
+        0,
+        &policy,
+        0,
+        false,
+    ));
+    assert!(!super::execute::should_retry_in_memory_error(
+        &server_error(504),
+        1,
+        &policy,
+        0,
+        false,
+    ));
+    assert!(!super::execute::should_retry_in_memory_error(
+        &server_error(500),
+        0,
+        &policy,
+        1,
+        false,
+    ));
+    assert!(!super::execute::should_retry_in_memory_error(
+        &server_error(502),
+        0,
+        &policy,
+        0,
+        false,
+    ));
+    assert!(super::execute::should_retry_in_memory_error(
+        &server_error(502),
+        0,
+        &policy,
+        1,
+        false,
+    ));
+    assert!(super::execute::should_retry_in_memory_error(
+        &server_error(503),
+        0,
+        &policy,
+        1,
+        false,
+    ));
+    assert!(!super::execute::should_retry_in_memory_error(
+        &Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: "HTTP error: 429".to_string(),
+        }),
+        0,
+        &policy,
+        1,
+        false,
+    ));
+    assert!(super::execute::should_retry_in_memory_error(
+        &Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "connection reset".to_string(),
+        }),
+        0,
+        &policy,
+        0,
+        false,
+    ));
+    assert!(super::execute::should_retry_in_memory_error(
+        &Aria2Error::Recoverable(RecoverableError::Timeout),
+        0,
+        &policy,
+        0,
+        false,
+    ));
+    assert!(!super::execute::should_retry_in_memory_error(
+        &Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+        0,
+        &policy,
+        0,
+        false,
+    ));
+    assert!(super::execute::should_retry_in_memory_error(
+        &Aria2Error::Recoverable(RecoverableError::ResourceNotFound),
+        0,
+        &policy,
+        0,
+        true,
+    ));
 }
 
 #[test]

@@ -17,6 +17,7 @@ use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTra
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
 };
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -227,6 +228,7 @@ pub async fn execute_with_coordinator(
         .into_iter()
         .collect();
     let retry_wait = dl.group.recover().options().retry_wait;
+    let retry_policy = RetryPolicy::new(max_retries_per_segment, retry_wait.saturating_mul(1000));
     let mut adaptive = HashMap::new();
     for key in &server_keys {
         adaptive.insert(
@@ -444,18 +446,14 @@ pub async fn execute_with_coordinator(
                             e
                         };
                         tracing::warn!(seg_idx, mirror_idx, error = %e, "Pooled segment download failed");
-                        let is_file_not_found = matches!(
-                            &e,
-                            Aria2Error::Recoverable(
-                                RecoverableError::ResourceNotFound
-                                    | RecoverableError::MaxFileNotFound
-                            )
-                        );
                         let file_not_found_retry_allowed = !matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
                         ) && dl.group.recover().can_retry_file_not_found();
-                        if is_file_not_found && !file_not_found_retry_allowed {
+                        if matches!(
+                            &e,
+                            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
+                        ) {
                             super::segment::cancel_and_persist(
                                 executor,
                                 &mut write_rx,
@@ -497,17 +495,44 @@ pub async fn execute_with_coordinator(
                         if should_fallback {
                             break;
                         }
-                        let preserve_retry_budget = adaptive
-                            .get(&result_authority_key)
-                            .is_some_and(HttpAdaptiveConcurrency::preserve_retry_budget);
-                        if is_capacity_limited && preserve_retry_budget {
-                            coordinator.requeue_segment(seg_idx);
+                        let retry_count = coordinator.segment_retry_count(seg_idx);
+                        let retry_allowed = super::should_retry_segment(
+                            &retry_policy,
+                            retry_count,
+                            &e,
+                            file_not_found_retry_allowed,
+                        );
+                        if !retry_allowed {
+                            let failed_over = coordinator.num_mirrors() > 1
+                                && coordinator
+                                    .on_terminal_segment_failed(seg_idx, error_code)
+                                    .is_some();
+                            if !failed_over {
+                                super::segment::cancel_and_persist(
+                                    executor,
+                                    &mut write_rx,
+                                    &mut writer,
+                                    None,
+                                    dl.global_limiter.as_ref(),
+                                    &mut ctrl_file,
+                                    coordinator.completed_bytes(),
+                                )
+                                .await?;
+                                return Err(e);
+                            }
                         } else {
-                            coordinator.on_segment_failed(
-                                mirror_idx,
-                                seg_idx,
-                                error_code,
-                            );
+                            let preserve_retry_budget = adaptive
+                                .get(&result_authority_key)
+                                .is_some_and(HttpAdaptiveConcurrency::preserve_retry_budget);
+                            if is_capacity_limited && preserve_retry_budget {
+                                coordinator.requeue_segment(seg_idx);
+                            } else {
+                                coordinator.on_segment_failed(
+                                    mirror_idx,
+                                    seg_idx,
+                                    error_code,
+                                );
+                            }
                         }
                     }
                 }

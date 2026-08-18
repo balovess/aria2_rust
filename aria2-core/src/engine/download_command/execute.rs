@@ -688,21 +688,24 @@ impl DownloadCommand {
         Ok(())
     }
 
-    /// Download a metadata source into a memory buffer, retrying 404s when
-    /// `max-file-not-found` permits another attempt.
+    /// Download a metadata source into a memory buffer, retrying transient
+    /// failures according to the original HTTP skip-response contract.
     async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
         let options = self.group.recover().options_arc();
+        let retry_policy =
+            RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
         let mut attempt = 0u32;
         loop {
             match self.execute_in_memory_attempt(uri).await {
                 Ok(()) => return Ok(()),
                 Err(error)
-                    if matches!(
+                    if should_retry_in_memory_error(
                         &error,
-                        Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound)
-                    ) && self.group.recover().can_retry_file_not_found()
-                        && (options.max_retries == 0
-                            || attempt.saturating_add(1) < options.max_retries) =>
+                        attempt,
+                        &retry_policy,
+                        options.retry_wait,
+                        self.group.recover().can_retry_file_not_found(),
+                    ) =>
                 {
                     attempt = attempt.saturating_add(1);
                     if options.retry_wait > 0 {
@@ -857,5 +860,38 @@ impl DownloadCommand {
         self.completed = true;
         self.group.recover_mut().complete()?;
         Ok(())
+    }
+}
+
+/// Return whether an in-memory HTTP metadata failure should start another
+/// request. This deliberately has a narrower status policy than the normal
+/// file downloader: it mirrors `HttpSkipResponseCommand` for the metadata
+/// pre-download path.
+pub(super) fn should_retry_in_memory_error(
+    error: &Aria2Error,
+    attempt: u32,
+    retry_policy: &RetryPolicy,
+    retry_wait_secs: u64,
+    can_retry_file_not_found: bool,
+) -> bool {
+    if !retry_policy.can_retry_after(attempt.saturating_add(1)) {
+        return false;
+    }
+
+    match error {
+        Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound) => {
+            can_retry_file_not_found
+        }
+        Aria2Error::Recoverable(
+            crate::error::RecoverableError::TemporaryNetworkFailure { .. }
+            | crate::error::RecoverableError::Timeout,
+        ) => true,
+        Aria2Error::Recoverable(crate::error::RecoverableError::ServerError { code }) => match code
+        {
+            504 => true,
+            502 | 503 => retry_wait_secs > 0,
+            _ => false,
+        },
+        _ => false,
     }
 }

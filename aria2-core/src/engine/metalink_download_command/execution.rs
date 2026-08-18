@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
+use crate::constants;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
@@ -22,7 +23,7 @@ use super::MetalinkDownloadCommand;
 fn classify_metalink_http_status(status_code: u16) -> Aria2Error {
     if status_code == 404 {
         Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-    } else if status_code >= 500 {
+    } else if status_code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&status_code) {
         Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
     } else {
         Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
@@ -137,6 +138,21 @@ impl MetalinkDownloadCommand {
             }
             error => error,
         }
+    }
+
+    /// Return whether a recorded not-found response must stop mirror failover.
+    ///
+    /// `max-file-not-found=0` disables 404 retries, so the first 404 is
+    /// terminal even though its public result remains `ResourceNotFound`.
+    /// Positive limits become terminal through `MaxFileNotFound` once the
+    /// configured count is reached.
+    fn should_stop_after_not_found(&self, error: &Aria2Error) -> bool {
+        matches!(
+            error,
+            Aria2Error::Recoverable(
+                RecoverableError::ResourceNotFound | RecoverableError::MaxFileNotFound
+            )
+        ) && !self.group.recover().can_retry_file_not_found()
     }
 
     async fn execute_file(
@@ -344,7 +360,8 @@ impl MetalinkDownloadCommand {
                     if matches!(
                         e,
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                    ) {
+                    ) || self.should_stop_after_not_found(&e)
+                    {
                         global_registry().release(&resolved_output_path).await;
                         return Err(e);
                     }
@@ -514,7 +531,8 @@ impl MetalinkDownloadCommand {
                     if matches!(
                         e,
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                    ) {
+                    ) || self.should_stop_after_not_found(&e)
+                    {
                         return Err(e);
                     }
                     last_err = Some(e);
@@ -650,7 +668,8 @@ impl MetalinkDownloadCommand {
                     if matches!(
                         error,
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                    ) {
+                    ) || self.should_stop_after_not_found(&error)
+                    {
                         return Err(error);
                     }
                     last_err = Some(error);
@@ -1164,6 +1183,17 @@ mod http_status_tests {
     }
 
     #[test]
+    fn classifies_configured_4xx_transients_as_retryable_server_errors() {
+        for status_code in [408, 429] {
+            assert!(matches!(
+                classify_metalink_http_status(status_code),
+                Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                    if code == status_code
+            ));
+        }
+    }
+
+    #[test]
     fn classifies_not_found_as_resource_not_found() {
         assert!(matches!(
             classify_metalink_http_status(404),
@@ -1237,6 +1267,93 @@ mod http_status_tests {
         ));
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
         server.await.expect("404 fixture should finish");
+    }
+
+    #[tokio::test]
+    async fn mirror_not_found_zero_does_not_fail_over_to_next_mirror() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("404 fixture should bind");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("first 404 request");
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request).await.expect("read first request");
+            server_count.fetch_add(1, Ordering::SeqCst);
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .expect("write first 404 response");
+
+            if let Ok(Ok((mut stream, _))) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await
+            {
+                let _ = stream
+                    .read(&mut request)
+                    .await
+                    .expect("read second request");
+                server_count.fetch_add(1, Ordering::SeqCst);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+                    )
+                    .await
+                    .expect("write second response");
+            }
+        });
+
+        let output_dir = tempfile::tempdir().expect("output directory");
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="payload.bin">
+    <size>1</size>
+    <url>{base_url}/first</url>
+    <url>{base_url}/second</url>
+  </file>
+</metalink>"#
+        );
+        let options = DownloadOptions {
+            dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            ..DownloadOptions::default()
+        };
+        let mut command =
+            MetalinkDownloadCommand::new(GroupId::new(402), xml.as_bytes(), &options, None)
+                .expect("Metalink command should construct");
+        command
+            .group
+            .recover_mut()
+            .set_option_snapshot(std::collections::HashMap::from([(
+                "max-file-not-found".to_string(),
+                serde_json::json!("0"),
+            )]));
+
+        let output_path = command.output_path.clone();
+        let error = command
+            .execute()
+            .await
+            .expect_err("max-file-not-found=0 must stop after the first 404");
+        assert!(matches!(
+            error,
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+        ));
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+        assert!(!output_path.exists());
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .expect("404 fixture should finish")
+            .expect("404 fixture task should succeed");
     }
 
     #[cfg(feature = "bittorrent")]

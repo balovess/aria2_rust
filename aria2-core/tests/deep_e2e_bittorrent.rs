@@ -41,6 +41,7 @@ use aria2_protocol::bittorrent::extension::mse_handshake::MseHandshake;
 
 use e2e_helpers::mock_http_server::{MockHttpServer, Response, StatusCode, full_body};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ===========================================================================
 // Metadata follow E2E
@@ -196,7 +197,7 @@ async fn follow_torrent_mem_http_uses_source_uri_extension() {
         );
         extract_download_info(&group)
     };
-    assert_eq!(info.source_uri.as_deref(), Some(url.as_str()));
+    assert_eq!(info.base_uri.as_deref(), Some(url.as_str()));
 
     let handlers = build_handler_chain(&info.options);
     let handler_refs: Vec<&dyn aria2_core::engine::post_download_handler::PostDownloadHandler> =
@@ -212,6 +213,72 @@ async fn follow_torrent_mem_http_uses_source_uri_extension() {
 
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].recover().bt_metadata_data(), Some(torrent));
+    server.shutdown().await;
+}
+
+/// A gateway timeout on an in-memory metadata request must follow the same
+/// retry contract as the original HTTP skip-response command.
+#[tokio::test]
+async fn follow_torrent_mem_http_retries_gateway_timeout() {
+    let dir = setup_temp_dir();
+    let server = MockHttpServer::start()
+        .await
+        .expect("mock HTTP server should start");
+    let tracker_url = "http://tracker.invalid:6969/announce";
+    let torrent =
+        fixtures::test_torrent_builder::build_test_torrent("payload.bin", 1024, 512, tracker_url);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_server = Arc::clone(&attempts);
+    let torrent_for_server = torrent.clone();
+    server.on_get("/retry-source.torrent", move |_| {
+        if attempts_for_server.fetch_add(1, Ordering::SeqCst) == 0 {
+            Response::builder()
+                .status(StatusCode::GATEWAY_TIMEOUT)
+                .body(full_body("gateway timeout"))
+                .unwrap()
+        } else {
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/x-bittorrent")
+                .header("Content-Length", torrent_for_server.len())
+                .body(full_body(torrent_for_server.clone()))
+                .unwrap()
+        }
+    });
+
+    let url = format!("{}/retry-source.torrent", server.base_url());
+    let mut options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        max_retries: 2,
+        retry_wait: 0,
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    options.dir = Some(dir.path().display().to_string());
+
+    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+        GroupId::new(0x704),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some("retry-source.torrent"),
+    )
+    .expect("memory torrent command should construct");
+    command
+        .execute()
+        .await
+        .expect("gateway timeout should be retried for memory metadata");
+
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let group = command
+        .request_group()
+        .expect("HTTP command should expose its request group");
+    assert_eq!(group.recover().in_memory_data(), Some(torrent));
+    assert!(
+        !dir.path().join("retry-source.torrent").exists(),
+        "follow-torrent=mem must not create the source torrent file"
+    );
+
     server.shutdown().await;
 }
 

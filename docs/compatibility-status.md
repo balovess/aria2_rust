@@ -69,17 +69,52 @@ substitutes for missing original behavior.
 | --- | --- |
 | Active phase | `phase-2-core-domain` (`in_progress`) |
 | Passed and locked phases | `phase-1-baseline-matrix` (`passed_locked`) |
-| Latest verification | 2026-08-18 in the current worktree based on `2ddae20` (`dev`) plus the uncommitted session serializer, checksum, BitTorrent handler, control-file, progress-persistence, retry-lifecycle, graceful/forced shutdown-halt E2E, formatting, and migration-record changes: `aria2-core` reports `3490 passed, 0 failed, 1 ignored` for its all-features library test; the focused checksum integrity manager target reports `17 passed, 0 failed`; the checksum E2E target reports `13 passed, 0 failed`; the focused session serializer target reports `16 passed, 0 failed`, including gzip round-trip, malformed gzip, terminal-result URI state, and `force-save` filtering; `session::active_session` reports `6 passed, 0 failed`; the real App shutdown/restart force-save test reports `1 passed, 0 failed`; the BitfieldMan target reports `76 passed, 0 failed`; the RPC library target reports `233 passed, 0 failed`; the focused sequential HTTP retry target reports `21 passed, 0 failed`; the HTTP E2E target reports `43 passed, 0 failed, 2 ignored`, including real graceful and forced `ShutdownSignal` halt resume-state preservation; the concurrent HTTP range E2E target reports `9 passed, 0 failed`; the BitTorrent download E2E reports `36 passed, 0 failed, 2 ignored`; the FTP proxy target reports `12 passed, 0 failed, 2 ignored` when rerun alone after the first multi-target run hit a Windows target-file lock before executing that binary; the FTP E2E target reports `43 passed, 0 failed, 2 ignored`, including total-attempt `max-tries`, real graceful and forced `ShutdownSignal` halt resume-state preservation; the SFTP E2E target reports `30 passed, 0 failed, 2 ignored`, including total-attempt `max-tries`, production retry-wait pause/remove, and graceful/forced shutdown-halt regressions; the real App Metalink graph restart execution tests report `2 passed, 0 failed`, including one metadata request, stopped completion results, a created zero-length output file, and unchanged pre-existing nonzero payload bytes; workspace all-targets/all-features Clippy with `-D warnings`, full `cargo fmt --all -- --check`, and `git diff --check` passed; package metadata and lockfile report `aria2-core` `0.3.2`; unrelated in-progress edits are preserved. After the unified whole-file dispatcher change, the focused manager/HTTP/FTP/SFTP/Metalink targets report `17/28/24/17/21` passed with zero failures and the all-features library suite has not been rerun |
+| Latest verification | 2026-08-18 in the current worktree based on `2ddae20` (`dev`) plus the uncommitted session serializer, checksum, BitTorrent handler, control-file, progress-persistence, retry-lifecycle, graceful/forced shutdown-halt E2E, formatting, and migration-record changes: `aria2-core` reports `3507 passed, 0 failed, 1 ignored` for its all-features library test; the focused checksum integrity manager target reports `17 passed, 0 failed`; the checksum E2E target reports `13 passed, 0 failed`; the focused session serializer target reports `16 passed, 0 failed`, including gzip round-trip, malformed gzip, terminal-result URI state, and `force-save` filtering; `session::active_session` reports `6 passed, 0 failed`; the real App shutdown/restart force-save test reports `1 passed, 0 failed`; the BitfieldMan target reports `76 passed, 0 failed`; the RPC library target reports `233 passed, 0 failed`; the focused sequential HTTP retry target reports `21 passed, 0 failed`; the HTTP E2E target reports `43 passed, 0 failed, 2 ignored`, including real graceful and forced `ShutdownSignal` halt resume-state preservation; the concurrent HTTP range E2E target reports `9 passed, 0 failed`; the BitTorrent download E2E reports `36 passed, 0 failed, 2 ignored`; the FTP proxy target reports `12 passed, 0 failed, 2 ignored` when rerun alone after the first multi-target run hit a Windows target-file lock before executing that binary; the FTP E2E target reports `43 passed, 0 failed, 2 ignored`, including total-attempt `max-tries`, real graceful and forced `ShutdownSignal` halt resume-state preservation; the SFTP E2E target reports `30 passed, 0 failed, 2 ignored`, including total-attempt `max-tries`, production retry-wait pause/remove, and graceful/forced shutdown-halt regressions; the real App Metalink graph restart execution tests report `2 passed, 0 failed`, including one metadata request, stopped completion results, a created zero-length output file, and unchanged pre-existing nonzero payload bytes; workspace all-targets/all-features Clippy with `-D warnings`, full `cargo fmt --all -- --check`, and `git diff --check` passed; package metadata and lockfile report `aria2-core` `0.3.2`; unrelated in-progress edits are preserved. The URI-aware in-memory metadata regression reports handler tests `2 passed, 0 failed` and the real `follow_torrent_mem_http_uses_source_uri_extension` test `1 passed, 0 failed`; after the unified whole-file dispatcher change, the focused manager/HTTP/FTP/SFTP/Metalink targets report `17/28/24/17/21` passed with zero failures and the all-features library suite now reports `3507 passed, 0 failed, 1 ignored`; the in-memory metadata retry classifier reports `29 passed, 0 failed`, and the `deep_e2e_bittorrent` target reports `34 passed, 0 failed, 2 ignored`, including the stateful gateway-timeout metadata E2E |
 | Latest focused protocol rerun | FTP control-connection and SFTP not-found `max-tries=2` total-attempt E2E tests passed individually; active-transfer force-remove tests passed individually; full targets then passed with HTTP `43/0/2`, FTP `43/0/2`, and SFTP `30/0/2`; core all-features Clippy, formatting, and diff checks passed |
 | Latest focused core lifecycle verification | `ForceHaltAll(ShutdownSignal)` now drains unpromoted reserved groups into stopped `removed` results before engine exit; engine-loop tests `19 passed, 0 failed`, including selected-peer DNS failure attribution; C API tests `3 passed, 0 failed`, including the reserved-group option-change/finalize regression; RequestGroupMan tests `29 passed, 0 failed`, core all-features Clippy and formatting passed |
 | Latest focused paused-graph verification | Fresh-App paused Metalink restart execution passed; App `app::tests` `27 passed, 0 failed`, RequestGroupMan `41 passed, 0 failed`, aria2 Clippy and formatting passed |
 | Latest focused autosave verification | Engine dirty notifications survive a busy autosave coordinator lock; `session::auto_save_coordinator` reports `3 passed, 0 failed`, `engine_loop` reports `18 passed, 0 failed`, and core all-features Clippy passed |
-| Current verification caveat | The C API option-change test hang was caused by the test retaining an internal `RequestGroup` read lock across `aria2_rust_session_final`; the assertion is now scoped so finalize can acquire its write lock, and the focused C API and engine-loop suites pass. The full post-change core all-features library aggregate remains to be rerun |
+| Current verification caveat | The C API option-change test hang was caused by the test retaining an internal `RequestGroup` read lock across `aria2_rust_session_final`; the assertion is now scoped so finalize can acquire its write lock, and the focused C API and engine-loop suites pass. The post-change core all-features library aggregate now reports `3507 passed, 0 failed, 1 ignored` |
 | Current status | `PARTIAL`; phase 1 is locked, but the final acceptance and stop conditions are not met |
-| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; disk-based whole-file checksum validation for HTTP, Metalink, FTP, and SFTP now uses one bounded, lifecycle-aware integrity dispatcher while in-memory paths retain direct validation; existing multi-file integrity validation now treats a physically truncated entry as a failed piece and follows the normal re-download path; Rust-owned BitTorrent A2CF checkpoints now persist and validate piece length while preserving historical sidecars through info-hash identity; explicit pause/remove/halt regression coverage; real HTTP, FTP, and SFTP graceful and forced `HaltAll(ShutdownSignal)` tests now preserve `InProgress` resume state and control files; BitTorrent normal pieces now use a bounded event-driven block pipeline and endgame peers are read concurrently; TCP/MSE frame reads preserve partial data across cancellation; unrestricted rarest-first selection uses a sorted cursor instead of repeated linear scans; active/waiting RPC status uses direct scheduling indexes and a stable-state fast path; BitTorrent block reads now interrupt promptly on a real halt and leave a durable checkpoint, while non-halt lifecycle notifications such as save-session retry the current piece instead of terminating the command; BitTorrent seeding now races the owning RequestGroup lifecycle, cancels and drains the seed manager on pause/remove/halt, preserves stopped announce cleanup, and returns a lifecycle error before finalization; FTP and SFTP in-flight reads now observe lifecycle notifications and use bounded connection-drop cleanup on halt; FTP and SFTP retry-wait remove regressions now prove lifecycle wake-up and no duplicate protocol attempt; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; unresolved Metalink metadata dependencies now reject reserved payload `remove` and `force-remove` until the graph can resolve or fail coherently; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; command failures now carry the last concrete connection context, allowing the engine to mark only an observed HTTP/FTP peer bad for network/timeout failures; session serialization of configured `certificate` and `private-key` paths; current session serialization now preserves remaining and spent URIs in original order with duplicate suppression; stopped `DownloadResult` snapshots now retain file/URI progress, effective task options, and `SaveSessionCommand` plus App shutdown serialization now apply `force-save`/`save-not-found` policy; standard App shutdown/restart restores a force-saved terminal result as a waiting task; standard Metalink graph session restart now restores persisted BT piece bitfield and metadata; restored standard Metalink graph lifecycle now coordinates metadata/payload pause, force-pause, and unpause by the persisted metadata GID; restored standard Metalink graphs now execute through a fresh App/engine after session restart for both zero-length and pre-existing nonzero payloads; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; current core test and all-features Clippy gates revalidated in the worktree |
+| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; disk-based whole-file checksum validation for HTTP, Metalink, FTP, and SFTP now uses one bounded, lifecycle-aware integrity dispatcher while in-memory paths retain direct validation; existing multi-file integrity validation now treats a physically truncated entry as a failed piece and follows the normal re-download path; Rust-owned BitTorrent A2CF checkpoints now persist and validate piece length while preserving historical sidecars through info-hash identity; explicit pause/remove/halt regression coverage; real HTTP, FTP, and SFTP graceful and forced `HaltAll(ShutdownSignal)` tests now preserve `InProgress` resume state and control files; BitTorrent normal pieces now use a bounded event-driven block pipeline and endgame peers are read concurrently; TCP/MSE frame reads preserve partial data across cancellation; unrestricted rarest-first selection uses a sorted cursor instead of repeated linear scans; active/waiting RPC status uses direct scheduling indexes and a stable-state fast path; BitTorrent block reads now interrupt promptly on a real halt and leave a durable checkpoint, while non-halt lifecycle notifications such as save-session retry the current piece instead of terminating the command; BitTorrent seeding now races the owning RequestGroup lifecycle, cancels and drains the seed manager on pause/remove/halt, preserves stopped announce cleanup, and returns a lifecycle error before finalization; FTP and SFTP in-flight reads now observe lifecycle notifications and use bounded connection-drop cleanup on halt; FTP and SFTP retry-wait remove regressions now prove lifecycle wake-up and no duplicate protocol attempt; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications and match the original 504/502/503 status policy; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; unresolved Metalink metadata dependencies now reject reserved payload `remove` and `force-remove` until the graph can resolve or fail coherently; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; command failures now carry the last concrete connection context, allowing the engine to mark only an observed HTTP/FTP peer bad for network/timeout failures; session serialization of configured `certificate` and `private-key` paths; current session serialization now preserves remaining and spent URIs in original order with duplicate suppression; stopped `DownloadResult` snapshots now retain file/URI progress, effective task options, and `SaveSessionCommand` plus App shutdown serialization now apply `force-save`/`save-not-found` policy; standard App shutdown/restart restores a force-saved terminal result as a waiting task; standard Metalink graph session restart now restores persisted BT piece bitfield and metadata; restored standard Metalink graph lifecycle now coordinates metadata/payload pause, force-pause, and unpause by the persisted metadata GID; restored standard Metalink graphs now execute through a fresh App/engine after session restart for both zero-length and pre-existing nonzero payloads; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; in-memory BT and Metalink post-download matching now retains the source URI and recognizes URI extensions when no output file exists; current core test and all-features Clippy gates revalidated in the worktree |
 | Next action | Continue remaining phase-2 RequestGroup force-halt, storage, checksum, paused session graph restart, and cross-protocol error/retry combinations while keeping broader protocol interoperability and later phases closed |
-| Acceptance evidence | The checkpoints below record the focused session serializer, control-file/piece-length, checksum, progress-manager, Metalink dependency-removal, lifecycle, cancellation-safe frame, and real HTTP/FTP/SFTP shutdown-halt tests, reserved-queue fairness regression, HTTP response classification tests, HTTP, FTP, SFTP, and BitTorrent lifecycle/integrity/seeding E2E, including the production SFTP retry-wait pause test (`26 passed, 0 failed, 2 ignored`), the FTP control-connection total-attempt test (`1 passed, 0 failed`), the SFTP not-found total-attempt test (`1 passed, 0 failed`), the current `aria2-core` library result (`3490 passed, 0 failed, 1 ignored`), RequestGroupMan lifecycle coverage (`41 passed, 0 failed`), terminal `DownloadResult`/`force-save` serializer and standard App shutdown/restart coverage, the standard Metalink graph piece-state restart regression (`1 passed, 0 failed`), the paused graph restart lifecycle regression and App test group (`24 passed, 0 failed`), the new real App Metalink graph restart execution regression (`1 passed, 0 failed`), FTP/SFTP retry-wait remove regressions and full protocol targets (`43`/`30` passed, 2 ignored), the current RPC library result (`233 passed, 0 failed`), the current all-features `aria2-protocol` library result (`836 passed, 0 failed`), the workspace regression command, workspace all-targets/all-features Clippy with `-D warnings`, full and targeted formatting, and diff checks; broader force-halt/session graph variants, cross-protocol error combinations, bindings, measured performance, and final workspace acceptance remain open |
+| Acceptance evidence | The checkpoints below record the focused session serializer, control-file/piece-length, checksum, progress-manager, Metalink dependency-removal, lifecycle, cancellation-safe frame, and real HTTP/FTP/SFTP shutdown-halt tests, reserved-queue fairness regression, HTTP response classification tests, HTTP, FTP, SFTP, and BitTorrent lifecycle/integrity/seeding E2E, including the production SFTP retry-wait pause test (`26 passed, 0 failed, 2 ignored`), the FTP control-connection total-attempt test (`1 passed, 0 failed`), the SFTP not-found total-attempt test (`1 passed, 0 failed`), the current `aria2-core` library result (`3507 passed, 0 failed, 1 ignored`) and the source-URI-aware in-memory torrent regression and the stateful in-memory HTTP 504 retry E2E (`1 passed, 0 failed`), RequestGroupMan lifecycle coverage (`41 passed, 0 failed`), terminal `DownloadResult`/`force-save` serializer and standard App shutdown/restart coverage, the standard Metalink graph piece-state restart regression (`1 passed, 0 failed`), the paused graph restart lifecycle regression and App test group (`24 passed, 0 failed`), the new real App Metalink graph restart execution regression (`1 passed, 0 failed`), FTP/SFTP retry-wait remove regressions and full protocol targets (`43`/`30` passed, 2 ignored), the current RPC library result (`233 passed, 0 failed`), the current all-features `aria2-protocol` library result (`836 passed, 0 failed`), the workspace regression command, workspace all-targets/all-features Clippy with `-D warnings`, full and targeted formatting, and diff checks; broader force-halt/session graph variants, cross-protocol error combinations, bindings, measured performance, and final workspace acceptance remain open |
 | Remaining differences, risks, reopen conditions | Connection-before-response failures still cannot identify reqwest's selected DNS candidate; cross-protocol lifecycle combinations, full BitTorrent scheduler/seeding parity, original-client and third-party interoperability, bindings, end-to-end throughput measurement, and final workspace acceptance remain open; the picker numbers are Rust-only algorithm evidence, not a complete BT throughput claim; reopen this checkpoint if any covered command bypasses the group-aware lifecycle entrypoint, a lifecycle test regresses, a reader path bypasses the cancellation-safe frame buffer, or a new disk checksum caller bypasses the shared integrity dispatcher |
+
+## 2026-08-18 In-Memory HTTP Metadata Retry Classification Checkpoint
+
+The in-memory metadata pre-download path now uses the original HTTP
+skip-response retry boundary while retaining the shared total-attempt policy:
+504 Gateway Timeout is retryable, 502/503 are retryable only when
+`retry-wait > 0`, 404 still follows `max-file-not-found`, and transient
+network/timeout failures retry within `max-tries`. HTTP 500 and other 4xx/5xx
+responses remain terminal metadata errors.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::download_command -- --test-threads=1
+  29 passed, 0 failed
+cargo test -p aria2-core --all-features --test deep_e2e_bittorrent follow_torrent_mem_http_retries_gateway_timeout -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test deep_e2e_bittorrent -- --test-threads=1
+  34 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3507 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the in-memory HTTP metadata retry-classification slice.
+Broader cross-protocol error combinations, original-client and third-party
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open; the active phase stays `phase-2-core-domain` and
+the migration remains `PARTIAL`.
+
 
 ## 2026-08-18 HTTP/FTP Selected-Peer Failure Attribution Checkpoint
 
@@ -345,6 +380,41 @@ remove/halt combinations, cross-protocol error matrices, interoperability,
 bindings, measured performance, and final workspace acceptance remain open;
 the active phase remains `phase-2-core-domain` and the migration remains
 `PARTIAL`.
+
+## 2026-08-18 In-Memory Metadata Source URI Checkpoint
+
+In-memory metadata downloads do not create a DownloadContext or output file.
+Post-download matching now populates the existing
+CompletedDownloadInfo.base_uri with the effective source URI and uses its
+parsed URI path for BitTorrent and Metalink extension criteria. Existing
+content-type and local-file matching APIs remain unchanged.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::post_download_handler -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::bt_torrent_post_download_handler -- --test-threads=1
+  4 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::metalink_post_download_handler -- --test-threads=1
+  6 passed, 0 failed
+cargo test -p aria2-core --all-features --test deep_e2e_bittorrent follow_torrent_mem_http_uses_source_uri_extension -- --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3498 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the source-URI detection gap for memory-backed metadata
+post-download processing. The active phase remains
+phase-2-core-domain (in_progress) and the migration remains PARTIAL; broader
+cross-protocol lifecycle combinations, interoperability, bindings, measured
+performance, and final workspace acceptance remain open.
 
 ## 2026-08-18 Standard Metalink Graph Session-Restart Checkpoint
 
@@ -5132,3 +5202,140 @@ git diff --check
 The full post-change core all-features library aggregate has not been rerun;
 the active phase remains `phase-2-core-domain` and the migration remains
 `PARTIAL`.
+
+### Metalink `max-file-not-found` mirror checkpoint (2026-08-18)
+
+Metalink direct-mirror failover now consults the owning `RequestGroup` after
+recording an HTTP 404. With `max-file-not-found=0`, the first 404 remains the
+public `ResourceNotFound` result and stops the mirror loop; positive limits
+continue to permit failover until the configured count reaches
+`MaxFileNotFound`. The same group-aware stop condition is applied to torrent
+metaurl fallback loops. This preserves the existing `aria2-core` package
+version `0.3.2` and changes no CLI, configuration, session, or RPC wire
+shape.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib metalink_download_command -- --test-threads=1
+  22 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3499 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the Metalink 404 mirror-limit slice. Broader HTTP range/gap
+status combinations, cross-protocol retry semantics, interoperability,
+bindings, measured performance, and final workspace acceptance remain open;
+the active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.
+
+### SFTP transient retry classification checkpoint (2026-08-18)
+
+SFTP command execution now applies the shared `RetryPolicy` to temporary
+network and timeout failures. Remote not-found responses retain their separate
+`max-file-not-found` counter, while authentication and other terminal errors
+remain non-retryable. The policy uses total-attempt semantics, including
+`max-tries=0` as unlimited.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::sftp_download_command -- --test-threads=1
+  19 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  30 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3501 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the SFTP transient-retry classification slice. Broader HTTP
+range/gap status combinations, cross-protocol lifecycle combinations,
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open; the active phase remains `phase-2-core-domain` and the
+migration remains `PARTIAL`.
+
+### HTTP 408/429 default retry classification checkpoint (2026-08-18)
+
+The default `RetryPolicy` classification now maps HTTP 408 (Request Timeout)
+and 429 (Too Many Requests) to `RecoverableError::ServerError`, so sequential
+HTTP, HTTP range/gap, Metalink HTTP, and authentication-retry paths can retry
+these transient responses. The existing special handling for 404, 401/407,
+and 416 remains unchanged; the standalone `http/skip_response` compatibility
+rule for 500/502/503/504 and `retry-wait` is also unchanged.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib sequential_download -- --test-threads=1
+  32 passed, 0 failed
+cargo test -p aria2-core --all-features --lib http_segment_downloader -- --test-threads=1
+  19 passed, 0 failed
+cargo test -p aria2-core --all-features --lib metalink_download_command -- --test-threads=1
+  6 passed, 0 failed
+cargo test -p aria2-core --all-features --lib http::skip_response -- --test-threads=1
+  36 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3506 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the default HTTP 408/429 retry-classification slice. Broader
+cross-protocol error combinations, original-client interoperability, bindings,
+measured performance, and final workspace acceptance remain open; the active
+phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+### Concurrent HTTP range retry and mirror failover checkpoint (2026-08-18)
+
+The concurrent HTTP range pipeline now uses the shared retry boundary for each
+segment. HTTP 500 and other terminal 4xx/5xx responses stop the current URI
+without spending the replacement mirror's retry budget; HTTP 504 remains
+retryable; HTTP 502/503 remain retryable only when `retry-wait` permits the
+retry; and HTTP 404 continues through the owning `RequestGroup`'s
+`max-file-not-found` counter. When a terminal segment failure has another
+available URI, the segment is reassigned to that mirror with a fresh retry
+count, matching aria2's terminal-URI failover behavior. Capacity-limited 429
+and 503 responses retain the adaptive requeue path.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1 --nocapture
+  12 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::concurrent_download -- --test-threads=1
+  5 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::concurrent_segment_manager -- --test-threads=1
+  23 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::retry_policy -- --test-threads=1
+  18 passed, 0 failed
+cargo test -p aria2-core --all-features --lib -- --test-threads=1
+  3508 passed, 0 failed, 1 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the concurrent HTTP range terminal-classification and
+terminal-mirror-failover slice. Broader cross-protocol error combinations,
+original-client and third-party interoperability, bindings, measured
+performance, and final workspace acceptance remain open; the active phase
+remains `phase-2-core-domain` and the migration remains `PARTIAL`.

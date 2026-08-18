@@ -17,6 +17,17 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::SequentialDownloader;
 use super::auth_retry::{AuthRetryOutcome, AuthRetryRequest};
 
+fn classify_http_status(status: reqwest::StatusCode) -> Aria2Error {
+    let status_code = status.as_u16();
+    if status_code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&status_code) {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
+    } else {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: format!("HTTP error: {status}"),
+        })
+    }
+}
+
 async fn finalize_cancelled_download(
     writer: &mut Box<dyn DiskWriter>,
     control_file: &mut Option<ControlFile>,
@@ -389,16 +400,7 @@ impl SequentialDownloader {
                 if status_code == 404 {
                     return Err(self.classify_file_not_found());
                 }
-                if status_code >= 500 {
-                    return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                        code: status_code,
-                    }));
-                }
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::HttpProtocolError {
-                        message: format!("HTTP error: {}", status),
-                    },
-                ));
+                return Err(classify_http_status(status));
             }
 
             // A server which ignores Range returns the complete entity with
@@ -728,5 +730,32 @@ impl SequentialDownloader {
         }
         self.cookie_helper.save_cookies_if_configured();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_configured_transient_statuses_as_server_errors() {
+        for status_code in [408, 429, 500, 502, 503, 504] {
+            let status = reqwest::StatusCode::from_u16(status_code).unwrap();
+            assert!(matches!(
+                classify_http_status(status),
+                Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                    if code == status_code
+            ));
+        }
+    }
+
+    #[test]
+    fn preserves_non_transient_http_statuses_as_protocol_errors() {
+        let status = reqwest::StatusCode::FORBIDDEN;
+        assert!(matches!(
+            classify_http_status(status),
+            Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message })
+                if message.contains("403")
+        ));
     }
 }

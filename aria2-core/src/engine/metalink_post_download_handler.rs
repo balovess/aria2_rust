@@ -215,7 +215,7 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
         Self::can_handle_with_source_uri(
             info.content_type.as_deref(),
             info.file_path.as_deref(),
-            info.source_uri.as_deref(),
+            info.base_uri.as_deref(),
         )
     }
 
@@ -404,7 +404,6 @@ mod tests {
             in_memory_download: false,
             in_memory_data: None,
             base_uri: Some("https://example.test/releases/index.meta4".to_string()),
-            source_uri: Some("https://example.test/releases/index.meta4".to_string()),
         };
         let handler = MetalinkPostDownloadHandler::new();
         let mut next_gid = 100;

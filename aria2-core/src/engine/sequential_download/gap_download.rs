@@ -16,7 +16,9 @@ fn classify_gap_http_status(status_code: u16, range_header: &str) -> Aria2Error 
         416 => Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
             range: range_header.to_string(),
         }),
-        500.. => Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code }),
+        code if code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&code) => {
+            Aria2Error::Recoverable(RecoverableError::ServerError { code })
+        }
         _ => Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
             message: format!("HTTP error: {status_code}"),
         }),
@@ -360,6 +362,17 @@ mod tests {
             classify_gap_http_status(503, "bytes=10-20"),
             Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
         ));
+    }
+
+    #[test]
+    fn classifies_configured_4xx_transients_as_server_failures() {
+        for status_code in [408, 429] {
+            assert!(matches!(
+                classify_gap_http_status(status_code, "bytes=10-20"),
+                Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                    if code == status_code
+            ));
+        }
     }
 
     #[test]
