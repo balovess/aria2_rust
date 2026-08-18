@@ -1,6 +1,8 @@
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
-use std::collections::HashMap;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
+use std::collections::{HashMap, hash_map::Entry};
 
 // ======================================================================
 // Multi-File Writer
@@ -155,8 +157,6 @@ pub async fn write_piece_to_multi_files_coalesced(
     piece_data: &bytes::Bytes,
     _piece_length: u32,
 ) -> Result<()> {
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-
     // ------------------------------------------------------------------
     // Phase 1: Collect all raw write operations
     // ------------------------------------------------------------------
@@ -228,9 +228,14 @@ pub async fn write_piece_to_multi_files_coalesced(
     }
 
     // ------------------------------------------------------------------
-    // Phase 4: Execute coalesced writes (one open per unique file)
+    // Phase 4: Execute coalesced writes (one open per unique file).
+    //
+    // A positioned writer removes the seek + write pair from every operation
+    // and forwards the Bytes slice directly to pwrite/seek_write. This keeps
+    // cross-file writes on the same non-blocking disk path as single-file BT
+    // downloads.
     // ------------------------------------------------------------------
-    let mut file_writers: HashMap<usize, tokio::fs::File> = HashMap::new();
+    let mut file_writers: HashMap<usize, PositionedDiskWriter> = HashMap::new();
 
     for cw in &coalesced {
         let file_path = layout
@@ -239,39 +244,27 @@ pub async fn write_piece_to_multi_files_coalesced(
             .to_path_buf();
 
         let writer = match file_writers.entry(cw.file_idx) {
-            std::collections::hash_map::Entry::Vacant(e) => {
-                // NOTE: Do NOT use .truncate(true) — it would destroy existing
-                // file content from previously completed pieces.  We seek +
-                // write at the correct offset for random-access writing.
-                let f = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .write(true)
-                    .read(true)
-                    .open(&file_path)
-                    .await
-                    .map_err(|e| {
-                        Aria2Error::Fatal(FatalError::Config(format!("open failed: {}", e)))
-                    })?;
-                e.insert(f)
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let mut writer = PositionedDiskWriter::new(&file_path, None);
+                writer.open().await.map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!("open failed: {error}")))
+                })?;
+                entry.insert(writer)
             }
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
         };
-
         writer
-            .seek(std::io::SeekFrom::Start(cw.file_offset))
+            .write_bytes_at(cw.file_offset, cw.data.clone())
             .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("seek failed: {}", e))))?;
-        writer
-            .write_all(&cw.data)
-            .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("write failed: {}", e))))?;
+            .map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!("write failed: {error}")))
+            })?;
     }
 
-    for (_, mut f) in file_writers {
-        f.flush()
-            .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("flush failed: {}", e))))?;
+    for (_, mut writer) in file_writers {
+        writer.flush().await.map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!("flush failed: {error}")))
+        })?;
     }
 
     Ok(())

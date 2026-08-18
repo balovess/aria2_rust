@@ -2,8 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::json_rpc::{JsonRpcRequest, JsonRpcResponse};
-use super::rpc_helpers::split_auth_token;
+use super::json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcWireEntry};
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, SessionInfo};
 use super::websocket::EventPublisher;
@@ -13,6 +12,91 @@ use aria2_core::request::request_group_man::RequestGroupMan;
 
 pub(crate) fn rpc_method_requires_auth(method: &str) -> bool {
     !matches!(method, "system.listMethods" | "system.listNotifications")
+}
+
+/// Maximum number of read-only RPC calls evaluated concurrently in one wire
+/// batch. Mutating calls remain ordered so a batch cannot reorder lifecycle
+/// operations such as add/pause/remove.
+pub(crate) const MAX_RPC_BATCH_CONCURRENCY: usize = 64;
+
+pub(crate) fn rpc_method_is_read_only(method: &str) -> bool {
+    matches!(
+        method,
+        "aria2.tellStatus"
+            | "aria2.tellActive"
+            | "aria2.tellWaiting"
+            | "aria2.tellStopped"
+            | "aria2.getGlobalStat"
+            | "aria2.getUris"
+            | "aria2.getFiles"
+            | "aria2.getServers"
+            | "aria2.getGlobalOption"
+            | "aria2.getOption"
+            | "aria2.getPeers"
+            | "aria2.getVersion"
+            | "aria2.getSessionInfo"
+            | "system.listMethods"
+            | "system.listNotifications"
+    )
+}
+
+async fn dispatch_wire_entry(engine: &RpcEngine, entry: JsonRpcWireEntry) -> JsonRpcResponse {
+    match entry {
+        JsonRpcWireEntry::Request(request) => engine.handle_request_owned(request).await,
+        JsonRpcWireEntry::Error(response) => response,
+    }
+}
+
+async fn dispatch_read_only_run(
+    engine: &RpcEngine,
+    entries: Vec<JsonRpcWireEntry>,
+) -> Vec<JsonRpcResponse> {
+    use futures::StreamExt;
+
+    futures::stream::iter(entries)
+        .map(|entry| dispatch_wire_entry(engine, entry))
+        .buffered(MAX_RPC_BATCH_CONCURRENCY)
+        .collect()
+        .await
+}
+
+/// Dispatch a JSON-RPC wire batch while preserving the input order of every
+/// response and the input order of all mutating operations.
+///
+/// Read-only runs between mutations can execute concurrently. A mutation is a
+/// barrier: the preceding read-only run is drained before it runs, and the
+/// following run starts only after it completes. This keeps lifecycle behavior
+/// deterministic without serializing the common WebUI polling batch.
+pub(crate) async fn dispatch_wire_entries(
+    engine: &RpcEngine,
+    entries: Vec<JsonRpcWireEntry>,
+) -> Vec<JsonRpcResponse> {
+    let mut responses = Vec::with_capacity(entries.len());
+    let mut read_only_run = Vec::new();
+
+    for entry in entries {
+        let is_read_only = match &entry {
+            JsonRpcWireEntry::Request(request) => rpc_method_is_read_only(&request.method),
+            JsonRpcWireEntry::Error(_) => true,
+        };
+
+        if is_read_only {
+            read_only_run.push(entry);
+        } else {
+            if !read_only_run.is_empty() {
+                responses.extend(
+                    dispatch_read_only_run(engine, std::mem::take(&mut read_only_run)).await,
+                );
+            }
+            responses.push(dispatch_wire_entry(engine, entry).await);
+        }
+    }
+
+    if !read_only_run.is_empty() {
+        responses.extend(dispatch_read_only_run(engine, read_only_run).await);
+    }
+
+    responses
 }
 
 /// Core RPC engine. Download state lives exclusively in `RequestGroupMan` and
@@ -179,43 +263,47 @@ impl RpcEngine {
     /// AriaNg and webui-aria2, which put the secret into every sub-call's
     /// `params[0]` and leave the envelope parameters as the call list.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        self.handle_request_owned(req.clone()).await
+    }
+
+    /// Dispatch an already-owned request without cloning its parameter DOM.
+    ///
+    /// HTTP and WebSocket parsers own every request they produce. Keeping this
+    /// consuming seam internal lets batch dispatch and `system.multicall`
+    /// move parameter arrays into handlers instead of cloning them before the
+    /// engine can inspect them.
+    pub(crate) async fn handle_request_owned(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         let is_multicall = req.method == "system.multicall";
 
         if is_multicall {
+            let request_id = req.id.clone();
             return self
-                .handle_multicall(req)
+                .handle_multicall_owned(req)
                 .await
-                .unwrap_or_else(|e| e.into_response(req.id.clone()));
+                .unwrap_or_else(|e| e.into_response(request_id));
         }
 
         // Authenticate: extract token from params and validate.
         // Supports both array-style ("token:xxx" as first param element)
         // and object-style ({"token": "xxx"}) params for backward compatibility.
-        let (token, stripped_params) = split_auth_token(&req.params);
+        let (token, params) = crate::rpc_helpers::split_auth_token_owned(req.params);
         if rpc_method_requires_auth(&req.method)
             && let Err(auth_err) = self.auth_middleware.validate(token.as_deref())
         {
-            return auth_err.into_response(req.id.clone());
+            return auth_err.into_response(req.id);
         }
 
         // Dispatch against the token-stripped params so method handlers never
         // see the secret — matching C++ aria2's authorize() behaviour which
         // pops the token from the params array before dispatching.
-        let stripped_req;
-        let dispatch_req = match stripped_params {
-            Some(params) => {
-                stripped_req = JsonRpcRequest {
-                    version: req.version.clone(),
-                    method: req.method.clone(),
-                    params,
-                    id: req.id.clone(),
-                };
-                &stripped_req
-            }
-            None => req,
+        let dispatch_req = JsonRpcRequest {
+            version: req.version,
+            method: req.method,
+            params,
+            id: req.id,
         };
 
-        self.dispatch_single(dispatch_req).await
+        self.dispatch_single(&dispatch_req).await
     }
 
     /// Dispatch one already-authenticated, token-stripped JSON-RPC request.

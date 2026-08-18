@@ -1,6 +1,7 @@
 //! Endgame-mode block request and download methods for BtMessageHandler.
 
 use futures::{StreamExt, stream::FuturesUnordered};
+use std::time::Duration;
 
 use crate::engine::bt_download_execute::EndgameState;
 use crate::engine::bt_peer_connection::BtPeerConn;
@@ -20,7 +21,7 @@ async fn wait_for_piece_block_from_peer(
     expected_index: u32,
     expected_begin: u32,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-) -> Result<(Vec<u8>, usize)> {
+) -> Result<(bytes::Bytes, usize)> {
     loop {
         match connection.read_message().await {
             Ok(Some(msg)) => {
@@ -51,6 +52,13 @@ async fn wait_for_piece_block_from_peer(
                                     engine.add_node(addr).await;
                                 });
                             }
+                        }
+                    }
+                    BtMessage::Extended { ext_id, payload } => {
+                        if ext_id != 0 && connection.peer_extension_id("ut_pex") == Some(ext_id) {
+                            BtMessageHandler::try_process_pex_during_read(
+                                connection, ext_id, &payload,
+                            );
                         }
                     }
                     other => {
@@ -124,6 +132,29 @@ impl BtMessageHandler {
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         network_activity: Option<&AtomicProgress>,
     ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            network_activity,
+            Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
+    ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -136,6 +167,7 @@ impl BtMessageHandler {
             &mut peer_bytes,
             &mut failed_peers,
             network_activity,
+            request_timeout,
         )
         .await?;
         Ok(PieceDownloadResult {
@@ -176,6 +208,7 @@ impl BtMessageHandler {
         peer_bytes: &mut Vec<PeerDownloadBytes>,
         failed_peers: &mut Vec<std::net::SocketAddr>,
         network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
         for _retry in 0..MAX_RETRIES {
@@ -218,6 +251,7 @@ impl BtMessageHandler {
                     len,
                     endgame_state,
                     dht_engine.clone(),
+                    request_timeout,
                 )
                 .await
                 {
@@ -319,6 +353,7 @@ impl BtMessageHandler {
         block_length: u32,
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        request_timeout: Duration,
     ) -> Result<BlockDownloadResult> {
         let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
             index: piece_index,
@@ -363,7 +398,7 @@ impl BtMessageHandler {
 
         // Now wait for the FIRST response from any peer (others will be cancelled later)
         match tokio::time::timeout(
-            std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+            request_timeout,
             Self::wait_for_any_piece_block(
                 connections,
                 piece_index,
@@ -402,7 +437,7 @@ impl BtMessageHandler {
             Err(_) => {
                 warn!(
                     "[BT] Endgame: Block request timed out after {}s",
-                    BLOCK_REQUEST_TIMEOUT_SECS
+                    request_timeout.as_secs()
                 );
             }
         }
@@ -427,7 +462,7 @@ impl BtMessageHandler {
         expected_index: u32,
         expected_begin: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-    ) -> Result<(Vec<u8>, usize)> {
+    ) -> Result<(bytes::Bytes, usize)> {
         // Keep one read future per peer so a slow connection cannot block a
         // responsive peer. Each future owns the connection borrow until it
         // either produces the expected block or becomes unusable.

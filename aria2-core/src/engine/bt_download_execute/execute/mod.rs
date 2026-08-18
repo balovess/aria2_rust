@@ -23,10 +23,12 @@ pub(crate) fn deduplicate_tracker_tiers(tiers: Vec<Vec<String>>) -> Vec<Vec<Stri
 }
 
 use async_trait::async_trait;
+use sha1::Digest;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use super::types::PeerKey;
@@ -39,6 +41,44 @@ use crate::filesystem::control_file::ControlFile;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
+
+const MAX_PIECE_HASH_WORKERS: usize = 4;
+
+fn piece_hash_semaphore() -> &'static Arc<Semaphore> {
+    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    HASH_SLOTS.get_or_init(|| {
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(1, MAX_PIECE_HASH_WORKERS);
+        Arc::new(Semaphore::new(workers))
+    })
+}
+
+/// Verify a downloaded piece without running the digest on a Tokio worker.
+///
+/// The owned payload is returned so callers can write it after verification
+/// without allocating a second piece-sized buffer.
+pub(super) async fn verify_piece_hash_async(
+    expected: Option<[u8; 20]>,
+    data: Vec<u8>,
+) -> Result<(bool, Vec<u8>)> {
+    let Some(expected) = expected else {
+        return Ok((false, data));
+    };
+    let permit = piece_hash_semaphore()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| Aria2Error::Io(format!("piece hash dispatcher closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let digest = sha1::Sha1::digest(&data);
+        (digest.as_slice() == expected.as_slice(), data)
+    })
+    .await
+    .map_err(|error| Aria2Error::Io(format!("piece hash task failed: {error}")))
+}
 
 fn checkpoint_save_due(
     save_requested: bool,
@@ -201,6 +241,7 @@ impl BtDownloadCommand {
                 endpoint,
             ),
         };
+        self.apply_peer_exchange_policy(&mut conn);
         let remote_peer_id = conn.remote_peer_id();
         if remote_peer_id == Some(self.local_peer_id)
             || remote_peer_id.is_some_and(|peer_id| {
@@ -214,6 +255,17 @@ impl BtDownloadCommand {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
             info!(%endpoint, "Rejected incoming self or duplicate BitTorrent peer");
+            return;
+        }
+        if !self.should_admit_incoming_peer(active_connections.len()) {
+            self.peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
+            info!(
+                %endpoint,
+                "Rejected incoming BitTorrent peer because peer speed is above the request threshold"
+            );
             return;
         }
         conn.allocate_session_resource(piece_length, total_size);
@@ -622,14 +674,9 @@ impl Command for BtDownloadCommand {
                             || group.options().bt_require_crypto,
                         force_encryption: group.options().bt_force_encrypt,
                         prefer_encryption: group
-                            .effective_option_snapshot()
-                            .and_then(|snapshot| {
-                                snapshot
-                                    .get("bt-min-crypto-level")
-                                    .and_then(serde_json::Value::as_str)
-                                    .map(str::to_owned)
-                            })
-                            .is_some_and(|level| level.eq_ignore_ascii_case("arc4"))
+                            .options()
+                            .bt_min_crypto_level
+                            .eq_ignore_ascii_case("arc4")
                             || group.options().bt_force_encrypt,
                     },
                 )
@@ -727,8 +774,11 @@ impl Command for BtDownloadCommand {
             );
         }
 
-        // Initialize web seed manager if web seeds are available (BEP 19)
-        let web_seed_manager = if !self.web_seed_urls.is_empty() {
+        // Initialize web seed manager only when the task explicitly enables
+        // the BEP 19 fallback. The torrent's url-list is metadata, not an
+        // instruction to bypass --bt-enable-web-seed=false.
+        let web_seed_enabled = self.group.recover().options().bt_enable_web_seed;
+        let web_seed_manager = if web_seed_enabled && !self.web_seed_urls.is_empty() {
             info!(
                 "[BT] Initializing web seed manager with {} URL(s)",
                 self.web_seed_urls.len()
@@ -760,7 +810,7 @@ impl Command for BtDownloadCommand {
         let mut last_pex_send = Instant::now();
         const PEX_SEND_INTERVAL_SECS: u64 = 60;
 
-        if !self.is_private {
+        if self.peer_exchange_enabled() {
             // PEX is enabled only after the remote BEP 10 handshake advertises
             // ut_pex. Each peer has an independent extension-ID namespace.
             for conn in active_connections.iter() {
@@ -904,7 +954,7 @@ impl Command for BtDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(600))
+        self.group.recover().timeout()
     }
 }
 

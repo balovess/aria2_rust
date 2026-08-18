@@ -1,5 +1,5 @@
 use aria2_rpc::engine::RpcEngine;
-use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
+use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse, parse_aria2_wire_document};
 use aria2_rpc::server::AuthConfig;
 use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse};
 use base64::Engine;
@@ -87,6 +87,13 @@ fn bench_jsonrpc_parse(c: &mut Criterion) {
     });
 }
 
+fn bench_jsonrpc_streaming_wire_parse(c: &mut Criterion) {
+    let json = br#"{"jsonrpc":"2.0","method":"aria2.tellActive","params":[],"id":"req-1"}"#;
+    c.bench_function("jsonrpc_streaming_wire_parse", |b| {
+        b.iter(|| black_box(parse_aria2_wire_document(json).is_ok()));
+    });
+}
+
 fn bench_jsonrpc_serialize(c: &mut Criterion) {
     let response = JsonRpcResponse {
         version: "2.0".into(),
@@ -99,6 +106,18 @@ fn bench_jsonrpc_serialize(c: &mut Criterion) {
             let s = serde_json::to_string(&response);
             black_box(s.ok());
         });
+    });
+}
+
+fn bench_jsonrpc_serialize_bytes(c: &mut Criterion) {
+    let response = JsonRpcResponse {
+        version: "2.0".into(),
+        id: serde_json::Value::String("req-1".into()),
+        result: Some(serde_json::Value::String("gid-001".into())),
+        error: None,
+    };
+    c.bench_function("jsonrpc_serialize_response_bytes", |b| {
+        b.iter(|| black_box(response.to_bytes().ok()));
     });
 }
 
@@ -165,7 +184,9 @@ criterion_group!(
     bench_tell_active_empty,
     bench_get_global_stat,
     bench_jsonrpc_parse,
+    bench_jsonrpc_streaming_wire_parse,
     bench_jsonrpc_serialize,
+    bench_jsonrpc_serialize_bytes,
     bench_xmlrpc_build_serialize,
     bench_xmlrpc_response,
     bench_base64_encode_decode,

@@ -171,7 +171,7 @@ impl BtUploadSession {
                                 self.conn.send_message(&BtMessage::Piece {
                                         index: request.index,
                                         begin: request.begin,
-                                        data: piece_data,
+                                        data: piece_data.into(),
                                     }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
                                         crate::error::RecoverableError::TemporaryNetworkFailure { message: e.to_string() }
                                     ))?;

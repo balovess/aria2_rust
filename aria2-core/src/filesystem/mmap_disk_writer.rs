@@ -115,14 +115,14 @@ impl MmapDiskWriter {
     }
 
     /// Create parent directories if they don't exist.
-    fn ensure_parent_dirs(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent()
+    fn ensure_parent_dirs(path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
-            debug!("Created parent directories for {:?}", self.path);
+            debug!("Created parent directories for {:?}", path);
         }
         Ok(())
     }
@@ -131,19 +131,19 @@ impl MmapDiskWriter {
     ///
     /// If the file size is 0 (cannot mmap) or `MmapMut::map_mut` fails,
     /// falls back to a [`PositionedDiskWriter`].
-    fn open_sync(&mut self) -> Result<()> {
-        self.ensure_parent_dirs()?;
+    fn open_sync(path: &Path, total_size: Option<u64>) -> Result<Inner> {
+        Self::ensure_parent_dirs(path)?;
 
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
             .read(true)
             .truncate(false) // Explicit: preserve existing data for resume scenarios.
-            .open(&self.path)
-            .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", self.path.display())))?;
+            .open(path)
+            .map_err(|e| Aria2Error::FileOpen(format!("{}: {e}", path.display())))?;
 
         // Pre-allocate if total_size is provided and file is new (size 0).
-        if let Some(size) = self.total_size {
+        if let Some(size) = total_size {
             let current_size = file.metadata()?.len();
             if current_size == 0 && size > 0 {
                 // Defensive disk-space pre-check before set_len. The download
@@ -154,14 +154,14 @@ impl MmapDiskWriter {
                 // fails cleanly if the filesystem rejects the allocation,
                 // whereas running out of space during dirty-page write-back
                 // would raise SIGBUS (see module docs).
-                if let Err(e) = crate::filesystem::disk_space::check_disk_space(&self.path, size) {
+                if let Err(e) = crate::filesystem::disk_space::check_disk_space(path, size) {
                     warn!(
                         "Insufficient disk space for mmap pre-allocation of {} bytes at {:?}: {}",
-                        size, self.path, e
+                        size, path, e
                     );
                 }
                 file.set_len(size)?;
-                debug!("Pre-allocated file to {} bytes: {:?}", size, self.path);
+                debug!("Pre-allocated file to {} bytes: {:?}", size, path);
             }
         }
 
@@ -170,15 +170,14 @@ impl MmapDiskWriter {
             // Cannot mmap a zero-length file — use positioned I/O fallback.
             warn!(
                 "File size is 0, cannot mmap: {:?}, using positioned I/O fallback",
-                self.path
+                path
             );
             // Drop our file handle; PositionedDiskWriter will open its own.
             // The fallback writer is stored unopened; the async `open()`
             // method will call `writer.open().await` to finish initialization.
             drop(file);
-            let writer = PositionedDiskWriter::new(&self.path, self.total_size);
-            self.inner = Some(Inner::Fallback(writer));
-            return Ok(());
+            let writer = PositionedDiskWriter::new(path, total_size);
+            return Ok(Inner::Fallback(writer));
         }
 
         // Try to create the memory mapping.
@@ -199,26 +198,22 @@ impl MmapDiskWriter {
         //    do the same (see `open_sync` for a defensive warning).
         match unsafe { MmapMut::map_mut(&file) } {
             Ok(mmap) => {
-                debug!(
-                    "Created mmap for {:?}, size: {} bytes",
-                    self.path, file_size
-                );
-                self.inner = Some(Inner::Mmap { file, mmap });
+                debug!("Created mmap for {:?}, size: {} bytes", path, file_size);
+                Ok(Inner::Mmap { file, mmap })
             }
             Err(e) => {
                 warn!(
                     "mmap failed for {:?}: {}, using positioned I/O fallback",
-                    self.path, e
+                    path, e
                 );
                 // Drop our file handle; PositionedDiskWriter will open its own.
                 // The fallback writer is stored unopened; the async `open()`
                 // method will call `writer.open().await` to finish initialization.
                 drop(file);
-                let writer = PositionedDiskWriter::new(&self.path, self.total_size);
-                self.inner = Some(Inner::Fallback(writer));
+                let writer = PositionedDiskWriter::new(path, total_size);
+                Ok(Inner::Fallback(writer))
             }
         }
-        Ok(())
     }
 }
 
@@ -230,7 +225,12 @@ impl SeekableDiskWriter for MmapDiskWriter {
         }
 
         if self.inner.is_none() {
-            self.open_sync()?;
+            let path = self.path.clone();
+            let total_size = self.total_size;
+            let inner = tokio::task::spawn_blocking(move || Self::open_sync(&path, total_size))
+                .await
+                .map_err(|error| Aria2Error::Io(format!("mmap open task failed: {error}")))??;
+            self.inner = Some(inner);
         }
 
         // If we fell back to PositionedDiskWriter, ensure it's opened.

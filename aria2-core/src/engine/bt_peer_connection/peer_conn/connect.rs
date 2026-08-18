@@ -11,7 +11,7 @@ use crate::error::{Aria2Error, FatalError, Result};
 
 use super::super::types::{ConnectionType, SendBuffer};
 use super::super::utp_connection::UtpPeerConnection;
-use super::{BtPeerConn, InnerConnection};
+use super::{BtPeerConn, InnerConnection, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
 
 impl BtPeerConn {
     // -----------------------------------------------------------------------
@@ -44,6 +44,8 @@ impl BtPeerConn {
                     send_buffer: SendBuffer::new(),
                     last_keepalive_sent: now,
                     last_message_received: now,
+                    keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+                    peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
                     stats: PeerStats::new([0u8; 20], std::net::SocketAddr::new(
                         addr.ip.parse().map_err(|_| {
                                 Aria2Error::Fatal(FatalError::Config(format!(
@@ -54,6 +56,7 @@ impl BtPeerConn {
                             addr.port,
                     )),
                     pending_pex_peers: Vec::new(),
+                    pex_enabled: true,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -86,6 +89,8 @@ impl BtPeerConn {
                     send_buffer: SendBuffer::new(),
                     last_keepalive_sent: now,
                     last_message_received: now,
+                    keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+                    peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
                     stats: PeerStats::new(
                         [0u8; 20],
                         std::net::SocketAddr::new(
@@ -99,6 +104,7 @@ impl BtPeerConn {
                         ),
                     ),
                     pending_pex_peers: Vec::new(),
+                    pex_enabled: true,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -129,8 +135,11 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
+            pex_enabled: true,
         }
     }
 
@@ -158,8 +167,11 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
+            pex_enabled: true,
         }
     }
 
@@ -208,8 +220,11 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
+            pex_enabled: true,
         }
     }
 
@@ -240,8 +255,11 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
+            pex_enabled: true,
         })
     }
 
@@ -272,11 +290,14 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
+            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
+            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new(
                 [0u8; 20],
                 std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
             ),
             pending_pex_peers: Vec::new(),
+            pex_enabled: true,
         }
     }
 }

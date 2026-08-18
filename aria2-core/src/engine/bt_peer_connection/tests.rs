@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::peer_conn::{KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
+use super::peer_conn::{BtPeerConn, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
 use super::session_resource::PeerSessionResource;
 use super::types::SendBuffer;
 
@@ -284,6 +284,17 @@ fn test_bt_peer_conn_peer_timeout() {
     // Old message should trigger timeout
     let old_recv = now - Duration::from_secs(PEER_TIMEOUT_SECS + 10);
     assert!(old_recv.elapsed() >= Duration::from_secs(PEER_TIMEOUT_SECS));
+}
+
+#[test]
+fn test_bt_peer_conn_uses_configured_timing_values() {
+    let mut connection = BtPeerConn::new_stub(&[0u8; 20]);
+    connection.set_timeouts(Duration::from_millis(5), Duration::from_millis(5));
+
+    std::thread::sleep(Duration::from_millis(15));
+
+    assert!(connection.should_send_keepalive());
+    assert!(connection.is_peer_timed_out());
 }
 
 // -----------------------------------------------------------------------

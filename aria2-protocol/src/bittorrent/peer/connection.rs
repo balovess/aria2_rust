@@ -87,36 +87,62 @@ pub struct PeerConnection {
 }
 
 impl PeerConnection {
-    pub async fn connect(addr: &PeerAddr, info_hash: &[u8; 20]) -> Result<Self, String> {
+    pub async fn connect_with_timeout(
+        addr: &PeerAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
         let socket_addr = addr.to_socket_addr();
         debug!("Connecting to peer: {}", socket_addr);
 
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            tokio::net::TcpStream::connect(&socket_addr),
-        )
-        .await
-        .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
-        .map_err(|e| format!("Peer connection failed: {}", e))?;
+        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+            .await
+            .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+            .map_err(|e| format!("Peer connection failed: {}", e))?;
 
-        Self::from_stream(stream, info_hash).await
+        Self::from_stream_with_timeout(stream, info_hash, local_peer_id, timeout).await
     }
 
-    pub async fn from_stream(
+    pub async fn connect(addr: &PeerAddr, info_hash: &[u8; 20]) -> Result<Self, String> {
+        let local_peer_id = id::generate_peer_id();
+        Self::connect_with_timeout(
+            addr,
+            info_hash,
+            &local_peer_id,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+    }
+
+    async fn from_stream_with_timeout(
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
     ) -> Result<Self, String> {
-        let my_peer_id = id::generate_peer_id();
-        let handshake = Handshake::new(info_hash, &my_peer_id);
-        let handshake_bytes = handshake.to_bytes();
-
+        let handshake = Handshake::new(info_hash, local_peer_id);
         stream
-            .write_all(&handshake_bytes)
+            .write_all(&handshake.to_bytes())
             .await
             .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
-        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash).await?;
+        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash, timeout).await?;
         Self::finish_handshake(stream, remote_hs)
+    }
+
+    pub async fn from_stream(
+        stream: tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+    ) -> Result<Self, String> {
+        let my_peer_id = id::generate_peer_id();
+        Self::from_stream_with_timeout(
+            stream,
+            info_hash,
+            &my_peer_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await
     }
 
     /// Complete the server side of a BitTorrent handshake.
@@ -181,10 +207,11 @@ impl PeerConnection {
     async fn read_remote_handshake(
         stream: &mut tokio::net::TcpStream,
         info_hash: &[u8; 20],
+        timeout: std::time::Duration,
     ) -> Result<Handshake, String> {
         let mut response = [0u8; 68];
         match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
+            timeout,
             stream.read_exact(&mut response),
         )
         .await
@@ -236,33 +263,40 @@ impl PeerConnection {
         use crate::bittorrent::message::serializer::serialize;
         let data = serialize(message);
 
+        self.send_serialized(&data).await?;
+        debug!("Sent message: {:?}", message.message_id());
+        Ok(())
+    }
+
+    /// Send an already-framed BitTorrent message without serializing it again.
+    ///
+    /// Small control frames such as HAVE are broadcast to many peers. Keeping
+    /// the frame at the caller avoids rebuilding the same nine bytes once per
+    /// connection while preserving the connection's write/flush boundary.
+    pub async fn send_serialized(&mut self, data: &[u8]) -> Result<(), String> {
         self.stream
-            .write_all(&data)
+            .write_all(data)
             .await
             .map_err(|e| format!("Failed to send message: {}", e))?;
         self.stream
             .flush()
             .await
             .map_err(|e| format!("Failed to flush buffer: {}", e))?;
-
-        debug!("Sent message: {:?}", message.message_id());
         Ok(())
     }
 
     pub async fn read_message(&mut self) -> Result<Option<BtMessage>, String> {
-        use crate::bittorrent::message::factory::parse_message;
-
         loop {
             if self.read_buffer.len() >= 4 {
                 let msg_len =
                     u32::from_be_bytes(self.read_buffer[..4].try_into().unwrap()) as usize;
                 let frame_len = 4 + msg_len;
                 if self.read_buffer.len() >= frame_len {
-                    let frame = self.read_buffer.split_to(frame_len);
+                    let frame = self.read_buffer.split_to(frame_len).freeze();
                     if msg_len == 0 {
                         return Ok(Some(BtMessage::KeepAlive));
                     }
-                    return parse_message(&frame);
+                    return crate::bittorrent::message::factory::parse_message_bytes(frame);
                 }
             }
 
@@ -494,5 +528,62 @@ mod tests {
             connection.read_message().await.unwrap(),
             Some(BtMessage::Choke)
         );
+    }
+
+    #[tokio::test]
+    async fn connect_with_timeout_uses_configured_handshake_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        });
+
+        let addr = PeerAddr::new("127.0.0.1", address.port());
+        let result = PeerConnection::connect_with_timeout(
+            &addr,
+            &[1u8; 20],
+            &[b'X'; 20],
+            std::time::Duration::from_millis(20),
+        )
+        .await;
+
+        match result {
+            Err(error) => assert!(error.contains("Handshake response timeout")),
+            Ok(_) => panic!("the peer does not answer the handshake"),
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn connect_with_timeout_sends_the_configured_peer_id() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 68];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut request)
+                .await
+                .unwrap();
+            let received = Handshake::parse(&request).unwrap();
+            assert_eq!(received.peer_id, [b'X'; 20]);
+            let response = Handshake::new(&[1u8; 20], &[b'Y'; 20]).to_bytes();
+            tokio::io::AsyncWriteExt::write_all(&mut stream, &response)
+                .await
+                .unwrap();
+        });
+
+        let addr = PeerAddr::new("127.0.0.1", address.port());
+        let connection = PeerConnection::connect_with_timeout(
+            &addr,
+            &[1u8; 20],
+            &[b'X'; 20],
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(connection.remote_peer_id, Some([b'Y'; 20]));
+        server.await.unwrap();
     }
 }

@@ -41,20 +41,45 @@ impl EncryptedConnection {
         force_encryption: bool,
         prefer_encryption: bool,
     ) -> Result<Self, String> {
+        let local_peer_id = crate::bittorrent::peer::id::generate_peer_id();
+        Self::connect_with_mse_with_options(
+            addr,
+            info_hash,
+            force_encryption,
+            prefer_encryption,
+            &local_peer_id,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+    }
+
+    pub async fn connect_with_mse_with_options(
+        addr: &PeerAddr,
+        info_hash: &[u8; 20],
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
         let socket_addr = addr.to_socket_addr();
         debug!("MSE connecting to peer: {}", socket_addr);
 
-        let stream = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            tokio::net::TcpStream::connect(&socket_addr),
-        )
+        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
         .await
         .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
         .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
         // aria2's MSE path starts with DH. The 68-byte BitTorrent handshake
         // is exchanged only after MSE has selected the stream cipher.
-        Self::complete_mse_handshake(stream, info_hash, force_encryption, prefer_encryption).await
+        Self::complete_mse_handshake(
+            stream,
+            info_hash,
+            force_encryption,
+            prefer_encryption,
+            local_peer_id,
+            timeout,
+        )
+        .await
     }
 
     async fn complete_mse_handshake(
@@ -62,6 +87,8 @@ impl EncryptedConnection {
         info_hash: &[u8; 20],
         force_encryption: bool,
         prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
     ) -> Result<Self, String> {
         let mut initiator = MseHandshake::new_initiator(*info_hash);
         initiator.set_crypto_preferences(force_encryption, prefer_encryption);
@@ -100,7 +127,7 @@ impl EncryptedConnection {
         let response_len = loop {
             let mut chunk = [0u8; 64];
             let read_len =
-                tokio::time::timeout(std::time::Duration::from_secs(30), stream.read(&mut chunk))
+                tokio::time::timeout(timeout, stream.read(&mut chunk))
                     .await
                     .map_err(|_| "MSE response read timeout".to_string())?
                     .map_err(|error| format!("MSE response read failed: {error}"))?;
@@ -129,7 +156,6 @@ impl EncryptedConnection {
             crypto.is_encrypted()
         );
 
-        let local_peer_id = crate::bittorrent::peer::id::generate_peer_id();
         let mut local_handshake = Handshake::new(info_hash, &local_peer_id)
             .with_dht(true)
             .to_bytes();
@@ -145,6 +171,7 @@ impl EncryptedConnection {
             &mut read_ahead,
             &mut remote_handshake,
             "MSE handshake",
+            timeout,
         )
         .await?;
         crypto.decrypt(&mut remote_handshake);
@@ -172,11 +199,9 @@ impl EncryptedConnection {
         stream: &mut tokio::net::TcpStream,
         buffer: &mut [u8],
         label: &str,
+        timeout: std::time::Duration,
     ) -> Result<(), String> {
-        tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            stream.read_exact(buffer),
-        )
+        tokio::time::timeout(timeout, stream.read_exact(buffer))
         .await
         .map_err(|_| format!("{label} read timeout"))?
         .map(|_| ())
@@ -188,12 +213,13 @@ impl EncryptedConnection {
         pending: &mut Vec<u8>,
         buffer: &mut [u8],
         label: &str,
+        timeout: std::time::Duration,
     ) -> Result<(), String> {
         let copied = pending.len().min(buffer.len());
         buffer[..copied].copy_from_slice(&pending[..copied]);
         pending.drain(..copied);
         if copied < buffer.len() {
-            Self::read_exact_with_timeout(stream, &mut buffer[copied..], label).await?;
+            Self::read_exact_with_timeout(stream, &mut buffer[copied..], label, timeout).await?;
         }
         Ok(())
     }
@@ -212,9 +238,15 @@ impl EncryptedConnection {
         self.send_encrypted(&data).await
     }
 
-    pub async fn read_message(&mut self) -> Result<Option<BtMessage>, String> {
-        use crate::bittorrent::message::factory::parse_message;
+    /// Send an already-framed BitTorrent message without serializing it again.
+    ///
+    /// Encryption still requires a per-connection copy for the cipher, but the
+    /// common wire-frame construction is shared across a HAVE broadcast.
+    pub async fn send_serialized(&mut self, data: &[u8]) -> Result<(), String> {
+        self.send_encrypted(data).await
+    }
 
+    pub async fn read_message(&mut self) -> Result<Option<BtMessage>, String> {
         if !self.read_ahead.is_empty() {
             let mut pending = std::mem::take(&mut self.read_ahead);
             self.crypto.decrypt(&mut pending);
@@ -227,11 +259,11 @@ impl EncryptedConnection {
                     u32::from_be_bytes(self.read_buffer[..4].try_into().unwrap()) as usize;
                 let frame_len = 4 + msg_len;
                 if self.read_buffer.len() >= frame_len {
-                    let frame = self.read_buffer.split_to(frame_len);
+                    let frame = self.read_buffer.split_to(frame_len).freeze();
                     if msg_len == 0 {
                         return Ok(Some(BtMessage::KeepAlive));
                     }
-                    return parse_message(&frame);
+                    return crate::bittorrent::message::factory::parse_message_bytes(frame);
                 }
             }
 

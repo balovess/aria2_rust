@@ -96,6 +96,14 @@ impl App {
         }
 
         let (options, option_snapshot) = self.download_options_with_snapshot().await;
+        let explicit_gid = self
+            .get_opt_str("gid")
+            .await
+            .map(|value| {
+                GroupId::from_hex_string(&value)
+                    .ok_or_else(|| format!("Invalid GID '{}': expected a hexadecimal u64", value))
+            })
+            .transpose()?;
         let global_dl = self
             .get_opt_i64("max-overall-download-limit")
             .await
@@ -245,7 +253,11 @@ impl App {
                 return Err("Metalink inputs must be submitted as a complete set".to_string());
             }
 
-            let gid = GroupId::new(i as u64 + 1);
+            let gid = if i == 0 {
+                explicit_gid.unwrap_or_else(|| self.request_man.next_available_gid())
+            } else {
+                self.request_man.next_available_gid()
+            };
             let mut initial_uri = input.raw.clone();
             #[cfg(feature = "bittorrent")]
             if matches!(input.input_type, InputType::TorrentFile) {

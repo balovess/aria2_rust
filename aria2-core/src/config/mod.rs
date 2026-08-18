@@ -19,10 +19,10 @@ pub use option::{
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use runtime::{
-    ChangeableKind, INITIAL_REQUEST_OPTIONS, INITIAL_SNAPSHOT_CONSUMER_OPTIONS,
-    RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
-    RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_global_option_changeable, is_initial_option,
-    is_option_changeable, is_snapshot_consumer, project_initial_options,
+    ChangeableKind, INITIAL_IDENTITY_OPTIONS, INITIAL_REQUEST_OPTIONS,
+    INITIAL_SNAPSHOT_WIRE_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+    RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_global_option_changeable,
+    is_initial_option, is_option_changeable, project_initial_options,
 };
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
 

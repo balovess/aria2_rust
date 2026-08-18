@@ -16,6 +16,8 @@ use aria2_core::request::request_group_man::ChangePositionMode;
 use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
+#[cfg(feature = "metalink")]
+use std::sync::Arc;
 
 /// Delay between answering a shutdown RPC and actually halting the engine.
 ///
@@ -36,6 +38,23 @@ fn optional_position(req: &JsonRpcRequest, index: usize) -> Result<Option<usize>
     usize::try_from(position)
         .map(Some)
         .map_err(|_| JsonRpcError::RpcExecution("Position is out of range.".into()))
+}
+
+fn decode_rpc_payload_sync(input: &str) -> Result<Vec<u8>, String> {
+    let encoded = if input.starts_with("data:") {
+        input.split(',').nth(1).unwrap_or("")
+    } else {
+        input
+    };
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|error| format!("base64 decode failed: {error}"))
+}
+
+async fn decode_rpc_payload(input: String) -> Result<Vec<u8>, JsonRpcError> {
+    tokio::task::spawn_blocking(move || decode_rpc_payload_sync(&input))
+        .await
+        .map_err(|error| JsonRpcError::InternalError(format!("base64 task failed: {error}")))?
+        .map_err(JsonRpcError::InvalidParams)
 }
 
 impl RpcEngine {
@@ -89,16 +108,7 @@ impl RpcEngine {
             .unwrap_or(".")
             .to_string();
 
-        let decoded_bytes = if torrent_data.starts_with("data:") {
-            base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                torrent_data.split(',').nth(1).unwrap_or(""),
-            )
-            .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
-        } else {
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &torrent_data)
-                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
-        };
+        let decoded_bytes = decode_rpc_payload(torrent_data).await?;
 
         if decoded_bytes.len() < 3
             || decoded_bytes[0] != b'd'
@@ -150,16 +160,7 @@ impl RpcEngine {
             req.get_optional_param(1)?.unwrap_or_default();
         let position = optional_position(req, 2)?;
 
-        let decoded_bytes = if metalink_data.starts_with("data:") {
-            base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                metalink_data.split(',').nth(1).unwrap_or(""),
-            )
-            .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
-        } else {
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &metalink_data)
-                .map_err(|e| JsonRpcError::InvalidParams(format!("base64 decode failed: {}", e)))?
-        };
+        let decoded_bytes = decode_rpc_payload(metalink_data).await?;
 
         let preview = String::from_utf8_lossy(&decoded_bytes[..decoded_bytes.len().min(200)]);
         if !preview.to_lowercase().contains("<metalink")
@@ -173,29 +174,65 @@ impl RpcEngine {
         #[cfg(feature = "metalink")]
         if let Some(group_man) = &self.group_man {
             let options = rpc_options_to_download_options(&opts)?;
-            let man = group_man;
-            let converter =
-                aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
-            let mut gid_source = std::iter::from_fn(|| Some(man.next_available_gid()));
-            let resource_groups = converter
-                .create_resource_groups_from_bytes(&decoded_bytes, &options, &mut gid_source)
-                .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?;
+            let data = Arc::new(decoded_bytes);
+            let resource_data = Arc::clone(&data);
+            let resource_man = Arc::clone(group_man);
+            let resource_options = options.clone();
+            let resource_groups = tokio::task::spawn_blocking(move || {
+                let converter =
+                    aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
+                let mut gid_source = std::iter::from_fn(|| Some(resource_man.next_available_gid()));
+                converter
+                    .create_resource_groups_from_bytes(
+                        resource_data.as_ref(),
+                        &resource_options,
+                        &mut gid_source,
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| {
+                JsonRpcError::InternalError(format!("Metalink worker failed: {error}"))
+            })?
+            .map_err(JsonRpcError::InvalidParams)?;
             let mut gids = Vec::new();
             for group in resource_groups {
                 let gid = group.recover().gid();
-                man.add_group_arc(group);
+                group_man.add_group_arc(group);
                 gids.push(gid.to_hex_string());
             }
 
             #[cfg(feature = "bittorrent")]
-            for graph in converter
-                .create_torrent_graphs_from_bytes(&decoded_bytes, &options, &mut gid_source)
-                .map_err(|error| JsonRpcError::InvalidParams(error.to_string()))?
             {
-                let (_, payload_gid) = man
-                    .add_metalink_graph(graph)
-                    .map_err(|error| JsonRpcError::InternalError(error.to_string()))?;
-                gids.push(payload_gid.to_hex_string());
+                let graph_data = Arc::clone(&data);
+                let graph_man = Arc::clone(group_man);
+                let graph_options = options.clone();
+                let torrent_graphs = tokio::task::spawn_blocking(move || {
+                    let converter =
+                        aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new(
+                        );
+                    let mut gid_source =
+                        std::iter::from_fn(|| Some(graph_man.next_available_gid()));
+                    converter
+                        .create_torrent_graphs_from_bytes(
+                            graph_data.as_ref(),
+                            &graph_options,
+                            &mut gid_source,
+                        )
+                        .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| {
+                    JsonRpcError::InternalError(format!("Metalink worker failed: {error}"))
+                })?
+                .map_err(JsonRpcError::InvalidParams)?;
+
+                for graph in torrent_graphs {
+                    let (_, payload_gid) = group_man
+                        .add_metalink_graph(graph)
+                        .map_err(|error| JsonRpcError::InternalError(error.to_string()))?;
+                    gids.push(payload_gid.to_hex_string());
+                }
             }
 
             if !gids.is_empty() {
@@ -206,7 +243,8 @@ impl RpcEngine {
                     let position = i32::try_from(pos).map_err(|_| {
                         JsonRpcError::InvalidParams("position is out of range".into())
                     })?;
-                    man.change_position(first_gid, position, ChangePositionMode::SetFromStart)
+                    group_man
+                        .change_position(first_gid, position, ChangePositionMode::SetFromStart)
                         .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
                 }
                 return Ok(JsonRpcResponse::success(

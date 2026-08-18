@@ -35,6 +35,25 @@ impl BtMessageHandler {
         block_length: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<BlockDownloadResult> {
+        Self::request_block_with_timeout(
+            connections,
+            piece_index,
+            block_offset,
+            block_length,
+            dht_engine,
+            std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    pub async fn request_block_with_timeout(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        block_offset: u32,
+        block_length: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        request_timeout: std::time::Duration,
+    ) -> Result<BlockDownloadResult> {
         let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
             index: piece_index,
             begin: block_offset,
@@ -66,7 +85,7 @@ impl BtMessageHandler {
 
             // Wait for response with timeout
             match tokio::time::timeout(
-                std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+                request_timeout,
                 Self::wait_for_piece_block(conn, piece_index, block_offset, dht_engine.clone()),
             )
             .await
@@ -100,7 +119,7 @@ impl BtMessageHandler {
                 Err(_) => {
                     warn!(
                         "[BT] Block request timed out after {}s",
-                        BLOCK_REQUEST_TIMEOUT_SECS
+                        request_timeout.as_secs()
                     );
                     if let Ok(addr) = format!("{}:{}", conn.ip_addr, conn.port).parse() {
                         failed_peers.push(addr);
@@ -130,20 +149,16 @@ impl BtMessageHandler {
         expected_index: u32,
         expected_begin: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<bytes::Bytes> {
         for _ in 0..MAX_BLOCK_READ_MESSAGES {
             match conn.read_message().await {
                 Ok(Some(msg)) => {
                     use aria2_protocol::bittorrent::message::types::BtMessage;
 
                     match msg {
-                        BtMessage::Piece {
-                            index,
-                            begin,
-                            ref data,
-                        } => {
+                        BtMessage::Piece { index, begin, data } => {
                             if index == expected_index && begin == expected_begin {
-                                return Ok(data.clone());
+                                return Ok(data);
                             }
                             // Not the block we're waiting for, continue reading
                             debug!(
@@ -275,6 +290,10 @@ impl BtMessageHandler {
     /// message is silently ignored (it might be ut_metadata or another
     /// extension we don't handle here).
     pub(crate) fn try_process_pex_during_read(conn: &mut BtPeerConn, ext_id: u8, payload: &[u8]) {
+        if !conn.is_pex_enabled() {
+            return;
+        }
+
         use aria2_protocol::bittorrent::message::extension::UtPexMessage;
         use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
@@ -354,6 +373,27 @@ impl BtMessageHandler {
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         network_activity: Option<&AtomicProgress>,
     ) -> Result<super::super::types::PieceDownloadResult> {
+        Self::download_piece_blocks_with_sources_and_activity_with_timeout(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            dht_engine,
+            network_activity,
+            std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    pub async fn download_piece_blocks_with_sources_and_activity_with_timeout(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: std::time::Duration,
+    ) -> Result<super::super::types::PieceDownloadResult> {
         Self::download_piece_blocks_pipelined_with_sources_and_activity(
             connections,
             piece_index,
@@ -361,6 +401,7 @@ impl BtMessageHandler {
             num_blocks,
             dht_engine,
             network_activity,
+            request_timeout,
         )
         .await
     }

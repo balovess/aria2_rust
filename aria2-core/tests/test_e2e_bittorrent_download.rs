@@ -1266,6 +1266,51 @@ async fn test_e2e_bt_web_seed_download_and_checkpoint_resume() {
 }
 
 #[tokio::test]
+async fn test_e2e_bt_disabled_web_seed_does_not_request_url_list() {
+    let dir = tmp_dir();
+    let data = vec![0x5Au8; 512];
+    let web_seed = MockHttpServer::start()
+        .await
+        .expect("web-seed server should start");
+    web_seed.register_range_response("/disabled-web-seed.bin", &data);
+
+    let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
+    let web_seed_url = format!("{}/disabled-web-seed.bin", web_seed.base_url());
+    let torrent_data = build_test_torrent_with_web_seeds(
+        "disabled-web-seed.bin",
+        data.len() as u64,
+        data.len() as u32,
+        &tracker.announce_url(),
+        std::slice::from_ref(&web_seed_url),
+    );
+    let options = DownloadOptions {
+        bt_enable_web_seed: false,
+        bt_stop_timeout: Some(1),
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        ..DownloadOptions::default()
+    };
+
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(110),
+        &torrent_data,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), command.execute())
+        .await
+        .expect("disabled web-seed command timed out");
+
+    assert!(result.is_err(), "without peers the disabled web-seed task must stop");
+    assert!(
+        web_seed.take_request_log().is_empty(),
+        "bt-enable-web-seed=false must prevent url-list requests"
+    );
+}
+
+#[tokio::test]
 async fn test_e2e_bt_save_session_flushes_requested_checkpoint() {
     let dir = tmp_dir();
     let total_size = 4096;

@@ -162,7 +162,15 @@ impl ConfigParser {
         while i < args.len() {
             let arg = &args[i];
             if let Some(opt_name) = arg.strip_prefix("--") {
-                if opt_name.starts_with("no-") && opt_name.len() > 3 {
+                if let Some((name, value)) = opt_name.split_once('=') {
+                    if name.starts_with("no-") && name.len() > 3 && !self.registry.contains(name) {
+                        // A `--no-foo` spelling is a boolean negation only
+                        // when `no-foo` is not itself a registered option.
+                        self.set(name[3..].to_string(), OptionValue::Bool(false));
+                    } else {
+                        self.set_raw(name, value);
+                    }
+                } else if opt_name.starts_with("no-") && opt_name.len() > 3 {
                     // Check if `no-<name>` exists as a full option name first (e.g., "no-conf")
                     if self.registry.contains(opt_name) {
                         self.set(opt_name, OptionValue::Bool(true));
@@ -170,11 +178,6 @@ impl ConfigParser {
                         // `no-X` means set option X to false (e.g., "no-check-certificate")
                         let real_name = &opt_name[3..];
                         self.set(real_name, OptionValue::Bool(false));
-                    }
-                } else if opt_name.contains('=') {
-                    let parts: Vec<&str> = opt_name.splitn(2, '=').collect();
-                    if parts.len() == 2 {
-                        self.set_raw(parts[0], parts[1]);
                     }
                 } else if let Some(def) = self.registry.get(opt_name) {
                     if def.opt_type() == OptionType::Boolean {
@@ -460,6 +463,30 @@ mod tests {
         p.parse_cli_args(&["--no-check-certificate", "--no-continue"]);
         assert!(!p.get_bool("check-certificate").unwrap());
         assert!(!p.get_bool("continue").unwrap());
+    }
+
+    #[test]
+    fn test_registered_no_prefix_names_accept_their_own_values() {
+        let mut p = ConfigParser::new();
+        p.parse_cli_args(&[
+            "--no-proxy=localhost,127.0.0.1",
+            "--no-file-allocation-limit=1",
+            "--no-netrc=true",
+            "--no-want-digest-header=true",
+        ]);
+
+        assert!(
+            !p.has_errors(),
+            "registered no-* option errors: {:?}",
+            p.errors()
+        );
+        assert_eq!(
+            p.get("no-proxy").and_then(OptionValue::as_list),
+            Some(&vec!["localhost".to_string(), "127.0.0.1".to_string()])
+        );
+        assert_eq!(p.get_i64("no-file-allocation-limit"), Some(1));
+        assert_eq!(p.get_bool("no-netrc"), Some(true));
+        assert_eq!(p.get_bool("no-want-digest-header"), Some(true));
     }
 
     #[test]

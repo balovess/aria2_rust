@@ -634,7 +634,7 @@ mod tests {
         let msg = BtMessage::Piece {
             index: 0,
             begin: 0,
-            data: vec![0u8; 16384],
+            data: vec![0u8; 16384].into(),
         };
         assert!(v.validate(&msg).is_ok());
     }

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::request::request_group::{
-    DownloadResult, DownloadResultCode, DownloadStatus, RequestGroup,
+    DownloadOptions, DownloadResult, DownloadResultCode, DownloadStatus, RequestGroup,
 };
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -217,13 +217,20 @@ pub fn download_result_to_entry(result: &DownloadResult) -> Option<SessionEntry>
 
     let options = result
         .option_snapshot()
-        .into_iter()
-        .flat_map(|snapshot| snapshot.iter())
-        .filter_map(|(key, value)| {
-            crate::request::request_group::option_value_to_string(value)
-                .map(|value| (key.clone(), value))
+        .map(|snapshot| {
+            let values = snapshot
+                .iter()
+                .filter_map(|(key, value)| {
+                    crate::request::request_group::option_value_to_string(value)
+                        .map(|value| (key.clone(), value))
+                })
+                .collect::<std::collections::HashMap<_, _>>();
+            download_options_to_map_with_snapshot(
+                &DownloadOptions::from_option_strings(&values),
+                Some(snapshot),
+            )
         })
-        .collect();
+        .unwrap_or_default();
 
     let bitfield = if result.bitfield.is_empty() {
         None

@@ -48,6 +48,7 @@ pub(crate) fn valid_bits_mask(nbits: usize) -> u8 {
 }
 
 /// Visit each set logical bit in a single MSB-first byte.
+#[cfg(any(feature = "bittorrent", test))]
 #[inline]
 pub(crate) fn for_each_set_byte(
     mut byte: u8,
@@ -72,6 +73,7 @@ pub(crate) fn for_each_set_byte(
 }
 
 /// Visit each set logical bit in an MSB-first bitfield.
+#[cfg(any(feature = "bittorrent", test))]
 #[inline]
 pub(crate) fn for_each_set_bit(bitfield: &[u8], nbits: usize, mut callback: impl FnMut(usize)) {
     for (byte_index, &byte) in bitfield.iter().enumerate().take(nbits.div_ceil(8)) {

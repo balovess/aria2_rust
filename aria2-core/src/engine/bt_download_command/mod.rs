@@ -432,4 +432,22 @@ mod tests {
             "seed-time is expressed in fractional minutes"
         );
     }
+
+    #[test]
+    fn command_uses_configured_peer_id_prefix() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions {
+            peer_id_prefix: "TEST-PREFIX-".to_string(),
+            ..Default::default()
+        };
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(12),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        assert!(command.local_peer_id.starts_with(b"TEST-PREFIX-"));
+    }
 }

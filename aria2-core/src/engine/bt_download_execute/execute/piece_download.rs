@@ -672,6 +672,10 @@ impl BtDownloadCommand {
 
         // Phase 14 - B1: Initialize endgame state for this download session
         let mut endgame_state = EndgameState::new();
+        let request_timeout = {
+            let group = self.group.recover();
+            Duration::from_secs(group.options().bt_request_timeout.max(1))
+        };
 
         // G1: Snub detection state - track last data received time per peer index
         let mut peer_last_data_time: HashMap<PeerKey, Instant> = HashMap::new();
@@ -1040,7 +1044,7 @@ impl BtDownloadCommand {
                         next_piece_idx,
                         active_connections.len()
                     );
-                    BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity(
+                    BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
                         active_connections,
                         next_piece_idx as u32,
                         actual_piece_len,
@@ -1048,16 +1052,18 @@ impl BtDownloadCommand {
                         &mut endgame_state,
                         self.dht_engine.clone(),
                         Some(self.progress.as_ref()),
+                        request_timeout,
                     )
                     .await
                 } else {
-                    BtMessageHandler::download_piece_blocks_with_sources_and_activity(
+                    BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout(
                         active_connections,
                         next_piece_idx as u32,
                         actual_piece_len,
                         num_blocks,
                         self.dht_engine.clone(),
                         Some(self.progress.as_ref()),
+                        request_timeout,
                     )
                     .await
                 }
@@ -1165,7 +1171,10 @@ impl BtDownloadCommand {
                         "[BT] All blocks received for piece {}, verifying...",
                         next_piece_idx
                     );
-                    if piece_manager.verify_piece_hash(next_piece_idx as u32, &piece_data) {
+                    let expected_hash = piece_manager.expected_piece_hash(next_piece_idx as u32);
+                    let (piece_verified, piece_data) =
+                        super::verify_piece_hash_async(expected_hash, piece_data).await?;
+                    if piece_verified {
                         tracing::info!("[BT] Piece {} verified OK", next_piece_idx);
                         piece_manager.mark_piece_complete(next_piece_idx as u32);
                         piece_picker.mark_completed(next_piece_idx as u32);

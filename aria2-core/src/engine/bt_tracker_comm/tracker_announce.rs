@@ -71,6 +71,10 @@ pub struct TrackerAnnouncer {
     last_failure_kind: Option<TrackerFailureKind>,
     /// Existing download TLS settings used by HTTPS tracker announces.
     http_tls: ClientTlsConfig,
+    /// Per-download tracker request timeout.
+    tracker_timeout_secs: u64,
+    /// Per-download tracker connection timeout.
+    tracker_connect_timeout_secs: u64,
 }
 
 impl TrackerAnnouncer {
@@ -86,6 +90,8 @@ impl TrackerAnnouncer {
             public_tracker_urls: HashSet::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
+            tracker_timeout_secs: 60,
+            tracker_connect_timeout_secs: 60,
         }
     }
 
@@ -101,6 +107,8 @@ impl TrackerAnnouncer {
             public_tracker_urls: HashSet::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
+            tracker_timeout_secs: 60,
+            tracker_connect_timeout_secs: 60,
         }
     }
 
@@ -112,6 +120,23 @@ impl TrackerAnnouncer {
     /// Apply the existing aria2-compatible TLS options to HTTP tracker calls.
     pub(crate) fn set_http_tls_config(&mut self, config: ClientTlsConfig) {
         self.http_tls = config;
+    }
+
+    /// Set the per-download tracker request and connection timeouts.
+    pub fn set_timeouts(&mut self, request: Duration, connect: Duration) {
+        self.tracker_timeout_secs = request.as_secs().max(1);
+        self.tracker_connect_timeout_secs = connect.as_secs().max(1);
+    }
+
+    /// Apply the user-defined announce interval from `bt-tracker-interval`.
+    pub fn set_user_defined_interval(&mut self, interval: Duration) {
+        self.announce.set_user_defined_interval(interval);
+    }
+
+    /// Apply the announce encryption and external-IP options.
+    pub fn set_announce_options(&mut self, force_encryption: bool, external_ip: Option<String>) {
+        self.announce.set_force_encryption(force_encryption);
+        self.announce.set_external_ip(external_ip);
     }
 
     /// Returns true if any announce is ready (stopped, completed, or periodic).
@@ -256,6 +281,7 @@ impl TrackerAnnouncer {
         }
 
         let mgr = self.udp_manager.as_mut()?;
+        mgr.set_request_timeout(Duration::from_secs(self.tracker_timeout_secs));
 
         // The state machine selects one URL per attempt. Keep the UDP manager
         // scoped to that URL so responses cannot be attributed to a different
@@ -353,7 +379,11 @@ impl TrackerAnnouncer {
         );
 
         // Send HTTP request
-        match crate::engine::http_tracker_client::build_tracker_client_with_tls(5, &self.http_tls) {
+        match crate::engine::http_tracker_client::build_tracker_client_with_tls_and_timeouts(
+            self.tracker_timeout_secs,
+            self.tracker_connect_timeout_secs,
+            &self.http_tls,
+        ) {
             Ok(client) => {
                 match client.get(&url).send().await {
                     Ok(resp) => {
@@ -587,6 +617,48 @@ impl TrackerAnnouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracker_timeout_options_are_stored_for_both_transports() {
+        let mut announcer = TrackerAnnouncer::new(
+            &[vec!["http://tracker.example.com/announce".to_string()]],
+            &None,
+        );
+        announcer.set_timeouts(Duration::from_secs(7), Duration::from_secs(11));
+
+        assert_eq!(announcer.tracker_timeout_secs, 7);
+        assert_eq!(announcer.tracker_connect_timeout_secs, 11);
+    }
+
+    #[tokio::test]
+    async fn tracker_request_timeout_aborts_a_slow_http_announce() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local tracker test listener");
+        let address = listener.local_addr().expect("local tracker address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept tracker request");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            use tokio::io::AsyncWriteExt;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+
+        let url = format!("http://{address}/announce");
+        let mut announcer = TrackerAnnouncer::new(&[vec![url]], &None);
+        announcer.set_timeouts(Duration::from_secs(1), Duration::from_secs(1));
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(4),
+            announcer.announce(&[0u8; 20], &[1u8; 20], 0, 1, 0),
+        )
+        .await
+        .expect("tracker request should finish within the test deadline");
+        assert!(result.is_none(), "slow tracker request should time out");
+
+        server.await.expect("tracker test server should exit");
+    }
 
     #[test]
     fn test_tracker_announcer_creation() {

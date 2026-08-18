@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use crate::config::parse_integer_segments;
@@ -17,7 +17,71 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
 
+fn filter_tracker_tiers(tiers: Vec<Vec<String>>, excluded: &[String]) -> Vec<Vec<String>> {
+    if excluded.iter().any(|url| url == "*") {
+        return Vec::new();
+    }
+    if excluded.is_empty() {
+        return tiers;
+    }
+
+    tiers
+        .into_iter()
+        .filter_map(|tier| {
+            let remaining = tier
+                .into_iter()
+                .filter(|url| !excluded.iter().any(|excluded| excluded == url))
+                .collect::<Vec<_>>();
+            (!remaining.is_empty()).then_some(remaining)
+        })
+        .collect()
+}
+
+fn prepare_tracker_tiers(
+    mut tiers: Vec<Vec<String>>,
+    announce: &str,
+    tracker_override: Option<Vec<String>>,
+    excluded: &[String],
+) -> Vec<Vec<String>> {
+    if tiers.is_empty() && !announce.is_empty() {
+        tiers.push(vec![announce.to_string()]);
+    }
+    let mut tiers = filter_tracker_tiers(tiers, excluded);
+    if let Some(list) = tracker_override.filter(|list| !list.is_empty()) {
+        info!(
+            count = list.len(),
+            "Appending user-specified trackers from --bt-tracker"
+        );
+        tiers.extend(list.into_iter().map(|url| vec![url]));
+    }
+    tiers
+}
+
+fn effective_peer_speed_threshold(configured: u64, max_download_limit: Option<u64>) -> u64 {
+    match max_download_limit.filter(|limit| *limit > 0) {
+        Some(limit) => configured.min(limit),
+        None => configured,
+    }
+}
+
+fn download_speed_is_below_peer_request_limit(
+    current_speed: u64,
+    configured: u64,
+    max_download_limit: Option<u64>,
+) -> bool {
+    let threshold = effective_peer_speed_threshold(configured, max_download_limit);
+    threshold > 0 && current_speed < threshold
+}
+
 impl BtDownloadCommand {
+    pub(super) fn peer_exchange_enabled(&self) -> bool {
+        !self.is_private && self.group.recover().options().enable_peer_exchange
+    }
+
+    pub(super) fn apply_peer_exchange_policy(&self, conn: &mut BtPeerConn) {
+        conn.set_pex_enabled(self.peer_exchange_enabled());
+    }
+
     fn return_checked_out_peers(
         &self,
         checked_out: &[(
@@ -85,28 +149,34 @@ impl BtDownloadCommand {
         // Initialize the unified TrackerAnnouncer from the torrent's announce list.
         // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
         // state machine that properly routes HTTP vs UDP based on URL scheme.
-        // `--bt-tracker` overrides the torrent's own announce list
-        // (C++: option value replaces announce URLs).
-        let tracker_override: Option<Vec<String>> = {
+        // C++ first removes excluded torrent trackers and then appends each
+        // `--bt-tracker` URL as its own tier.
+        let (
+            tracker_override,
+            excluded_trackers,
+            tracker_timeout,
+            tracker_connect_timeout,
+            tracker_interval,
+            external_ip,
+            force_encryption,
+        ) = {
             let g = self.group.recover();
-            g.options().bt_tracker.clone()
+            (
+                g.options().bt_tracker.clone(),
+                g.options().bt_exclude_tracker.clone().unwrap_or_default(),
+                g.options().bt_tracker_timeout,
+                g.options().bt_tracker_connect_timeout,
+                g.options().bt_tracker_interval,
+                g.options().bt_external_ip.clone(),
+                g.options().bt_force_encrypt || g.options().bt_require_crypto,
+            )
         };
-        let mut tracker_tiers = match tracker_override {
-            Some(list) if !list.is_empty() => {
-                info!(
-                    count = list.len(),
-                    "Using user-specified trackers from --bt-tracker"
-                );
-                list.into_iter().map(|u| vec![u]).collect()
-            }
-            _ => {
-                let mut tiers = meta.announce_list.clone();
-                if tiers.is_empty() && !meta.announce.is_empty() {
-                    tiers.push(vec![meta.announce.clone()]);
-                }
-                tiers
-            }
-        };
+        let mut tracker_tiers = prepare_tracker_tiers(
+            meta.announce_list.clone(),
+            &meta.announce,
+            tracker_override,
+            &excluded_trackers,
+        );
 
         let enable_public_trackers =
             { self.group.recover().options().enable_public_trackers } && !self.is_private;
@@ -138,8 +208,14 @@ impl BtDownloadCommand {
         }
 
         tracker_tiers = super::deduplicate_tracker_tiers(tracker_tiers);
-        let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &Some(meta.announce.clone()));
+        let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
         announcer.set_http_tls_config(tracker_tls);
+        announcer.set_timeouts(
+            Duration::from_secs(tracker_timeout),
+            Duration::from_secs(tracker_connect_timeout),
+        );
+        announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
+        announcer.set_announce_options(force_encryption, external_ip);
         if let Some(catalog) = public_tracker_catalog {
             announcer.set_public_tracker_catalog(catalog, self.public_tracker_urls.clone());
         }
@@ -398,12 +474,11 @@ impl BtDownloadCommand {
             BtPeerCryptoPolicy {
                 require_mse: group.options().bt_require_crypto || group.options().bt_force_encrypt,
                 force_encryption: group.options().bt_force_encrypt,
-                prefer_encryption: group.effective_option_snapshot().is_some_and(|snapshot| {
-                    snapshot
-                        .get("bt-min-crypto-level")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|level| level.eq_ignore_ascii_case("arc4"))
-                }) || group.options().bt_force_encrypt,
+                prefer_encryption: group
+                    .options()
+                    .bt_min_crypto_level
+                    .eq_ignore_ascii_case("arc4")
+                    || group.options().bt_force_encrypt,
             }
         };
 
@@ -483,6 +558,9 @@ impl BtDownloadCommand {
         };
 
         let mut active_connections = conn_result.connections;
+        for conn in &mut active_connections {
+            self.apply_peer_exchange_policy(conn);
+        }
 
         tracing::info!("[BT] Active connections: {}", active_connections.len());
 
@@ -605,7 +683,29 @@ impl BtDownloadCommand {
     }
 
     pub(super) fn should_discover_more_peers(&self, active_connections: usize) -> bool {
-        self.peer_coordinator.should_replenish(active_connections)
+        if self.peer_coordinator.should_replenish(active_connections) {
+            return true;
+        }
+
+        let group = self.group.recover();
+        download_speed_is_below_peer_request_limit(
+            group.download_speed(),
+            group.options().bt_request_peer_speed_limit,
+            group.options().max_download_limit,
+        )
+    }
+
+    pub(super) fn should_admit_incoming_peer(&self, active_connections: usize) -> bool {
+        let group = self.group.recover();
+        if group.options().bt_max_peers == 0 || active_connections < group.options().bt_max_peers {
+            return true;
+        }
+
+        download_speed_is_below_peer_request_limit(
+            group.download_speed(),
+            group.options().bt_request_peer_speed_limit,
+            group.options().max_download_limit,
+        )
     }
 
     /// Periodic tracker re-announce for peer discovery during download.
@@ -662,5 +762,74 @@ impl BtDownloadCommand {
             }
             None => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        download_speed_is_below_peer_request_limit, effective_peer_speed_threshold,
+        prepare_tracker_tiers,
+    };
+
+    #[test]
+    fn tracker_exclusions_and_user_trackers_follow_announce_policy() {
+        let tiers = prepare_tracker_tiers(
+            vec![vec![
+                "http://torrent-one.test/announce".to_string(),
+                "http://torrent-two.test/announce".to_string(),
+            ]],
+            "",
+            Some(vec!["http://custom.test/announce".to_string()]),
+            &["http://torrent-one.test/announce".to_string()],
+        );
+
+        assert_eq!(
+            tiers,
+            vec![
+                vec!["http://torrent-two.test/announce".to_string()],
+                vec!["http://custom.test/announce".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn wildcard_tracker_exclusion_removes_torrent_trackers_but_keeps_override() {
+        let tiers = prepare_tracker_tiers(
+            vec![vec!["http://torrent.test/announce".to_string()]],
+            "",
+            Some(vec!["http://custom.test/announce".to_string()]),
+            &["*".to_string()],
+        );
+
+        assert_eq!(tiers, vec![vec!["http://custom.test/announce".to_string()]]);
+    }
+
+    #[test]
+    fn peer_speed_threshold_is_clamped_by_download_limit() {
+        assert_eq!(
+            effective_peer_speed_threshold(50 * 1024, Some(20 * 1024)),
+            20 * 1024
+        );
+        assert_eq!(
+            effective_peer_speed_threshold(50 * 1024, Some(0)),
+            50 * 1024
+        );
+        assert_eq!(effective_peer_speed_threshold(50 * 1024, None), 50 * 1024);
+    }
+
+    #[test]
+    fn low_peer_speed_requests_more_peers_but_zero_disables_policy() {
+        assert!(download_speed_is_below_peer_request_limit(
+            10 * 1024,
+            50 * 1024,
+            None,
+        ));
+        assert!(!download_speed_is_below_peer_request_limit(
+            50 * 1024,
+            50 * 1024,
+            None,
+        ));
+        assert!(!download_speed_is_below_peer_request_limit(0, 0, None));
     }
 }

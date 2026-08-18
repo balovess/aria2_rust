@@ -437,6 +437,17 @@ fn test_download_options_to_map_all_fields() {
             "https://tracker.example/announce".to_string(),
             "udp://tracker.example:6969".to_string(),
         ]),
+        bt_exclude_tracker: Some(vec!["https://excluded.example/announce".to_string()]),
+        bt_external_ip: Some("203.0.113.7".to_string()),
+        bt_load_saved_metadata: true,
+        bt_metadata_only: true,
+        bt_min_crypto_level: "arc4".to_string(),
+        bt_request_peer_speed_limit: 128 * 1024,
+        bt_save_metadata: true,
+        bt_tracker_interval: 17,
+        bt_tracker_connect_timeout: 11,
+        bt_tracker_timeout: 23,
+        enable_peer_exchange: false,
         // Checksum
         checksum: Some(("sha256".to_string(), "abc123".to_string())),
         // Cookies
@@ -544,6 +555,7 @@ fn test_download_options_to_map_all_fields() {
         netrc_path: Some("/tmp/netrc".to_string()),
         // Conditional GET
         conditional_get: true,
+        ..DownloadOptions::default()
     };
 
     let map = download_options_to_map(&opts);
@@ -582,6 +594,20 @@ fn test_download_options_to_map_all_fields() {
         map.get("bt-tracker").unwrap(),
         "https://tracker.example/announce,udp://tracker.example:6969"
     );
+    assert_eq!(
+        map.get("bt-exclude-tracker").unwrap(),
+        "https://excluded.example/announce"
+    );
+    assert_eq!(map.get("bt-external-ip").unwrap(), "203.0.113.7");
+    assert_eq!(map.get("bt-load-saved-metadata").unwrap(), "true");
+    assert_eq!(map.get("bt-metadata-only").unwrap(), "true");
+    assert_eq!(map.get("bt-min-crypto-level").unwrap(), "arc4");
+    assert_eq!(map.get("bt-request-peer-speed-limit").unwrap(), "131072");
+    assert_eq!(map.get("bt-save-metadata").unwrap(), "true");
+    assert_eq!(map.get("bt-tracker-interval").unwrap(), "17");
+    assert_eq!(map.get("bt-tracker-connect-timeout").unwrap(), "11");
+    assert_eq!(map.get("bt-tracker-timeout").unwrap(), "23");
+    assert_eq!(map.get("enable-peer-exchange").unwrap(), "false");
     assert_eq!(map.get("enable-public-trackers").unwrap(), "false");
     assert_eq!(
         map.get("bt-piece-selection-strategy").unwrap(),
@@ -670,6 +696,20 @@ fn test_download_options_to_map_all_fields() {
             "udp://tracker.example:6969".to_string(),
         ])
     );
+    assert_eq!(
+        restored.bt_exclude_tracker,
+        Some(vec!["https://excluded.example/announce".to_string()])
+    );
+    assert_eq!(restored.bt_external_ip.as_deref(), Some("203.0.113.7"));
+    assert!(restored.bt_load_saved_metadata);
+    assert!(restored.bt_metadata_only);
+    assert_eq!(restored.bt_min_crypto_level, "arc4");
+    assert_eq!(restored.bt_request_peer_speed_limit, 128 * 1024);
+    assert!(restored.bt_save_metadata);
+    assert_eq!(restored.bt_tracker_interval, 17);
+    assert_eq!(restored.bt_tracker_connect_timeout, 11);
+    assert_eq!(restored.bt_tracker_timeout, 23);
+    assert!(!restored.enable_peer_exchange);
     assert_eq!(restored.listen_port.as_deref(), Some("6881-6999"));
     assert_eq!(restored.dht_listen_port.as_deref(), Some("6881-6999"));
     assert!(!restored.metalink_enable_unique_protocol);

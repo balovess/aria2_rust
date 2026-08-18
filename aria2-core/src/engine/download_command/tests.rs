@@ -33,6 +33,28 @@ impl DownloadCommand {
 }
 
 #[test]
+fn command_timeout_comes_from_download_options() {
+    let options = DownloadOptions {
+        timeout: Some(7),
+        ..DownloadOptions::default()
+    };
+    let command = DownloadCommand::new(
+        GroupId::new(1001),
+        "http://example.com/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .expect("HTTP command should accept a valid URI");
+
+    assert_eq!(
+        Command::timeout(&command),
+        Some(Duration::from_secs(7)),
+        "timeout must be the configured I/O inactivity duration"
+    );
+}
+
+#[test]
 fn in_memory_metadata_retry_classification_matches_http_contract() {
     let policy = RetryPolicy::new(2, 0);
     let server_error = |code| Aria2Error::Recoverable(RecoverableError::ServerError { code });

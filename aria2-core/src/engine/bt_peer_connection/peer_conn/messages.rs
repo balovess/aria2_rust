@@ -111,6 +111,22 @@ impl BtPeerConn {
         }
     }
 
+    /// Send a pre-serialized HAVE frame.
+    ///
+    /// The frame is shared by the broadcast caller; encrypted transports still
+    /// perform their required per-connection encryption copy.
+    pub async fn send_have_frame(&mut self, frame: &[u8]) -> Result<()> {
+        match &mut self.inner {
+            InnerConnection::Plain(c) => c.send_serialized(frame).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            InnerConnection::Encrypted(c) => c.send_serialized(frame).await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
+            }),
+            InnerConnection::Utp(c) => c.send_message(frame).await,
+        }
+    }
+
     pub async fn send_request(
         &mut self,
         req: aria2_protocol::bittorrent::message::types::PieceBlockRequest,
@@ -221,22 +237,41 @@ impl BtPeerConn {
         &mut self,
         validator: Option<&aria2_protocol::bittorrent::message::validation::BtMessageValidator>,
     ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
-        let result = match &mut self.inner {
-            InnerConnection::Plain(c) => c.read_message().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Encrypted(c) => c.read_message().await.map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
-            }),
-            InnerConnection::Utp(c) => {
-                let msg_bytes = c.recv_message().await?;
-                if let Some(bytes) = msg_bytes {
-                    use aria2_protocol::bittorrent::message::factory::parse_message;
-                    parse_message(&bytes).map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
-                } else {
-                    Ok(None)
+        let result = match tokio::time::timeout(self.peer_timeout, async {
+            match &mut self.inner {
+                InnerConnection::Plain(c) => c.read_message().await.map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e,
+                    })
+                }),
+                InnerConnection::Encrypted(c) => c.read_message().await.map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e,
+                    })
+                }),
+                InnerConnection::Utp(c) => {
+                    let msg_bytes = c.recv_message().await?;
+                    if let Some(bytes) = msg_bytes {
+                        use aria2_protocol::bittorrent::message::factory::parse_message;
+                        parse_message(&bytes)
+                            .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
+                    } else {
+                        Ok(None)
+                    }
                 }
             }
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "peer inactivity timeout after {} seconds",
+                        self.peer_timeout.as_secs()
+                    ),
+                },
+            )),
         };
         let result = result.and_then(|message| {
             if let (Some(validator), Some(message)) = (validator, message.as_ref()) {

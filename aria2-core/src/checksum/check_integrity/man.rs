@@ -43,7 +43,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::{Notify, RwLock, oneshot};
+use tokio::sync::{Notify, RwLock, Semaphore, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::checksum::checksum::Checksum;
@@ -76,6 +76,63 @@ pub struct IntegrityOutcome {
 
 fn expected_piece_count(total_length: u64, piece_length: u64) -> usize {
     total_length.div_ceil(piece_length.max(1)) as usize
+}
+
+const MAX_HASH_WORKERS: usize = 4;
+
+fn hash_slots() -> &'static Arc<Semaphore> {
+    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    HASH_SLOTS.get_or_init(|| {
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(1, MAX_HASH_WORKERS);
+        Arc::new(Semaphore::new(workers))
+    })
+}
+
+async fn hash_bytes_async(algo: HashType, data: Vec<u8>) -> Result<Vec<u8>> {
+    let permit = hash_slots()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        Ok::<_, Aria2Error>(MessageDigest::hash_data(algo, &data))
+    })
+    .await
+    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))?
+}
+
+async fn update_digest_async(digest: MessageDigest, data: Vec<u8>) -> Result<MessageDigest> {
+    let permit = hash_slots()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let mut digest = digest;
+        digest.update(&data);
+        digest
+    })
+    .await
+    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))
+}
+
+async fn finalize_digest_async(digest: MessageDigest) -> Result<String> {
+    let permit = hash_slots()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        digest.finalize_hex()
+    })
+    .await
+    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))
 }
 
 #[async_trait]
@@ -222,10 +279,7 @@ impl CheckIntegrityTask for FileChunkValidator {
             .map_err(|e| Aria2Error::Io(format!("read {}: {}", self.path.display(), e)))?;
         buf.truncate(n);
 
-        let digest = MessageDigest::new(self.algo);
-        let mut digest = digest;
-        digest.update(&buf);
-        let actual = digest.finalize();
+        let actual = hash_bytes_async(self.algo, buf).await?;
 
         let ok = self
             .expected
@@ -374,9 +428,7 @@ impl CheckIntegrityTask for MultiFileChunkValidator {
         let offset = self.current_piece as u64 * self.piece_length;
         let length = (self.total_length - offset).min(self.piece_length) as usize;
         let data = self.read_piece(offset, length).await?;
-        let mut digest = MessageDigest::new(self.algo);
-        digest.update(&data);
-        let actual = digest.finalize();
+        let actual = hash_bytes_async(self.algo, data).await?;
         if self.expected.get(self.current_piece) != Some(&actual) {
             self.passed = false;
             self.failed_indices.push(self.current_piece);
@@ -475,18 +527,20 @@ impl CheckIntegrityTask for FileChecksumTask {
             })?;
 
         if bytes_read == 0 {
-            let actual_hex = self
+            let digest = self
                 .digest
                 .take()
-                .expect("checksum digest is present until EOF")
-                .finalize_hex();
+                .expect("checksum digest is present until EOF");
+            let actual_hex = finalize_digest_async(digest).await?;
             self.passed = actual_hex.eq_ignore_ascii_case(&self.expected_hex);
             self.finished = true;
         } else {
-            self.digest
-                .as_mut()
-                .expect("checksum digest is present before EOF")
-                .update(&buffer[..bytes_read]);
+            buffer.truncate(bytes_read);
+            let digest = self
+                .digest
+                .take()
+                .expect("checksum digest is present before EOF");
+            self.digest = Some(update_digest_async(digest, buffer).await?);
             self.current_length += bytes_read as u64;
         }
         Ok(())

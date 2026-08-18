@@ -183,6 +183,36 @@ pub fn split_auth_token(params: &serde_json::Value) -> (Option<String>, Option<s
     }
 }
 
+/// Consume a parameter value while removing a leading `token:` entry.
+///
+/// Server-side parsers already own their request DOM. This variant preserves
+/// the borrowed helper's wire semantics without cloning the whole positional
+/// parameter array before dispatch.
+pub(crate) fn split_auth_token_owned(
+    params: serde_json::Value,
+) -> (Option<String>, serde_json::Value) {
+    match params {
+        serde_json::Value::Array(mut arr) => {
+            let token = arr
+                .first()
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.strip_prefix("token:"))
+                .map(str::to_owned);
+            if token.is_some() {
+                arr.remove(0);
+            }
+            (token, serde_json::Value::Array(arr))
+        }
+        params => {
+            let token = params
+                .get("token")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
+            (token, params)
+        }
+    }
+}
+
 /// Format session summary for logging/display
 ///
 /// Creates a human-readable summary of the current session state.

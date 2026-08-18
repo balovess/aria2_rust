@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::error::Result;
 
 use super::super::types::SendBuffer;
-use super::{BtPeerConn, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
+use super::BtPeerConn;
 
 impl BtPeerConn {
     // -----------------------------------------------------------------------
@@ -15,16 +15,24 @@ impl BtPeerConn {
 
     /// Check whether we should send a keep-alive message.
     ///
-    /// Returns `true` if more than [`KEEPALIVE_INTERVAL_SECS`] have elapsed
-    /// since the last keep-alive was sent.
+    /// Returns `true` if the configured interval has elapsed since the last
+    /// keep-alive was sent.
     pub fn should_send_keepalive(&self) -> bool {
-        self.last_keepalive_sent.elapsed() >= Duration::from_secs(KEEPALIVE_INTERVAL_SECS)
+        self.last_keepalive_sent.elapsed() >= self.keep_alive_interval
     }
 
-    /// Check whether the peer has timed out (no messages received for
-    /// [`PEER_TIMEOUT_SECS`]).
+    /// Check whether the peer has timed out according to the configured
+    /// inactivity interval.
     pub fn is_peer_timed_out(&self) -> bool {
-        self.last_message_received.elapsed() >= Duration::from_secs(PEER_TIMEOUT_SECS)
+        self.last_message_received.elapsed() >= self.peer_timeout
+    }
+
+    /// Configure the keep-alive and peer inactivity intervals for this
+    /// connection. The download command applies task options here after the
+    /// transport handshake completes.
+    pub(crate) fn set_timeouts(&mut self, keep_alive: Duration, peer_timeout: Duration) {
+        self.keep_alive_interval = keep_alive;
+        self.peer_timeout = peer_timeout;
     }
 
     // -----------------------------------------------------------------------

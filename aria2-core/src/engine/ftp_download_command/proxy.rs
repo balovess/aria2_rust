@@ -229,7 +229,7 @@ impl FtpDownloadCommand {
             ))));
         }
 
-        let finalized_data = match writer.finalize().await {
+        let mut finalized_data = match writer.finalize().await {
             Ok(data) => data,
             Err(error) => {
                 self.flush_checkpoint().await;
@@ -245,7 +245,9 @@ impl FtpDownloadCommand {
                 })?;
             let checksum = Checksum::new(hash_type, &expected)?;
             let verified = if in_memory_download {
-                checksum.verify(&finalized_data)
+                let (data, verified) = checksum.verify_async(finalized_data).await?;
+                finalized_data = data;
+                verified
             } else {
                 crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
                     &crate::checksum::check_integrity::man::shared(),

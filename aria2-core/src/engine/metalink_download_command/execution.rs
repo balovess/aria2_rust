@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 use crate::checksum::checksum::Checksum;
@@ -24,6 +26,10 @@ use super::MetalinkDownloadCommand;
 fn classify_metalink_http_status(status_code: u16) -> Aria2Error {
     if status_code == 404 {
         Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+    } else if status_code == 401 || status_code == 407 {
+        Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
+            message: format!("authentication failed: HTTP {status_code}"),
+        })
     } else if status_code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&status_code) {
         Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
     } else {
@@ -76,7 +82,7 @@ impl Command for MetalinkDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(600))
+        self.group.recover().timeout()
     }
 }
 
@@ -1204,7 +1210,8 @@ impl MetalinkDownloadCommand {
                 }
                 read += count;
             }
-            let actual = digest_hex(&buffer[..read], pieces.type_);
+            let (actual, returned_buffer) = digest_hex_async(buffer, read, pieces.type_).await?;
+            buffer = returned_buffer;
             if !actual.eq_ignore_ascii_case(expected_hash) {
                 warn!(piece = index, "Metalink piece hash mismatch");
                 return Ok(false);
@@ -1277,6 +1284,39 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
     }
 }
 
+const MAX_METALINK_HASH_WORKERS: usize = 4;
+
+fn metalink_hash_slots() -> &'static Arc<Semaphore> {
+    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    HASH_SLOTS.get_or_init(|| {
+        let workers = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .clamp(1, MAX_METALINK_HASH_WORKERS);
+        Arc::new(Semaphore::new(workers))
+    })
+}
+
+async fn digest_hex_async(
+    data: Vec<u8>,
+    used: usize,
+    algo: aria2_protocol::metalink::parser::HashAlgorithm,
+) -> Result<(String, Vec<u8>)> {
+    debug_assert!(used <= data.len());
+    let permit = metalink_hash_slots()
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| Aria2Error::Io(format!("Metalink hash dispatcher closed: {error}")))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let digest = digest_hex(&data[..used], algo);
+        (digest, data)
+    })
+    .await
+    .map_err(|error| Aria2Error::Io(format!("Metalink hash task failed: {error}")))
+}
+
 #[cfg(test)]
 mod http_status_tests {
     use super::*;
@@ -1307,6 +1347,17 @@ mod http_status_tests {
             classify_metalink_http_status(404),
             Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
         ));
+    }
+
+    #[test]
+    fn classifies_authentication_statuses_as_http_auth_failures() {
+        for status_code in [401, 407] {
+            assert!(matches!(
+                classify_metalink_http_status(status_code),
+                Aria2Error::Recoverable(RecoverableError::HttpAuthFailed { message })
+                    if message == format!("authentication failed: HTTP {status_code}")
+            ));
+        }
     }
 
     #[tokio::test]

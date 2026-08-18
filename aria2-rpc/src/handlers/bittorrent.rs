@@ -5,7 +5,7 @@
 
 use crate::engine::{RpcEngine, rpc_method_requires_auth};
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
-use crate::rpc_helpers::split_auth_token;
+use crate::rpc_helpers::split_auth_token_owned;
 use crate::types::{DownloadStatus, PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::engine::engine_command::EngineCommand;
@@ -393,24 +393,80 @@ impl RpcEngine {
             }
         };
 
+        self.execute_multicall(req.id.clone().unwrap_or_default(), calls)
+            .await
+    }
+
+    /// Owned variant used by the network server. It consumes the outer
+    /// parameter array and each sub-call object, avoiding a clone of every
+    /// nested parameter value in large multicall refresh requests.
+    pub(crate) async fn handle_multicall_owned(
+        &self,
+        req: JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let id = req.id.unwrap_or_default();
+        let calls = match req.params {
+            serde_json::Value::Array(params) => match params.into_iter().next() {
+                Some(serde_json::Value::Array(calls)) => calls,
+                Some(_) => {
+                    return Err(JsonRpcError::RpcExecution(
+                        "The parameter at 0 has wrong type.".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(JsonRpcError::RpcExecution(
+                        "The parameter at 0 is required but missing.".to_string(),
+                    ));
+                }
+            },
+            serde_json::Value::Object(mut params) => match params.remove("p0") {
+                Some(serde_json::Value::Array(calls)) => calls,
+                Some(_) => {
+                    return Err(JsonRpcError::RpcExecution(
+                        "The parameter at 0 has wrong type.".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(JsonRpcError::RpcExecution(
+                        "The parameter at 0 is required but missing.".to_string(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(JsonRpcError::RpcExecution(
+                    "The parameter at 0 is required but missing.".to_string(),
+                ));
+            }
+        };
+
+        self.execute_multicall(id, calls).await
+    }
+
+    async fn execute_multicall(
+        &self,
+        id: serde_json::Value,
+        calls: Vec<serde_json::Value>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         if calls.is_empty() {
-            return Ok(JsonRpcResponse::success(
-                req.id.clone().unwrap_or_default(),
-                serde_json::json!([]),
-            ));
+            return Ok(JsonRpcResponse::success(id, serde_json::json!([])));
         }
 
         let mut results = Vec::with_capacity(calls.len());
 
-        for call_obj in &calls {
-            let Some(call_obj) = call_obj.as_object() else {
-                results.push(serde_json::json!({
-                    "code": 1,
-                    "message": "system.multicall expected struct."
-                }));
-                continue;
+        for call_obj in calls {
+            let mut call_obj = match call_obj {
+                serde_json::Value::Object(call_obj) => call_obj,
+                _ => {
+                    results.push(serde_json::json!({
+                        "code": 1,
+                        "message": "system.multicall expected struct."
+                    }));
+                    continue;
+                }
             };
-            let Some(method_name) = call_obj.get("methodName").and_then(|value| value.as_str())
+            let Some(method_name) = call_obj
+                .remove("methodName")
+                .and_then(|value| value.as_str().map(str::to_owned))
             else {
                 results.push(serde_json::json!({
                     "code": 1,
@@ -429,8 +485,8 @@ impl RpcEngine {
             // The original implementation accepts only a list for a
             // sub-call's params member. Missing, null, object, and scalar
             // values all become an empty list before authorization/dispatch.
-            let call_params = match call_obj.get("params") {
-                Some(serde_json::Value::Array(params)) => serde_json::Value::Array(params.clone()),
+            let call_params = match call_obj.remove("params") {
+                Some(serde_json::Value::Array(params)) => serde_json::Value::Array(params),
                 _ => serde_json::Value::Array(Vec::new()),
             };
 
@@ -439,11 +495,10 @@ impl RpcEngine {
             // parameter and validate it. Without this the token would leak
             // into the handler as a positional argument and shift every
             // subsequent parameter by one.
-            let (sub_token, stripped_params) = split_auth_token(&call_params);
-            let sub_request =
-                JsonRpcRequest::new(method_name, stripped_params.unwrap_or(call_params));
+            let (sub_token, stripped_params) = split_auth_token_owned(call_params);
+            let sub_request = JsonRpcRequest::new(method_name, stripped_params);
 
-            let sub_response = if rpc_method_requires_auth(method_name) {
+            let sub_response = if rpc_method_requires_auth(&sub_request.method) {
                 match self.auth_middleware.validate(sub_token.as_deref()) {
                     Ok(()) => self.dispatch_single(&sub_request).await,
                     Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
@@ -470,9 +525,6 @@ impl RpcEngine {
             }
         }
 
-        Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
-            serde_json::json!(results),
-        ))
+        Ok(JsonRpcResponse::success(id, serde_json::json!(results)))
     }
 }

@@ -208,9 +208,9 @@ fn every_registered_option_uses_one_parser_contract() {
 #[test]
 fn runtime_policy_names_are_unique_and_registered() {
     use super::runtime::{
-        INITIAL_REQUEST_OPTIONS, INITIAL_SNAPSHOT_CONSUMER_OPTIONS,
+        INITIAL_IDENTITY_OPTIONS, INITIAL_REQUEST_OPTIONS, INITIAL_SNAPSHOT_WIRE_OPTIONS,
         RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
-        RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_snapshot_consumer,
+        RUNTIME_GLOBAL_CHANGEABLE_OPTIONS,
     };
 
     let registry = OptionRegistry::new();
@@ -221,9 +221,10 @@ fn runtime_policy_names_are_unique_and_registered() {
         "reserved task policy",
         RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
     );
+    assert_unique("initial identity policy", INITIAL_IDENTITY_OPTIONS);
     assert_unique(
-        "initial snapshot consumer policy",
-        INITIAL_SNAPSHOT_CONSUMER_OPTIONS,
+        "initial snapshot wire policy",
+        INITIAL_SNAPSHOT_WIRE_OPTIONS,
     );
 
     for name in INITIAL_REQUEST_OPTIONS
@@ -257,15 +258,18 @@ fn runtime_policy_names_are_unique_and_registered() {
         }
     }
 
-    for name in INITIAL_SNAPSHOT_CONSUMER_OPTIONS {
+    for name in INITIAL_IDENTITY_OPTIONS {
         assert!(
             INITIAL_REQUEST_OPTIONS.contains(name),
-            "snapshot consumer '{}' is not an initial request option",
+            "identity consumer '{}' is not an initial request option",
             name
         );
+    }
+
+    for name in INITIAL_SNAPSHOT_WIRE_OPTIONS {
         assert!(
-            is_snapshot_consumer(name),
-            "snapshot consumer '{}' must be recognized by the shared policy",
+            INITIAL_REQUEST_OPTIONS.contains(name),
+            "snapshot wire option '{}' is not an initial request option",
             name
         );
     }
@@ -273,18 +277,77 @@ fn runtime_policy_names_are_unique_and_registered() {
 
 #[test]
 fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consumer() {
-    use super::runtime::{INITIAL_REQUEST_OPTIONS, is_snapshot_consumer};
+    use super::runtime::{INITIAL_IDENTITY_OPTIONS, INITIAL_REQUEST_OPTIONS};
 
     let registry = OptionRegistry::new();
-    let mut missing = Vec::new();
+    let mut config_content = String::new();
+    let mut cli_args = Vec::new();
     for name in INITIAL_REQUEST_OPTIONS {
         let Some(definition) = registry.get(name) else {
             continue;
         };
         let raw = non_default_sample(definition);
-        let options = std::collections::HashMap::from([((*name).to_string(), raw)]);
+        config_content.push_str(name);
+        config_content.push('=');
+        config_content.push_str(&raw);
+        config_content.push('\n');
+        cli_args.push(format!("--{}={}", name, raw));
+    }
+
+    let temp_dir = tempfile::tempdir().expect("initial-option contract directory");
+    let config_path = temp_dir.path().join("initial-options.conf");
+    std::fs::write(&config_path, config_content).expect("write initial-option config fixture");
+
+    let mut file_parser = ConfigParser::new();
+    file_parser.parse_file(config_path.to_str().expect("UTF-8 temp path"));
+    assert!(
+        !file_parser.has_errors(),
+        "initial-option config errors: {:?}",
+        file_parser.errors()
+    );
+    let file_download_options =
+        crate::request::request_group::DownloadOptions::from_option_values(file_parser.options());
+    let file_session =
+        crate::session::session_entry::download_options_to_map(&file_download_options);
+
+    let cli_refs = cli_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut cli_parser = ConfigParser::new();
+    cli_parser.parse_cli_args(&cli_refs);
+    assert!(
+        !cli_parser.has_errors(),
+        "initial-option CLI errors: {:?}",
+        cli_parser.errors()
+    );
+    let cli_download_options =
+        crate::request::request_group::DownloadOptions::from_option_values(cli_parser.options());
+    let cli_session = crate::session::session_entry::download_options_to_map(&cli_download_options);
+
+    let mut missing: Vec<&str> = Vec::new();
+    for name in INITIAL_REQUEST_OPTIONS {
+        let Some(definition) = registry.get(name) else {
+            continue;
+        };
+        if INITIAL_IDENTITY_OPTIONS.contains(name) {
+            continue;
+        }
+        let raw = non_default_sample(definition);
+        let options = std::collections::HashMap::from([((*name).to_string(), raw.clone())]);
         let download_options =
             crate::request::request_group::DownloadOptions::from_option_strings(&options);
+        let rpc_options = std::collections::HashMap::from([(
+            (*name).to_string(),
+            serde_json::Value::String(raw.clone()),
+        )]);
+        let rpc_download_options =
+            crate::request::request_group::DownloadOptions::try_from_rpc_options(&rpc_options)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "RPC option '{}' must reach DownloadOptions: {}",
+                        name, error
+                    )
+                });
+        let rpc_session =
+            crate::session::session_entry::download_options_to_map(&rpc_download_options);
         let snapshot = crate::config::project_initial_options(
             options
                 .iter()
@@ -294,20 +357,343 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
             &download_options,
             Some(&snapshot),
         );
-        if !serialized.contains_key(session_wire_name(name)) {
-            assert!(
-                is_snapshot_consumer(name),
-                "initial option '{}' must either map to DownloadOptions/session or be an explicit snapshot consumer",
-                name
-            );
-            missing.push(*name);
+        let wire_name = session_wire_name(name);
+        let reaches_all_entry_points = [
+            ("config-file", &file_session),
+            ("cli", &cli_session),
+            ("rpc", &rpc_session),
+            ("session-snapshot", &serialized),
+        ]
+        .into_iter()
+        .all(|(source, map)| {
+            if map.get(wire_name) != Some(&raw) {
+                eprintln!(
+                    "initial option '{}' from {} serialized as {:?}, expected {:?}",
+                    name,
+                    source,
+                    map.get(wire_name),
+                    raw
+                );
+                false
+            } else {
+                true
+            }
+        });
+        if !reaches_all_entry_points {
+            missing.push(name);
         }
     }
 
     assert!(
         missing.is_empty(),
-        "initial options have no DownloadOptions/session consumer: {:?}; add a real field mapping or explicitly move the option to a snapshot consumer",
+        "initial options have no DownloadOptions/session consumer: {:?}; add a typed field mapping",
         missing
+    );
+}
+
+#[test]
+fn every_task_runtime_policy_has_a_real_download_option_consumer() {
+    use super::runtime::{RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS};
+
+    let registry = OptionRegistry::new();
+    let mut group = crate::request::request_group::RequestGroup::new(
+        crate::request::request_group::GroupId::new(42),
+        vec!["http://example.test/file".to_string()],
+        crate::request::request_group::DownloadOptions::default(),
+    );
+    let mut seen = BTreeSet::new();
+
+    for name in RUNTIME_CHANGEABLE_OPTIONS
+        .iter()
+        .chain(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS)
+    {
+        if !seen.insert(*name) {
+            continue;
+        }
+        let Some(definition) = registry.get(name) else {
+            // Feature-specific policies are absent from a build without the
+            // corresponding protocol feature.
+            continue;
+        };
+        let raw = non_default_sample(definition);
+        let value = serde_json::Value::String(raw);
+        assert!(
+            crate::request::request_group::RequestGroup::validate_option_update(name, &value)
+                .expect("runtime option validation must not fail"),
+            "runtime policy '{}' has no typed DownloadOptions consumer",
+            name
+        );
+        assert!(
+            group
+                .try_update_option(name, value)
+                .expect("runtime option update must not fail"),
+            "runtime policy '{}' was not applied to the live request group",
+            name
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_global_runtime_policy_reaches_config_manager_storage() {
+    use super::runtime::RUNTIME_GLOBAL_CHANGEABLE_OPTIONS;
+
+    let registry = OptionRegistry::new();
+    let mut manager = super::ConfigManager::new();
+    for name in RUNTIME_GLOBAL_CHANGEABLE_OPTIONS {
+        let Some(definition) = registry.get(name) else {
+            continue;
+        };
+        let raw = non_default_sample(definition);
+        let parsed = definition.parse_value(&raw).unwrap_or_else(|error| {
+            panic!("global option '{}' sample is invalid: {}", name, error)
+        });
+        manager
+            .set_global_option(name, parsed.clone())
+            .await
+            .unwrap_or_else(|error| panic!("global option '{}' was not stored: {}", name, error));
+        assert_eq!(
+            manager.get_global_option(name).await,
+            Some(parsed),
+            "global option '{}' did not round-trip through ConfigManager",
+            name
+        );
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn bittorrent_options_share_config_cli_rpc_and_session_contract() {
+    use crate::request::request_group::DownloadOptions;
+    use crate::session::session_entry::download_options_to_map;
+
+    let config_content = "bt-exclude-tracker=http://excluded.test/announce,udp://excluded.test:6969\n\
+bt-tracker=http://custom-one.test/announce,udp://custom-two.test:6969\n\
+bt-external-ip=203.0.113.7\n\
+bt-tracker-interval=17\n\
+bt-tracker-timeout=23\n\
+bt-tracker-connect-timeout=11\n\
+bt-request-peer-speed-limit=128K\n\
+enable-peer-exchange=false\n\
+bt-load-saved-metadata=true\n\
+bt-save-metadata=true\n\
+bt-metadata-only=true\n";
+    let temp_dir = tempfile::tempdir().expect("BitTorrent config contract directory");
+    let config_path = temp_dir.path().join("bittorrent-options.conf");
+    std::fs::write(&config_path, config_content).expect("write BitTorrent config fixture");
+
+    let mut file_parser = ConfigParser::new();
+    file_parser.parse_file(config_path.to_str().expect("UTF-8 temp path"));
+    assert!(
+        !file_parser.has_errors(),
+        "config errors: {:?}",
+        file_parser.errors()
+    );
+    let file_options = DownloadOptions::from_option_values(file_parser.options());
+
+    let mut cli_parser = ConfigParser::new();
+    cli_parser.parse_cli_args(&[
+        "--bt-exclude-tracker=http://excluded.test/announce",
+        "--bt-exclude-tracker=udp://excluded.test:6969",
+        "--bt-tracker=http://custom-one.test/announce,udp://custom-two.test:6969",
+        "--bt-external-ip=203.0.113.7",
+        "--bt-tracker-interval=17",
+        "--bt-tracker-timeout=23",
+        "--bt-tracker-connect-timeout=11",
+        "--bt-request-peer-speed-limit=128K",
+        "--enable-peer-exchange=false",
+        "--bt-load-saved-metadata=true",
+        "--bt-save-metadata=true",
+        "--bt-metadata-only=true",
+    ]);
+    assert!(
+        !cli_parser.has_errors(),
+        "CLI errors: {:?}",
+        cli_parser.errors()
+    );
+    let cli_options = DownloadOptions::from_option_values(cli_parser.options());
+
+    let rpc_values = std::collections::HashMap::from([
+        (
+            "bt-exclude-tracker".to_string(),
+            serde_json::json!(["http://excluded.test/announce", "udp://excluded.test:6969"]),
+        ),
+        (
+            "bt-tracker".to_string(),
+            serde_json::json!("http://custom-one.test/announce,udp://custom-two.test:6969"),
+        ),
+        (
+            "bt-external-ip".to_string(),
+            serde_json::json!("203.0.113.7"),
+        ),
+        ("bt-tracker-interval".to_string(), serde_json::json!(17)),
+        ("bt-tracker-timeout".to_string(), serde_json::json!(23)),
+        (
+            "bt-tracker-connect-timeout".to_string(),
+            serde_json::json!(11),
+        ),
+        (
+            "bt-request-peer-speed-limit".to_string(),
+            serde_json::json!("128K"),
+        ),
+        ("enable-peer-exchange".to_string(), serde_json::json!(false)),
+        (
+            "bt-load-saved-metadata".to_string(),
+            serde_json::json!(true),
+        ),
+        ("bt-save-metadata".to_string(), serde_json::json!(true)),
+        ("bt-metadata-only".to_string(), serde_json::json!(true)),
+    ]);
+    let rpc_options = DownloadOptions::try_from_rpc_options(&rpc_values)
+        .expect("RPC BitTorrent options must use the shared typed parser");
+
+    for (source, options) in [
+        ("config-file", &file_options),
+        ("CLI", &cli_options),
+        ("RPC", &rpc_options),
+    ] {
+        assert_eq!(
+            options.bt_exclude_tracker.as_deref(),
+            Some(
+                [
+                    "http://excluded.test/announce".to_string(),
+                    "udp://excluded.test:6969".to_string(),
+                ]
+                .as_slice()
+            ),
+            "{} bt-exclude-tracker",
+            source
+        );
+        assert_eq!(
+            options.bt_tracker.as_deref(),
+            Some(
+                [
+                    "http://custom-one.test/announce".to_string(),
+                    "udp://custom-two.test:6969".to_string(),
+                ]
+                .as_slice()
+            ),
+            "{} bt-tracker",
+            source
+        );
+        assert_eq!(options.bt_external_ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(options.bt_tracker_interval, 17);
+        assert_eq!(options.bt_tracker_timeout, 23);
+        assert_eq!(options.bt_tracker_connect_timeout, 11);
+        assert_eq!(options.bt_request_peer_speed_limit, 128 * 1024);
+        assert!(!options.enable_peer_exchange);
+        assert!(options.bt_load_saved_metadata);
+        assert!(options.bt_save_metadata);
+        assert!(options.bt_metadata_only);
+    }
+
+    let session = download_options_to_map(&rpc_options);
+    for (name, expected) in [
+        (
+            "bt-exclude-tracker",
+            "http://excluded.test/announce,udp://excluded.test:6969",
+        ),
+        (
+            "bt-tracker",
+            "http://custom-one.test/announce,udp://custom-two.test:6969",
+        ),
+        ("bt-external-ip", "203.0.113.7"),
+        ("bt-tracker-interval", "17"),
+        ("bt-tracker-timeout", "23"),
+        ("bt-tracker-connect-timeout", "11"),
+        ("bt-request-peer-speed-limit", "131072"),
+        ("enable-peer-exchange", "false"),
+        ("bt-load-saved-metadata", "true"),
+        ("bt-save-metadata", "true"),
+        ("bt-metadata-only", "true"),
+    ] {
+        assert_eq!(
+            session.get(name).map(String::as_str),
+            Some(expected),
+            "session {}",
+            name
+        );
+    }
+
+    let restored = DownloadOptions::from_option_strings(&session);
+    assert_eq!(restored.bt_tracker, rpc_options.bt_tracker);
+    assert_eq!(restored.bt_exclude_tracker, rpc_options.bt_exclude_tracker);
+    assert_eq!(restored.bt_external_ip, rpc_options.bt_external_ip);
+    assert_eq!(
+        restored.bt_tracker_interval,
+        rpc_options.bt_tracker_interval
+    );
+    assert_eq!(restored.bt_tracker_timeout, rpc_options.bt_tracker_timeout);
+    assert_eq!(
+        restored.bt_tracker_connect_timeout,
+        rpc_options.bt_tracker_connect_timeout
+    );
+    assert_eq!(
+        restored.bt_request_peer_speed_limit,
+        rpc_options.bt_request_peer_speed_limit
+    );
+    assert_eq!(
+        restored.enable_peer_exchange,
+        rpc_options.enable_peer_exchange
+    );
+    assert_eq!(
+        restored.bt_load_saved_metadata,
+        rpc_options.bt_load_saved_metadata
+    );
+    assert_eq!(restored.bt_save_metadata, rpc_options.bt_save_metadata);
+    assert_eq!(restored.bt_metadata_only, rpc_options.bt_metadata_only);
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn bittorrent_execution_options_round_trip_through_task_session() {
+    use crate::request::request_group::DownloadOptions;
+    use crate::session::session_entry::download_options_to_map;
+
+    let cases = [
+        ("bt-enable-web-seed", "false"),
+        ("bt-max-open-files", "17"),
+        ("bt-peer-blocklist", "blocked-peers.txt"),
+        ("bt-keep-alive-interval", "31"),
+        ("bt-timeout", "181"),
+        ("bt-request-timeout", "61"),
+        ("peer-connection-timeout", "16"),
+        ("peer-id-prefix", "AZ1234"),
+        ("peer-agent", "contract-peer-agent/1"),
+        ("dht-message-timeout", "11"),
+        ("enable-dht6", "true"),
+        ("dht-listen-addr6", "::1"),
+        ("dht-entry-point-host", "bootstrap.example"),
+        ("dht-entry-point-port", "6881"),
+        ("dht-entry-point6", "[2001:db8::1]:6881"),
+        ("dht-entry-point-host6", "bootstrap6.example"),
+        ("dht-entry-point-port6", "6882"),
+        ("dht-file-path6", "dht6.dat"),
+        ("dht-listen-addr", "127.0.0.1"),
+    ];
+
+    let raw = cases
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let options = DownloadOptions::from_option_strings(&raw);
+    let serialized = download_options_to_map(&options);
+
+    for (name, expected) in cases {
+        assert_eq!(
+            serialized.get(name).map(String::as_str),
+            Some(expected),
+            "BitTorrent execution option '{}' must have a typed session consumer",
+            name
+        );
+    }
+}
+
+#[test]
+fn initial_option_snapshot_is_reserved_for_wire_fidelity_only() {
+    assert_eq!(
+        super::runtime::INITIAL_SNAPSHOT_WIRE_OPTIONS,
+        &["min-split-size"],
+        "raw snapshot preservation must not become an execution fallback"
     );
 }
 

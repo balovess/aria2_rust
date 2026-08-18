@@ -1,5 +1,121 @@
 # aria2 → Rust 迁移主台账
 
+## 当前性能差异化索引
+
+相对 `aria2_original` 的磁盘 I/O、数据路径、Hash、BT/DHT、文件预分配、RPC 和事件
+驱动优化，统一见 [Performance Differentiators](performance-differentiators.md)。该文档
+是当前实现入口和性能证据的索引；本文件下面的 dated checkpoint 仍然是历史记录，
+不因新增索引而改变其验收状态。
+
+## 2026-08-18 PKCS#12 AES-CBC identity compatibility checkpoint
+
+The Rust-owned empty-password PKCS#12 identity adapter now retains the
+existing `p12_q3` path for supported archives and falls back to `pkcs5` PBES2
+decoding when the archive uses AES-128-CBC or AES-192-CBC. The fallback also
+walks encrypted safe contents when `p12_q3` cannot decrypt the content, and
+accepts a plaintext `keyBag` containing PKCS#8 private-key DER. No option name,
+default, session shape, RPC/CLI wire behavior, certificate chain handling, or
+product version changed. The new fixtures are built inside the Rust test with
+corrected PBKDF2 AlgorithmIdentifier encoding and do not depend on an external
+client or executable.
+
+Rust-owned verification:
+
+~~~text
+cargo test --target-dir target-phase2 -j 1 -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
+  17 passed, 0 failed
+cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+rustfmt --edition 2024 --check aria2-core/src/http/client_identity.rs
+  PASS
+git diff --check -- aria2-core/Cargo.toml aria2-core/src/http/client_identity.rs Cargo.lock
+  PASS
+~~~
+
+This closes only the AES-128/192-CBC and plaintext `keyBag` PKCS#12 slices.
+AES-GCM, alternative PBKDF2 PRFs, unsupported bag variants, password-bearing
+archives, broader original-client/third-party HTTPS interoperability, and the
+final workspace acceptance remain open. The active phase remains
+`phase-2-core-domain` (`in_progress`) and the migration remains `PARTIAL`.
+
+## 2026-08-18 DHT announce 实际 peer 端口检查点
+
+BitTorrent 完成公告现在把已绑定的 TCP peer listener 端口传给 DHT
+`announce_peer`。此前完成路径传入固定的 `0`，远端虽然能收到公告，却无法
+据此连接到实际 peer；若 listener 尚未建立，则跳过无效公告。端口选择仍由
+engine-owned listener 负责，DHT UDP 监听端口不被误用为 BitTorrent peer 端口。
+
+Rust-owned 回归验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::bt_download_execute::execute::finalization::tests --target-dir target-phase2 -j 1 -- --test-threads=1
+  3 passed, 0 failed
+~~~
+
+这一检查点关闭的是完成公告的端口传递切片；公网 DHT、原版客户端互操作、
+完整跨协议组合和最终 workspace 验收仍未完成，Goal 继续保持
+`phase-2-core-domain` / `PARTIAL`。
+
+## 2026-08-18 DHT 本地节点查询过滤检查点
+
+原版 `DHTMessageReceiver` 在消息分发前会比较远端 node ID 与本地 node
+ID；收到自身发出的查询时直接转为 unknown 消息，不发送响应，也不把本地
+节点重新写入路由表。Rust inbound handler 现在在方法分发前执行同一边界
+判断，并让 `HandleResult` 明确表示不响应、不标记 good。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-protocol --all-features --lib bittorrent::dht::handler::tests --target-dir target-phase2 -j 1 -- --test-threads=1
+  7 passed, 0 failed
+cargo test -p aria2-core --all-features --test dht_integration_tests --target-dir target-phase2 -j 1 -- --test-threads=1
+  30 passed, 0 failed, 4 ignored
+cargo clippy -p aria2-protocol --all-targets --all-features --target-dir target-phase2 -j 1 -- -D warnings
+  PASS
+~~~
+
+这个检查点只关闭 DHT 本地节点自查询过滤切片；公网 DHT、准确 advertise
+port 生命周期、原版客户端互操作、跨协议组合和最终 workspace 验收仍未完成，
+Goal 继续保持 `phase-2-core-domain` / `PARTIAL`。
+
+## 2026-08-18 引擎空闲事件与持久化 deadline 检查点
+
+引擎空闲路径现在只等待四类输入：`EngineCommand`、任务完成通知、最早的真实维护
+deadline 和 shutdown 信号。旧的固定 tick 不再作为空闲扫描周期；没有命令、完成或
+到期维护时，engine loop 会真正 parked。`RunningDownload` 的 generation 仍用于完成
+去重和生命周期 accounting，不依赖周期扫描发现状态变化。
+
+`RequestGroupMan` 暴露无损的 `Notify + generation` 活动信号，覆盖任务注册、生命周期
+变化、进度、文件分配和 retry 等观察者需要的变化。`Notify` 负责唤醒，generation
+负责让正在读取 snapshot 的观察者不会丢失事件。Console UI 由该信号驱动，只在真实
+活动后渲染，并保留 250ms 的终端渲染限频。
+
+`AutoSaveCoordinator` 将 session 保存和控制文件保存合并到同一条最早 deadline 调度
+路径；正在写文件时到达的 dirty 信号通过无锁标志保留，下一次 deadline 会继续处理。
+显式 `SaveSession` 控制请求恢复到生产路径，BitTorrent checkpoint 发布前先 flush
+writer，避免控制文件记录的 completed piece 领先于实际 payload。
+
+进程等待按平台优先使用原生事件：Windows 进程句柄等待、Linux `pidfd` + Tokio
+`AsyncFd`、macOS/BSD `kqueue`；只有目标平台没有可用的任意 PID 退出事件原语时才
+保留低频兼容 fallback。
+
+Rust-owned 验证：
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::engine_loop::tests -- --test-threads=1
+  19 passed, 0 failed
+cargo test -p aria2-core --all-features --lib request::request_group_man::tests -- --test-threads=1
+  35 passed, 0 failed
+cargo test -p aria2-core --all-features --lib session::auto_save_coordinator::tests -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2 --all-features --lib ui::console_progress -- --test-threads=1
+  4 passed, 0 failed
+~~~
+
+这只关闭引擎空闲扫描、活动观察、保存 deadline、Console UI 唤醒和原生进程等待
+切片；协议语义的 tracker/DHT announce、retry backoff、keepalive、Happy Eyeballs
+等 deadline 仍然保留，跨平台 workspace 验收、外部互操作和完整吞吐基准仍待完成。
+
 ## 2026-08-18 package and bindings verification checkpoint
 
 The workspace package and SDK release identity is now synchronized at `0.3.2`.
@@ -16,12 +132,57 @@ Rust-owned and SDK verification:
 Node.js TypeScript typecheck: PASS
 Node.js Vitest: 13 files, 123 passed
 Python pytest: 137 passed in 38.93s
-aria2-core all-features library: 3511 passed, 0 failed, 1 ignored
+aria2-core all-features library: 3518 passed, 0 failed, 1 ignored
 ~~~
 
 The active phase remains `phase-2-core-domain` and the migration remains
 `PARTIAL`; broader protocol/lifecycle combinations, measured performance, and
 final workspace acceptance remain open.
+
+## 2026-08-18 Current workspace crate test refresh
+
+The current checkout still resolves `aria2-core`, `aria2-protocol`,
+`aria2-rpc`, and `aria2` to `0.3.2`; no additional manifest or lockfile edit is
+needed for the requested core package version. The Rust crate test surfaces
+were rerun serially with all features enabled:
+
+~~~text
+aria2-core library: 3518 passed, 0 failed, 1 ignored
+aria2-protocol library and integration tests: 837 + 6 + 53 passed, 0 failed
+aria2-rpc library and integration/E2E tests: 233 + 19 + 55 + 2 + 47 + 5 + 4 + 31 + 9 + 5 + 7 + 10 passed, 0 failed
+aria2 library, binary, integration, and regression tests: 303 passed, 0 failed, 3 ignored
+~~~
+
+`cargo test -p aria2-protocol --all-targets` was not used as a pass gate because
+the forwarded `--test-threads=1` argument is rejected by Criterion benchmark
+binaries; the corrected `--lib --tests` command passed. Core Clippy with
+`-D warnings` remains blocked by the pre-existing `manual_clamp` warning in
+`aria2-core/src/engine/bt_download_execute/execute/piece_download.rs:55`, and
+core format checking reports that file's existing import order. `git diff
+--check` passes. These results do not change the migration status: it remains
+`PARTIAL`, with interoperability, measured performance, and final workspace
+acceptance still open.
+
+## 2026-08-18 Cross-protocol E2E refresh checkpoint
+
+The existing Rust-owned cross-protocol fixture was rerun from the current
+checkout. It covers Metalink checksum success and mismatch, mirror failover,
+FTP authentication, rate limiting, disk-write failure propagation, session
+save/restore, and output-name collision handling, along with its local DHT/LPD
+fixture checks. No production behavior changed in this refresh.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test deep_e2e_cross_protocol -- --test-threads=1
+  18 passed, 0 failed, 2 ignored
+~~~
+
+This refresh strengthens only the local cross-protocol evidence. Broader
+protocol error/retry combinations, live third-party and original-client
+interoperability, measured performance, and final workspace acceptance remain
+open; the active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.
 
 ## 2026-08-18 BitTorrent engine force-halt checkpoint
 
@@ -4399,3 +4560,85 @@ scheduling-fixture slice; benchmark-specific evidence, cross-protocol error comb
 original-client and third-party interoperability, bindings, measured
 performance, and final workspace acceptance remain open. The active phase
 remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Piece cache-ownership TODO cleanup checkpoint
+
+`Piece` no longer advertises an unimplemented `WrDiskCache` field or cache
+clearing path. The active BitTorrent writer owns cache ordering and flushing;
+`Piece::clear_all_blocks` only resets its completed and in-use block bitfields.
+This removes stale required-looking TODOs without introducing a second cache
+owner or changing piece state behaviour.
+
+Rust-owned verification:
+
+~~~text
+cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+cargo test --target-dir target-phase2 -j 1 -p aria2-core --lib segment::piece -- --test-threads=1
+  110 passed, 0 failed, 0 ignored, 2520 filtered out
+git diff --check
+  PASS
+cargo fmt --all -- --check
+  BLOCKED by the existing formatting diff at aria2-core/src/config/parser.rs:475
+~~~
+
+This closes only the stale Piece cache-ownership documentation slice. Storage
+aggregation and error propagation coverage, cross-protocol lifecycle and retry
+combinations, scheduler and seeding parity, live interoperability, bindings,
+measured performance, and final workspace acceptance remain open. The active
+phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Metalink HTTP authentication error mapping checkpoint
+
+The Metalink direct-mirror and torrent-metaurl HTTP status classifier now maps
+`401 Unauthorized` and `407 Proxy Authentication Required` to the typed
+`HttpAuthFailed` result. This matches the sequential and segmented HTTP paths
+and keeps engine result-code mapping consistent across protocol entry points;
+404 and transient 5xx classification are unchanged.
+
+Rust-owned verification:
+
+~~~text
+cargo test --target-dir target-phase2 -j 1 -p aria2-core --all-features --lib engine::metalink_download_command::execution::http_status_tests -- --test-threads=1
+  9 passed, 0 failed, 0 ignored, 3534 filtered out
+cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+rustfmt --edition 2024 --check aria2-core/src/engine/metalink_download_command/execution.rs
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the Metalink HTTP authentication-result mapping slice. The
+broader cross-protocol retry/error matrix, live third-party and original-client
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open. The active phase remains `phase-2-core-domain` and the
+migration remains `PARTIAL`.
+
+## 2026-08-18 PKCS#12 PBKDF2 PRF compatibility checkpoint
+
+The Rust-owned empty-password PKCS#12 adapter now accepts PBES2 archives whose
+PBKDF2 PRF uses HMAC-SHA224, HMAC-SHA384, or HMAC-SHA512. `p12_q3` represents
+these standard OIDs as `OtherAlg`; the adapter validates their DER NULL
+parameters and delegates the actual derivation and AES-CBC decryption to the
+existing `pkcs5 0.7.1` implementation. No configuration name, default,
+session shape, RPC/CLI wire behavior, certificate chain handling, or product
+version changed.
+
+Rust-owned verification:
+
+~~~text
+cargo test --target-dir target-phase2 -j 1 -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
+  18 passed, 0 failed
+cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+rustfmt --edition 2024 --check aria2-core/src/http/client_identity.rs
+  PASS
+git diff --check -- aria2-core/src/http/client_identity.rs
+  PASS
+~~~
+
+This closes only the alternative PBKDF2 PRF slice. AES-GCM, unsupported bag
+variants, password-bearing archives, broader original-client and third-party
+HTTPS interoperability, and final workspace acceptance remain open. The
+active phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.

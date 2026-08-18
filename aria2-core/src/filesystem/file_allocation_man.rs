@@ -640,7 +640,7 @@ async fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 async fn check_disk_space(path: &Path, length: u64) -> Result<()> {
     // K5.3: Pre-allocation disk space check (same as `preallocate_file`).
-    if let Err(_e) = file_allocation::check_disk_space(path, length) {
+    if let Err(_e) = file_allocation::check_disk_space_async(path, length).await {
         return Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted));
     }
     Ok(())

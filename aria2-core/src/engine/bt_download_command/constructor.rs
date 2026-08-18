@@ -454,7 +454,9 @@ impl BtDownloadCommand {
 
         let progress = group.progress.clone();
         let mut command = Self {
-            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id(),
+            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
+                &options.peer_id_prefix,
+            ),
             group: Arc::new(std::sync::RwLock::new(group)),
             progress,
             output_path: effective_output_path,

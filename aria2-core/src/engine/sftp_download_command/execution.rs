@@ -434,7 +434,7 @@ impl SftpDownloadCommand {
 
         // Finalize disk writer (flush, sync, etc.). Completion is not valid
         // unless the local bytes have been durably finalized.
-        let finalized_data = match writer.finalize().await {
+        let mut finalized_data = match writer.finalize().await {
             Ok(data) => data,
             Err(error) => {
                 self.flush_checkpoint().await;
@@ -459,7 +459,9 @@ impl SftpDownloadCommand {
                 }
             };
             let verified = if in_memory_download {
-                checksum.verify(&finalized_data)
+                let (data, verified) = checksum.verify_async(finalized_data).await?;
+                finalized_data = data;
+                verified
             } else {
                 match crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
                     &crate::checksum::check_integrity::man::shared(),
@@ -586,7 +588,7 @@ impl Command for SftpDownloadCommand {
 
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))
+        self.group.recover().timeout()
     }
 
     async fn shutdown(&mut self) {

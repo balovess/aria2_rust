@@ -307,6 +307,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
 /// URL parsing removes query and fragment components without changing the
 /// existing path-based checks used by the post-download handlers. Plain local
 /// paths remain supported through the fallback branch.
+#[cfg(any(feature = "bittorrent", feature = "metalink"))]
 pub(crate) fn path_has_extension(candidate: &str, extensions: &[&str]) -> bool {
     let path = reqwest::Url::parse(candidate)
         .map(|url| url.path().to_owned())

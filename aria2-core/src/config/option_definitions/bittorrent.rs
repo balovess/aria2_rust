@@ -150,6 +150,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "dht-entry-point".into(),
             opt_type: OptionType::List,
+            cumulative_delimiter: Some("\n"),
             description: "DHT bootstrap nodes (host:port format, comma-separated)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -248,6 +249,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-exclude-tracker".into(),
             opt_type: OptionType::List,
+            cumulative_delimiter: Some("\n"),
             description: "Comma-separated list of tracker announce URIs to exclude".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

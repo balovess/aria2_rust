@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
@@ -27,6 +28,7 @@ pub struct UdpTrackerManager {
     current_tier: usize,
     last_announce_interval: u32,
     last_announce_time: Option<tokio::time::Instant>,
+    request_timeout: Duration,
 }
 
 impl UdpTrackerManager {
@@ -37,6 +39,9 @@ impl UdpTrackerManager {
             current_tier: 0,
             last_announce_interval: 300,
             last_announce_time: None,
+            request_timeout: Duration::from_secs(
+                crate::engine::udp_tracker_client::REQUEST_TIMEOUT_SECS,
+            ),
         }
     }
 
@@ -135,6 +140,7 @@ impl UdpTrackerManager {
         }
 
         let port = self.get_bind_port().await;
+        let request_timeout = self.request_timeout;
         let start_tier = self
             .current_tier
             .min(self.endpoints.len().saturating_sub(1));
@@ -153,7 +159,7 @@ impl UdpTrackerManager {
 
             let mut c = self.client.lock().await;
             while c.process_one().await {
-                if c.has_inflight() && !c.receive_next().await {
+                if c.has_inflight() && !c.receive_next_with_timeout(request_timeout).await {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -182,7 +188,7 @@ impl UdpTrackerManager {
             );
         }
 
-        c.handle_timeouts().await;
+        c.handle_timeouts_with_timeout(self.request_timeout).await;
         results
     }
 
@@ -199,6 +205,10 @@ impl UdpTrackerManager {
 
     pub fn endpoint_count(&self) -> usize {
         self.endpoints.len()
+    }
+
+    pub fn set_request_timeout(&mut self, timeout: Duration) {
+        self.request_timeout = timeout.max(Duration::from_secs(1));
     }
 
     pub async fn use_tracker_url(&mut self, url: &str) {
@@ -278,6 +288,9 @@ impl UdpTrackerManager {
             current_tier: 0,
             last_announce_interval: 300,
             last_announce_time: None,
+            request_timeout: Duration::from_secs(
+                crate::engine::udp_tracker_client::REQUEST_TIMEOUT_SECS,
+            ),
         }
     }
 }

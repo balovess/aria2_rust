@@ -613,9 +613,7 @@ impl Command for DownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        Some(Duration::from_secs(
-            constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS,
-        ))
+        self.group.recover().timeout()
     }
 }
 

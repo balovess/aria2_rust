@@ -161,11 +161,13 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "auto-file-renaming",
     "bt-enable-hook-after-hash-check",
     "bt-enable-lpd",
+    "bt-enable-web-seed",
     "bt-exclude-tracker",
     "bt-external-ip",
     "bt-force-encryption",
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
+    "bt-max-open-files",
     "bt-max-peers",
     "bt-metadata-only",
     "bt-min-crypto-level",
@@ -175,11 +177,32 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-require-crypto",
     "bt-save-metadata",
     "bt-seed-unverified",
+    "bt-peer-blocklist",
+    "bt-keep-alive-interval",
+    "bt-timeout",
+    "bt-request-timeout",
+    "peer-connection-timeout",
+    "peer-id-prefix",
+    "peer-agent",
     "bt-stop-timeout",
     "bt-tracker",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
+    "dht-message-timeout",
+    "enable-dht",
+    "enable-dht6",
+    "dht-listen-port",
+    "dht-listen-addr",
+    "dht-listen-addr6",
+    "dht-entry-point",
+    "dht-entry-point-host",
+    "dht-entry-point-port",
+    "dht-entry-point6",
+    "dht-entry-point-host6",
+    "dht-entry-point-port6",
+    "dht-file-path",
+    "dht-file-path6",
     "check-integrity",
     "checksum",
     "conditional-get",
@@ -266,53 +289,15 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "user-agent",
 ];
 
-/// Initial options intentionally kept in the raw request-group snapshot.
-///
-/// `DownloadOptions` owns the fields needed directly by the download engines.
-/// The options below are consumed by lifecycle/protocol/session code through
-/// the canonical snapshot, or need to survive a session round-trip before a
-/// typed field is introduced. Keeping this list explicit prevents a newly
-/// registered initial option from silently disappearing during serialization.
-pub const INITIAL_SNAPSHOT_CONSUMER_OPTIONS: &[&str] = &[
-    "allow-piece-length-change",
-    "async-dns",
-    "bt-exclude-tracker",
-    "bt-external-ip",
-    "bt-load-saved-metadata",
-    "bt-metadata-only",
-    "bt-min-crypto-level",
-    "bt-request-peer-speed-limit",
-    "bt-save-metadata",
-    "bt-tracker-connect-timeout",
-    "bt-tracker-interval",
-    "bt-tracker-timeout",
-    "content-disposition-default-utf8",
-    "enable-async-dns6",
-    "enable-mmap",
-    "enable-peer-exchange",
-    "force-save",
-    "ftp-type",
-    "gid",
-    "max-file-not-found",
-    "max-mmap-limit",
-    "metalink-base-uri",
-    "min-split-size",
-    "no-file-allocation-limit",
-    "parameterized-uri",
-    "pause",
-    "pause-metadata",
-    "proxy-method",
-    "reuse-uri",
-    "rpc-save-upload-metadata",
-    "save-not-found",
-    "stream-piece-selector",
-    "uri-selector",
-];
+/// Initial options whose typed execution representation must not replace the
+/// original wire spelling when a session entry is written.
+pub const INITIAL_SNAPSHOT_WIRE_OPTIONS: &[&str] = &["min-split-size"];
 
-/// Returns whether an initial option is preserved through the raw task snapshot.
-pub fn is_snapshot_consumer(option_name: &str) -> bool {
-    INITIAL_SNAPSHOT_CONSUMER_OPTIONS.contains(&option_name)
-}
+/// Initial options consumed by task creation rather than download behavior.
+///
+/// `gid` is an identity allocator input and must never be serialized as a
+/// normal per-download behavior option.
+pub const INITIAL_IDENTITY_OPTIONS: &[&str] = &["gid"];
 
 /// Returns whether an option belongs to a request-group's initial state.
 pub fn is_initial_option(option_name: &str) -> bool {

@@ -17,10 +17,33 @@ use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::AtomicProgress;
 
 use super::super::types::{
-    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES,
-    PeerDownloadBytes, PieceDownloadResult,
+    BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES, PeerDownloadBytes,
+    PieceDownloadResult,
 };
 use super::BtMessageHandler;
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::block_request_deadline;
+    use crate::engine::bt_message_handler::BLOCK_REQUEST_TIMEOUT_SECS;
+
+    #[test]
+    fn configured_bt_request_timeout_controls_pending_deadline() {
+        let sent_at = Instant::now();
+        let configured = Duration::from_secs(61);
+
+        assert_eq!(
+            block_request_deadline(sent_at, configured),
+            sent_at + configured
+        );
+        assert_ne!(
+            block_request_deadline(sent_at, configured),
+            sent_at + Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS)
+        );
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BlockRequest {
@@ -47,6 +70,10 @@ struct PendingRequest {
     request: BlockRequest,
     peer_index: usize,
     sent_at: Instant,
+}
+
+fn block_request_deadline(sent_at: Instant, timeout: Duration) -> Instant {
+    sent_at + timeout
 }
 
 enum PeerCommand {
@@ -232,7 +259,10 @@ fn process_peer_message(
             None
         }
         BtMessage::Extended { ext_id, payload } => {
-            if ext_id != 0 && connection.peer_extension_id("ut_pex") == Some(ext_id) {
+            if connection.is_pex_enabled()
+                && ext_id != 0
+                && connection.peer_extension_id("ut_pex") == Some(ext_id)
+            {
                 BtMessageHandler::try_process_pex_during_read(connection, ext_id, &payload);
             }
             None
@@ -414,6 +444,7 @@ async fn run_attempt(
     peer_addresses: &[Option<SocketAddr>],
     has_piece: &[bool],
     network_activity: Option<&AtomicProgress>,
+    request_timeout: Duration,
 ) -> AttemptOutcome {
     let block_count = piece_length.div_ceil(BLOCK_SIZE);
     if num_blocks != block_count {
@@ -477,9 +508,9 @@ async fn run_attempt(
 
         let next_deadline = pending
             .values()
-            .map(|request| request.sent_at + Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS))
+            .map(|request| block_request_deadline(request.sent_at, request_timeout))
             .min()
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS));
+            .unwrap_or_else(|| block_request_deadline(Instant::now(), request_timeout));
         let wait = next_deadline.saturating_duration_since(Instant::now());
         let workers_active = !workers.workers.is_empty();
 
@@ -614,7 +645,7 @@ async fn run_attempt(
                 let now = Instant::now();
                 let expired = pending
                     .values()
-                    .filter(|request| now >= request.sent_at + Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS))
+                    .filter(|request| now >= block_request_deadline(request.sent_at, request_timeout))
                     .map(|request| request.peer_index)
                     .collect::<HashSet<_>>();
                 for peer_index in expired {
@@ -650,6 +681,7 @@ impl BtMessageHandler {
         num_blocks: u32,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
     ) -> Result<PieceDownloadResult> {
         for retry in 0..MAX_RETRIES {
             info!(
@@ -686,6 +718,7 @@ impl BtMessageHandler {
                 &peer_addresses,
                 &has_piece,
                 network_activity,
+                request_timeout,
             )
             .await;
             workers.shutdown(&mut event_rx).await;

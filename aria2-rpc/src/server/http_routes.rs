@@ -7,7 +7,7 @@ use super::config::ServerConfig;
 use super::cors::CorsConfig;
 use super::tls::{TlsConfig, TlsError};
 use super::ws_session::handle_ws_socket;
-use crate::engine::RpcEngine;
+use crate::engine::{RpcEngine, dispatch_wire_entries};
 
 /// RPC HTTP server supporting both HTTP and HTTPS.
 ///
@@ -590,7 +590,7 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
 
 struct JsonRpcHttpResponse {
     status: axum::http::StatusCode,
-    body: String,
+    body: Vec<u8>,
     close_connection: bool,
 }
 
@@ -613,11 +613,12 @@ fn serialize_jsonrpc_response(response: crate::json_rpc::JsonRpcResponse) -> Jso
         .as_ref()
         .map(|error| http_status_for_jsonrpc_error(error.code))
         .unwrap_or(axum::http::StatusCode::OK);
-    let body = response.to_string().unwrap_or_else(|error| {
+    let body = response.to_bytes().unwrap_or_else(|error| {
         format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
             serde_json::Value::String(error.to_string())
         )
+        .into_bytes()
     });
     JsonRpcHttpResponse {
         status,
@@ -640,26 +641,20 @@ async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpRe
                 .next()
                 .expect("single JSON-RPC document must contain one entry");
             let response = match entry {
-                JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+                JsonRpcWireEntry::Request(request) => engine.handle_request_owned(request).await,
                 JsonRpcWireEntry::Error(response) => response,
             };
             serialize_jsonrpc_response(response)
         }
         Ok(document) => {
-            let mut responses = Vec::with_capacity(document.entries.len());
-            for entry in document.entries {
-                responses.push(match entry {
-                    JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
-                    JsonRpcWireEntry::Error(response) => response,
-                });
-            }
-            let body = JsonRpcBatchResponse(responses)
-                .to_string()
+            let body = JsonRpcBatchResponse(dispatch_wire_entries(engine, document.entries).await)
+                .to_bytes()
                 .unwrap_or_else(|error| {
                     format!(
                         "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
                         serde_json::Value::String(error.to_string())
                     )
+                    .into_bytes()
                 });
             // aria2 always returns HTTP 200 for a batch envelope, even when
             // individual entries contain RPC errors.
@@ -695,9 +690,16 @@ fn into_jsonrpc_http_response(
     http_response
 }
 
-fn wrap_jsonp(body: String, callback: Option<&str>) -> String {
+fn wrap_jsonp(body: Vec<u8>, callback: Option<&str>) -> Vec<u8> {
     match callback {
-        Some(callback) => format!("{callback}({body})"),
+        Some(callback) => {
+            let mut wrapped = Vec::with_capacity(callback.len() + body.len() + 2);
+            wrapped.extend_from_slice(callback.as_bytes());
+            wrapped.push(b'(');
+            wrapped.extend_from_slice(&body);
+            wrapped.push(b')');
+            wrapped
+        }
         None => body,
     }
 }

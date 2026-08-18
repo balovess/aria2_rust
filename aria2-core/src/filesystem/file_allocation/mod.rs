@@ -7,7 +7,7 @@ mod windows;
 mod tests;
 
 // Re-exports: preserve the original public API surface.
-pub use crate::filesystem::disk_space::check_disk_space;
+pub use crate::filesystem::disk_space::{check_disk_space, check_disk_space_async};
 pub use strategies::get_available_space;
 
 use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
@@ -119,7 +119,7 @@ where
     // Verify sufficient disk space before attempting allocation to prevent
     // failures mid-download due to exhausted storage. The check includes
     // a 10% headroom margin for filesystem overhead.
-    if let Err(_e) = check_disk_space(path, length) {
+    if let Err(_e) = check_disk_space_async(path, length).await {
         return Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted));
     }
 

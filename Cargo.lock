@@ -194,6 +194,7 @@ dependencies = [
  "memmap2",
  "once_cell",
  "p12_q3",
+ "pkcs5",
  "rand 0.8.5",
  "rc4",
  "regex",
@@ -221,6 +222,7 @@ dependencies = [
  "url",
  "webpki-roots 0.26.11",
  "windows-sys 0.59.0",
+ "yasna",
  "zeroize",
 ]
 
@@ -2624,6 +2626,7 @@ dependencies = [
  "der 0.7.10",
  "pbkdf2",
  "scrypt",
+ "sha1 0.10.6",
  "sha2 0.10.9",
  "spki 0.7.3",
 ]

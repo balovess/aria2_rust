@@ -40,6 +40,7 @@ pub use types::{
 use std::time::Duration;
 
 use aria2_protocol::bittorrent::message::types::BtMessage;
+use futures::stream::{self, StreamExt};
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -50,6 +51,8 @@ use tracing::{debug, error, info, warn};
 /// Handles the lifecycle of peer connections from initial connection
 /// through the handshake phase until they're ready for data transfer.
 pub struct BtPeerInteraction;
+
+const HAVE_BROADCAST_CONCURRENCY: usize = 64;
 
 impl BtPeerInteraction {
     /// Connect to multiple peers with automatic fallback strategies
@@ -267,11 +270,17 @@ impl BtPeerInteraction {
     /// * `connections` - Mutable slice of active peer connections
     /// * `piece_index` - Index of the completed piece
     pub async fn broadcast_have(connections: &mut [BtPeerConn], piece_index: u32) {
-        for conn in connections.iter_mut() {
-            if let Err(e) = conn.send_have(piece_index).await {
-                warn!("[BT] Failed to send HAVE to peer: {}", e);
-            }
-        }
+        let frame = aria2_protocol::bittorrent::message::serializer::serialize_have(piece_index);
+        stream::iter(connections.iter_mut())
+            .for_each_concurrent(HAVE_BROADCAST_CONCURRENCY, |conn| {
+                let frame = &frame;
+                async move {
+                    if let Err(e) = conn.send_have_frame(frame).await {
+                        warn!("[BT] Failed to send HAVE to peer: {}", e);
+                    }
+                }
+            })
+            .await;
     }
 
     /// Return the stable key used by the peer bitfield tracker.
