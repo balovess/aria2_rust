@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::{Checksum, verify_file};
+use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
@@ -248,7 +248,10 @@ impl MetalinkDownloadCommand {
             {
                 Ok(payload) => {
                     let hash_valid = match hash_entry_owned.as_ref() {
-                        Some(hash) => match self.verify_file_hash(&payload.path, hash).await {
+                        Some(hash) => match self
+                            .verify_file_hash(&payload.path, payload.total_length, hash)
+                            .await
+                        {
                             Ok(valid) => valid,
                             Err(error) => {
                                 self.discard_checkpoint(&payload.path).await;
@@ -967,12 +970,20 @@ impl MetalinkDownloadCommand {
     async fn verify_file_hash(
         &self,
         path: &Path,
+        total_length: u64,
         hash: &aria2_protocol::metalink::parser::HashEntry,
     ) -> Result<bool> {
         let hash_type = HashType::from_str(hash.algo.as_standard_name())
             .ok_or_else(|| Aria2Error::Parse("unsupported Metalink hash algorithm".into()))?;
         let checksum = Checksum::new(hash_type, &hash.value)?;
-        verify_file(path, &checksum).await
+        crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+            &crate::checksum::check_integrity::man::shared(),
+            std::sync::Arc::clone(&self.group),
+            path,
+            total_length,
+            checksum,
+        )
+        .await
     }
 
     /// Verify a whole-file download against Metalink `<pieces>` chunk hashes.

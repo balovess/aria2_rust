@@ -4,6 +4,9 @@ mod e2e_helpers;
 mod fixtures;
 
 use aria2_core::engine::bt_download_command::BtDownloadCommand;
+use aria2_core::engine::bt_progress_info_file::{
+    BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats,
+};
 use aria2_core::engine::bt_tracker_comm::TrackerAnnouncer;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_event_hooks::{
@@ -302,6 +305,94 @@ async fn test_e2e_bt_resume_skips_verified_checkpoint_pieces() {
     assert!(
         !control_path.exists(),
         "successful resume must remove checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_resume_skips_verified_legacy_progress_pieces() {
+    let dir = tmp_dir();
+    let tracker = MockTrackerServer::start(0).await;
+    let torrent_data =
+        build_test_torrent("legacy-progress.bin", 1024, 512, &tracker.announce_url());
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent_data).unwrap();
+    let info_hash = meta.info_hash.bytes;
+    let peer = MockBtPeerServer::start(
+        info_hash,
+        vec![
+            expected_piece_data(0, 512, 1024),
+            expected_piece_data(1, 512, 1024),
+        ],
+    )
+    .await;
+    drop(tracker);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data =
+        build_test_torrent("legacy-progress.bin", 1024, 512, &tracker.announce_url());
+    let output_path = dir.path().join("legacy-progress.bin");
+    let piece_zero = expected_piece_data(0, 512, 1024);
+    std::fs::write(&output_path, &piece_zero).unwrap();
+
+    let manager = BtProgressManager::new(dir.path()).unwrap();
+    let progress_path = manager.get_progress_file_path(&info_hash);
+    manager
+        .save_progress(
+            &info_hash,
+            &BtProgress {
+                info_hash,
+                bitfield: vec![0b1000_0000],
+                peers: vec![],
+                stats: ProgressDownloadStats {
+                    downloaded_bytes: 512,
+                    ..ProgressDownloadStats::default()
+                },
+                piece_length: 512,
+                total_size: 1024,
+                num_pieces: 2,
+                upload_length: 0,
+                in_flight_pieces: vec![],
+                is_torrent: true,
+                save_time: std::time::SystemTime::now(),
+                version: 1,
+            },
+        )
+        .unwrap();
+
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(110),
+        &torrent_data,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    cmd.set_progress_manager(manager);
+    tokio::time::timeout(std::time::Duration::from_secs(20), cmd.execute())
+        .await
+        .expect("legacy progress resume timed out")
+        .expect("legacy progress resume failed");
+
+    let requested = peer.requested_pieces().await;
+    assert!(
+        requested.contains(&1),
+        "missing piece was not requested: {requested:?}"
+    );
+    assert!(
+        !requested.contains(&0),
+        "verified legacy progress piece was requested again: {requested:?}"
+    );
+    assert_eq!(
+        std::fs::read(&output_path).unwrap(),
+        [piece_zero, expected_piece_data(1, 512, 1024)].concat()
+    );
+    assert!(
+        !progress_path.exists(),
+        "successful resume must remove legacy progress"
     );
 }
 

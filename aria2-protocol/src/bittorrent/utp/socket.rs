@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
@@ -92,6 +92,12 @@ impl ConnectionId {
 pub struct UtpSocket {
     /// Underlying UDP socket
     socket: UdpSocket,
+    /// Tokio registration for async read readiness.
+    ///
+    /// The synchronous socket remains the owner of the protocol state. This
+    /// handle is initialized only from an async receive path and shares the
+    /// same OS socket, allowing callers to await readiness without polling.
+    async_socket: OnceLock<Arc<tokio::net::UdpSocket>>,
     /// Active connections indexed by connection ID
     connections: HashMap<u16, UtpConnection>,
     /// Mapping from remote address to connection ID (for incoming packets)
@@ -123,6 +129,7 @@ impl UtpSocket {
 
         Ok(Self {
             socket,
+            async_socket: OnceLock::new(),
             connections: HashMap::new(),
             addr_to_conn: HashMap::new(),
             timers: TimerManager::new(),
@@ -148,6 +155,27 @@ impl UtpSocket {
     /// Get the local address this socket is bound to
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Return a Tokio handle for waiting on UDP read readiness.
+    ///
+    /// The handle is created lazily because the synchronous uTP API is also
+    /// used by non-async callers and must remain constructible outside a
+    /// Tokio runtime. The returned socket is only a readiness/receive view of
+    /// the same underlying UDP socket; protocol state still lives here.
+    pub fn readiness_socket(&self) -> Result<Arc<tokio::net::UdpSocket>, UtpSocketError> {
+        if let Some(socket) = self.async_socket.get() {
+            return Ok(Arc::clone(socket));
+        }
+
+        let socket = self
+            .socket
+            .try_clone()
+            .map_err(UtpSocketError::RecvFailed)?;
+        let async_socket =
+            Arc::new(tokio::net::UdpSocket::from_std(socket).map_err(UtpSocketError::RecvFailed)?);
+        let _ = self.async_socket.set(Arc::clone(&async_socket));
+        Ok(self.async_socket.get().cloned().unwrap_or(async_socket))
     }
 
     /// Set connection timeout
@@ -278,7 +306,13 @@ impl UtpSocket {
 
     /// Process incoming UDP packets
     fn process_incoming_packets(&mut self) -> Result<(), UtpSocketError> {
-        match self.socket.recv_from(&mut self.recv_buffer) {
+        let received = if let Some(socket) = self.async_socket.get() {
+            socket.try_recv_from(&mut self.recv_buffer)
+        } else {
+            self.socket.recv_from(&mut self.recv_buffer)
+        };
+
+        match received {
             Ok((len, addr)) => {
                 let packet = UtpPacket::from_bytes(&self.recv_buffer[..len])?;
                 self.handle_packet(&packet, addr)?;

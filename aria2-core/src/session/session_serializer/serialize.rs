@@ -1,9 +1,12 @@
 //! Serialization logic for converting RequestGroups to session file format
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::error::Result;
-use crate::request::request_group::{DownloadStatus, RequestGroup};
+use crate::request::request_group::{
+    DownloadResult, DownloadResultCode, DownloadStatus, RequestGroup,
+};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SessionEntry;
@@ -41,7 +44,16 @@ pub fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
         DownloadStatus::Complete | DownloadStatus::Removed | DownloadStatus::Error(_) => None,
         _ => {
             let mut gid = group.gid().value();
-            let mut uris = group.uris().to_vec();
+            // aria2 writes remaining URIs first and spent URIs second, while
+            // suppressing duplicates. The RequestGroup's initial URI list is
+            // stale once a DownloadContext has dispatched a request.
+            let mut seen_uris = HashSet::new();
+            let mut uris = group
+                .get_remaining_uris()
+                .into_iter()
+                .chain(group.get_spent_uris())
+                .filter(|uri| seen_uris.insert(uri.clone()))
+                .collect::<Vec<_>>();
 
             if uris.is_empty() {
                 return None;
@@ -184,6 +196,93 @@ pub fn group_to_entry(group: &RequestGroup) -> Option<SessionEntry> {
     }
 }
 
+/// Converts a stopped `DownloadResult` into a resumable session entry.
+///
+/// aria2_original writes terminal results only when `force-save` is enabled
+/// (or when the result is an in-progress/error result allowed by the save
+/// policy). A terminal result is written as a waiting session task so the
+/// restore path does not discard it as already complete or removed.
+pub fn download_result_to_entry(result: &DownloadResult) -> Option<SessionEntry> {
+    if result.belongs_to.is_some() {
+        return None;
+    }
+
+    let mut seen_uris = HashSet::new();
+    let mut uris = Vec::new();
+    for file in &result.files {
+        for uri in file.uris.iter().filter(|uri| uri.status == "waiting") {
+            if seen_uris.insert(uri.uri.clone()) {
+                uris.push(uri.uri.clone());
+            }
+        }
+        for uri in file.uris.iter().filter(|uri| uri.status != "waiting") {
+            if seen_uris.insert(uri.uri.clone()) {
+                uris.push(uri.uri.clone());
+            }
+        }
+    }
+    if uris.is_empty() {
+        return None;
+    }
+
+    let options = result
+        .option_snapshot()
+        .into_iter()
+        .flat_map(|snapshot| snapshot.iter())
+        .filter_map(|(key, value)| {
+            crate::request::request_group::option_value_to_string(value)
+                .map(|value| (key.clone(), value))
+        })
+        .collect();
+
+    let bitfield = if result.bitfield.is_empty() {
+        None
+    } else {
+        super::decode_hex(&result.bitfield).ok()
+    };
+
+    Some(SessionEntry {
+        gid: result.gid.value(),
+        uris,
+        options,
+        paused: false,
+        total_length: result.total_length,
+        completed_length: result.completed_length,
+        upload_length: result.upload_length,
+        download_speed: result.download_speed,
+        status: "waiting".to_string(),
+        error_code: (result.code != DownloadResultCode::Finished)
+            .then(|| result.code.as_code() as i32),
+        bitfield,
+        num_pieces: (result.num_pieces > 0).then_some(result.num_pieces),
+        piece_length: (result.piece_length > 0).then_some(result.piece_length),
+        info_hash_hex: (!result.info_hash.is_empty()).then(|| result.info_hash.clone()),
+        resume_offset: (result.completed_length > 0).then_some(result.completed_length),
+    })
+}
+
+fn result_option_bool(result: &DownloadResult, key: &str, default: bool) -> bool {
+    result
+        .option_snapshot()
+        .and_then(|snapshot| snapshot.get(key))
+        .and_then(crate::request::request_group::option_value_to_string)
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(default)
+}
+
+pub(crate) fn should_save_download_result(result: &DownloadResult) -> bool {
+    match result.code {
+        DownloadResultCode::Finished | DownloadResultCode::Removed => {
+            result_option_bool(result, "force-save", false)
+        }
+        DownloadResultCode::InProgress => true,
+        DownloadResultCode::ResourceNotFound | DownloadResultCode::MaxFileNotFound => {
+            result_option_bool(result, "save-not-found", true)
+        }
+        _ => true,
+    }
+}
+
 fn graph_metadata_info(
     info: Option<crate::request::request_group::MetadataInfo>,
     #[cfg(feature = "bittorrent")] has_bt_dependency: bool,
@@ -239,11 +338,28 @@ fn encode_descriptor<T: serde::Serialize>(value: &T) -> std::result::Result<Stri
 /// }
 /// ```
 pub fn serialize_groups(groups: &[Arc<std::sync::RwLock<RequestGroup>>]) -> Result<String> {
+    serialize_groups_with_results(groups, &[])
+}
+
+/// Serializes active/reserved groups and eligible stopped results.
+pub fn serialize_groups_with_results(
+    groups: &[Arc<std::sync::RwLock<RequestGroup>>],
+    results: &[DownloadResult],
+) -> Result<String> {
     let mut output = String::new();
 
     for group_lock in groups {
         let group = group_lock.recover();
         if let Some(entry) = group_to_entry(&group) {
+            output.push_str(&entry.serialize());
+            output.push('\n');
+        }
+    }
+
+    for result in results {
+        if should_save_download_result(result)
+            && let Some(entry) = download_result_to_entry(result)
+        {
             output.push_str(&entry.serialize());
             output.push('\n');
         }

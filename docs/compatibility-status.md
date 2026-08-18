@@ -69,12 +69,686 @@ substitutes for missing original behavior.
 | --- | --- |
 | Active phase | `phase-2-core-domain` (`in_progress`) |
 | Passed and locked phases | `phase-1-baseline-matrix` (`passed_locked`) |
-| Latest verification | 2026-08-18 in the current worktree based on `02e3937` (`dev`) plus the uncommitted core lifecycle, HTTP, BitTorrent, Metalink, scheduler, session-default, BT block-read, FTP/SFTP in-flight read, and BitTorrent seeding lifecycle fixes: `cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1` completed with exit code 0; `aria2-core` reports `3470 passed, 0 failed, 1 ignored` and all its integration test targets passed; the all-features BitTorrent command target reports `35 passed, 0 failed, 2 ignored`, FTP reports `37 passed, 0 failed, 2 ignored`, and SFTP reports `24 passed, 0 failed, 2 ignored`; the focused seeding lifecycle target reports `2 passed, 0 failed`; `cargo clippy -p aria2-core --all-targets --all-features -- -D warnings`, `cargo fmt --all -- --check`, and `git diff --check` passed; the earlier all-features workspace regression reported `aria2-protocol` `832 passed, 0 failed` and all four Rust packages passed all-targets/all-features Clippy with `-D warnings`; unrelated in-progress edits are preserved |
+| Latest verification | 2026-08-18 in the current worktree based on `2ddae20` (`dev`) plus the uncommitted session serializer, checksum, BitTorrent handler, control-file, progress-persistence, retry-lifecycle, graceful/forced shutdown-halt E2E, formatting, and migration-record changes: `aria2-core` reports `3490 passed, 0 failed, 1 ignored` for its all-features library test; the focused checksum integrity manager target reports `17 passed, 0 failed`; the checksum E2E target reports `13 passed, 0 failed`; the focused session serializer target reports `16 passed, 0 failed`, including gzip round-trip, malformed gzip, terminal-result URI state, and `force-save` filtering; `session::active_session` reports `6 passed, 0 failed`; the real App shutdown/restart force-save test reports `1 passed, 0 failed`; the BitfieldMan target reports `76 passed, 0 failed`; the RPC library target reports `233 passed, 0 failed`; the focused sequential HTTP retry target reports `21 passed, 0 failed`; the HTTP E2E target reports `43 passed, 0 failed, 2 ignored`, including real graceful and forced `ShutdownSignal` halt resume-state preservation; the concurrent HTTP range E2E target reports `9 passed, 0 failed`; the BitTorrent download E2E reports `36 passed, 0 failed, 2 ignored`; the FTP proxy target reports `12 passed, 0 failed, 2 ignored` when rerun alone after the first multi-target run hit a Windows target-file lock before executing that binary; the FTP E2E target reports `43 passed, 0 failed, 2 ignored`, including total-attempt `max-tries`, real graceful and forced `ShutdownSignal` halt resume-state preservation; the SFTP E2E target reports `30 passed, 0 failed, 2 ignored`, including total-attempt `max-tries`, production retry-wait pause/remove, and graceful/forced shutdown-halt regressions; the real App Metalink graph restart execution tests report `2 passed, 0 failed`, including one metadata request, stopped completion results, a created zero-length output file, and unchanged pre-existing nonzero payload bytes; workspace all-targets/all-features Clippy with `-D warnings`, full `cargo fmt --all -- --check`, and `git diff --check` passed; package metadata and lockfile report `aria2-core` `0.3.2`; unrelated in-progress edits are preserved. After the unified whole-file dispatcher change, the focused manager/HTTP/FTP/SFTP/Metalink targets report `17/28/24/17/21` passed with zero failures and the all-features library suite has not been rerun |
+| Latest focused protocol rerun | FTP control-connection and SFTP not-found `max-tries=2` total-attempt E2E tests passed individually; active-transfer force-remove tests passed individually; full targets then passed with HTTP `43/0/2`, FTP `43/0/2`, and SFTP `30/0/2`; core all-features Clippy, formatting, and diff checks passed |
+| Latest focused core lifecycle verification | `ForceHaltAll(ShutdownSignal)` now drains unpromoted reserved groups into stopped `removed` results before engine exit; engine-loop tests `19 passed, 0 failed`, including selected-peer DNS failure attribution; C API tests `3 passed, 0 failed`, including the reserved-group option-change/finalize regression; RequestGroupMan tests `29 passed, 0 failed`, core all-features Clippy and formatting passed |
+| Latest focused paused-graph verification | Fresh-App paused Metalink restart execution passed; App `app::tests` `27 passed, 0 failed`, RequestGroupMan `41 passed, 0 failed`, aria2 Clippy and formatting passed |
+| Latest focused autosave verification | Engine dirty notifications survive a busy autosave coordinator lock; `session::auto_save_coordinator` reports `3 passed, 0 failed`, `engine_loop` reports `18 passed, 0 failed`, and core all-features Clippy passed |
+| Current verification caveat | The C API option-change test hang was caused by the test retaining an internal `RequestGroup` read lock across `aria2_rust_session_final`; the assertion is now scoped so finalize can acquire its write lock, and the focused C API and engine-loop suites pass. The full post-change core all-features library aggregate remains to be rerun |
 | Current status | `PARTIAL`; phase 1 is locked, but the final acceptance and stop conditions are not met |
-| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; explicit pause/remove/halt regression coverage; BitTorrent block reads now interrupt promptly on a real halt and leave a durable checkpoint, while non-halt lifecycle notifications such as save-session retry the current piece instead of terminating the command; BitTorrent seeding now races the owning RequestGroup lifecycle, cancels and drains the seed manager on pause/remove/halt, preserves stopped announce cleanup, and returns a lifecycle error before finalization; FTP and SFTP in-flight reads now observe lifecycle notifications and use bounded connection-drop cleanup on halt; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; session serialization of configured `certificate` and `private-key` paths; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; current core test and Clippy gates revalidated in the worktree |
-| Next action | Audit remaining phase-2 RequestGroup pause/resume, retry, storage, and checksum seams, starting with one independently reproducible cross-protocol lifecycle gap; keep broader protocol interoperability and later phases closed |
-| Acceptance evidence | The checkpoint below records the focused lifecycle tests, reserved-queue fairness regression, HTTP response classification tests, HTTP, FTP, SFTP, and BitTorrent lifecycle/integrity/seeding E2E, the current `aria2-core` library result (`3470 passed, 0 failed, 1 ignored`), the `aria2-protocol` library result (`832 passed, 0 failed`), the workspace regression command, all four `-D warnings` Clippy commands, formatting, and diff checks |
-| Remaining differences, risks, reopen conditions | Cross-protocol lifecycle combinations, full BitTorrent scheduler/seeding parity, original-client and third-party interoperability, bindings, measured performance, and final workspace acceptance remain open; reopen this checkpoint if any covered command bypasses the group-aware lifecycle entrypoint or a lifecycle test regresses |
+| Completed improvements | RequestGroup-scoped queued/active integrity cancellation for HTTP and BitTorrent pre-download checks; disk-based whole-file checksum validation for HTTP, Metalink, FTP, and SFTP now uses one bounded, lifecycle-aware integrity dispatcher while in-memory paths retain direct validation; existing multi-file integrity validation now treats a physically truncated entry as a failed piece and follows the normal re-download path; Rust-owned BitTorrent A2CF checkpoints now persist and validate piece length while preserving historical sidecars through info-hash identity; explicit pause/remove/halt regression coverage; real HTTP, FTP, and SFTP graceful and forced `HaltAll(ShutdownSignal)` tests now preserve `InProgress` resume state and control files; BitTorrent normal pieces now use a bounded event-driven block pipeline and endgame peers are read concurrently; TCP/MSE frame reads preserve partial data across cancellation; unrestricted rarest-first selection uses a sorted cursor instead of repeated linear scans; active/waiting RPC status uses direct scheduling indexes and a stable-state fast path; BitTorrent block reads now interrupt promptly on a real halt and leave a durable checkpoint, while non-halt lifecycle notifications such as save-session retry the current piece instead of terminating the command; BitTorrent seeding now races the owning RequestGroup lifecycle, cancels and drains the seed manager on pause/remove/halt, preserves stopped announce cleanup, and returns a lifecycle error before finalization; FTP and SFTP in-flight reads now observe lifecycle notifications and use bounded connection-drop cleanup on halt; FTP and SFTP retry-wait remove regressions now prove lifecycle wake-up and no duplicate protocol attempt; reserved-queue promotion now skips blocked head groups so later runnable groups are not starved under a finite concurrency limit; sequential HTTP retry waits, concurrent 429/503 adaptive cooldowns, FTP/SFTP retry waits, and in-memory metadata retries now use event-driven RequestGroup lifecycle notifications; pre-constructed groups now preserve `follow-metalink=mem` and do not materialize the source document; unresolved Metalink metadata dependencies now reject reserved payload `remove` and `force-remove` until the graph can resolve or fail coherently; HTTP-date parsing and formatting now share one validated RFC 7231/RFC 6265-compatible implementation; the standalone `HttpResponseProcessor` now honors configured retry-wait and preserves retryable/fatal HTTP classifications; command failures now carry the last concrete connection context, allowing the engine to mark only an observed HTTP/FTP peer bad for network/timeout failures; session serialization of configured `certificate` and `private-key` paths; current session serialization now preserves remaining and spent URIs in original order with duplicate suppression; stopped `DownloadResult` snapshots now retain file/URI progress, effective task options, and `SaveSessionCommand` plus App shutdown serialization now apply `force-save`/`save-not-found` policy; standard App shutdown/restart restores a force-saved terminal result as a waiting task; standard Metalink graph session restart now restores persisted BT piece bitfield and metadata; restored standard Metalink graph lifecycle now coordinates metadata/payload pause, force-pause, and unpause by the persisted metadata GID; restored standard Metalink graphs now execute through a fresh App/engine after session restart for both zero-length and pre-existing nonzero payloads; omitted session `seed-ratio` now restores the typed default `1.0` without expanding the compact wire map; `aria2-core` package version `0.3.2` with root dependency and lockfile synchronized; current core test and all-features Clippy gates revalidated in the worktree |
+| Next action | Continue remaining phase-2 RequestGroup force-halt, storage, checksum, paused session graph restart, and cross-protocol error/retry combinations while keeping broader protocol interoperability and later phases closed |
+| Acceptance evidence | The checkpoints below record the focused session serializer, control-file/piece-length, checksum, progress-manager, Metalink dependency-removal, lifecycle, cancellation-safe frame, and real HTTP/FTP/SFTP shutdown-halt tests, reserved-queue fairness regression, HTTP response classification tests, HTTP, FTP, SFTP, and BitTorrent lifecycle/integrity/seeding E2E, including the production SFTP retry-wait pause test (`26 passed, 0 failed, 2 ignored`), the FTP control-connection total-attempt test (`1 passed, 0 failed`), the SFTP not-found total-attempt test (`1 passed, 0 failed`), the current `aria2-core` library result (`3490 passed, 0 failed, 1 ignored`), RequestGroupMan lifecycle coverage (`41 passed, 0 failed`), terminal `DownloadResult`/`force-save` serializer and standard App shutdown/restart coverage, the standard Metalink graph piece-state restart regression (`1 passed, 0 failed`), the paused graph restart lifecycle regression and App test group (`24 passed, 0 failed`), the new real App Metalink graph restart execution regression (`1 passed, 0 failed`), FTP/SFTP retry-wait remove regressions and full protocol targets (`43`/`30` passed, 2 ignored), the current RPC library result (`233 passed, 0 failed`), the current all-features `aria2-protocol` library result (`836 passed, 0 failed`), the workspace regression command, workspace all-targets/all-features Clippy with `-D warnings`, full and targeted formatting, and diff checks; broader force-halt/session graph variants, cross-protocol error combinations, bindings, measured performance, and final workspace acceptance remain open |
+| Remaining differences, risks, reopen conditions | Connection-before-response failures still cannot identify reqwest's selected DNS candidate; cross-protocol lifecycle combinations, full BitTorrent scheduler/seeding parity, original-client and third-party interoperability, bindings, end-to-end throughput measurement, and final workspace acceptance remain open; the picker numbers are Rust-only algorithm evidence, not a complete BT throughput claim; reopen this checkpoint if any covered command bypasses the group-aware lifecycle entrypoint, a lifecycle test regresses, a reader path bypasses the cancellation-safe frame buffer, or a new disk checksum caller bypasses the shared integrity dispatcher |
+
+## 2026-08-18 HTTP/FTP Selected-Peer Failure Attribution Checkpoint
+
+Download command completion events now carry the last concrete connection
+context observed by the command. The engine consumes that context only for
+network and timeout failures, marks that peer bad in the shared DNS cache, and
+refreshes the endpoint when no good cached candidate remains. File, protocol,
+authentication, cancellation, and other non-network failures do not evict DNS
+candidates. This closes the post-connection failure path without claiming that
+reqwest exposes which DNS candidate failed before any response was established.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::engine_loop::tests -- --test-threads=1
+  19 passed, 0 failed
+cargo fmt --all
+  PASS
+~~~
+
+The active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`; connection-before-response attribution, broader cross-protocol
+error combinations, interoperability, bindings, measured performance, and
+final workspace acceptance remain open.
+
+## 2026-08-18 Unified Whole-File Integrity Dispatcher Checkpoint
+
+The disk-based whole-file checksum paths now share the lifecycle-aware integrity
+dispatcher. HTTP `DownloadCommand`, Metalink whole-file hashes, FTP control and
+proxy completion checks, and SFTP existing-file and post-transfer checks all use
+`checksum::check_integrity::man::enqueue_file_checksum_for_group`. The new
+`FileChecksumTask` hashes in bounded 64 KiB reads, yields between chunks, and
+observes RequestGroup pause/remove/halt notifications. In-memory downloads keep
+their existing in-memory checksum path. The core production tree now has no
+direct `verify_file` callers; the remaining calls are checksum-module tests.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity::man::tests -- --test-threads=1
+  17 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::download_command -- --test-threads=1
+  28 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::ftp_download_command -- --test-threads=1
+  24 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::sftp_download_command -- --test-threads=1
+  17 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::metalink_download_command -- --test-threads=1
+  21 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_download check_integrity -- --test-threads=1 --nocapture
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download checksum -- --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download checksum -- --test-threads=1 --nocapture
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_metalink_lifecycle -- --test-threads=1 --nocapture
+  14 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the disk whole-file checksum dispatcher gap, but does not claim the
+full cross-protocol real-service E2E, original-client interoperability, bindings,
+measured performance, or final workspace acceptance. The active phase remains
+`phase-2-core-domain` (`in_progress`) and the migration remains `PARTIAL`.
+
+## 2026-08-18 HTTP Gap Peer Attribution Checkpoint
+
+HTTP gap downloads now publish the successful range response's
+`remote_addr()` into the owning `RequestGroup`, matching the normal sequential
+response and concurrent segment paths. This keeps timeout handling and DNS
+candidate bad-peer attribution tied to the actual selected origin address even
+when a concurrent download falls back to sequential gap repair.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::sequential_download::gap_download::tests -- --test-threads=1
+  4 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+~~~
+
+The focused regression uses a local HTTP 206 range response and asserts that
+the request group records the listener's concrete peer address. This closes
+only the gap-download attribution path; broader cross-protocol lifecycle,
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open. The active phase stays `phase-2-core-domain` and the
+migration remains `PARTIAL`.
+
+## 2026-08-18 Autosave Dirty-Signal Checkpoint
+
+Engine-side session dirty notifications now use a lock-free signal shared with
+the `AutoSaveCoordinator`. A state change observed while the coordinator is
+writing a session file is retained and absorbed after the mutex becomes
+available; the pending signal also participates in deadline selection. This
+prevents `try_lock()` contention from silently losing a state change and keeps
+changes that arrive during a save eligible for the next interval.
+
+Rust-owned verification in this worktree:
+
+~~~text
+cargo test -p aria2-core --all-features --lib session::auto_save_coordinator::tests -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::engine_loop::tests -- --test-threads=1
+  18 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+~~~
+
+The lock-contention regression holds the coordinator mutex while processing an
+`AddDownload` command, then verifies that the session still becomes dirty and
+is persisted after the lock is released. This closes only the engine-side
+dirty-notification loss; full live autosave timing, cross-protocol autosave
+E2E, external interoperability, bindings, measured performance, and final
+workspace acceptance remain open. The active phase stays
+`phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Reserved-Queue Force-Halt Checkpoint
+
+`ForceHaltAll(ShutdownSignal)` now drains groups that are still waiting in the
+reserved queue before the engine exits. Each drained group is marked `Removed`,
+unregistered from the canonical group index, and retained as a stopped result;
+active groups continue through the existing force-halt and task-shutdown path.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --lib engine_loop::tests -- --test-threads=1
+  18 passed, 0 failed
+cargo test -p aria2-core --lib request_group_man::tests -- --test-threads=1
+  29 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the reserved-queue force-halt cleanup slice. Active-transfer
+cross-protocol lifecycle combinations, session graph variants, interoperability,
+bindings, measured performance, and final workspace acceptance remain open; the
+active phase stays `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 SFTP `max-tries` total-attempt checkpoint
+
+The Rust-owned SFTP E2E now separates the public total-attempt limit from the
+not-found threshold. A real SSH/SFTP fixture continuously returns
+`SSH_FX_NO_SUCH_FILE`; with `max-tries=2`, `max-file-not-found=3`, and zero
+retry wait, the production command returns `ResourceNotFound` after exactly two
+`STAT` requests.
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download e2e_sftp_max_tries_limits_total_not_found_attempts -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  30 passed, 0 failed, 2 ignored
+~~~
+
+This closes only the SFTP not-found total-attempt evidence. Broader
+cross-protocol error combinations, third-party/original-client
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open; the active phase stays `phase-2-core-domain` and the
+migration remains `PARTIAL`.
+
+## 2026-08-18 FTP total-attempt checkpoint
+
+The Rust-owned FTP E2E now proves the public total-attempt limit on a
+persistent transient control failure. A real local TCP fixture accepts and
+closes every control connection; with `max-tries=2` and zero retry wait, the
+production command fails after exactly two control connection attempts.
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download test_e2e_ftp_max_tries_limits_total_connection_attempts -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  43 passed, 0 failed, 2 ignored
+~~~
+
+This closes only the FTP transient-connection total-attempt evidence. Broader
+cross-protocol error combinations, third-party/original-client
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open; the active phase stays `phase-2-core-domain` and the
+migration remains `PARTIAL`.
+
+## 2026-08-18 Paused Metalink Graph Fresh-App Execution Checkpoint
+
+The Rust-owned App regression now covers a paused standard Metalink graph across
+a real session restart. The first App saves the dependency-gated metadata and
+payload after pausing the payload; a fresh App restores both groups as paused,
+unpauses them through the persisted metadata GID, fetches torrent metadata once,
+and completes the metadata plus zero-length payload groups with the output file
+created.
+
+~~~text
+cargo test -p aria2 --all-features --lib app::tests::test_process_restart_executes_paused_metalink_graph_after_unpause -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2 --all-features --lib app::tests -- --test-threads=1
+  27 passed, 0 failed
+cargo test -p aria2-core --all-features --lib request::request_group_man -- --test-threads=1
+  41 passed, 0 failed
+cargo clippy -p aria2 --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes only the paused Metalink graph fresh-App execution slice. Broader
+cross-protocol error combinations, interoperability, bindings, measured
+performance, and final workspace acceptance remain open; the active phase
+remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Active-Transfer Force-Remove Checkpoint
+
+Real Rust-owned active-transfer regressions now cover `ForceRemoveDownload` for
+slow HTTP, FTP, and SFTP downloads. Each task has already created partial output
+and a control-file checkpoint before force removal; the engine stops promptly,
+marks the owning `RequestGroup` as `Removed`, and retains both resume artifacts.
+This is intentionally distinct from `ForceHaltAll(ShutdownSignal)`, which keeps
+the task resumable and reports `InProgress`.
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_download test_e2e_engine_sequential_http_force_remove_preserves_control_file -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download test_engine_ftp_force_remove_preserves_partial_control_file -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download e2e_engine_sftp_force_remove_preserves_partial_control_file -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+~~~
+
+完整协议目标复跑：HTTP `43 passed, 0 failed, 2 ignored`；FTP `42 passed,
+0 failed, 2 ignored`；SFTP `29 passed, 0 failed, 2 ignored`。
+
+This closes only the active-transfer force-remove persistence slice. Broader
+cross-protocol error combinations, interoperability, bindings, measured
+performance, and final workspace acceptance remain open; the active phase
+remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 FTP/SFTP Retry-Wait Remove Checkpoint
+
+Rust-owned real-service regressions now cover removal during the protocol retry
+wait for both FTP and SFTP. FTP accepts and closes a control connection, while
+SFTP returns `SSH_FX_NO_SUCH_FILE` from its first `STAT`; removing the owning
+`RequestGroup` wakes each event-driven waiter, returns `Download cancelled by
+user`, and prevents a second protocol attempt.
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  41 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  28 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes only the FTP/SFTP retry-wait remove slice. Broader active-transfer
+remove/halt combinations, cross-protocol error matrices, interoperability,
+bindings, measured performance, and final workspace acceptance remain open;
+the active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.
+
+## 2026-08-18 Standard Metalink Graph Session-Restart Checkpoint
+
+Standard Metalink torrent graphs now restore the persisted BitTorrent piece
+bitfield, piece count, piece length, and info-hash on the dependency-gated
+payload group. This keeps the Rust-owned checkpoint state available while the
+metadata prerequisite is downloaded again; the resolved torrent metadata may
+then replace those fields with its validated values. The public session wire
+fields and graph identity metadata remain unchanged.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2 --all-features --lib app::tests::test_session_save_then_restart_restores_metalink_graph -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2 --all-features --lib app::tests -- --test-threads=1
+  23 passed, 0 failed
+cargo test -p aria2-core --all-features --lib session::session_serializer -- --test-threads=1
+  16 passed, 0 failed
+cargo clippy -p aria2 --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the persisted BT piece-state slice of standard Metalink graph
+restart. Paused/active graph execution after a real process restart, broader
+cross-protocol error combinations, third-party/original-client interoperability,
+bindings, measured performance, and final workspace acceptance remain open; the
+active phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Paused Metalink Graph Lifecycle Checkpoint
+
+The RequestGroup manager now recognizes only the strict standard Metalink graph
+relation (`metadata.belongs_to(payload)` plus `payload.metadata_info.gid()`)
+when applying a single-GID lifecycle operation. After session restore, pausing,
+force-pausing, or unpausing the persisted metadata GID updates both metadata and
+payload groups, so the dependency graph cannot remain half-paused. Ordinary
+downloads and unrelated follow children keep their independent lifecycle.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2 --all-features --lib app::tests::test_paused_session_graph_unpauses_both_groups -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2 --all-features --lib app::tests -- --test-threads=1
+  24 passed, 0 failed
+cargo test -p aria2-core --all-features --lib request::request_group_man -- --test-threads=1
+  41 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo clippy -p aria2 --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the restored standard Metalink graph pause/force-pause/unpause
+coordination slice. Real process restart execution, broader cross-protocol error
+combinations, third-party/original-client interoperability, bindings, measured
+performance, and final workspace acceptance remain open; the active phase remains
+`phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 HTTP, Metadata, and Concurrent Retry-Wait Lifecycle Checkpoint
+
+Sequential HTTP retry waits now register the RequestGroup lifecycle waiter before
+the state check, so pause/remove cannot be lost between observing the group and
+starting the timer. The same ordering is used by in-memory metadata source
+retries. Concurrent HTTP range downloads now apply the same event-driven lifecycle
+handling to 429/503 adaptive cooldowns, including prompt pause and remove
+termination. These changes preserve the existing `retry-wait`, retry-count,
+HTTP-status, option, and wire contracts.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::sequential_download::tests -- --test-threads=1
+  21 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::download_command::tests::test_retry_wait_wakes_when_paused_after_wait_starts -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  40 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1
+  9 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_http_adaptive_concurrency_e2e -- --test-threads=1
+  PASS
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the HTTP/metadata retry-wait and concurrent adaptive-cooldown
+pause/remove slices. FTP/SFTP remove/halt combinations, broader cross-protocol
+lifecycle coverage, third-party/original-client interoperability, bindings,
+measured performance, and final workspace acceptance remain open; the active
+phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Cross-Protocol Shutdown-Halt E2E Checkpoint
+
+The production DownloadEngine now has Rust-owned real-service evidence for a
+graceful `HaltAll(ShutdownSignal)` while sequential HTTP, FTP, and SFTP data
+commands are active. Each protocol exits the engine promptly, keeps its partial
+payload and control file, retains `ShutdownSignal` instead of converting the
+task to user removal, and exposes an `InProgress` download-result snapshot for
+session recovery. This checkpoint covers graceful shutdown-halt only; forced
+halt and broader cross-protocol error combinations remain open.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  41 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  39 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  26 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the graceful shutdown-halt persistence slice. Forced halt,
+session graph restart variants, broader cross-protocol error/retry combinations,
+third-party/original-client interoperability, bindings, measured performance,
+and final workspace acceptance remain open; the active phase remains
+`phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Cross-Protocol Forced-Halt E2E Checkpoint
+
+The production DownloadEngine now has Rust-owned real-service evidence for
+`ForceHaltAll(ShutdownSignal)` while sequential HTTP, FTP, and SFTP transfers
+are active. Each forced halt terminates the protocol task, keeps the partial
+control-file boundary, retains `ShutdownSignal` rather than converting the task
+to user removal, and exposes an `InProgress` result for recovery. The force-halt
+path uses the engine's cancellation and completion accounting; this is separate
+from the graceful halt checkpoint above.
+
+Rust-owned verification of the focused regressions:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_download test_e2e_engine_sequential_http_force_halt_preserves_resume_state -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download test_engine_ftp_force_halt_preserves_resume_state -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download e2e_engine_sftp_force_halt_preserves_resume_state -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+This closes only the production forced shutdown-halt persistence slice. Session
+graph restart variants, broader cross-protocol error/retry combinations,
+third-party/original-client interoperability, bindings, measured performance,
+and final workspace acceptance remain open; the active phase remains
+`phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Integrity Dispatcher Pre-Cancel Lifecycle Checkpoint
+
+The group-aware integrity entrypoint now queues the validation entry before it
+observes RequestGroup lifecycle state. Previously, a group that was already
+paused before the lazy validation future was first polled could call `cancel_gid`
+before the entry existed, leaving the waiter attached to uncancelled work. The
+entry is now owned by the manager before pause/remove/halt inspection, so both
+queued and active validation have one cancellation and completion path.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib checksum::check_integrity::man::tests -- --test-threads=1
+  16 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_checksum -- --test-threads=1
+  13 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the initial group lifecycle ordering race in the integrity
+dispatcher. Broader cross-protocol pause/remove/retry combinations, external
+interoperability, bindings, measured performance, and final workspace acceptance
+remain open; the migration remains `PARTIAL`.
+
+## 2026-08-18 FTP Retry-Wait Pause E2E Checkpoint
+
+A Rust-owned FTP E2E now drives the production command through a real transient
+control failure: a temporary listener accepts and closes the first control
+connection, the command enters the configured five-second `retry-wait`, and a
+pause on the same RequestGroup wakes that wait through the lifecycle notification.
+The command returns `Download paused` promptly instead of sleeping through the
+full retry interval.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download test_e2e_ftp_retry_wait_is_interruptible_when_paused -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_ftp_download -- --test-threads=1
+  38 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the production FTP retry-wait pause slice. FTP remove/halt,
+SFTP remove/halt, third-party/original-client interoperability, bindings,
+measured performance, and final workspace acceptance remain open; the migration
+remains `PARTIAL`.
+
+## 2026-08-18 SFTP Retry-Wait Pause E2E Checkpoint
+
+A Rust-owned SFTP E2E now drives the production command through a real SSH and
+SFTP session where the first `STAT` returns `SSH_FX_NO_SUCH_FILE`. With
+`max-file-not-found=2` and a five-second `retry-wait`, the command enters its
+normal not-found retry loop. Pausing the same `RequestGroup` wakes that wait
+promptly and prevents the second `STAT` attempt. The retry future registers its
+`Notify` waiter before checking lifecycle state, so a pause cannot be lost in
+the check-to-listen window.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download e2e_sftp_retry_wait_is_interruptible_when_paused -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_sftp_download -- --test-threads=1
+  25 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib engine::sftp_download_command::tests -- --test-threads=1
+  17 passed, 0 failed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the production SFTP retry-wait pause slice. FTP/SFTP
+remove/halt combinations, third-party/original-client interoperability,
+bindings, measured performance, and final workspace acceptance remain open;
+the active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.
+
+## 2026-08-18 uTP Readiness and Dynamic Rate-Limit Checkpoint
+
+The asynchronous uTP receive path now keeps the synchronous protocol state
+machine and adds a lazy Tokio UDP readiness handle. `UtpPeerConnection` first
+drains the state machine, then waits for a real UDP readable event when no
+payload is available. It no longer retries `recv` after a fixed sleep. A
+persistent `BytesMut` preserves fragmented BitTorrent frames until the full
+length-prefixed frame is available; the synchronous uTP API remains unchanged.
+
+`TokenBucket::acquire` now waits on both the refill deadline and a dynamic
+configuration notification. `set_rate` and `set_unlimited` wake blocked
+acquires, so `changeOption` takes effect without waiting for an obsolete fixed
+sleep. `ThrottledWriter` continues to interleave token acquisition with chunked
+writes to keep large transport chunks from delaying all disk I/O.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib rate_limiter -- --test-threads=1
+  26 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::bt_peer_connection::utp_connection::tests -- --test-threads=1
+  1 passed, 0 failed
+~~~
+
+This closes only the uTP asynchronous receive and dynamic rate-limit wake-up
+slice. DHT/tracker announce, retry backoff, keepalive, Happy Eyeballs, UI
+throttling, and the process-wait fallback on platforms without an event API
+retain their protocol or platform timer semantics. Cross-platform network
+measurement, original/third-party interoperability, end-to-end throughput
+benchmarks, and final workspace acceptance remain open; the migration remains
+`PARTIAL`.
+
+## 2026-08-18 Bitfield Byte-Scan Checkpoint
+
+`PieceStatMan` now updates counts by visiting set bits, and its diff update only
+visits bits changed between the new and old peer bitfields. `BitfieldMan` missing
+queries and stream-selection combined-state construction now operate bytewise,
+avoiding per-piece division, bounds checks, and temporary `set_bit` calls.
+Trailing bits outside the logical piece count remain masked, and short peer or
+ignore bitfields still read as zero-filled input.
+
+Rust-owned benchmark evidence from the same Windows release build and Criterion
+run (`sample-size=10`, `measurement-time=1s`) compares the pre-change and
+post-change medians:
+
+~~~text
+PieceStatMan add sparse, 50,000: about 60.1 us -> 19.8 us
+PieceStatMan update changed bits, 50,000: about 58.5 us -> 39.3 us
+BitfieldMan all missing, 50,000: about 63.4 us -> 4.3 us
+BitfieldMan all missing unused, 50,000: about 76.9 us -> 4.8 us
+BitfieldMan sparse selection, 50,000: about 194.9 us -> 75.0 us
+~~~
+
+These are Rust algorithm-level results, not whole-download throughput and not
+a same-host comparison with `aria2_original`. Cross-platform data distributions,
+external interoperability, and final workspace acceptance remain open; the
+migration remains `PARTIAL`.
+
+## 2026-08-18 BitTorrent progress manager bitfield resume checkpoint
+
+`BtDownloadCommand::set_progress_manager` now persists the piece picker's
+completed bitfield instead of an empty placeholder. On startup, a C++-compatible
+binary or historical text progress file is only a fallback after the Rust-owned
+A2CF checkpoint; it is accepted only when the payload exists, no newer A2CF
+progress or integrity result is authoritative, and the torrent marker, info hash,
+piece length, total size, piece count, bitfield length, and trailing bits are
+consistent. Accepted pieces are injected into the picker, and progress writes
+do not advance their save timer after an error.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::bt_download_execute::execute::tests -- --test-threads=1
+  5 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::bt_download_execute::execute::piece_download::tests -- --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::bt_progress_info_file_tests -- --test-threads=1
+  14 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::bt_progress_info_file::binary -- --test-threads=1
+  5 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download test_e2e_bt_resume_skips_verified_legacy_progress_pieces -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3480 passed, 0 failed, 1 ignored
+  all aria2-core integration test targets passed
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes the progress manager's bitfield persistence, strict layout validation,
+and real legacy-resume picker integration only. Cross-protocol lifecycle coverage,
+original/third-party interoperability, bindings, measured performance, and final
+workspace acceptance remain open; phase 2 remains `in_progress` and the migration
+remains `PARTIAL`.
+
+## 2026-08-18 BitTorrent Event-Driven Scheduling Checkpoint
+
+The normal BitTorrent piece path now keeps at most six outstanding block requests
+per peer and consumes responses through an event-driven `FuturesUnordered`
+pipeline. Blocks may complete out of order; timeout, reject, disconnect, and
+retry state are handled by the scheduler. Endgame duplicate requests wait on all
+eligible peers concurrently, so a slow peer no longer delays a responsive peer.
+
+The protocol TCP and MSE readers now retain partial frames in connection-owned
+buffers. Dropping a pending read after the first endgame response therefore does
+not lose bytes or shift the next frame boundary. The same buffer is used by the
+raw metadata read helper so request timeouts do not discard partial extension
+messages.
+
+The unrestricted rarest-first picker sorts availability once per frequency
+update and advances a cursor across available pieces. Peer-restricted selection
+remains linear because each peer has a different bitfield. RPC active and waiting
+status queries use their corresponding scheduling indexes and avoid canonical
+index deduplication in the stable state.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_e2e_bittorrent_download -- --test-threads=1
+  35 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --lib --tests -j 1 --quiet -- --test-threads=1
+  aria2-core library: 3480 passed, 0 failed, 1 ignored
+  all aria2-core integration targets passed
+cargo test -p aria2-protocol --all-features --lib -- --test-threads=1
+  836 passed, 0 failed
+cargo test -p aria2-rpc --all-features --lib -- --test-threads=1
+  233 passed, 0 failed
+cargo clippy -p aria2-core -p aria2-protocol -p aria2-rpc --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+Rust-owned benchmark evidence compares the old linear rarest scan with the sorted
+cursor on 1,000, 10,000, and 50,000 pieces: approximately `1.14/11.35/54.96 us`
+versus `0.231/1.17/2.13 us` in the latest Criterion medians. These are
+algorithm-level Rust regression numbers;
+they are not a whole-download throughput percentage and have not been compared
+with an aria2_original run. The checkpoint remains `PARTIAL` pending broader
+BitTorrent scheduler parity, external interoperability, and final workspace
+acceptance.
 
 ## 2026-08-18 BitTorrent Seeding Lifecycle Checkpoint
 
@@ -3071,12 +3745,12 @@ checkpoint.
 | --- | --- | --- | --- |
 | Engine and scheduling | aria2-core/src/engine/ | PARTIAL | Typed command loop, generation-based completion accounting, `CancellationToken` shutdown, pause/unpause requeueing, runtime concurrency and global rate updates are covered. Shared retry policy now has source-backed `max-tries` semantics across sequential HTTP, concurrent segments, and FTP; full parity across allocation and all protocol commands is not yet proven. |
 | HTTP/HTTPS | aria2-core/src/http/, aria2-protocol/src/http/ | PARTIAL | Focused parser and download coverage exists, including existing-file naming, control-file cleanup, preallocation-safe resume recovery, unknown-remote-length resume, multi-URI resume failover, HTTP 200 responses that ignore a requested Range (CannotResume by default or fresh restart according to always-resume/max-resume-failure-tries), request-level GET/HEAD, cache, digest, keep-alive, explicit-header, gzip, chunked, and canonical CookieStorage coverage. Existing `check-certificate`, `ca-certificate`, `certificate`, and `private-key` options now use one Rust-owned TLS config in primary HTTP/HTTPS and Metalink clients, plus production BitTorrent HTTP tracker and web-seed clients; verification-disabled mode, strict multi-root PEM CA loading, separate PEM and legacy empty-password PKCS#12 client identities, PBES2/AES-256-CBC PFX construction, configuration errors, and local live HTTPS fixtures for custom CA, disabled verification, and legacy identity forms are covered. AES-128/192-CBC, AES-GCM, alternative PBKDF2 PRFs, plaintext keyBag, unsupported bag types, and the broader original-client HTTPS matrix remain unverified. Cookie lookup is host-suffix indexed with normalized domain keys, and domain eviction uses one lock order; the legacy CookieJar is only an API/session adapter. An E2E check proves max-tries counts total GET attempts with 0 meaning unlimited. Default production clients explicitly disable gzip negotiation and opt in only through http-accept-gzip; every unknown-length path, including explicit split > 1, starts with one ordinary GET and remains on the original single-connection unknown-length path without a synthetic Range probe. Concurrent buffered and streaming Range requests now share a bounded manual redirect seam, preserve Range validation after redirects, and propagate redirect Set-Cookie values through the task cookie store; 401/407 responses use the original authentication result mapping and the existing challenge credential retry seam for segmented requests. HTTP, HTTPS, and ALL proxy selection, proxy credentials from explicit options or proxy-URL userinfo, no-proxy matching, manual redirects, and real authenticated-proxy E2E coverage are implemented; a production E2E also proves proxy-URL credentials remain available for a 407 fallback. Rust's internal GrowSegment/unknown-length storage modules are not yet the production writer seam; this is an internal architecture difference, not a missing download path. Core owns production orchestration; aria2-protocol::http::client is the standalone adapter used by legacy protocol helpers, and broader original-binary interoperability remains unverified. |
-| FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Original FTP active/passive/auth behavior has focused coverage, including the canonical `PWD`/directory-level `CWD`/file-name `SIZE` and `RETR` order, optional `remote-time` `MDTM` query and local mtime application, FTP `dry-run` metadata-only completion without `REST`/`RETR`, `connect-timeout` enforcement for silent control peers, multiline response parsing with the C++ 64 KiB receive limit, the original PASV control-peer target rule, active-mode listeners bound to the control connection's local interface, `max-tries` total-attempt semantics, remote `SIZE` versus `RETR` length validation, whole-file checksum verification for both fresh downloads and same-length local-file short-circuiting, and real slow-server pause/remove/unpause lifecycle E2E (`test_e2e_ftp_download`: 36 passed, 2 ignored). The Rust command now persists partial progress through the internal `A2CF` checkpoint seam and removes the checkpoint only after successful completion. Live third-party-server, multi-homed process, and original-client interoperability evidence is incomplete. FTPS is a Rust-only additive extension: explicit/implicit control and data TLS paths exist, the plaintext downgrade regression is covered, and positive TLS-server interoperability is still unverified. |
-| SFTP | aria2-protocol/src/sftp/, aria2-core/src/engine/sftp_download_command/ | PARTIAL | A local `russh` SFTP server E2E verifies password acceptance and rejection, aria2_original's `sha-1=<hex>` host-key pin acceptance and mismatch rejection, missing-file mapping, complete output, resume from an existing local prefix, configured whole-file checksum verification after transfer, and real slow-server pause/remove/unpause lifecycle (`test_e2e_sftp_download`: 12 passed, 0 failed). A complete local output with a matching checksum is accepted before any SFTP `READ`; a mismatch resets the resume offset and returns to the remote transfer path. The Rust command persists partial progress through the internal `A2CF` checkpoint seam and removes it only after successful checksum-verified completion. Third-party SFTP server interoperability and the complete original error matrix remain unverified. Rust's protocol crate has an additive public-key authentication API, but aria2_original exposes no SSH private-key login option; `--private-key` remains an HTTP/HTTPS client-TLS option. Known-hosts persistence is not part of aria2_original's `ssh-host-key-md` contract. |
+| FTP/FTPS | aria2-core/src/ftp/, aria2-protocol/src/ftp/ | PARTIAL | Original FTP active/passive/auth behavior has focused coverage, including the canonical `PWD`/directory-level `CWD`/file-name `SIZE` and `RETR` order, optional `remote-time` `MDTM` query and local mtime application, FTP `dry-run` metadata-only completion without `REST`/`RETR`, `connect-timeout` enforcement for silent control peers, multiline response parsing with the C++ 64 KiB receive limit, the original PASV control-peer target rule, active-mode listeners bound to the control connection's local interface, `max-tries` total-attempt semantics with a persistent transient connection count, remote `SIZE` versus `RETR` length validation, whole-file checksum verification for both fresh downloads and same-length local-file short-circuiting, and production retry-wait pause/remove, real slow-server pause/remove/unpause plus graceful and forced `ShutdownSignal` halt lifecycle E2E (`test_e2e_ftp_download`: 43 passed, 0 failed, 2 ignored). The Rust command now persists partial progress through the internal `A2CF` checkpoint seam and removes the checkpoint only after successful completion. Live third-party-server, multi-homed process, and original-client interoperability evidence is incomplete. FTPS is a Rust-only additive extension: explicit/implicit control and data TLS paths exist, the plaintext downgrade regression is covered, and positive TLS-server interoperability is still unverified. |
+| SFTP | aria2-protocol/src/sftp/, aria2-core/src/engine/sftp_download_command/ | PARTIAL | A local `russh` SFTP server E2E verifies password acceptance and rejection, aria2_original's `sha-1=<hex>` host-key pin acceptance and mismatch rejection, missing-file mapping, complete output, resume from an existing local prefix, configured whole-file checksum verification after transfer, real slow-server pause/remove/unpause lifecycle, production not-found retry-wait pause/remove, not-found `max-tries` total-attempt semantics, and graceful and forced `ShutdownSignal` halt resume-state preservation (`test_e2e_sftp_download`: 30 passed, 0 failed, 2 ignored). A complete local output with a matching checksum is accepted before any SFTP `READ`; a mismatch resets the resume offset and returns to the remote transfer path. The Rust command persists partial progress through the internal `A2CF` checkpoint seam and removes it only after successful checksum-verified completion. Third-party SFTP server interoperability and the complete original error matrix remain unverified. Rust's protocol crate has an additive public-key authentication API, but aria2_original exposes no SSH private-key login option; `--private-key` remains an HTTP/HTTPS client-TLS option. Known-hosts persistence is not part of aria2_original's `ssh-host-key-md` contract. |
 | BitTorrent | aria2-protocol/src/bittorrent/, aria2-core/src/engine/bt_* | PARTIAL | Core protocol pieces exist. `index-out` now applies the original 1-based `INDEX=PATH` mapping to both `DownloadContext` and the actual single/multi-file writers; TCP listen-port ranges try ports in order and have occupied-port regression coverage. `bt-prioritize-piece` now uses the original typed `head[=SIZE],tail[=SIZE]` parser and a file-boundary priority wrapper over rarest-first, with focused parser/picker/index tests. The process listener now owns one shared TCP socket, routes MSE and legacy handshakes by info-hash, unregisters routes with RAII, and releases its port on shutdown. MSE covers PadA/PadB, RC4 and plaintext-after-MSE negotiation, `bt-force-encryption`, `bt-require-crypto`, and `bt-min-crypto-level`; focused socket and state-machine evidence is recorded below. Rust A2CF checkpoints now bind the info-hash, reject malformed trailing bits, require payload presence, restore piece-sized progress, persist peer and web-seed completions, and are exercised through halt, pause/resume, verified-piece skip, no-peer web-seed download, failed-piece integrity recovery, complete-payload hash-check controls, and a real multi-file piece crossing two physical files. Explicit `SaveSessionCommand` requests now flush the positioned/cache-backed writer before publishing the verified-piece sidecar; the Rust-owned save-session web-seed regression proves the checkpointed piece is readable after that boundary. A successful complete integrity check emits the BT completion hook only when `bt-enable-hook-after-hash-check=true`; `bt-hash-check-seed=false` completes locally without tracker/peer discovery, while the default `true` path enters a real tracker/peer lifecycle. `bt-seed-unverified=true` now marks an existing payload complete without piece-hash validation, skips the piece writer so existing bytes remain unchanged, and is carried through option parsing, runtime `changeOption`, and session serialization; `hash-check-only` retains validation precedence. The command-level suite now reports `31 passed, 0 failed, 2 ignored`; the obsolete context-free PieceStorage filter setup seam was removed because production BT selection is Rust-owned by `DownloadContext -> allowed_piece_indices -> PiecePicker`. Dependency graph, full scheduler/seeding parity, and live original-client interoperability remain open. |
 | DHT and trackers | aria2-protocol/src/bittorrent/dht/, aria2-protocol/src/bittorrent/tracker/ | PARTIAL | Production paths and tests use the protocol crate as the single canonical DHT implementation. The former unreferenced `aria2-core/src/dht/` duplicate was removed after a source/dependency audit; no public wire, configuration, default, or product-version behavior changed. DHT port ranges now try the ordered list and fall back after an occupied first port. The Rust-only public tracker catalog is wired through the BT announce path with source refresh, URL de-duplication, HTTP/UDP dispatch, private-torrent exclusion, disabled/enabled availability, exponential health backoff, and success recovery; these `enable-public-trackers`/`bt-tracker-source` options are additive extensions and do not alter original-client requests. Complete live-network and original-client interoperability evidence is still missing. |
-| Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Ordinary HTTP payloads now stream through the Rust disk-writer seam, persist pause/remove progress in Rust `A2CF`, resume with `Range`, remove the checkpoint on success, and verify whole-file and `<pieces>` hashes by streaming the output file. Named shared metaurls now form one multi-file payload with per-file direct-mirror and original-name mappings, and the original `metalink4-groupbymetaurl.xml` shape is covered. Both manager-owned `BtDependency` resolution and command-level direct-mirror fallback reuse one torrent-context mapping seam; a local HTTP regression proves that a failed shared group requests one torrent metadata resource and preserves every file path/name/URI mapping. A process-level E2E now submits `EngineCommand::AddMetalinkGraph`, verifies one metadata request, promotion-time context injection, the mapped output path, and a web-seed payload completion (`13 passed, 0 failed, 2 ignored`). The application session path now proves save/restart/restore of a standard memory-backed graph (`test_session_save_then_restart_restores_metalink_graph`: 1 passed), including metadata-first dependency reconstruction. Zero-length torrent payloads complete without peer discovery. Full `follow-torrent=mem` semantics, other Metalink lifecycle variants, and live protocol interoperability remain open. |
-| Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Single- and multi-mirror concurrent HTTP paths, ordinary Metalink payloads, and SFTP now create/load, checkpoint, flush on cancellation or Range fallback, restore compatible prefixes or segment bitfields, discard untrusted sidecars, and remove `.aria2` only after successful completion and checksum verification where configured; two real multi-mirror HTTP cases, the Metalink lifecycle E2E, and SFTP checksum preflight/transfer cases verify restored data is not incorrectly accepted. Metalink whole-file and piece hashes are checked through streaming file reads. Session serialization preserves original option names and non-default values for resume policy, trackers, port ranges, piece sizing, FTP/auth/netrc settings, plus the original 16-hex-digit GID form; Rust-only fields remain extensions. The result-code seam now contains exactly the original wire values `0..32`; `paused` remains a separate task status and cannot leak a Rust-only error code. Live engine pause/remove orchestration across every protocol, checksum-integrity dispatcher callbacks beyond the covered paths, and broader original-client interoperability remain incomplete or unverified. |
+| Metalink | aria2-protocol/src/metalink/, aria2-core/src/engine/metalink_* | PARTIAL | V3/V4 parsing, filtering, resource downloads, manager-owned GID allocation, relative-URI base propagation, and metadata/payload graph terminal states have focused regression coverage. Reserved Metalink payloads whose metadata dependency is unresolved now reject both `remove` and `force-remove`, matching the original manager/API contract instead of orphaning the prerequisite. Ordinary HTTP payloads now stream through the Rust disk-writer seam, persist pause/remove progress in Rust `A2CF`, resume with `Range`, remove the checkpoint on success, and verify whole-file and `<pieces>` hashes by streaming the output file. Named shared metaurls now form one multi-file payload with per-file direct-mirror and original-name mappings, and the original `metalink4-groupbymetaurl.xml` shape is covered. Both manager-owned `BtDependency` resolution and command-level direct-mirror fallback reuse one torrent-context mapping seam; a local HTTP regression proves that a failed shared group requests one torrent metadata resource and preserves every file path/name/URI mapping. A process-level E2E now submits `EngineCommand::AddMetalinkGraph`, verifies one metadata request, promotion-time context injection, the mapped output path, and a web-seed payload completion (`14 passed, 0 failed, 2 ignored` in the current Metalink lifecycle target). The application session path now proves save/restart/restore of a standard memory-backed graph (`test_session_save_then_restart_restores_metalink_graph`: 1 passed), including metadata-first dependency reconstruction. Fresh-App restart regressions now execute restored graphs through a local metadata server for both zero-length and pre-existing nonzero payloads (`test_process_restart_executes_restored_metalink_graph` and `test_process_restart_executes_nonzero_metalink_graph_from_checkpoint`: 2 passed), verifying one metadata request, stopped completion results, creation of zero-length output, and preservation of nonzero payload bytes. Full `follow-torrent=mem` semantics and live protocol interoperability remain open; paused graph fresh-App restart execution is now verified. |
+| Integrity and resume | aria2-core/src/checksum/, aria2-core/src/session/ | PARTIAL | Sequential resume detection, defunct-control-file cleanup, existing-file policy, preallocation-safe offset writes, `always-resume`, and `max-resume-failure-tries` multi-URI behavior have focused unit/HTTP E2E evidence. Single- and multi-mirror concurrent HTTP paths, ordinary Metalink payloads, and SFTP now create/load, checkpoint, flush on cancellation or Range fallback, restore compatible prefixes or segment bitfields, discard untrusted sidecars, and remove `.aria2` only after successful completion and checksum verification where configured; two real multi-mirror HTTP cases, the Metalink lifecycle E2E, and SFTP checksum preflight/transfer cases verify restored data is not incorrectly accepted. Metalink whole-file and piece hashes are checked through streaming file reads. Multi-file piece validation now treats an existing physical entry shorter than its declared length as a failed piece, with a Rust-owned regression covering the resulting re-download decision. Session serialization preserves original option names and non-default values for resume policy, trackers, port ranges, piece sizing, FTP/auth/netrc settings, plus the original 16-hex-digit GID form; Rust-only fields remain extensions. The result-code seam now contains exactly the original wire values `0..32`; `paused` remains a separate task status and cannot leak a Rust-only error code. Live engine pause/remove orchestration across every protocol, checksum-integrity dispatcher callbacks beyond the covered paths, and broader original-client interoperability remain incomplete or unverified. |
 | RPC and WebSocket | aria2-rpc/src/ | PARTIAL | JSON-RPC/XML-RPC/WebSocket surfaces, token/Basic authentication, aria2-compatible error/status mapping, feature-specific method/notification discovery, feature-aware `getVersion`, browser-facing CORS preflight headers, and real HTTP E2E coverage exist. CORS is disabled by default as in `aria2_original`; explicit `rpc-allow-origin-all=true` enables wildcard headers, and `Access-Control-Max-Age` matches the original at `1728000`. XML-RPC execution faults use HTTP 200 + `faultCode=1`; structurally malformed documents or conversion failures use the original HTTP 400 empty-body contract, while well-formed documents with invalid scalar/member values follow the original omission semantics before normal method execution. `getServers` is active-only and reports only real in-flight requests; waiting, paused, stopped, or unknown GIDs return execution error code 1. `getSessionInfo` now generates one 20-byte random session key per engine and exposes the original 40-character lowercase hexadecimal representation. The catalog is 33 core methods plus 2 BitTorrent and 1 Metalink method when enabled; notifications are 5 core plus 1 BitTorrent event when enabled. `aria2.forceUnpause` is rejected as an unknown original method and omitted from `system.listMethods`, keeping original-client discovery exact. Task creation and runtime changes share core validation; `RequestGroup` owns a source-derived `setInitialOption(true)` request snapshot and transfers its effective state to `DownloadResult` when a task stops, excluding process-only RPC settings and Rust-only session metadata. `getOption` therefore keeps the original task state for both live and stopped GIDs, including only changes already applied to the task; later `changeGlobalOption` calls affect future tasks without rewriting existing ones. `getGlobalOption` uses registry-owned original wire metadata: defined hidden or deprecated original values remain observable, no-default values stay absent until configured, `rpc-secret` is withheld, and Rust-only uTP fields cannot leak into an original-client response. `changeUri` now honors the optional zero-based insertion position after deletions, matching the original ordering and count result; task-creation positions share the same rejection rules for negative values. `tellStatus`, `tellActive`, `tellWaiting`, and `tellStopped` honor the original optional `keys` field filter while preserving full output when omitted, and waiting/stopped pagination supports the original negative-offset semantics. Full original-client interoperability, including the browser-extension matrix and complete XML-RPC client coverage, remains unverified. |
 | CLI and options | aria2/src/app/, aria2-core/src/config/ | PARTIAL | `OptionDef::parse_value` remains the shared typed seam for CLI/config/RPC validation, and `App::load_cli_args` now propagates validation failures instead of silently discarding them. Regression coverage proves invalid `--split=0` and unknown `--file-allocation` values are rejected before engine startup; startup coverage proves `--no-conf` skips an explicit config file as in the original. `IntegerRange` preserves ordered range wire values, `IndexOut` uses one cumulative `INDEX=PATH` parser for validation and BT execution, and `bt-prioritize-piece` validates the original `head[=SIZE],tail[=SIZE]` grammar through the same registry seam. The original short-option contract and the eight Rust additive aliases are covered separately, including `-h`/`-v`/`-V` actions. `-h`/`--help[=TAG|KEYWORD]` now preserves the optional-argument/getopt boundary, renders before engine startup, and filters by long-option keyword or supported help groups. The Rust-owned inventory baseline is `214` public names; the all-features registry has 22 additional Rust extensions, and the Rust-owned public-help baseline represents 198 names. Runtime changeability is now verified item-by-item against the Rust-owned compatibility baseline (`setInitialOption` 113/113, global 120/120, reserved 106/106, immediate 7/7), with Rust extensions listed separately. Exact defaults, help-tag membership/text, feature-conditional behavior, and full E2E proof remain open. CLI product identity and version output intentionally belong to `aria2-rust`. |
 | Public C API/ABI | aria2_original/src/aria2api.cc, src/includes/aria2/aria2.h | PARTIAL | `aria2-core/src/c_api.rs` and `bindings/c/` provide a tested opaque-handle `extern "C"`/cdylib migration interface. The current host builds `aria2_core.dll` and an import library exporting all 19 declared `aria2_rust_*` functions; a temporary C consumer compiled, linked, and ran against that import library. It is intentionally source-level and is not binary-compatible with the original C++ classes or STL ABI; a platform ABI matrix and complete original `aria2api.h` semantic comparison remain open. |
@@ -3086,6 +3760,45 @@ checkpoint.
 | Workspace and CI | Cargo.toml, .github/workflows/ | PARTIAL | The all-features Rust workspace test aggregate, formatting, and selected Clippy gates have reproducible evidence. CI release publishing and platform matrices are tracked as product-owned workflow behavior; current platform-specific runs, complete release validation, bindings/package validation, and final external-client acceptance remain open. |
 
 ## Verification Evidence
+
+### Real App Metalink Graph Restart Execution Checkpoint (2026-08-18)
+
+The application session path now has a process-style Rust-owned regression for a
+standard Metalink torrent graph. The test saves a dependency-gated graph,
+creates a fresh `App`, initializes a fresh `DownloadEngine`, restores both
+groups, serves valid zero-length torrent metadata through a local HTTP fixture,
+and runs the restored graph to terminal completion. It verifies one metadata
+request, complete stopped results for metadata and payload, and the final empty
+payload file. The BitTorrent zero-length fast path now creates all single-file
+or multi-file output entries before marking the group complete.
+
+~~~text
+cargo test -p aria2 --all-features --lib app::tests::test_process_restart_executes_restored_metalink_graph -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+~~~
+
+This closes only the active/waiting zero-length process-restart slice. Paused
+graphs, broader cross-protocol error
+combinations, interoperability, bindings, performance, and final workspace
+acceptance remain open.
+
+### Real App Metalink Graph Nonzero Restart Checkpoint (2026-08-18)
+
+The application session path also has a Rust-owned regression for a nonzero
+two-piece torrent graph. It pre-writes the payload and a matching Rust `A2CF`
+checkpoint, saves the dependency-gated graph, creates a fresh `App` and engine,
+restores both groups, and serves the torrent metadata once through a local HTTP
+fixture. The test verifies stopped `Complete` results for metadata and payload
+and byte-for-byte preservation of the pre-existing payload.
+
+~~~text
+cargo test -p aria2 --all-features --lib app::tests::test_process_restart_executes_nonzero_metalink_graph_from_checkpoint -- --exact --test-threads=1 --nocapture
+  1 passed, 0 failed
+~~~
+
+This closes only the active/waiting nonzero process-restart slice; paused graph
+execution, broader cross-protocol error combinations, interoperability,
+bindings, performance, and final workspace acceptance remain open.
 
 ### HTTP Authentication Checkpoint
 
@@ -4393,3 +5106,29 @@ cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
 
 This closes the local cache-advice slice only; platform-specific filesystem
 semantics and full workspace acceptance remain `PARTIAL`.
+
+### Core package version and C API lifecycle checkpoint (2026-08-18)
+
+`aria2-core` is currently version `0.3.2` in its package manifest and lockfile;
+the workspace path dependency remains compatible with the `0.3` release line.
+The C API reserved-group option-change regression now releases its internal
+read guard before finalizing the session. This preserves the production
+shutdown lock contract and prevents the test from waiting forever for the
+force-halt cleanup write lock.
+
+Focused verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib c_api::tests:: -- --nocapture --test-threads=1
+  3 passed, 0 failed
+cargo test -p aria2-core --all-features --lib engine::engine_loop::tests:: -- --nocapture --test-threads=1
+  19 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The full post-change core all-features library aggregate has not been rerun;
+the active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.

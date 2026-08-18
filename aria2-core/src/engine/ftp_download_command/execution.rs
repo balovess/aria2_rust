@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
-use crate::checksum::checksum::{Checksum, verify_file};
+use crate::checksum::checksum::Checksum;
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -214,10 +214,12 @@ impl FtpDownloadCommand {
     pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
         let notifier = self.group.recover().lifecycle_notifier();
         let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         self.check_cancelled()?;
         tokio::select! {
             _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = notified => self.check_cancelled(),
+            _ = &mut notified => self.check_cancelled(),
         }
     }
 
@@ -444,7 +446,14 @@ impl FtpDownloadCommand {
                                         ))
                                     })?;
                             let checksum = Checksum::new(hash_type, &expected)?;
-                            verify_file(&self.output_path, &checksum).await?
+                            crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+                                &crate::checksum::check_integrity::man::shared(),
+                                std::sync::Arc::clone(&self.group),
+                                &self.output_path,
+                                actual_size,
+                                checksum,
+                            )
+                            .await?
                         }
                         None => true,
                     }
@@ -849,7 +858,14 @@ impl FtpDownloadCommand {
             let verified = if in_memory_download {
                 checksum.verify(&finalized_data)
             } else {
-                verify_file(&self.output_path, &checksum).await?
+                crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+                    &crate::checksum::check_integrity::man::shared(),
+                    std::sync::Arc::clone(&self.group),
+                    &self.output_path,
+                    self.completed_bytes,
+                    checksum,
+                )
+                .await?
             };
             if !verified {
                 return Err(FtpAttemptError::from(Aria2Error::Checksum(format!(

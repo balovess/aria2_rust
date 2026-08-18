@@ -255,6 +255,73 @@ impl DownloadResult {
         self.dir = group.options().dir.clone().unwrap_or_default();
         self.info_hash = group.info_hash_hex().unwrap_or_default();
         self.in_memory_download = group.is_in_memory_download();
+
+        self.files = if let Some(context) = group.get_download_context() {
+            context
+                .get_file_entries()
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let completed_length = self
+                        .completed_length
+                        .saturating_sub(file.offset())
+                        .min(file.length());
+                    let uris = file
+                        .uris()
+                        .into_iter()
+                        .map(|uri| {
+                            let status = if file.remaining_uris().iter().any(|value| value == &uri)
+                            {
+                                "waiting"
+                            } else if file.spent_uris().iter().any(|value| value == &uri) {
+                                "used"
+                            } else {
+                                "spent"
+                            };
+                            UriEntry {
+                                uri,
+                                status: status.to_string(),
+                            }
+                        })
+                        .collect();
+
+                    FileEntry {
+                        index: index + 1,
+                        path: file.path().to_string(),
+                        length: file.length(),
+                        completed_length,
+                        selected: file.is_requested(),
+                        uris,
+                    }
+                })
+                .collect()
+        } else {
+            let uris = group
+                .get_all_uris()
+                .into_iter()
+                .map(|uri| UriEntry {
+                    uri,
+                    status: "waiting".to_string(),
+                })
+                .collect();
+            vec![FileEntry {
+                index: 1,
+                path: group
+                    .output_name()
+                    .or_else(|| group.options().out.clone())
+                    .unwrap_or_default(),
+                length: self.total_length,
+                completed_length: self.completed_length,
+                selected: true,
+                uris,
+            }]
+        };
+
+        self.num_pieces = group.get_bt_num_pieces();
+        self.piece_length = group.get_bt_piece_length();
+        if let Some(bitfield) = group.get_bt_bitfield() {
+            self.bitfield = bitfield.iter().map(|byte| format!("{byte:02x}")).collect();
+        }
     }
 }
 

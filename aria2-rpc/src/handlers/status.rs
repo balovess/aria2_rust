@@ -113,7 +113,7 @@ impl RpcEngine {
 
     /// Handle `aria2.tellActive` - List all active/running downloads.
     ///
-    /// Iterates all registered groups and reads live progress from their atomic fields.
+    /// Iterates active groups and reads live progress from their atomic fields.
     pub async fn handle_tell_active(
         &self,
         req: &JsonRpcRequest,
@@ -122,12 +122,10 @@ impl RpcEngine {
         let active: Vec<StatusInfo> = if let Some(group_man) = self.group_man.as_ref() {
             let man = group_man;
             let mut result = Vec::new();
-            for (gid, group_lock) in man.all_groups() {
+            for group_lock in man.get_active_groups() {
                 let g = group_lock.recover();
-                if matches!(g.status(), DownloadStatus::Active) {
-                    let gid_hex = gid.to_hex_string();
-                    result.push(Self::build_status_from_group(&g, &gid_hex));
-                }
+                let gid_hex = g.gid().to_hex_string();
+                result.push(Self::build_status_from_group(&g, &gid_hex));
             }
             result
         } else {
@@ -158,17 +156,10 @@ impl RpcEngine {
         let waiting: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
             let man = group_man;
             let mut result = Vec::new();
-            for (gid, group_lock) in man.all_groups() {
+            for group_lock in man.get_waiting_groups() {
                 let g = group_lock.recover();
-                // Original aria2: reservedGroups_ contains both waiting
-                // and paused downloads. tellWaiting returns both.
-                match g.status() {
-                    DownloadStatus::Waiting | DownloadStatus::Paused => {
-                        let gid_hex = gid.to_hex_string();
-                        result.push(Self::build_status_from_group(&g, &gid_hex));
-                    }
-                    _ => {}
-                }
+                let gid_hex = g.gid().to_hex_string();
+                result.push(Self::build_status_from_group(&g, &gid_hex));
             }
             paginate(result, offset, num)
         } else {

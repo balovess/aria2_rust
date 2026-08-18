@@ -24,6 +24,7 @@ pub(crate) fn deduplicate_tracker_tiers(tiers: Vec<Vec<String>>) -> Vec<Vec<Stri
 
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -31,12 +32,74 @@ use tracing::{debug, info, warn};
 use super::types::PeerKey;
 use crate::config::parse_integer_segments;
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_progress_info_file::BtProgress;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::request::request_group::GroupId;
 use crate::util::rwlock_ext::RwLockRecover;
+
+fn checkpoint_save_due(
+    save_requested: bool,
+    bytes_since_save: u64,
+    last_save: Instant,
+    now: Instant,
+) -> bool {
+    save_requested
+        || bytes_since_save >= crate::constants::BT_CHECKPOINT_SAVE_BYTES
+        || now.saturating_duration_since(last_save)
+            >= Duration::from_secs(crate::constants::BT_CHECKPOINT_SAVE_INTERVAL_SECS)
+}
+
+fn legacy_progress_piece_indices(
+    progress: &BtProgress,
+    piece_length: u32,
+    total_size: u64,
+    num_pieces: u32,
+) -> Option<Vec<usize>> {
+    let num_pieces_usize = num_pieces as usize;
+    if !progress.is_torrent
+        || progress.piece_length != piece_length
+        || progress.total_size != total_size
+        || progress.num_pieces != num_pieces
+        || progress.bitfield.len() != num_pieces_usize.div_ceil(8)
+    {
+        return None;
+    }
+
+    let unused_bits = (8 - num_pieces_usize % 8) % 8;
+    if unused_bits != 0
+        && progress
+            .bitfield
+            .last()
+            .is_none_or(|byte| byte & ((1u8 << unused_bits) - 1) != 0)
+    {
+        return None;
+    }
+
+    Some(
+        (0..num_pieces_usize)
+            .filter(|&index| {
+                progress
+                    .bitfield
+                    .get(index / 8)
+                    .is_some_and(|byte| byte & (1 << (7 - index % 8)) != 0)
+            })
+            .collect(),
+    )
+}
+
+fn completed_piece_bytes(indices: &[usize], piece_length: u32, total_size: u64) -> u64 {
+    indices
+        .iter()
+        .map(|&index| {
+            total_size
+                .saturating_sub(index as u64 * piece_length as u64)
+                .min(piece_length as u64)
+        })
+        .sum()
+}
 
 impl BtDownloadCommand {
     pub(super) async fn persist_checkpoint_after_piece(
@@ -55,24 +118,25 @@ impl BtDownloadCommand {
             return Ok(());
         };
 
-        self.checkpoint_bytes_since_save = self
-            .checkpoint_bytes_since_save
-            .saturating_add(piece_bytes);
-        let interval_elapsed = self.checkpoint_last_save.elapsed()
-            >= std::time::Duration::from_secs(crate::constants::BT_CHECKPOINT_SAVE_INTERVAL_SECS);
-        let bytes_threshold_reached = self.checkpoint_bytes_since_save
-            >= crate::constants::BT_CHECKPOINT_SAVE_BYTES;
-        if !save_requested && !interval_elapsed && !bytes_threshold_reached {
+        self.checkpoint_bytes_since_save =
+            self.checkpoint_bytes_since_save.saturating_add(piece_bytes);
+        if !checkpoint_save_due(
+            save_requested,
+            self.checkpoint_bytes_since_save,
+            self.checkpoint_last_save,
+            Instant::now(),
+        ) {
             return Ok(());
         }
 
-        if save_requested {
-            writer.flush().await.map_err(|error| {
-                Aria2Error::FileIo(format!(
-                    "Failed to flush requested BitTorrent checkpoint: {error}"
-                ))
-            })?;
-        }
+        // The single-file BT writer uses a write-back cache. Persist payload
+        // bytes before its bitfield so a restored checkpoint never advertises
+        // a verified piece whose data is still only in memory.
+        writer.flush().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to flush BitTorrent checkpoint payload: {error}"
+            ))
+        })?;
 
         let save_started = std::time::Instant::now();
         match checkpoint.save(bitfield, self.completed_bytes).await {
@@ -235,6 +299,7 @@ impl Command for BtDownloadCommand {
         // it after metadata preparation, matching the normal download
         // lifecycle without entering tracker/peer discovery.
         if total_size == 0 {
+            self.create_zero_length_payload().await?;
             self.completed_bytes = 0;
             self.progress.set_completed_length(0);
             let payload_exists = self.bt_payload_exists();
@@ -273,6 +338,8 @@ impl Command for BtDownloadCommand {
             .recover()
             .set_bt_bitfield(checkpoint.bitfield().map(ToOwned::to_owned));
         self.checkpoint = Some(checkpoint);
+        self.checkpoint_bytes_since_save = 0;
+        self.checkpoint_last_save = Instant::now();
 
         // C++ `--bt-seed-unverified` marks an existing payload complete before
         // the integrity command is scheduled. Keep hash-check-only explicit:
@@ -478,16 +545,45 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        // P1 integration: try to resume from saved .aria2 progress file
+        // P1 integration: use the C++-compatible progress file only as a
+        // fallback when the Rust-owned A2CF has no progress. Integrity checks
+        // remain authoritative because a progress file records trust, not
+        // fresh hash evidence.
         if let Some(ref mgr) = self.progress_manager {
             match mgr.load_progress(&meta.info_hash.bytes) {
-                Ok(saved) => {
-                    info!(
-                        pieces_done = saved.num_pieces,
-                        ratio = saved.completion_ratio(),
-                        "Resuming from saved progress"
-                    );
+                Ok(saved)
+                    if !self.check_integrity
+                        && !seed_unverified
+                        && payload_exists
+                        && self.completed_bytes == 0 =>
+                {
+                    match legacy_progress_piece_indices(
+                        &saved,
+                        piece_length,
+                        total_size,
+                        num_pieces,
+                    ) {
+                        Some(indices) if !indices.is_empty() => {
+                            self.completed_bytes =
+                                completed_piece_bytes(&indices, piece_length, total_size);
+                            self.progress.set_completed_length(self.completed_bytes);
+                            self.group
+                                .recover()
+                                .set_bt_bitfield(Some(saved.bitfield.clone()));
+                            verified_piece_indices = indices;
+                            info!(
+                                pieces_done = verified_piece_indices.len(),
+                                completed_bytes = self.completed_bytes,
+                                "Resuming from legacy BT progress"
+                            );
+                        }
+                        Some(_) => debug!("Saved BT progress has no completed pieces"),
+                        None => warn!("Ignoring BT progress with incompatible torrent layout"),
+                    }
                 }
+                Ok(_) => debug!(
+                    "Ignoring saved BT progress because a newer checkpoint or integrity result is authoritative"
+                ),
                 Err(e) => {
                     debug!(
                         error = %e,
@@ -904,11 +1000,69 @@ impl BtDownloadCommand {
             None => self.output_path.is_file(),
         }
     }
+
+    async fn create_zero_length_payload(&self) -> Result<()> {
+        let paths = match self.multi_file_layout.as_ref() {
+            Some(layout) => (0..layout.num_files())
+                .filter_map(|index| layout.file_absolute_path(index).map(PathBuf::from))
+                .collect(),
+            None => vec![self.output_path.clone()],
+        };
+
+        for path in paths {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                    Aria2Error::FileCreate(format!(
+                        "Failed to create directory '{}': {error}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            tokio::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&path)
+                .await
+                .map_err(|error| {
+                    Aria2Error::FileCreate(format!(
+                        "Failed to create zero-length payload '{}': {error}",
+                        path.display()
+                    ))
+                })?;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_listen_ports;
+    use super::{
+        checkpoint_save_due, completed_piece_bytes, legacy_progress_piece_indices,
+        parse_listen_ports,
+    };
+    use crate::engine::bt_progress_info_file::BtProgress;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn checkpoint_save_due_honors_explicit_request_and_thresholds() {
+        let start = Instant::now();
+        assert!(checkpoint_save_due(true, 0, start, start));
+        assert!(checkpoint_save_due(
+            false,
+            crate::constants::BT_CHECKPOINT_SAVE_BYTES,
+            start,
+            start
+        ));
+        assert!(checkpoint_save_due(
+            false,
+            0,
+            start,
+            start + Duration::from_secs(crate::constants::BT_CHECKPOINT_SAVE_INTERVAL_SECS)
+        ));
+        assert!(!checkpoint_save_due(false, 0, start, start));
+    }
 
     #[test]
     fn listen_port_parser_expands_original_segment_syntax() {
@@ -923,5 +1077,37 @@ mod tests {
         assert!(parse_listen_ports("1023").is_err());
         assert!(parse_listen_ports("70000").is_err());
         assert!(parse_listen_ports("6881-").is_err());
+    }
+
+    #[test]
+    fn legacy_progress_restores_only_a_matching_layout() {
+        let progress = BtProgress {
+            bitfield: vec![0b1010_0000],
+            piece_length: 4,
+            total_size: 10,
+            num_pieces: 3,
+            is_torrent: true,
+            ..BtProgress::default()
+        };
+
+        let indices = legacy_progress_piece_indices(&progress, 4, 10, 3).unwrap();
+        assert_eq!(indices, vec![0, 2]);
+        assert_eq!(completed_piece_bytes(&indices, 4, 10), 6);
+        assert!(legacy_progress_piece_indices(&progress, 5, 10, 3).is_none());
+        assert!(legacy_progress_piece_indices(&progress, 4, 11, 3).is_none());
+    }
+
+    #[test]
+    fn legacy_progress_rejects_set_trailing_bits() {
+        let progress = BtProgress {
+            bitfield: vec![0b1010_0001],
+            piece_length: 4,
+            total_size: 10,
+            num_pieces: 3,
+            is_torrent: true,
+            ..BtProgress::default()
+        };
+
+        assert!(legacy_progress_piece_indices(&progress, 4, 10, 3).is_none());
     }
 }

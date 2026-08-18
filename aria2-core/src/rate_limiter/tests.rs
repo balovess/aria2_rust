@@ -418,6 +418,23 @@ async fn test_rate_limiter_set_upload_rate() {
     assert!(config.upload_rate().is_none());
 }
 
+#[tokio::test]
+async fn test_token_bucket_unlimited_wakes_waiting_acquire() {
+    let bucket = Arc::new(TokenBucket::new(100, Some(0)));
+    let waiting_bucket = Arc::clone(&bucket);
+    let acquire = tokio::spawn(async move {
+        waiting_bucket.acquire(100).await;
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    bucket.set_unlimited(true);
+
+    tokio::time::timeout(Duration::from_millis(300), acquire)
+        .await
+        .expect("changing the rate should wake a blocked acquire")
+        .expect("acquire task should not panic");
+}
+
 /// Verify that `RateLimiter` clones share the inner token bucket state —
 /// changing the rate via one clone is visible through `config()` and
 /// `is_download_limited()` on another. Both the rate and the limited flag

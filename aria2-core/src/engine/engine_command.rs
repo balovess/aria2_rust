@@ -17,6 +17,7 @@ use tokio::sync::{Notify, mpsc};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph::MetalinkRequestGraph;
 use crate::error::Aria2Error;
+use crate::network::ConnectionContext;
 use crate::request::request_group::{GroupId, HaltReason, RequestGroup};
 
 /// Normal submissions are bounded so an RPC producer cannot grow memory
@@ -553,6 +554,16 @@ pub enum TaskResult {
 
     /// Download failed with an error.
     Failed(Aria2Error),
+
+    /// Download failed after observing a concrete network peer.
+    ///
+    /// Keeping the peer on the internal completion event avoids making the
+    /// engine infer DNS attribution from a group-wide history after several
+    /// concurrent requests have completed.
+    FailedWithContext {
+        error: Aria2Error,
+        connection_context: ConnectionContext,
+    },
 
     /// Download was cancelled (halt/pause requested).
     Cancelled,

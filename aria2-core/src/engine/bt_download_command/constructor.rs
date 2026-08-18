@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::config::{parse_index_out, parse_integer_segments};

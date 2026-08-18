@@ -26,6 +26,7 @@ use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::ftp::FtpConnectionPool;
+use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId, HaltReason};
 use crate::request::request_group_man::RequestGroupMan;
@@ -38,6 +39,38 @@ use crate::util::rwlock_ext::RwLockRecover;
 const MAX_STOPPED_RESULTS: usize = 1000;
 const SERVER_STAT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+
+fn should_mark_failed_connection(error: &Aria2Error) -> bool {
+    matches!(
+        error,
+        Aria2Error::Network(_)
+            | Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure { .. } | RecoverableError::Timeout
+            )
+    )
+}
+
+async fn mark_failed_connection(
+    dns_cache: &tokio::sync::Mutex<DnsCache>,
+    error: &Aria2Error,
+    context: &ConnectionContext,
+) {
+    if !should_mark_failed_connection(error) {
+        return;
+    }
+
+    let mut dns = dns_cache.lock().await;
+    dns.mark_bad_context(context);
+    if !dns.has_good_address(&context.endpoint) {
+        dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());
+    }
+}
+
+enum ProcessedTaskResult {
+    Success,
+    Failed(Aria2Error),
+    Cancelled,
+}
 
 /// Context passed into the engine loop, holding shared state that the
 /// loop needs to coordinate between EngineCommand processing, promotion,
@@ -54,6 +87,9 @@ pub struct EngineLoopContext {
 
     /// Unified deadline-driven coordinator for session and control-file saves.
     pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveCoordinator>>>,
+
+    /// Lock-free session dirty signal used when `auto_save` is busy writing.
+    pub auto_save_dirty_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
 
     /// Download event hooks for firing on-download-start/complete/error/pause/stop.
     /// Mirrors C++ `util::executeHookByOptName()`.
@@ -115,10 +151,8 @@ struct RunningDownload {
 /// caller that mutates download state (queue membership, status, options,
 /// progress) must flip this flag or `save_if_dirty()` never writes.
 fn mark_session_dirty(ctx: &EngineLoopContext) {
-    if let Some(ref auto_save) = ctx.auto_save
-        && let Ok(save) = auto_save.try_lock()
-    {
-        save.mark_session_dirty();
+    if let Some(signal) = &ctx.auto_save_dirty_signal {
+        signal.store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -586,6 +620,10 @@ async fn process_engine_commands<R: EngineCommandQueue>(
             EngineCommand::ForceHaltAll { reason } => {
                 let man = &ctx.group_man;
                 man.force_halt_all(reason);
+                let removed = man.force_remove_reserved();
+                if removed > 0 {
+                    mark_session_dirty(ctx);
+                }
                 *force_halt_requested = true;
 
                 for (_, running) in running_downloads.iter_mut() {
@@ -811,8 +849,21 @@ async fn process_task_completions<R: CompletionQueue>(
                 prev, last_command, "Task completed, decremented num_commands"
             );
 
+            let result = match result {
+                TaskResult::FailedWithContext {
+                    error,
+                    connection_context,
+                } => {
+                    mark_failed_connection(&ctx.dns_cache, &error, &connection_context).await;
+                    ProcessedTaskResult::Failed(error)
+                }
+                TaskResult::Success => ProcessedTaskResult::Success,
+                TaskResult::Failed(error) => ProcessedTaskResult::Failed(error),
+                TaskResult::Cancelled => ProcessedTaskResult::Cancelled,
+            };
+
             match result {
-                TaskResult::Success if last_command => {
+                ProcessedTaskResult::Success if last_command => {
                     let had_failure = group
                         .recover()
                         .command_failure
@@ -849,12 +900,12 @@ async fn process_task_completions<R: CompletionQueue>(
                         }
                     }
                 }
-                TaskResult::Success => {
+                ProcessedTaskResult::Success => {
                     // C++ removes a RequestGroup only after its final
                     // AbstractCommand is destroyed. Keep the group active
                     // while other command instances are still running.
                 }
-                TaskResult::Failed(e) if !last_command => {
+                ProcessedTaskResult::Failed(e) if !last_command => {
                     // A non-final command failure is recorded for the group,
                     // but terminal state is deferred until all commands have
                     // exited, matching C++ numCommand_ semantics.
@@ -866,7 +917,7 @@ async fn process_task_completions<R: CompletionQueue>(
                         .command_failure
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
-                TaskResult::Failed(e) => {
+                ProcessedTaskResult::Failed(e) => {
                     // Handle failures from the final command, including pause-induced
                     // termination, before treating them as errors.
                     // (`aria2.pause` / `aria2.forcePause`
@@ -923,7 +974,7 @@ async fn process_task_completions<R: CompletionQueue>(
                         .command_failure
                         .store(false, std::sync::atomic::Ordering::Release);
                 }
-                TaskResult::Cancelled => {
+                ProcessedTaskResult::Cancelled => {
                     // Synthetic cancellation is emitted before Tokio abort, so
                     // finalize the group here rather than relying on the
                     // cancelled task to mutate its status.
@@ -1185,6 +1236,7 @@ mod tests {
             ftp_pool: Arc::new(FtpConnectionPool::new(1)),
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             auto_save: None,
+            auto_save_dirty_signal: None,
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive,
@@ -1245,6 +1297,37 @@ mod tests {
         .unwrap();
 
         run_until_exit(test_ctx(true), rx, sd_rx, Duration::from_secs(5)).await;
+    }
+
+    #[tokio::test]
+    async fn force_halt_removes_reserved_groups_before_exit() {
+        let ctx = test_ctx(true);
+        let gid = ctx
+            .group_man
+            .add_group(
+                vec!["http://example.com/queued-before-force-halt.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group_man = Arc::clone(&ctx.group_man);
+
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
+        tx.send(EngineCommand::ForceHaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .unwrap();
+
+        run_until_exit(ctx, rx, sd_rx, Duration::from_secs(5)).await;
+
+        assert_eq!(group_man.count(), 0, "force halt must remove queued groups");
+        assert!(group_man.find_group(gid).is_none());
+        assert_eq!(group_man.stopped_results_len(), 1);
+        let result = group_man
+            .find_stopped_result(&gid.to_hex_string())
+            .expect("queued force-halted group should have a stopped result");
+        assert_eq!(result.status, DownloadStatus::Removed);
+        assert_eq!(result.code, DownloadResultCode::Removed);
     }
 
     #[tokio::test]
@@ -1342,6 +1425,7 @@ mod tests {
             Some((path.clone(), Duration::from_millis(0))),
             None,
         )));
+        let auto_save_dirty_signal = auto_save.lock().await.dirty_signal();
 
         // The auto-save must share the SAME group manager that the engine
         // commands mutate, otherwise it serializes a stale/empty snapshot.
@@ -1350,6 +1434,7 @@ mod tests {
             ftp_pool: Arc::new(FtpConnectionPool::new(1)),
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             auto_save: Some(auto_save.clone()),
+            auto_save_dirty_signal: Some(auto_save_dirty_signal),
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive: false,
@@ -1379,6 +1464,10 @@ mod tests {
 
         let mut halt_requested = false;
         let mut force_halt_requested = false;
+        // Hold the coordinator lock while the command mutates state. The
+        // engine must retain the dirty notification instead of dropping it
+        // because the autosave writer is busy.
+        let auto_save_guard = auto_save.lock().await;
         process_engine_commands(
             &mut ctx,
             &mut rx,
@@ -1387,6 +1476,7 @@ mod tests {
             &mut force_halt_requested,
         )
         .await;
+        drop(auto_save_guard);
 
         // The AddDownload command must have flipped the dirty flag.
         assert!(
@@ -1548,6 +1638,59 @@ mod tests {
             DownloadStatus::Paused,
             "a clean command completion must not make a paused group terminal"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_network_task_marks_only_the_observed_dns_peer_bad() {
+        let ctx = test_ctx(false);
+        let gid = ctx
+            .group_man
+            .add_group(
+                vec!["http://localhost/dns-peer.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group = ctx.group_man.find_group(gid).unwrap();
+        group.recover().inc_commands();
+
+        let cached = ctx
+            .dns_cache
+            .lock()
+            .await
+            .resolve("localhost", 80)
+            .await
+            .expect("localhost should resolve for the DNS cache fixture");
+        let observed = cached[0];
+        group
+            .recover()
+            .set_connection_context(ConnectionContext::new("localhost", 80, observed));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send((
+            gid,
+            1,
+            TaskResult::FailedWithContext {
+                error: Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: "connection reset".into(),
+                }),
+                connection_context: ConnectionContext::new("localhost", 80, observed),
+            },
+        ))
+        .unwrap();
+
+        process_task_completions(&ctx, &mut rx, &mut Vec::new(), &mut HashSet::new()).await;
+
+        let remaining = ctx
+            .dns_cache
+            .lock()
+            .await
+            .resolve_no_network("localhost", 80);
+        if let Ok(addresses) = remaining {
+            assert!(
+                !addresses.contains(&observed),
+                "the peer that actually failed must not remain a good candidate"
+            );
+        }
     }
 
     #[tokio::test]

@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocketError};
+use bytes::BytesMut;
 use tokio::sync::Mutex;
 
 use crate::constants;
@@ -27,7 +29,7 @@ pub struct UtpPeerConnection {
     remote_peer_id: Option<[u8; 20]>,
     remote_endpoint: Option<std::net::SocketAddr>,
     /// Receive buffer for partial messages
-    recv_buffer: Vec<u8>,
+    recv_buffer: BytesMut,
 }
 
 impl UtpPeerConnection {
@@ -44,7 +46,7 @@ impl UtpPeerConnection {
             handshake_complete: false,
             remote_peer_id: None,
             remote_endpoint: None,
-            recv_buffer: Vec::new(),
+            recv_buffer: BytesMut::new(),
         }
     }
 
@@ -68,7 +70,7 @@ impl UtpPeerConnection {
             handshake_complete: false,
             remote_peer_id: None,
             remote_endpoint: Some(addr),
-            recv_buffer: Vec::new(),
+            recv_buffer: BytesMut::new(),
         })
     }
 
@@ -91,6 +93,54 @@ impl UtpPeerConnection {
         self.handshake_complete
     }
 
+    /// Receive one available uTP payload without holding the socket lock
+    /// while waiting for network readiness.
+    async fn recv_available(&self, buf: &mut [u8]) -> Result<Option<usize>> {
+        loop {
+            let readiness = {
+                let mut socket = self.socket.lock().await;
+                match socket.recv(self.conn_id, buf) {
+                    Ok(len) if len > 0 => return Ok(Some(len)),
+                    Ok(_) => {
+                        let closed = match socket.connection_state(self.conn_id) {
+                            Ok(state) => matches!(
+                                state,
+                                ConnectionState::Closed
+                                    | ConnectionState::FinWait
+                                    | ConnectionState::Closing
+                                    | ConnectionState::TimeWait
+                            ),
+                            Err(UtpSocketError::ConnectionNotFound(_)) => true,
+                            Err(_) => false,
+                        };
+                        if closed {
+                            return Ok(None);
+                        }
+
+                        socket.readiness_socket().map_err(|e| {
+                            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                                message: e.to_string(),
+                            })
+                        })?
+                    }
+                    Err(e) => {
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: e.to_string(),
+                            },
+                        ));
+                    }
+                }
+            };
+
+            readiness.readable().await.map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: e.to_string(),
+                })
+            })?;
+        }
+    }
+
     /// Perform BitTorrent handshake over uTP.
     pub async fn perform_handshake(&mut self) -> Result<()> {
         use aria2_protocol::bittorrent::message::handshake::Handshake;
@@ -110,14 +160,14 @@ impl UtpPeerConnection {
         }
 
         let mut response_buf = vec![0u8; 68];
-        let len = {
-            let mut socket = self.socket.lock().await;
-            socket.recv(self.conn_id, &mut response_buf).map_err(|e| {
+        let len = self
+            .recv_available(&mut response_buf)
+            .await?
+            .ok_or_else(|| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: e.to_string(),
+                    message: "uTP connection closed during handshake".to_string(),
                 })
-            })?
-        };
+            })?;
 
         if len < 68 {
             return Err(Aria2Error::Fatal(FatalError::Config(
@@ -152,40 +202,35 @@ impl UtpPeerConnection {
 
     /// Receive a BitTorrent message.
     pub async fn recv_message(&mut self) -> Result<Option<Vec<u8>>> {
-        let mut buf = vec![0u8; constants::BT_RECEIVE_BUFFER_SIZE];
-        let len = {
-            let mut socket = self.socket.lock().await;
-            match socket.recv(self.conn_id, &mut buf) {
-                Ok(0) => return Ok(None),
-                Ok(len) => len,
-                Err(e) => {
+        loop {
+            if self.recv_buffer.len() >= 4 {
+                let msg_len =
+                    u32::from_be_bytes(self.recv_buffer[..4].try_into().unwrap()) as usize;
+                let frame_len = msg_len.checked_add(4).ok_or_else(|| {
+                    Aria2Error::Fatal(FatalError::Config(
+                        "uTP BitTorrent message length overflows address space".to_string(),
+                    ))
+                })?;
+
+                if self.recv_buffer.len() >= frame_len {
+                    return Ok(Some(self.recv_buffer.split_to(frame_len).to_vec()));
+                }
+            }
+
+            let mut buf = vec![0u8; constants::BT_RECEIVE_BUFFER_SIZE];
+            match self.recv_available(&mut buf).await? {
+                Some(len) => self.recv_buffer.extend_from_slice(&buf[..len]),
+                None if self.recv_buffer.is_empty() => return Ok(None),
+                None => {
                     return Err(Aria2Error::Recoverable(
                         RecoverableError::TemporaryNetworkFailure {
-                            message: e.to_string(),
+                            message: "uTP connection closed with an incomplete BitTorrent message"
+                                .to_string(),
                         },
                     ));
                 }
             }
-        };
-
-        self.recv_buffer.extend_from_slice(&buf[..len]);
-
-        if self.recv_buffer.len() >= 4 {
-            let msg_len = u32::from_be_bytes([
-                self.recv_buffer[0],
-                self.recv_buffer[1],
-                self.recv_buffer[2],
-                self.recv_buffer[3],
-            ]) as usize;
-
-            if self.recv_buffer.len() >= 4 + msg_len {
-                let message = self.recv_buffer[4..4 + msg_len].to_vec();
-                self.recv_buffer = self.recv_buffer[4 + msg_len..].to_vec();
-                return Ok(Some(message));
-            }
         }
-
-        Ok(None)
     }
 
     /// Close the connection.
@@ -205,5 +250,57 @@ impl UtpPeerConnection {
         socket
             .connection_stats(self.conn_id)
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UtpPeerConnection;
+    use aria2_protocol::bittorrent::utp::{ConnectionState, UtpSocket};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    #[tokio::test]
+    async fn recv_message_waits_for_fragmented_frame() {
+        let info_hash = [7u8; 20];
+        let mut client = UtpSocket::bind("127.0.0.1:0").unwrap();
+        let mut server = UtpSocket::bind("127.0.0.1:0").unwrap();
+        let client_conn_id = client.connect(server.local_addr()).unwrap();
+
+        for _ in 0..100 {
+            server.poll_recv().unwrap();
+            client.poll_recv().unwrap();
+            if client.connection_state(client_conn_id).unwrap() == ConnectionState::Established {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+
+        assert_eq!(
+            client.connection_state(client_conn_id).unwrap(),
+            ConnectionState::Established
+        );
+        let server_conn_id = server.connection_ids()[0];
+        let client = Arc::new(Mutex::new(client));
+        let server = Arc::new(Mutex::new(server));
+
+        let mut peer = UtpPeerConnection::new(client, client_conn_id, info_hash);
+        server
+            .lock()
+            .await
+            .send(server_conn_id, &[0, 0, 0, 1])
+            .unwrap();
+
+        let receive = tokio::spawn(async move { peer.recv_message().await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        server.lock().await.send(server_conn_id, &[0]).unwrap();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), receive)
+            .await
+            .expect("fragmented uTP message should complete")
+            .expect("receiver task should not panic")
+            .expect("receiver should succeed");
+        assert_eq!(result, Some(vec![0, 0, 0, 1, 0]));
     }
 }

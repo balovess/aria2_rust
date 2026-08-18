@@ -177,3 +177,9 @@ harness = false
 [[bench]]
 name = "disk_cache_lookup_bench"
 harness = false
+
+# F5: PieceStatMan and BitfieldMan full-piece scans and temporary bitfield queries.
+[[bench]]
+name = "segment_scan_bench"
+harness = false
+required-features = ["bittorrent"]

@@ -27,6 +27,7 @@ const FILE_HANDLE: &[u8] = b"aria2-sftp-fixture";
 struct FixtureData {
     content: Arc<[u8]>,
     read_delay: Option<Duration>,
+    stat_requests: Arc<AtomicUsize>,
     read_requests: Arc<AtomicUsize>,
 }
 
@@ -41,6 +42,7 @@ pub struct MockSftpServer {
     sha1_fingerprint: String,
     shutdown: Option<oneshot::Sender<()>>,
     accept_task: JoinHandle<()>,
+    stat_requests: Arc<AtomicUsize>,
     read_requests: Arc<AtomicUsize>,
 }
 
@@ -71,6 +73,7 @@ impl MockSftpServer {
             .local_addr()
             .expect("mock SFTP listener should expose its address");
         let content: Arc<[u8]> = fixture_content().into();
+        let stat_requests = Arc::new(AtomicUsize::new(0));
         let read_requests = Arc::new(AtomicUsize::new(0));
 
         let mut rng = OsRng;
@@ -91,6 +94,7 @@ impl MockSftpServer {
         let fixture = Arc::new(FixtureData {
             content: Arc::clone(&content),
             read_delay,
+            stat_requests: Arc::clone(&stat_requests),
             read_requests: Arc::clone(&read_requests),
         });
         let (shutdown, mut shutdown_rx) = oneshot::channel();
@@ -121,6 +125,7 @@ impl MockSftpServer {
             sha1_fingerprint,
             shutdown: Some(shutdown),
             accept_task,
+            stat_requests,
             read_requests,
         }
     }
@@ -147,6 +152,10 @@ impl MockSftpServer {
 
     pub fn read_requests(&self) -> usize {
         self.read_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn stat_requests(&self) -> usize {
+        self.stat_requests.load(Ordering::Relaxed)
     }
 
     /// Uses the `aria2_original` `--ssh-host-key-md` SHA-1 wire format.
@@ -218,6 +227,7 @@ impl MockSftpHandler {
     }
 
     fn attributes_response(&self, request_id: u32, path: &str) -> SftpPacket {
+        self.fixture.stat_requests.fetch_add(1, Ordering::Relaxed);
         if path != FILE_PATH {
             return status(request_id, SSH_FX_NO_SUCH_FILE, "No such file");
         }

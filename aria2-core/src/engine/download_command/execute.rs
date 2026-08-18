@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::{Checksum, verify_file};
+use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::HashType;
 use crate::constants;
 use crate::engine::active_output_registry::{OutputPathPolicy, global_registry};
@@ -454,7 +454,17 @@ impl DownloadCommand {
                 && let Some(ht) = HashType::from_str(algo)
             {
                 let cs = Checksum::new(ht, expected)?;
-                if !verify_file(&self.output_path, &cs).await? {
+                let total_length = self.group.recover().total_length();
+                let verified =
+                    crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+                        &crate::checksum::check_integrity::man::shared(),
+                        Arc::clone(&self.group),
+                        &self.output_path,
+                        total_length,
+                        cs,
+                    )
+                    .await?;
+                if !verified {
                     tracing::error!(
                         algo = %algo,
                         path = %self.output_path.display(),
@@ -710,10 +720,12 @@ impl DownloadCommand {
     pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
         let notifier = self.group.recover().lifecycle_notifier();
         let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         self.check_cancelled()?;
         tokio::select! {
             _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = notified => self.check_cancelled(),
+            _ = &mut notified => self.check_cancelled(),
         }
     }
 

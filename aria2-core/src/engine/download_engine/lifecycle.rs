@@ -26,6 +26,7 @@ impl DownloadEngine {
             ftp_pool: Arc::clone(&self.ftp_pool),
             dns_cache: Arc::clone(&self.dns_cache),
             auto_save: self.auto_save.take(),
+            auto_save_dirty_signal: self.auto_save_dirty_signal.take(),
             // Share the engine's bus so listeners registered before the loop are reached.
             event_hooks: Arc::clone(&self.event_hooks),
             // Use the process-wide file allocation manager owned by the engine layer.

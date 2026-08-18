@@ -4,11 +4,62 @@ use super::cli::CliArgs;
 use super::*;
 use aria2_core::config::OptionValue;
 use aria2_core::request::request_group::DownloadOptions;
-#[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+async fn spawn_torrent_metadata_server(
+    body: Vec<u8>,
+) -> (
+    String,
+    std::sync::Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("metadata server should bind");
+    let address = listener
+        .local_addr()
+        .expect("metadata server should expose an address");
+    let request_count = std::sync::Arc::new(AtomicUsize::new(0));
+    let request_count_for_task = std::sync::Arc::clone(&request_count);
+    let task = tokio::spawn(async move {
+        let (mut stream, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), listener.accept())
+                .await
+                .expect("metadata request timed out")
+                .expect("metadata server accept failed");
+        request_count_for_task.fetch_add(1, Ordering::Relaxed);
+
+        let mut request = [0u8; 4096];
+        tokio::time::timeout(std::time::Duration::from_secs(5), stream.read(&mut request))
+            .await
+            .expect("metadata request read timed out")
+            .expect("metadata request read failed");
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-bittorrent\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(header.as_bytes())
+            .await
+            .expect("metadata response headers should be written");
+        stream
+            .write_all(&body)
+            .await
+            .expect("metadata response body should be written");
+    });
+
+    (
+        format!("http://{address}/empty.torrent"),
+        request_count,
+        task,
+    )
+}
 
 async fn read_http_response(port: u16, request: &str) -> String {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -411,6 +462,16 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
     app.request_man
         .add_metalink_graph(graph)
         .expect("graph should be queued");
+    let payload = app
+        .request_man
+        .find_group(GroupId::new(0x40))
+        .expect("payload group should be indexed");
+    payload.recover().set_bt_bitfield(Some(vec![0xa5, 0x03]));
+    payload.recover().set_bt_metadata(
+        11,
+        16_384,
+        "1111111111111111111111111111111111111111".to_string(),
+    );
     {
         let mut config = app.config.write().await;
         config
@@ -435,6 +496,19 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
         .expect("saved session should be readable");
     assert!(session_text.contains("aria2-rust-payload-gid=0000000000000040"));
     assert!(session_text.contains("aria2-rust-metadata-uri=https://example.test/payload.torrent"));
+    let saved_entry =
+        aria2_core::session::active_session::ActiveSessionManager::new(session_file.clone())
+            .load_session()
+            .await
+            .expect("saved graph session should load");
+    assert_eq!(saved_entry.len(), 1);
+    assert_eq!(saved_entry[0].bitfield, Some(vec![0xa5, 0x03]));
+    assert_eq!(saved_entry[0].num_pieces, Some(11));
+    assert_eq!(saved_entry[0].piece_length, Some(16_384));
+    assert_eq!(
+        saved_entry[0].info_hash_hex.as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
 
     let restarted = App::new();
     {
@@ -474,7 +548,669 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
         payload.recover().output_name().as_deref(),
         Some("payload.bin")
     );
+    assert_eq!(payload.recover().get_bt_bitfield(), Some(vec![0xa5, 0x03]));
+    assert_eq!(payload.recover().get_bt_num_pieces(), 11);
+    assert_eq!(payload.recover().get_bt_piece_length(), 16_384);
+    assert_eq!(
+        payload.recover().get_bt_info_hash_hex().as_deref(),
+        Some("1111111111111111111111111111111111111111")
+    );
     assert!(!payload.recover().is_dependency_resolved());
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_process_restart_executes_restored_metalink_graph() {
+    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::request::request_group::{DownloadStatus, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let (metadata_uri, request_count, metadata_server) =
+        spawn_torrent_metadata_server(
+            b"d8:announce27:http://127.0.0.1:1/announce4:infod6:lengthi0e4:name9:empty.bin12:piece lengthi16384e6:pieces0:ee".to_vec(),
+        )
+        .await;
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        out: Some("empty.bin".to_string()),
+        enable_dht: false,
+        enable_public_trackers: false,
+        seed_time: Some(0.0),
+        ..Default::default()
+    };
+    let metadata_gid = GroupId::new(0x70);
+    let payload_gid = GroupId::new(0x80);
+    let graph = MetalinkRequestGraph::new_memory(
+        &metadata_uri,
+        "empty.bin",
+        &options,
+        metadata_gid,
+        payload_gid,
+    )
+    .expect("graph should be constructible");
+
+    let app = App::new();
+    app.request_man
+        .add_metalink_graph(graph)
+        .expect("graph should be queued");
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1),
+        "only the dependency-gated payload should be persisted"
+    );
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+    restarted.initialize_engine().await;
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        2,
+        "process restart must rebuild both metadata and payload groups"
+    );
+
+    restarted
+        .run_engine(false, false)
+        .await
+        .expect("restored Metalink graph should execute to completion");
+    metadata_server
+        .await
+        .expect("metadata server task should not panic");
+
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        restarted
+            .request_man
+            .find_stopped_result(&metadata_gid.to_hex_string())
+            .expect("completed metadata group should be in stopped results")
+            .status,
+        DownloadStatus::Complete
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_stopped_result(&payload_gid.to_hex_string())
+            .expect("completed payload group should be in stopped results")
+            .status,
+        DownloadStatus::Complete
+    );
+    assert_eq!(
+        tokio::fs::read(temp_dir.path().join("empty.bin"))
+            .await
+            .expect("completed zero-length payload should exist"),
+        Vec::<u8>::new()
+    );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() {
+    use aria2_core::checksum::message_digest::{HashType, MessageDigest};
+    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::filesystem::control_file::ControlFile;
+    use aria2_core::request::request_group::{DownloadStatus, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let output_path = temp_dir.path().join("payload.bin");
+    let payload_bytes = b"abcdefgh".to_vec();
+
+    let mut piece_hashes = Vec::with_capacity(40);
+    for piece in payload_bytes.chunks(4) {
+        piece_hashes.extend(MessageDigest::hash_data(HashType::Sha1, piece));
+    }
+    let mut info = b"d6:lengthi8e4:name11:payload.bin12:piece lengthi4e6:pieces40:".to_vec();
+    info.extend_from_slice(&piece_hashes);
+    info.push(b'e');
+    let mut torrent = b"d8:announce27:http://127.0.0.1:1/announce4:info".to_vec();
+    torrent.extend_from_slice(&info);
+    torrent.push(b'e');
+    let metadata = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+        .expect("nonzero torrent fixture should parse");
+    let info_hash = metadata.info_hash.bytes;
+    let info_hash_hex = metadata.info_hash.as_hex();
+
+    tokio::fs::write(&output_path, &payload_bytes)
+        .await
+        .expect("pre-existing payload should be writable");
+    let control_path = ControlFile::control_path_for(&output_path);
+    let mut control = ControlFile::open_or_create(&control_path, 8, 2)
+        .await
+        .expect("checkpoint should be constructible");
+    control.mark_torrent_checkpoint();
+    control.set_torrent_info_hash(info_hash);
+    control.set_torrent_piece_length(4);
+    control.set_bitfield(vec![0xc0]);
+    control.update_completed_length(8);
+    control.save().await.expect("checkpoint should be durable");
+
+    let (metadata_uri, request_count, metadata_server) =
+        spawn_torrent_metadata_server(torrent).await;
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        out: Some("payload.bin".to_string()),
+        enable_dht: false,
+        enable_public_trackers: false,
+        seed_time: Some(0.0),
+        ..Default::default()
+    };
+    let metadata_gid = GroupId::new(0x90);
+    let payload_gid = GroupId::new(0xa0);
+    let graph = MetalinkRequestGraph::new_memory(
+        &metadata_uri,
+        "payload.bin",
+        &options,
+        metadata_gid,
+        payload_gid,
+    )
+    .expect("graph should be constructible");
+
+    let app = App::new();
+    app.request_man
+        .add_metalink_graph(graph)
+        .expect("graph should be queued");
+    let payload = app
+        .request_man
+        .find_group(payload_gid)
+        .expect("payload group should be indexed");
+    payload.recover().set_bt_bitfield(Some(vec![0xc0]));
+    payload.recover().set_bt_metadata(2, 4, info_hash_hex);
+    payload.recover().set_total_length(8);
+    payload.recover().set_completed_length(8);
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1),
+        "only the dependency-gated payload should be persisted"
+    );
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+    restarted.initialize_engine().await;
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        2,
+        "process restart must rebuild both metadata and payload groups"
+    );
+
+    restarted
+        .run_engine(false, false)
+        .await
+        .expect("restored nonzero Metalink graph should execute to completion");
+    metadata_server
+        .await
+        .expect("metadata server task should not panic");
+
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        tokio::fs::read(&output_path)
+            .await
+            .expect("payload should remain readable"),
+        payload_bytes
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_stopped_result(&metadata_gid.to_hex_string())
+            .expect("completed metadata group should be in stopped results")
+            .status,
+        DownloadStatus::Complete
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_stopped_result(&payload_gid.to_hex_string())
+            .expect("completed payload group should be in stopped results")
+            .status,
+        DownloadStatus::Complete
+    );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
+    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::request::request_group::{DownloadStatus, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let (metadata_uri, request_count, metadata_server) = spawn_torrent_metadata_server(
+        b"d8:announce27:http://127.0.0.1:1/announce4:infod6:lengthi0e4:name9:empty.bin12:piece lengthi16384e6:pieces0:ee".to_vec(),
+    )
+    .await;
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        out: Some("empty.bin".to_string()),
+        enable_dht: false,
+        enable_public_trackers: false,
+        seed_time: Some(0.0),
+        ..Default::default()
+    };
+    let metadata_gid = GroupId::new(0xb0);
+    let payload_gid = GroupId::new(0xc0);
+    let graph = MetalinkRequestGraph::new_memory(
+        &metadata_uri,
+        "empty.bin",
+        &options,
+        metadata_gid,
+        payload_gid,
+    )
+    .expect("graph should be constructible");
+
+    let app = App::new();
+    app.request_man
+        .add_metalink_graph(graph)
+        .expect("graph should be queued");
+    app.request_man
+        .find_group(payload_gid)
+        .expect("payload group should be indexed")
+        .recover_mut()
+        .pause()
+        .expect("payload should be pausable before session save");
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1),
+        "paused graph should persist its dependency-gated payload"
+    );
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+    restarted.initialize_engine().await;
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        2,
+        "process restart must rebuild both paused graph groups"
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(metadata_gid)
+            .expect("metadata group should be restored")
+            .recover()
+            .status(),
+        DownloadStatus::Paused
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(payload_gid)
+            .expect("payload group should be restored")
+            .recover()
+            .status(),
+        DownloadStatus::Paused
+    );
+
+    restarted
+        .request_man
+        .unpause_group(metadata_gid)
+        .expect("restored paused graph should be unpausable");
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(metadata_gid)
+            .expect("metadata group should remain indexed")
+            .recover()
+            .status(),
+        DownloadStatus::Waiting
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(payload_gid)
+            .expect("payload group should remain indexed")
+            .recover()
+            .status(),
+        DownloadStatus::Waiting,
+        "unpausing the restored metadata GID must resume its payload graph"
+    );
+
+    restarted
+        .run_engine(false, false)
+        .await
+        .expect("unpaused restored Metalink graph should execute to completion");
+    metadata_server
+        .await
+        .expect("metadata server task should not panic");
+
+    assert_eq!(request_count.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        restarted
+            .request_man
+            .find_stopped_result(&metadata_gid.to_hex_string())
+            .expect("completed metadata group should be in stopped results")
+            .status,
+        DownloadStatus::Complete
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_stopped_result(&payload_gid.to_hex_string())
+            .expect("completed payload group should be in stopped results")
+            .status,
+        DownloadStatus::Complete
+    );
+    assert_eq!(
+        tokio::fs::read(temp_dir.path().join("empty.bin"))
+            .await
+            .expect("completed zero-length payload should exist"),
+        Vec::<u8>::new()
+    );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[tokio::test]
+async fn test_paused_session_graph_unpauses_both_groups() {
+    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session");
+    let options = DownloadOptions {
+        dir: Some(temp_dir.path().to_string_lossy().into_owned()),
+        out: Some("paused-payload.bin".to_string()),
+        ..Default::default()
+    };
+    let metadata_gid = GroupId::new(0x50);
+    let payload_gid = GroupId::new(0x60);
+    let graph = MetalinkRequestGraph::new_memory_with_fallback(
+        "https://example.test/paused-payload.torrent",
+        "paused-payload.bin",
+        &options,
+        metadata_gid,
+        payload_gid,
+        vec!["https://mirror.example.test/paused-payload.bin".to_string()],
+    )
+    .expect("graph should be constructible");
+
+    let app = App::new();
+    app.request_man
+        .add_metalink_graph(graph)
+        .expect("graph should be queued");
+    app.request_man
+        .find_group(payload_gid)
+        .expect("payload group should be indexed")
+        .recover_mut()
+        .pause()
+        .expect("payload should be pausable");
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1)
+    );
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        2
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(metadata_gid)
+            .unwrap()
+            .recover()
+            .status(),
+        DownloadStatus::Paused
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(payload_gid)
+            .unwrap()
+            .recover()
+            .status(),
+        DownloadStatus::Paused
+    );
+
+    restarted
+        .request_man
+        .unpause_group(metadata_gid)
+        .expect("session task should be unpausable");
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(metadata_gid)
+            .unwrap()
+            .recover()
+            .status(),
+        DownloadStatus::Waiting
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(payload_gid)
+            .unwrap()
+            .recover()
+            .status(),
+        DownloadStatus::Waiting,
+        "unpausing the persisted metadata GID must resume its payload graph"
+    );
+
+    restarted
+        .request_man
+        .force_pause_group(metadata_gid)
+        .expect("session task should be force-pausable");
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(metadata_gid)
+            .unwrap()
+            .recover()
+            .status(),
+        DownloadStatus::Paused
+    );
+    assert_eq!(
+        restarted
+            .request_man
+            .find_group(payload_gid)
+            .unwrap()
+            .recover()
+            .status(),
+        DownloadStatus::Paused,
+        "force-pausing the persisted metadata GID must pause its payload graph"
+    );
+}
+
+#[tokio::test]
+async fn test_force_saved_stopped_result_survives_app_session_restart() {
+    use aria2_core::request::request_group::{DownloadStatus, GroupId};
+
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_file = temp_dir.path().join("aria2.session.gz");
+    let app = App::new();
+    let gid = app
+        .request_man
+        .add_group(
+            vec!["https://example.test/complete.bin".to_string()],
+            DownloadOptions {
+                out: Some("complete.bin".to_string()),
+                split: Some(4),
+                ..Default::default()
+            },
+        )
+        .expect("group should be created");
+
+    app.request_man.fill_from_reserver();
+    let group = app
+        .request_man
+        .find_group(gid)
+        .expect("group should be promoted");
+    group.recover_mut().set_option_snapshot(HashMap::from([
+        ("force-save".to_string(), serde_json::json!(true)),
+        ("split".to_string(), serde_json::json!("4")),
+        ("out".to_string(), serde_json::json!("complete.bin")),
+    ]));
+    group.recover().mark_complete();
+    assert_eq!(
+        app.request_man.remove_stopped_groups(None),
+        vec![gid],
+        "completed group should enter stopped storage"
+    );
+
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "save-session",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session output");
+    }
+
+    assert_eq!(
+        app.save_session_on_shutdown()
+            .await
+            .expect("save session should succeed"),
+        Some(1),
+        "force-saved stopped result should be counted"
+    );
+    let session_bytes = tokio::fs::read(&session_file)
+        .await
+        .expect("saved compressed session should be readable");
+    assert_eq!(&session_bytes[..2], &[0x1f, 0x8b], "session should be gzip");
+    let entries =
+        aria2_core::session::active_session::ActiveSessionManager::new(session_file.clone())
+            .load_session()
+            .await
+            .expect("saved compressed session should load");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].uris,
+        vec!["https://example.test/complete.bin".to_string()]
+    );
+    assert_eq!(
+        entries[0].options.get("force-save"),
+        Some(&"true".to_string())
+    );
+
+    let restarted = App::new();
+    {
+        let mut config = restarted.config.write().await;
+        config
+            .set_global_option(
+                "input-file",
+                OptionValue::Str(session_file.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("configure session input");
+    }
+
+    assert_eq!(
+        restarted
+            .restore_session()
+            .await
+            .expect("restore session should succeed"),
+        1,
+        "force-saved stopped result should restore as one waiting task"
+    );
+    let restored = restarted
+        .request_man
+        .find_group(GroupId::new(gid.value()))
+        .expect("restored group should be indexed");
+    assert_eq!(restored.recover().status(), DownloadStatus::Waiting);
+    assert_eq!(
+        restored.recover().options().out.as_deref(),
+        Some("complete.bin")
+    );
 }
 
 /// Test 1: Load entries from session file

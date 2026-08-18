@@ -107,8 +107,10 @@ impl SequentialDownloader {
         loop {
             let notifier = self.group.recover().lifecycle_notifier();
             let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             self.check_cancelled()?;
-            notified.await;
+            notified.as_mut().await;
         }
     }
 
@@ -118,10 +120,12 @@ impl SequentialDownloader {
     pub(crate) async fn wait_for_retry(&self, wait: std::time::Duration) -> Result<()> {
         let notifier = self.group.recover().lifecycle_notifier();
         let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         self.check_cancelled()?;
         tokio::select! {
             _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = notified => self.check_cancelled(),
+            _ = &mut notified => self.check_cancelled(),
         }
     }
 

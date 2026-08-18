@@ -54,6 +54,12 @@ pub struct CompletedDownloadInfo {
     pub in_memory_data: Option<Vec<u8>>,
     /// Base URI from the first file entry's spent URIs (for Metalink).
     pub base_uri: Option<String>,
+    /// Effective source URI used for the completed download.
+    ///
+    /// In-memory metadata downloads do not create a DownloadContext, so
+    /// base_uri is unavailable even though the source URI is still needed
+    /// for extension-based post-download handler matching.
+    pub source_uri: Option<String>,
 }
 
 /// Trait for post-download handlers that create child request groups.
@@ -256,8 +262,9 @@ pub fn build_handler_chain(options: &DownloadOptions) -> Vec<Box<dyn PostDownloa
 pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
     let gid = group.gid();
     let options = group.options_arc();
+    let initial_source_uri = group.uris().first().cloned();
 
-    let (content_type, file_path, base_uri, in_memory_download, in_memory_data) =
+    let (content_type, file_path, base_uri, source_uri, in_memory_download, in_memory_data) =
         if let Some(dctx) = group.download_context.recover().as_ref() {
             let fp = dctx.first_file_path().map(|s| s.to_string());
 
@@ -270,6 +277,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
                     .cloned()
                     .or_else(|| entry.remaining_uris().front().cloned())
             });
+            let source_uri = base_uri.clone().or(initial_source_uri.clone());
 
             // C++ uses an explicit RequestGroup flag set by the memory
             // pre-download handler. Do not infer this from an empty path:
@@ -278,12 +286,13 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
             let in_mem = group.is_in_memory_download();
             let data = group.in_memory_data();
 
-            (group.content_type(), fp, base_uri, in_mem, data)
+            (group.content_type(), fp, base_uri, source_uri, in_mem, data)
         } else {
             (
                 group.content_type(),
                 None,
                 None,
+                initial_source_uri,
                 group.is_in_memory_download(),
                 group.in_memory_data(),
             )
@@ -297,7 +306,21 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
         in_memory_download,
         in_memory_data,
         base_uri,
+        source_uri,
     }
+}
+
+/// Return whether a URI or path ends with one of the supplied extensions.
+///
+/// URL parsing removes query and fragment components without changing the
+/// existing path-based checks used by the post-download handlers. Plain local
+/// paths remain supported through the fallback branch.
+pub(crate) fn path_has_extension(candidate: &str, extensions: &[&str]) -> bool {
+    let path = reqwest::Url::parse(candidate)
+        .map(|url| url.path().to_owned())
+        .unwrap_or_else(|_| candidate.to_owned());
+    let path = path.to_ascii_lowercase();
+    extensions.iter().any(|extension| path.ends_with(extension))
 }
 
 use crate::util::rwlock_ext::RwLockRecover;
@@ -372,6 +395,7 @@ mod tests {
             in_memory_download: false,
             in_memory_data: None,
             base_uri: None,
+            source_uri: None,
         }
     }
 

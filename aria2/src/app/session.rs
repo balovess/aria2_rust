@@ -243,6 +243,18 @@ impl App {
         payload.recover_mut().set_option_snapshot(option_snapshot);
         payload.recover().set_output_name(output_name);
         payload.recover().set_metadata_info(metadata_info.clone());
+        if let Some(bitfield) = entry.bitfield.clone() {
+            payload.recover().set_bt_bitfield(Some(bitfield));
+        }
+        if let (Some(num_pieces), Some(piece_length), Some(info_hash_hex)) = (
+            entry.num_pieces,
+            entry.piece_length,
+            entry.info_hash_hex.clone(),
+        ) {
+            payload
+                .recover()
+                .set_bt_metadata(num_pieces, piece_length, info_hash_hex);
+        }
         let dependency = if memory_source {
             BtDependency::new_memory_with_fallback(
                 metadata_gid,
@@ -314,8 +326,12 @@ impl App {
         // manager lock must not be held while session serialization performs
         // filesystem I/O, otherwise RPC mutations can be blocked at shutdown.
         let groups = self.request_man.list_groups();
+        let stopped_results = self.request_man.get_stopped_results(0, usize::MAX);
 
-        match mgr.save_session(&groups).await {
+        match mgr
+            .save_session_with_results(&groups, &stopped_results)
+            .await
+        {
             Ok(n) => {
                 info!("Successfully saved {} entries to {}", n, save_path);
                 Ok(Some(n))

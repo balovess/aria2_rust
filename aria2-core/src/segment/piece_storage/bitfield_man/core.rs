@@ -3,7 +3,7 @@
 //! block length queries, and private trailing-bit cleanup helpers.
 
 use super::helpers::{bf_count_set, bf_set, bf_unset};
-use crate::segment::bitfield_util::test_bit;
+use crate::segment::bitfield_util::{test_bit, valid_bits_mask};
 
 /// Manages completion, usage, and filter bitfields for piece tracking.
 ///
@@ -119,10 +119,14 @@ impl BitfieldMan {
 
     /// Returns true if there are missing pieces that are not in-use.
     pub fn has_missing_piece(&self) -> bool {
-        for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i)
-                && !test_bit(&self.use_bitfield, self.num_pieces, i)
-            {
+        let last_mask = valid_bits_mask(self.num_pieces);
+        for byte_index in 0..self.bitfield.len() {
+            let mask = if byte_index + 1 == self.bitfield.len() {
+                last_mask
+            } else {
+                u8::MAX
+            };
+            if ((!self.bitfield[byte_index] & !self.use_bitfield[byte_index]) & mask) != 0 {
                 return true;
             }
         }
@@ -131,10 +135,19 @@ impl BitfieldMan {
 
     /// Returns the index of the first missing unused piece.
     pub fn get_missing_piece_index(&self) -> Option<usize> {
-        (0..self.num_pieces).find(|&i| {
-            !test_bit(&self.bitfield, self.num_pieces, i)
-                && !test_bit(&self.use_bitfield, self.num_pieces, i)
-        })
+        let last_mask = valid_bits_mask(self.num_pieces);
+        for byte_index in 0..self.bitfield.len() {
+            let mask = if byte_index + 1 == self.bitfield.len() {
+                last_mask
+            } else {
+                u8::MAX
+            };
+            let available = (!self.bitfield[byte_index] & !self.use_bitfield[byte_index]) & mask;
+            if available != 0 {
+                return Some(byte_index * 8 + available.leading_zeros() as usize);
+            }
+        }
+        None
     }
 
     /// Returns the index of the first missing unused piece that is not
@@ -248,13 +261,16 @@ impl BitfieldMan {
         if !self.filter_enabled {
             return 0;
         }
+        let last_mask = valid_bits_mask(self.num_pieces);
         let mut count = 0usize;
-        for i in 0..self.num_pieces {
-            if test_bit(&self.bitfield, self.num_pieces, i)
-                && test_bit(&self.filter_bitfield, self.num_pieces, i)
-            {
-                count += 1;
-            }
+        for byte_index in 0..self.bitfield.len() {
+            let mask = if byte_index + 1 == self.bitfield.len() {
+                last_mask
+            } else {
+                u8::MAX
+            };
+            count += (self.bitfield[byte_index] & self.filter_bitfield[byte_index] & mask)
+                .count_ones() as usize;
         }
         count
     }
@@ -267,13 +283,16 @@ impl BitfieldMan {
         if !self.filter_enabled {
             return self.count_missing_pieces();
         }
+        let last_mask = valid_bits_mask(self.num_pieces);
         let mut count = 0usize;
-        for i in 0..self.num_pieces {
-            if !test_bit(&self.bitfield, self.num_pieces, i)
-                && test_bit(&self.filter_bitfield, self.num_pieces, i)
-            {
-                count += 1;
-            }
+        for byte_index in 0..self.bitfield.len() {
+            let mask = if byte_index + 1 == self.bitfield.len() {
+                last_mask
+            } else {
+                u8::MAX
+            };
+            count += ((!self.bitfield[byte_index] & self.filter_bitfield[byte_index]) & mask)
+                .count_ones() as usize;
         }
         count
     }

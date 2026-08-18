@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
@@ -81,6 +82,8 @@ pub struct PeerConnection {
     pub state: PeerState,
     pub remote_peer_id: Option<[u8; 20]>,
     pub remote_bitfield: Vec<u8>,
+    // Keep partially received frames across cancellation of read_message.
+    read_buffer: BytesMut,
 }
 
 impl PeerConnection {
@@ -213,6 +216,7 @@ impl PeerConnection {
             state: PeerState::new(),
             remote_peer_id: Some(remote_hs.peer_id),
             remote_bitfield: vec![],
+            read_buffer: BytesMut::new(),
         })
     }
 
@@ -224,6 +228,7 @@ impl PeerConnection {
             state: PeerState::new(),
             remote_peer_id: Some(peer_id),
             remote_bitfield: vec![],
+            read_buffer: BytesMut::new(),
         }
     }
 
@@ -247,29 +252,35 @@ impl PeerConnection {
     pub async fn read_message(&mut self) -> Result<Option<BtMessage>, String> {
         use crate::bittorrent::message::factory::parse_message;
 
-        let mut len_buf = [0u8; 4];
-        match self.stream.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(format!("Failed to read message length: {}", e)),
+        loop {
+            if self.read_buffer.len() >= 4 {
+                let msg_len =
+                    u32::from_be_bytes(self.read_buffer[..4].try_into().unwrap()) as usize;
+                let frame_len = 4 + msg_len;
+                if self.read_buffer.len() >= frame_len {
+                    let frame = self.read_buffer.split_to(frame_len);
+                    if msg_len == 0 {
+                        return Ok(Some(BtMessage::KeepAlive));
+                    }
+                    return parse_message(&frame);
+                }
+            }
+
+            let mut chunk = [0u8; 16 * 1024];
+            let bytes_read = self
+                .stream
+                .read(&mut chunk)
+                .await
+                .map_err(|e| format!("Failed to read message: {}", e))?;
+            if bytes_read == 0 {
+                return if self.read_buffer.is_empty() {
+                    Ok(None)
+                } else {
+                    Err("Failed to read message: unexpected eof".to_string())
+                };
+            }
+            self.read_buffer.extend_from_slice(&chunk[..bytes_read]);
         }
-
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len == 0 {
-            return Ok(Some(BtMessage::KeepAlive));
-        }
-
-        let mut payload_buf = vec![0u8; msg_len];
-        self.stream
-            .read_exact(&mut payload_buf)
-            .await
-            .map_err(|e| format!("Failed to read message body: {}", e))?;
-
-        let mut full_msg = vec![0u8; 4 + msg_len];
-        full_msg[0..4].copy_from_slice(&len_buf);
-        full_msg[4..].copy_from_slice(&payload_buf);
-
-        parse_message(&full_msg)
     }
 
     pub async fn send_choke(&mut self) -> Result<(), String> {
@@ -339,10 +350,28 @@ impl PeerConnection {
     }
 
     pub async fn stream_read_exact(&mut self, buf: &mut [u8]) -> Result<(), String> {
+        while self.read_buffer.len() < buf.len() {
+            let mut chunk = [0u8; 16 * 1024];
+            let bytes_read = self
+                .stream
+                .read(&mut chunk)
+                .await
+                .map_err(|e| format!("Stream read failed: {}", e))?;
+            if bytes_read == 0 {
+                return Err("Stream read failed: unexpected eof".to_string());
+            }
+            self.read_buffer.extend_from_slice(&chunk[..bytes_read]);
+        }
+
+        buf.copy_from_slice(&self.read_buffer[..buf.len()]);
+        let _ = self.read_buffer.split_to(buf.len());
+        Ok(())
+    }
+
+    pub async fn stream_read(&mut self, buf: &mut [u8]) -> Result<usize, String> {
         self.stream
-            .read_exact(buf)
+            .read(buf)
             .await
-            .map(|_| ())
             .map_err(|e| format!("Stream read failed: {}", e))
     }
 }
@@ -437,5 +466,33 @@ mod tests {
         let addr = PeerAddr::from_compact_v6(&data).unwrap();
         assert_eq!(addr.ip, "2001:db8:85a3::8a2e:370:7334");
         assert_eq!(addr.port, 1234);
+    }
+
+    #[tokio::test]
+    async fn test_read_message_preserves_partial_frame_after_cancellation() {
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let mut connection = PeerConnection::from_stream_with_peer(server, [0u8; 20]);
+        let frame = crate::bittorrent::message::serializer::serialize(&BtMessage::Choke);
+
+        client.write_all(&frame[..2]).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                connection.read_message()
+            )
+            .await
+            .is_err()
+        );
+
+        client.write_all(&frame[2..]).await.unwrap();
+        assert_eq!(
+            connection.read_message().await.unwrap(),
+            Some(BtMessage::Choke)
+        );
     }
 }

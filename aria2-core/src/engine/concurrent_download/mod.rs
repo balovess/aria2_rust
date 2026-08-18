@@ -179,10 +179,12 @@ impl ConcurrentDownloader {
     pub(crate) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
         let notifier = self.group.recover().lifecycle_notifier();
         let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         self.check_cancelled()?;
         tokio::select! {
             _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = notified => self.check_cancelled(),
+            _ = notified.as_mut() => self.check_cancelled(),
         }
     }
 

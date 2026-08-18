@@ -32,6 +32,53 @@ pub fn test_bit(bitfield: &[u8], nbits: usize, index: usize) -> bool {
     (bitfield[byte_index] & (1 << (7 - bit_offset))) != 0
 }
 
+/// Return a bitfield byte or zero when the input is shorter than requested.
+#[inline]
+pub(crate) fn byte_at(bitfield: &[u8], byte_index: usize) -> u8 {
+    bitfield.get(byte_index).copied().unwrap_or(0)
+}
+
+/// Return the mask of valid MSB-first bits in the last logical byte.
+#[inline]
+pub(crate) fn valid_bits_mask(nbits: usize) -> u8 {
+    match nbits % 8 {
+        0 => u8::MAX,
+        remaining => u8::MAX << (8 - remaining),
+    }
+}
+
+/// Visit each set logical bit in a single MSB-first byte.
+#[inline]
+pub(crate) fn for_each_set_byte(
+    mut byte: u8,
+    byte_index: usize,
+    nbits: usize,
+    callback: &mut impl FnMut(usize),
+) {
+    let byte_start = byte_index * 8;
+    let valid_bits = nbits.saturating_sub(byte_start).min(8);
+    if valid_bits == 0 {
+        return;
+    }
+    if valid_bits < 8 {
+        byte &= valid_bits_mask(nbits);
+    }
+
+    while byte != 0 {
+        let bit_from_msb = byte.leading_zeros() as usize;
+        callback(byte_start + bit_from_msb);
+        byte &= !(1 << (7 - bit_from_msb));
+    }
+}
+
+/// Visit each set logical bit in an MSB-first bitfield.
+#[inline]
+pub(crate) fn for_each_set_bit(bitfield: &[u8], nbits: usize, mut callback: impl FnMut(usize)) {
+    for (byte_index, &byte) in bitfield.iter().enumerate().take(nbits.div_ceil(8)) {
+        for_each_set_byte(byte, byte_index, nbits, &mut callback);
+    }
+}
+
 /// Clear (unset) the bit at `index` in a mutable raw bitfield of `nbits` total
 /// bits, using MSB-first byte ordering.
 ///
@@ -189,5 +236,19 @@ mod tests {
         // bitfield slice too short for the index
         let bf: &[u8] = &[0xFF]; // only 1 byte
         assert!(!test_bit(bf, 16, 8)); // would need byte 1, which is missing
+    }
+
+    #[test]
+    fn test_for_each_set_bit_masks_trailing_bits() {
+        let mut indexes = Vec::new();
+        for_each_set_bit(&[0xFF, 0xFF], 10, |index| indexes.push(index));
+        assert_eq!(indexes, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn test_for_each_set_bit_handles_short_input() {
+        let mut indexes = Vec::new();
+        for_each_set_bit(&[0b1010_0000], 16, |index| indexes.push(index));
+        assert_eq!(indexes, vec![0, 2]);
     }
 }

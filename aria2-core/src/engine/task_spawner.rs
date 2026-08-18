@@ -13,6 +13,7 @@ use super::command::Command;
 use super::engine_command::TaskResult;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::Aria2Error;
+use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -76,7 +77,7 @@ pub(crate) fn spawn_download_task(
     // engine loop can continue processing pause/remove commands while a
     // resolver or a slow protocol constructor is waiting.
     let handle = tokio::spawn(async move {
-        let result = tokio::select! {
+        let (result, connection_context) = tokio::select! {
             command_result = create_command_for_group(
                 Arc::clone(&group),
                 first_uri,
@@ -84,18 +85,21 @@ pub(crate) fn spawn_download_task(
                 dependencies,
             ) => {
                 match command_result {
-                    Ok(mut cmd) => tokio::select! {
-                        result = cmd.execute() => result,
-                        _ = task_shutdown.cancelled() => {
-                            cmd.shutdown().await;
-                            Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
-                        }
-                    },
-                    Err(error) => Err(error),
+                    Ok(mut cmd) => {
+                        let result = tokio::select! {
+                            result = cmd.execute() => result,
+                            _ = task_shutdown.cancelled() => {
+                                cmd.shutdown().await;
+                                Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+                            }
+                        };
+                        (result, cmd.connection_context())
+                    }
+                    Err(error) => (Err(error), None),
                 }
             }
             _ = task_shutdown.cancelled() => {
-                Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
+                (Err(Aria2Error::DownloadFailed("download shutdown requested".into())), None)
             }
         };
         let task_result = match result {
@@ -108,11 +112,11 @@ pub(crate) fn spawn_download_task(
                     gid = gid.value(),
                     "Download task failed with recoverable error"
                 );
-                TaskResult::Failed(Aria2Error::Recoverable(recoverable))
+                failed_task_result(Aria2Error::Recoverable(recoverable), connection_context)
             }
             Err(e) => {
                 warn!(gid = gid.value(), error = %e, "Download task failed");
-                TaskResult::Failed(e)
+                failed_task_result(e, connection_context)
             }
         };
 
@@ -131,6 +135,19 @@ pub(crate) fn spawn_download_task(
     });
 
     Some((handle, shutdown))
+}
+
+fn failed_task_result(
+    error: Aria2Error,
+    connection_context: Option<ConnectionContext>,
+) -> TaskResult {
+    match connection_context {
+        Some(connection_context) => TaskResult::FailedWithContext {
+            error,
+            connection_context,
+        },
+        None => TaskResult::Failed(error),
+    }
 }
 
 fn direct_origin(uri: &str) -> Option<(String, u16)> {

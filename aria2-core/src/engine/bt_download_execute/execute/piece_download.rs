@@ -19,6 +19,31 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::types::{EndgameState, PeerKey};
 
+fn progress_snapshot(
+    info_hash: [u8; 20],
+    bitfield: &[u8],
+    piece_length: u32,
+    total_size: u64,
+    num_pieces: u32,
+    stats: ProgressDownloadStats,
+) -> BtProgress {
+    let upload_length = stats.uploaded_bytes;
+    BtProgress {
+        info_hash,
+        bitfield: bitfield.to_vec(),
+        peers: vec![],
+        stats,
+        piece_length,
+        total_size,
+        num_pieces,
+        upload_length,
+        in_flight_pieces: vec![],
+        is_torrent: true,
+        save_time: std::time::SystemTime::now(),
+        version: 1,
+    }
+}
+
 fn sync_peer_snapshots(
     group: &crate::request::request_group::RequestGroup,
     active_connections: &[BtPeerConn],
@@ -1174,7 +1199,7 @@ impl BtDownloadCommand {
                             &bitfield,
                             piece_data_len as u64,
                         )
-                            .await?;
+                        .await?;
 
                         BtPeerInteraction::broadcast_have(
                             active_connections,
@@ -1186,6 +1211,7 @@ impl BtDownloadCommand {
                         // P1 integration: periodically save download progress
                         self.maybe_save_progress(
                             meta,
+                            &bitfield,
                             piece_length,
                             total_size,
                             num_pieces,
@@ -1300,6 +1326,7 @@ impl BtDownloadCommand {
     fn maybe_save_progress(
         &self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        bitfield: &[u8],
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
@@ -1310,44 +1337,39 @@ impl BtDownloadCommand {
         if let Some(ref mgr) = self.progress_manager
             && last_progress_save.elapsed() >= self.progress_save_interval
         {
-            let progress = BtProgress {
-                info_hash: meta.info_hash.bytes,
-                bitfield: vec![],
-                peers: vec![],
-                stats: ProgressDownloadStats {
+            let progress = progress_snapshot(
+                meta.info_hash.bytes,
+                bitfield,
+                piece_length,
+                total_size,
+                num_pieces,
+                ProgressDownloadStats {
                     downloaded_bytes: self.completed_bytes,
                     uploaded_bytes: self.total_uploaded,
                     upload_speed: 0.0,
                     download_speed: 0.0,
                     elapsed_seconds: start_time.elapsed().as_secs(),
                 },
-                piece_length,
-                total_size,
-                num_pieces,
-                upload_length: self.total_uploaded,
-                in_flight_pieces: vec![],
-                is_torrent: true,
-                save_time: std::time::SystemTime::now(),
-                version: 1,
-            };
+            );
 
-            if let Err(e) = mgr.save_progress(&meta.info_hash.bytes, &progress) {
-                warn!(error = %e, "Failed to save BT progress");
-            } else {
-                debug!(
-                    pieces_completed = next_piece_idx + 1,
-                    total_pieces = num_pieces,
-                    "BT progress saved successfully"
-                );
+            match mgr.save_progress(&meta.info_hash.bytes, &progress) {
+                Ok(()) => {
+                    *last_progress_save = Instant::now();
+                    debug!(
+                        pieces_completed = next_piece_idx + 1,
+                        total_pieces = num_pieces,
+                        "BT progress saved successfully"
+                    );
+                }
+                Err(e) => warn!(error = %e, "Failed to save BT progress"),
             }
-            *last_progress_save = Instant::now();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BtStopTimeoutState;
+    use super::{BtStopTimeoutState, ProgressDownloadStats, progress_snapshot};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1369,5 +1391,30 @@ mod tests {
         assert!(!state.should_halt(Some(2), 1, start + Duration::from_secs(1)));
         assert!(!state.should_halt(Some(2), 1, start + Duration::from_secs(2)));
         assert!(state.should_halt(Some(2), 1, start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn progress_snapshot_preserves_completed_bitfield() {
+        let snapshot = progress_snapshot(
+            [0x11; 20],
+            &[0b1100_0000],
+            4,
+            8,
+            2,
+            ProgressDownloadStats {
+                downloaded_bytes: 8,
+                uploaded_bytes: 3,
+                upload_speed: 0.0,
+                download_speed: 0.0,
+                elapsed_seconds: 9,
+            },
+        );
+
+        assert_eq!(snapshot.bitfield, vec![0b1100_0000]);
+        assert_eq!(snapshot.piece_length, 4);
+        assert_eq!(snapshot.total_size, 8);
+        assert_eq!(snapshot.num_pieces, 2);
+        assert_eq!(snapshot.upload_length, 3);
+        assert_eq!(snapshot.stats.downloaded_bytes, 8);
     }
 }

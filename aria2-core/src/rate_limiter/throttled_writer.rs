@@ -86,18 +86,13 @@ where
         // Acquire tokens per-chunk (not batched for the entire buffer).
         //
         // Rationale: reqwest's `bytes_stream()` yields chunks whose sizes grow
-        // adaptively (8K → 16K → 32K → … → 256K+) on fast links. A single
-        // batched `acquire_download(entire_buffer)` for a 417 KB chunk at
-        // 80 KB/s would sleep for ~5.2 s. That sleep is a fixed
-        // `tokio::time::sleep` and is NOT interrupted when `changeOption`
-        // updates the rate mid-sleep, making dynamic rate changes appear to
-        // stall the download.
-        //
-        // Per-chunk acquisition bounds each `acquire` to
-        // `chunk_size / rate` seconds (e.g. 8 KB / 80 KB/s = 0.1 s), so a
-        // rate change takes effect within at most one chunk's duration. The
-        // lock-free CAS in `TokenBucket::acquire` keeps overhead negligible
-        // even at high rates where `try_acquire`-style fast paths trigger.
+        // adaptively (8K -> 16K -> 32K -> ... -> 256K+) on fast links. Keeping
+        // acquisition and writes interleaved prevents one large transport
+        // chunk from delaying all disk I/O behind a single long wait. The
+        // TokenBucket also listens for rate changes, so `changeOption` wakes a
+        // pending acquire and the next chunk uses the new rate immediately.
+        // The lock-free CAS in `TokenBucket::acquire` keeps this accounting
+        // overhead low even at high rates.
         if data.len() <= self.chunk_size {
             if per_limited {
                 self.limiter.acquire_download(data.len() as u64).await;

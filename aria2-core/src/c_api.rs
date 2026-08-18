@@ -1155,15 +1155,17 @@ mod tests {
             0
         );
 
-        let group = unsafe { (&*session).request_man.find_group(GroupId::new(gid)) }
-            .expect("C API option change should keep the group");
-        let group = group.read().unwrap();
-        assert_eq!(group.options().dir.as_deref(), Some("reserved-dir"));
-        assert_eq!(
-            group.runtime_options().get("dir"),
-            Some(&serde_json::json!("reserved-dir"))
-        );
-        assert!(group.pending_options().is_empty());
+        {
+            let group = unsafe { (&*session).request_man.find_group(GroupId::new(gid)) }
+                .expect("C API option change should keep the group");
+            let group = group.read().unwrap();
+            assert_eq!(group.options().dir.as_deref(), Some("reserved-dir"));
+            assert_eq!(
+                group.runtime_options().get("dir"),
+                Some(&serde_json::json!("reserved-dir"))
+            );
+            assert!(group.pending_options().is_empty());
+        }
 
         assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
         assert_eq!(aria2_rust_library_deinit(), 0);

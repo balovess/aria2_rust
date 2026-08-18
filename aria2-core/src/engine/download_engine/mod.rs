@@ -37,6 +37,7 @@ pub struct DownloadEngine {
     pub(crate) auto_save_interval: Option<Duration>,
     pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
     pub(crate) auto_save: Option<Arc<Mutex<AutoSaveCoordinator>>>,
+    pub(crate) auto_save_dirty_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// FTP connection pool for connection reuse across FTP downloads.
     /// Created during engine initialization and passed down via dependency injection.
     pub(crate) ftp_pool: Arc<FtpConnectionPool>,
@@ -93,6 +94,7 @@ impl DownloadEngine {
             auto_save_interval: None,
             request_group_man: None,
             auto_save: None,
+            auto_save_dirty_signal: None,
             ftp_pool: Arc::new(FtpConnectionPool::new(
                 constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
             )),
@@ -174,18 +176,14 @@ impl DownloadEngine {
         // Keep the coordinator even when both intervals are disabled. Its
         // shutdown path still requests the final protocol-owned checkpoints,
         // matching aria2's guarantee that stopping saves control files.
-        self.auto_save = Some(Arc::new(Mutex::new(AutoSaveCoordinator::new(
-            man,
-            session,
-            self.auto_save_interval,
-        ))));
+        let coordinator = AutoSaveCoordinator::new(man, session, self.auto_save_interval);
+        self.auto_save_dirty_signal = Some(coordinator.dirty_signal());
+        self.auto_save = Some(Arc::new(Mutex::new(coordinator)));
     }
 
     pub fn mark_session_dirty(&self) {
-        if let Some(ref auto_save) = self.auto_save
-            && let Ok(auto) = auto_save.try_lock()
-        {
-            auto.mark_session_dirty();
+        if let Some(signal) = &self.auto_save_dirty_signal {
+            signal.store(true, std::sync::atomic::Ordering::Release);
         }
     }
 

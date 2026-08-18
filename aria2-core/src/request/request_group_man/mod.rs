@@ -387,10 +387,7 @@ impl RequestGroupMan {
     /// Remove a reserved group while the lifecycle transition lock is held.
     fn remove_reserved_group(&self, gid: GroupId) -> Result<()> {
         let group_lock = self.reserved.find_by_gid(gid).ok_or_else(|| {
-            crate::error::Aria2Error::InvalidArgument(format!(
-                "GID {} not found",
-                gid.value()
-            ))
+            crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
 
         // Match aria2_original's removeDownload() contract: a reserved group
@@ -503,6 +500,57 @@ impl RequestGroupMan {
         true
     }
 
+    /// Return both sides of a standard Metalink metadata/payload graph.
+    ///
+    /// Session restore materializes the metadata prerequisite and payload as
+    /// separate Rust groups, while the persisted task identity is the
+    /// metadata GID. Keep lifecycle operations on that identity coherent
+    /// without treating arbitrary `belongs_to` follow children as one task.
+    fn metalink_graph_groups(&self, gid: GroupId) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
+        let Some(target) = self.find_group(gid) else {
+            return Vec::new();
+        };
+
+        let (metadata_gid, payload_gid) =
+            if let Some(metadata_info) = target.recover().metadata_info() {
+                let Some(metadata_gid) = metadata_info.gid() else {
+                    return vec![Arc::clone(&target)];
+                };
+                let Some(metadata) = self.find_group(metadata_gid) else {
+                    return vec![Arc::clone(&target)];
+                };
+                if metadata.recover().belongs_to_gid() != Some(gid) {
+                    return vec![Arc::clone(&target)];
+                }
+                (metadata_gid, gid)
+            } else if let Some(payload_gid) = target.recover().belongs_to_gid() {
+                let Some(payload) = self.find_group(payload_gid) else {
+                    return vec![Arc::clone(&target)];
+                };
+                let Some(metadata_gid) = payload
+                    .recover()
+                    .metadata_info()
+                    .and_then(|info| info.gid())
+                else {
+                    return vec![Arc::clone(&target)];
+                };
+                if metadata_gid != gid {
+                    return vec![Arc::clone(&target)];
+                }
+                (gid, payload_gid)
+            } else {
+                return vec![Arc::clone(&target)];
+            };
+
+        let Some(metadata) = self.find_group(metadata_gid) else {
+            return vec![Arc::clone(&target)];
+        };
+        let Some(payload) = self.find_group(payload_gid) else {
+            return vec![Arc::clone(&target)];
+        };
+        vec![metadata, payload]
+    }
+
     // ── Pause/Unpause ───────────────────────────────────────────────────
 
     pub fn pause_group(&self, gid: GroupId) -> Result<()> {
@@ -510,7 +558,7 @@ impl RequestGroupMan {
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
-        let mut group = group_lock.recover_mut();
+        let group = group_lock.recover();
         if !matches!(
             group.status(),
             DownloadStatus::Active | DownloadStatus::Waiting
@@ -520,7 +568,10 @@ impl RequestGroupMan {
                 gid.to_hex_string()
             )));
         }
-        group.pause()?;
+        drop(group);
+        for group_lock in self.metalink_graph_groups(gid) {
+            group_lock.recover_mut().pause()?;
+        }
         info!("Pausing download task #{}", gid.value());
         Ok(())
     }
@@ -530,14 +581,17 @@ impl RequestGroupMan {
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
-        let mut group = group_lock.recover_mut();
+        let group = group_lock.recover();
         if !group.status().is_paused() {
             return Err(crate::error::Aria2Error::InvalidArgument(format!(
                 "GID#{} cannot be unpaused now",
                 gid.to_hex_string()
             )));
         }
-        group.resume()?;
+        drop(group);
+        for group_lock in self.metalink_graph_groups(gid) {
+            group_lock.recover_mut().resume()?;
+        }
         info!("Resuming download task #{}", gid.value());
         Ok(())
     }
@@ -547,7 +601,7 @@ impl RequestGroupMan {
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
-        let mut group = group_lock.recover_mut();
+        let group = group_lock.recover();
         if !matches!(
             group.status(),
             DownloadStatus::Active | DownloadStatus::Waiting
@@ -557,7 +611,10 @@ impl RequestGroupMan {
                 gid.to_hex_string()
             )));
         }
-        group.force_pause()?;
+        drop(group);
+        for group_lock in self.metalink_graph_groups(gid) {
+            group_lock.recover_mut().force_pause()?;
+        }
         Ok(())
     }
 
@@ -688,7 +745,29 @@ impl RequestGroupMan {
     /// those stores. The set also prevents duplicates if a reader observes
     /// the two stores during the same transfer window.
     fn groups_snapshot(&self) -> Vec<(GroupId, Arc<std::sync::RwLock<RequestGroup>>)> {
-        let mut snapshot = Vec::with_capacity(self.groups.len());
+        let reserved = self.reserved.iter_snapshot();
+        let canonical_len = self.groups.len();
+        let active_len = self.active.len();
+
+        // Lifecycle transitions remove a group from one scheduling store
+        // before inserting it into the next. In the steady state the two
+        // stores are complete, so avoid rescanning the canonical index and
+        // allocating a deduplication set for every status query.
+        if active_len + reserved.len() == canonical_len {
+            let mut snapshot = Vec::with_capacity(canonical_len);
+            snapshot.extend(
+                self.active
+                    .iter()
+                    .map(|entry| (*entry.key(), entry.value().clone())),
+            );
+            snapshot.extend(reserved.into_iter().map(|group| {
+                let gid = group.recover().gid();
+                (gid, group)
+            }));
+            return snapshot;
+        }
+
+        let mut snapshot = Vec::with_capacity(canonical_len);
         let mut seen = HashSet::with_capacity(self.groups.len());
 
         for entry in self.active.iter() {
@@ -753,26 +832,53 @@ impl RequestGroupMan {
     }
 
     pub fn get_active_groups(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
+        let groups = self
+            .active
+            .iter()
+            .filter_map(|entry| {
+                let group = entry.value().clone();
+                let is_active = matches!(group.recover().status(), DownloadStatus::Active);
+                is_active.then_some(group)
+            })
+            .collect::<Vec<_>>();
+        if self.active.len() + self.reserved.len() == self.groups.len() {
+            return groups;
+        }
+
         self.groups_snapshot()
             .into_iter()
-            .filter(|entry| {
-                let g = entry.1.recover();
-                matches!(g.status(), DownloadStatus::Active)
+            .filter_map(|(_, group)| {
+                let is_active = matches!(group.recover().status(), DownloadStatus::Active);
+                is_active.then_some(group)
             })
-            .map(|(_, group)| group)
             .collect()
     }
 
     pub fn get_waiting_groups(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
-        self.groups_snapshot()
+        let groups = self
+            .reserved
+            .iter_snapshot()
             .into_iter()
-            .filter(|g| {
+            .filter(|group| {
                 matches!(
-                    g.1.recover().status(),
+                    group.recover().status(),
                     DownloadStatus::Waiting | DownloadStatus::Paused
                 )
             })
-            .map(|(_, group)| group)
+            .collect::<Vec<_>>();
+        if self.active.len() + self.reserved.len() == self.groups.len() {
+            return groups;
+        }
+
+        self.groups_snapshot()
+            .into_iter()
+            .filter_map(|(_, group)| {
+                let is_waiting = matches!(
+                    group.recover().status(),
+                    DownloadStatus::Waiting | DownloadStatus::Paused
+                );
+                is_waiting.then_some(group)
+            })
             .collect()
     }
 

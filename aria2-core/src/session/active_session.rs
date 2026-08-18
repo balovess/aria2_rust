@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::session_serializer::{self, SessionEntry};
-use crate::request::request_group::RequestGroup;
+use crate::request::request_group::{DownloadResult, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Active session manager responsible for session loading and explicit saving.
@@ -79,6 +79,20 @@ impl ActiveSessionManager {
         &self,
         groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<usize, String> {
+        self.save_session_with_results(groups, &[]).await
+    }
+
+    /// Save active groups and eligible stopped results to the session file.
+    ///
+    /// Terminal results are included according to the session serializer's
+    /// `force-save`, `save-not-found`, and resumable-result policy. The
+    /// separate method keeps the existing active-group API intact while
+    /// allowing the application shutdown path to persist stopped tasks.
+    pub async fn save_session_with_results(
+        &self,
+        groups: &[Arc<std::sync::RwLock<RequestGroup>>],
+        results: &[DownloadResult],
+    ) -> Result<usize, String> {
         // Serialize all groups into a SessionEntry list
         let mut entries = Vec::new();
         for group_lock in groups {
@@ -88,15 +102,23 @@ impl ActiveSessionManager {
             }
         }
 
+        let result_count = results
+            .iter()
+            .filter(|result| session_serializer::should_save_download_result(result))
+            .filter_map(session_serializer::download_result_to_entry)
+            .count();
+
         // Save to file using atomic write strategy
-        match session_serializer::save_to_file_with_entries(&self.session_path, &entries).await {
+        match session_serializer::save_to_file_with_results(&self.session_path, groups, results)
+            .await
+        {
             Ok(_) => {
                 tracing::info!(
                     "Session file saved successfully: {}, entries: {}",
                     self.session_path.display(),
-                    entries.len()
+                    entries.len() + result_count
                 );
-                Ok(entries.len())
+                Ok(entries.len() + result_count)
             }
             Err(e) => {
                 let err_msg = format!("Failed to save session file: {}", e);

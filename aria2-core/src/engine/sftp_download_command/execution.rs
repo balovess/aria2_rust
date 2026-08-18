@@ -211,7 +211,15 @@ impl SftpDownloadCommand {
                 .as_ref()
                 .expect("complete local checksum candidate has a checksum");
             let checksum = Checksum::from_type_and_value(algorithm, expected)?;
-            if crate::checksum::checksum::verify_file(&self.output_path, &checksum).await? {
+            if crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+                &crate::checksum::check_integrity::man::shared(),
+                std::sync::Arc::clone(&self.group),
+                &self.output_path,
+                total_length,
+                checksum,
+            )
+            .await?
+            {
                 self.group.recover().set_checksum_verified(true);
                 self.group.recover().set_completed_length(total_length);
                 self.group.recover_mut().complete()?;
@@ -452,7 +460,15 @@ impl SftpDownloadCommand {
             let verified = if in_memory_download {
                 checksum.verify(&finalized_data)
             } else {
-                match crate::checksum::checksum::verify_file(&self.output_path, &checksum).await {
+                match crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+                    &crate::checksum::check_integrity::man::shared(),
+                    std::sync::Arc::clone(&self.group),
+                    &self.output_path,
+                    self.completed_bytes,
+                    checksum,
+                )
+                .await
+                {
                     Ok(verified) => verified,
                     Err(error) => {
                         self.flush_checkpoint().await;
@@ -590,10 +606,12 @@ impl SftpDownloadCommand {
     pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
         let notifier = self.group.recover().lifecycle_notifier();
         let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         self.check_cancelled()?;
         tokio::select! {
             _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = notified => self.check_cancelled(),
+            _ = &mut notified => self.check_cancelled(),
         }
     }
 

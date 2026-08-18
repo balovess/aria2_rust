@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tracing::debug;
@@ -19,6 +20,7 @@ pub struct AutoSaveCoordinator {
     session: Option<AutoSaveSession>,
     control_file_interval: Option<Duration>,
     last_control_file_save: Instant,
+    pending_session_dirty: Arc<AtomicBool>,
 }
 
 impl AutoSaveCoordinator {
@@ -35,27 +37,33 @@ impl AutoSaveCoordinator {
             session,
             control_file_interval,
             last_control_file_save: Instant::now(),
+            pending_session_dirty: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Return a lock-free dirty signal for engine callers that cannot wait on
+    /// the coordinator mutex while a session file is being written.
+    pub fn dirty_signal(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.pending_session_dirty)
     }
 
     pub fn mark_session_dirty(&self) {
-        if let Some(session) = &self.session {
-            session.mark_dirty();
-        }
+        self.pending_session_dirty.store(true, Ordering::Release);
     }
 
     pub fn is_session_dirty(&self) -> bool {
-        self.session.as_ref().is_some_and(AutoSaveSession::is_dirty)
+        self.pending_session_dirty.load(Ordering::Acquire)
+            || self.session.as_ref().is_some_and(AutoSaveSession::is_dirty)
     }
 
     /// Return the earliest real persistence deadline.
     pub fn next_deadline(&self, has_pending_downloads: bool) -> Option<Instant> {
+        let session_dirty = self.is_session_dirty();
         let session_deadline = self.session.as_ref().and_then(|session| {
             if session.interval().is_zero() {
-                session.is_dirty().then_some(Instant::now())
+                session_dirty.then_some(Instant::now())
             } else {
-                (has_pending_downloads || session.is_dirty())
-                    .then_some(session.next_save_deadline())
+                (has_pending_downloads || session_dirty).then_some(session.next_save_deadline())
             }
         });
 
@@ -73,6 +81,12 @@ impl AutoSaveCoordinator {
     /// Execute every persistence action whose deadline has elapsed.
     pub async fn run_due(&mut self, has_pending_downloads: bool) {
         let now = Instant::now();
+
+        if self.pending_session_dirty.swap(false, Ordering::AcqRel)
+            && let Some(session) = &self.session
+        {
+            session.mark_dirty();
+        }
 
         if let Some(interval) = self.control_file_interval
             && !interval.is_zero()
@@ -112,6 +126,11 @@ impl AutoSaveCoordinator {
 
     /// Test and focused-call helper for the session sub-path.
     pub async fn save_if_dirty(&mut self) {
+        if self.pending_session_dirty.swap(false, Ordering::AcqRel)
+            && let Some(session) = &self.session
+        {
+            session.mark_dirty();
+        }
         if let Some(session) = &mut self.session {
             session.save_if_dirty().await;
         }

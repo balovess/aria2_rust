@@ -38,7 +38,9 @@ impl Command for SaveSessionCommand {
 
         self.request_group_man.request_control_file_saves();
         let groups = self.request_group_man.list_groups();
-        session_serializer::save_to_file(&self.path, &groups).await?;
+        let stopped_results = self.request_group_man.get_stopped_results(0, usize::MAX);
+        session_serializer::save_to_file_with_results(&self.path, &groups, &stopped_results)
+            .await?;
 
         self.status = CommandStatus::Completed;
         info!("Session saved to {}", self.path.display());

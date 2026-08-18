@@ -142,6 +142,79 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
     server.shutdown().await;
 }
 
+/// A memory-backed torrent source must still be recognized from its source
+/// URI when the server uses the generic octet-stream content type.
+#[tokio::test]
+async fn follow_torrent_mem_http_uses_source_uri_extension() {
+    let dir = setup_temp_dir();
+    let server = MockHttpServer::start()
+        .await
+        .expect("mock HTTP server should start");
+    let tracker_url = "http://tracker.invalid:6969/announce";
+    let torrent =
+        fixtures::test_torrent_builder::build_test_torrent("payload.bin", 1024, 512, tracker_url);
+    let torrent_for_server = torrent.clone();
+    server.on_get("/source.torrent", move |_| {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", torrent_for_server.len())
+            .body(full_body(torrent_for_server.clone()))
+            .unwrap()
+    });
+
+    let url = format!("{}/source.torrent?download=1", server.base_url());
+    let mut options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        ..DownloadOptions::default()
+    };
+    options.dir = Some(dir.path().display().to_string());
+
+    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+        GroupId::new(0x702),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some("source.torrent"),
+    )
+    .expect("memory torrent command should construct");
+    command
+        .execute()
+        .await
+        .expect("memory torrent download should succeed");
+
+    let group = command
+        .request_group()
+        .expect("HTTP command should expose its request group");
+    let info = {
+        let group = group.recover();
+        assert!(group.is_in_memory_download());
+        assert_eq!(group.in_memory_data(), Some(torrent.clone()));
+        assert_eq!(
+            group.content_type().as_deref(),
+            Some("application/octet-stream")
+        );
+        extract_download_info(&group)
+    };
+    assert_eq!(info.source_uri.as_deref(), Some(url.as_str()));
+
+    let handlers = build_handler_chain(&info.options);
+    let handler_refs: Vec<&dyn aria2_core::engine::post_download_handler::PostDownloadHandler> =
+        handlers.iter().map(|handler| handler.as_ref()).collect();
+    let mut next_gid = 0x703u64;
+    let mut allocate_gid = || {
+        let gid = GroupId::new(next_gid);
+        next_gid += 1;
+        gid
+    };
+    let children =
+        run_post_download_processing_with_allocator(&info, &handler_refs, &mut allocate_gid);
+
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].recover().bt_metadata_data(), Some(torrent));
+    server.shutdown().await;
+}
+
 /// Run the same metadata follow through DownloadEngine, including the
 /// tracker/web-seed child dispatch. A child whose first URI is an announce URL
 /// must still be constructed as a BitTorrent command from its in-memory

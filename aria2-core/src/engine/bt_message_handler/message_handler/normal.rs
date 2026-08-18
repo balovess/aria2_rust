@@ -1,13 +1,11 @@
 //! Normal-mode block request and download methods for BtMessageHandler.
 
-use crate::constants;
 use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
-use tracing::{debug, info, trace, warn};
+use crate::error::{Aria2Error, RecoverableError, Result};
+use tracing::{debug, trace, warn};
 
 use super::super::types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
-    MAX_RETRIES, PeerDownloadBytes, PieceDownloadResult,
 };
 use super::BtMessageHandler;
 
@@ -335,24 +333,15 @@ impl BtMessageHandler {
         piece_length: u32,
         num_blocks: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-    ) -> Result<PieceDownloadResult> {
-        let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
-        let mut failed_peers = Vec::new();
-        let data = Self::download_piece_blocks_inner(
+    ) -> Result<super::super::types::PieceDownloadResult> {
+        Self::download_piece_blocks_pipelined_with_sources(
             connections,
             piece_index,
             piece_length,
             num_blocks,
             dht_engine,
-            &mut peer_bytes,
-            &mut failed_peers,
         )
-        .await?;
-        Ok(PieceDownloadResult {
-            data,
-            peer_bytes,
-            failed_peers,
-        })
+        .await
     }
 
     pub async fn download_piece_blocks(
@@ -371,126 +360,5 @@ impl BtMessageHandler {
         )
         .await?
         .data)
-    }
-
-    async fn download_piece_blocks_inner(
-        connections: &mut [BtPeerConn],
-        piece_index: u32,
-        piece_length: u32,
-        num_blocks: u32,
-        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-        peer_bytes: &mut Vec<PeerDownloadBytes>,
-        failed_peers: &mut Vec<std::net::SocketAddr>,
-    ) -> Result<Vec<u8>> {
-        // Retry the entire piece multiple times
-        for _retry in 0..MAX_RETRIES {
-            peer_bytes.clear();
-            failed_peers.clear();
-            info!(
-                "[BT] Piece download attempt {} for piece {}",
-                _retry + 1,
-                piece_index
-            );
-
-            // Ensure clean state for each retry attempt
-            let mut piece_data = Vec::with_capacity(piece_length as usize);
-            piece_data.clear();
-            let mut all_blocks_ok = true;
-
-            // Download each block in sequence
-            for block_idx in 0..num_blocks {
-                let offset = block_idx * BLOCK_SIZE;
-                let len = if offset + BLOCK_SIZE > piece_length {
-                    piece_length - offset
-                } else {
-                    BLOCK_SIZE
-                };
-
-                debug!(
-                    "[BT] Requesting block {}/{} (offset={}, len={})",
-                    block_idx + 1,
-                    num_blocks,
-                    offset,
-                    len
-                );
-
-                // Try to get this block from any peer
-                match Self::request_block(connections, piece_index, offset, len, dht_engine.clone())
-                    .await
-                {
-                    Ok(result) if result.success => {
-                        failed_peers.extend(result.failed_peers);
-                        if let Some(data) = result.data {
-                            if let Some(peer_index) = result.peer_index
-                                && let Some(peer) = connections.get(peer_index)
-                                && let Ok(ip) = peer.ip_addr.parse()
-                            {
-                                let address = std::net::SocketAddr::new(ip, peer.port);
-                                let bytes = result.bytes_received;
-                                if let Some(entry) = peer_bytes
-                                    .iter_mut()
-                                    .find(|item| item.peer_index == peer_index)
-                                {
-                                    entry.bytes += bytes;
-                                } else {
-                                    peer_bytes.push(PeerDownloadBytes {
-                                        peer_index,
-                                        peer: address,
-                                        bytes,
-                                    });
-                                }
-                            }
-                            piece_data.extend_from_slice(&data);
-                        } else {
-                            all_blocks_ok = false;
-                            break;
-                        }
-                    }
-                    Ok(result) => {
-                        failed_peers.extend(result.failed_peers);
-                        warn!("[BT] Block {} request returned no data", block_idx);
-                        all_blocks_ok = false;
-                        break;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "[BT] Block {} request failed; retrying entire piece: {}",
-                            block_idx, e
-                        );
-                        all_blocks_ok = false;
-                        break;
-                    }
-                }
-            }
-
-            // Check if we got all blocks
-            if all_blocks_ok && piece_data.len() == piece_length as usize {
-                info!(
-                    "[BT] All {} blocks downloaded for piece {} ({} bytes)",
-                    num_blocks,
-                    piece_index,
-                    piece_data.len()
-                );
-                return Ok(piece_data);
-            }
-
-            warn!(
-                "[BT] Incomplete piece {} (attempt {}/{}), retrying...",
-                piece_index,
-                _retry + 1,
-                MAX_RETRIES
-            );
-
-            // Small delay before retry
-            tokio::time::sleep(std::time::Duration::from_millis(
-                constants::BT_RETRY_DELAY_MS,
-            ))
-            .await;
-        }
-
-        Err(Aria2Error::Fatal(FatalError::Config(format!(
-            "Failed to download piece {} after {} attempts",
-            piece_index, MAX_RETRIES
-        ))))
     }
 }
