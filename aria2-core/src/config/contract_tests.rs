@@ -47,13 +47,9 @@ fn sample_value(definition: &OptionDef) -> String {
 
 fn non_default_sample(definition: &OptionDef) -> String {
     let candidates = match definition.opt_type() {
-        OptionType::Boolean => vec![
-            (!definition
-                .default_value()
-                .as_bool()
-                .unwrap_or(false))
-                .to_string(),
-        ],
+        OptionType::Boolean => {
+            vec![(!definition.default_value().as_bool().unwrap_or(false)).to_string()]
+        }
         OptionType::String | OptionType::Path => {
             if definition.name() == "checksum" {
                 vec!["sha-256=contract-digest".to_string()]
@@ -61,12 +57,12 @@ fn non_default_sample(definition: &OptionDef) -> String {
                 vec!["contract-consumer-value".to_string()]
             }
         }
-        OptionType::Integer | OptionType::IntegerRange | OptionType::Size => [
-            "1", "2", "7", "1024", "2048", "65535", "1048576",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect(),
+        OptionType::Integer | OptionType::IntegerRange | OptionType::Size => {
+            ["1", "2", "7", "1024", "2048", "65535", "1048576"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        }
         OptionType::Float => vec!["1.5".to_string(), "2.5".to_string(), "7.5".to_string()],
         OptionType::List => vec!["first,second".to_string()],
         OptionType::Enum => definition
@@ -212,8 +208,9 @@ fn every_registered_option_uses_one_parser_contract() {
 #[test]
 fn runtime_policy_names_are_unique_and_registered() {
     use super::runtime::{
-        INITIAL_REQUEST_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
-        RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS,
+        INITIAL_REQUEST_OPTIONS, INITIAL_SNAPSHOT_CONSUMER_OPTIONS,
+        RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
+        RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_snapshot_consumer,
     };
 
     let registry = OptionRegistry::new();
@@ -223,6 +220,10 @@ fn runtime_policy_names_are_unique_and_registered() {
     assert_unique(
         "reserved task policy",
         RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+    );
+    assert_unique(
+        "initial snapshot consumer policy",
+        INITIAL_SNAPSHOT_CONSUMER_OPTIONS,
     );
 
     for name in INITIAL_REQUEST_OPTIONS
@@ -255,11 +256,24 @@ fn runtime_policy_names_are_unique_and_registered() {
             );
         }
     }
+
+    for name in INITIAL_SNAPSHOT_CONSUMER_OPTIONS {
+        assert!(
+            INITIAL_REQUEST_OPTIONS.contains(name),
+            "snapshot consumer '{}' is not an initial request option",
+            name
+        );
+        assert!(
+            is_snapshot_consumer(name),
+            "snapshot consumer '{}' must be recognized by the shared policy",
+            name
+        );
+    }
 }
 
 #[test]
 fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consumer() {
-    use super::runtime::INITIAL_REQUEST_OPTIONS;
+    use super::runtime::{INITIAL_REQUEST_OPTIONS, is_snapshot_consumer};
 
     let registry = OptionRegistry::new();
     let mut missing = Vec::new();
@@ -269,11 +283,23 @@ fn every_initial_option_reaches_download_options_or_an_explicit_snapshot_consume
         };
         let raw = non_default_sample(definition);
         let options = std::collections::HashMap::from([((*name).to_string(), raw)]);
-        let download_options = crate::request::request_group::DownloadOptions::from_option_strings(
-            &options,
+        let download_options =
+            crate::request::request_group::DownloadOptions::from_option_strings(&options);
+        let snapshot = crate::config::project_initial_options(
+            options
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone()))),
         );
-        let serialized = crate::session::session_entry::download_options_to_map(&download_options);
+        let serialized = crate::session::session_entry::download_options_to_map_with_snapshot(
+            &download_options,
+            Some(&snapshot),
+        );
         if !serialized.contains_key(session_wire_name(name)) {
+            assert!(
+                is_snapshot_consumer(name),
+                "initial option '{}' must either map to DownloadOptions/session or be an explicit snapshot consumer",
+                name
+            );
             missing.push(*name);
         }
     }

@@ -47,7 +47,8 @@
 
 // Re-export core types from session_entry module
 pub use super::session_entry::{
-    SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri,
+    SessionEntry, decode_hex, download_options_to_map, download_options_to_map_with_snapshot,
+    escape_uri, unescape_uri,
 };
 
 mod deserialization;

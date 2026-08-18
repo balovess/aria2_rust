@@ -266,6 +266,54 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "user-agent",
 ];
 
+/// Initial options intentionally kept in the raw request-group snapshot.
+///
+/// `DownloadOptions` owns the fields needed directly by the download engines.
+/// The options below are consumed by lifecycle/protocol/session code through
+/// the canonical snapshot, or need to survive a session round-trip before a
+/// typed field is introduced. Keeping this list explicit prevents a newly
+/// registered initial option from silently disappearing during serialization.
+pub const INITIAL_SNAPSHOT_CONSUMER_OPTIONS: &[&str] = &[
+    "allow-piece-length-change",
+    "async-dns",
+    "bt-exclude-tracker",
+    "bt-external-ip",
+    "bt-load-saved-metadata",
+    "bt-metadata-only",
+    "bt-min-crypto-level",
+    "bt-request-peer-speed-limit",
+    "bt-save-metadata",
+    "bt-tracker-connect-timeout",
+    "bt-tracker-interval",
+    "bt-tracker-timeout",
+    "content-disposition-default-utf8",
+    "enable-async-dns6",
+    "enable-mmap",
+    "enable-peer-exchange",
+    "force-save",
+    "ftp-type",
+    "gid",
+    "max-file-not-found",
+    "max-mmap-limit",
+    "metalink-base-uri",
+    "min-split-size",
+    "no-file-allocation-limit",
+    "parameterized-uri",
+    "pause",
+    "pause-metadata",
+    "proxy-method",
+    "reuse-uri",
+    "rpc-save-upload-metadata",
+    "save-not-found",
+    "stream-piece-selector",
+    "uri-selector",
+];
+
+/// Returns whether an initial option is preserved through the raw task snapshot.
+pub fn is_snapshot_consumer(option_name: &str) -> bool {
+    INITIAL_SNAPSHOT_CONSUMER_OPTIONS.contains(&option_name)
+}
+
 /// Returns whether an option belongs to a request-group's initial state.
 pub fn is_initial_option(option_name: &str) -> bool {
     INITIAL_REQUEST_OPTIONS.contains(&option_name)

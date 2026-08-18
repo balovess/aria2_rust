@@ -59,7 +59,8 @@ async fn ftp_proxy_records_each_payload_chunk_for_timeout() {
         async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
-            stream.read(&mut request).await.unwrap();
+            let bytes_read = stream.read(&mut request).await.unwrap();
+            assert!(bytes_read > 0, "FTP proxy fixture should receive a request");
             stream
                 .write_all(
                     format!(

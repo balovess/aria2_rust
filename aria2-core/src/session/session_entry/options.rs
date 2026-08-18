@@ -410,3 +410,39 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
 
     map
 }
+
+/// Add non-default raw initial options that are intentionally consumed through
+/// a request-group snapshot rather than a typed [`DownloadOptions`] field.
+pub fn download_options_to_map_with_snapshot(
+    opts: &DownloadOptions,
+    snapshot: Option<&HashMap<String, serde_json::Value>>,
+) -> HashMap<String, String> {
+    let mut map = download_options_to_map(opts);
+    let Some(snapshot) = snapshot else {
+        return map;
+    };
+
+    let registry = crate::config::OptionRegistry::new();
+    for name in crate::config::INITIAL_SNAPSHOT_CONSUMER_OPTIONS {
+        if map.contains_key(*name) {
+            continue;
+        }
+        let Some(value) = snapshot
+            .get(*name)
+            .and_then(crate::request::request_group::option_value_to_string)
+        else {
+            continue;
+        };
+
+        let is_default = registry.get(name).is_some_and(|definition| {
+            definition
+                .parse_value(&value)
+                .ok()
+                .is_some_and(|parsed| parsed.to_string() == definition.default_value().to_string())
+        });
+        if !is_default {
+            map.insert((*name).to_string(), value);
+        }
+    }
+    map
+}
