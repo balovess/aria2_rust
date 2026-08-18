@@ -1,5 +1,71 @@
 # aria2 → Rust 迁移主台账
 
+## 2026-08-18 BitTorrent metadata piece retry-budget checkpoint
+
+BitTorrent `ut_metadata` piece timeout and reject handling now treats
+`max_attempts` as the total number of requests for a piece. `max_attempts=1`
+does not issue a retry, while `max_attempts=3` allows exactly two retries. This
+aligns piece-level handling with the existing peer-level total-attempt policy
+without changing CLI, configuration, session, or RPC wire shapes. The
+`aria2-core` package remains at version `0.3.2`.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::metadata_exchange -- --test-threads=1
+  9 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_magnet_download -- --test-threads=1
+  36 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the BitTorrent metadata piece retry-budget slice. Broader
+BitTorrent scheduler and interoperability coverage, cross-protocol lifecycle
+combinations, bindings, measured performance, and final workspace acceptance
+remain open. The active phase remains `phase-2-core-domain` and the migration
+remains `PARTIAL`.
+
+## 2026-08-18 Metalink payload and torrent-metaurl retry checkpoint
+
+Metalink direct mirror payloads now reuse the shared `RetryPolicy` with the
+RequestGroup lifecycle waiter. Each mirror honors total `max-tries`; transient
+network/timeout failures and HTTP 504 retry, HTTP 500 remains terminal, and
+HTTP 502/503 retry only when `retry-wait` is non-zero. A 404 still uses the
+separate `max-file-not-found` counter before mirror failover. Pause, remove,
+and halt notifications interrupt the retry wait without a fixed sleep.
+
+Torrent metaurl metadata requests now use the same policy before the torrent
+dependency or shared multi-file fallback is constructed. The retry wrapper
+records a 404 exactly once per HTTP attempt, so the RequestGroup-owned
+`max-file-not-found` counter is not advanced again by the outer metaurl loop.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --lib engine::metalink_download_command -- --test-threads=1
+  25 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_metalink_lifecycle -- --test-threads=1
+  14 passed, 0 failed, 2 ignored
+cargo clippy -p aria2-core --all-targets --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the direct Metalink payload and torrent-metaurl HTTP metadata
+retry-policy slices. BitTorrent dependency execution after metadata retrieval,
+broader cross-protocol lifecycle/error coverage, third-party and original-
+client interoperability, bindings, measured performance, and final workspace
+acceptance remain open. The active phase remains `phase-2-core-domain` and the
+migration remains `PARTIAL`.
+
 ## 2026-08-18 统一 whole-file 完整性 dispatcher 检查点
 
 将 HTTP `DownloadCommand`、Metalink whole-file hash、FTP control/proxy
@@ -4209,7 +4275,7 @@ Rust-owned verification:
 
 ~~~text
 cargo test -p aria2-core --all-features --test test_e2e_concurrent_http_range -- --test-threads=1 --nocapture
-  12 passed, 0 failed
+  14 passed, 0 failed
 cargo test -p aria2-core --all-features --lib engine::concurrent_download -- --test-threads=1
   5 passed, 0 failed
 cargo test -p aria2-core --all-features --lib engine::concurrent_segment_manager -- --test-threads=1
@@ -4228,6 +4294,46 @@ git diff --check
 
 This checkpoint closes only the concurrent HTTP range terminal-classification
 and terminal-mirror-failover slice. Cross-protocol error combinations,
+original-client and third-party interoperability, bindings, measured
+performance, and final workspace acceptance remain open. The active phase
+remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-18 Retry-policy test alignment and RPC scheduling fixture checkpoint
+
+The retry policy keeps HTTP 500 terminal, while 503 remains retryable when a
+non-zero `retry-wait` is configured. The stale tests that expected 500 to be
+retried now exercise the 503 fixture, which records request counts for the
+pause/remove and gap-retry lifecycle checks. The RPC active-list test now uses
+`RequestGroupMan::fill_from_reserver()` with a one-download concurrency limit,
+so it validates the same reserved-to-active scheduling transition used by the
+engine rather than changing only the group's status field.
+
+Rust-owned verification:
+
+~~~text
+cargo test -p aria2-core --all-features --test test_error_network --test test_retry -- --test-threads=1
+  32 passed, 0 failed, 2 ignored; 16 passed, 0 failed
+cargo test -p aria2-core --all-features --test test_e2e_download -- --test-threads=1
+  43 passed, 0 failed, 2 ignored
+cargo test -p aria2-core --all-features --test test_e2e_gap_retry -- --test-threads=1
+  26 passed, 0 failed, 2 ignored
+cargo test -p aria2-rpc --all-features --test test_rpc_headers_and_progress -- --test-threads=1
+  9 passed, 0 failed
+cargo test --workspace --all-features --lib --tests --no-fail-fast -- --test-threads=1
+  PASS (all library and integration targets)
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+cargo clippy -p aria2-core -p aria2-rpc --all-targets --all-features -- -D warnings
+  PASS
+~~~
+
+The earlier all-target aggregate failed to execute Criterion benchmark binaries
+because `--test-threads=1` was forwarded to benchmark executables. The
+library/integration workspace aggregation now passes without benchmark
+targets. This checkpoint closes only the retry-policy test alignment and RPC
+scheduling-fixture slice; benchmark-specific evidence, cross-protocol error combinations,
 original-client and third-party interoperability, bindings, measured
 performance, and final workspace acceptance remain open. The active phase
 remains `phase-2-core-domain` and the migration remains `PARTIAL`.

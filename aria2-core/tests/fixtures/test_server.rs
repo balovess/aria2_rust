@@ -16,6 +16,7 @@ pub struct TestServer {
     slow_gap_attempts: Arc<AtomicUsize>,
     slow_gap_updates: watch::Sender<usize>,
     error_404_requests: Arc<AtomicUsize>,
+    error_503_requests: Arc<AtomicUsize>,
     error_500_requests: Arc<AtomicUsize>,
 }
 
@@ -35,6 +36,8 @@ impl TestServer {
         let handler_slow_gap_fallback_started = Arc::clone(&slow_gap_fallback_started);
         let error_404_requests = Arc::new(AtomicUsize::new(0));
         let handler_error_404_requests = Arc::clone(&error_404_requests);
+        let error_503_requests = Arc::new(AtomicUsize::new(0));
+        let handler_error_503_requests = Arc::clone(&error_503_requests);
         let error_500_requests = Arc::new(AtomicUsize::new(0));
         let handler_error_500_requests = Arc::clone(&error_500_requests);
 
@@ -53,6 +56,7 @@ impl TestServer {
                                     handler_slow_gap_updates.clone(),
                                     Arc::clone(&handler_slow_gap_fallback_started),
                                     Arc::clone(&handler_error_404_requests),
+                                    Arc::clone(&handler_error_503_requests),
                                     Arc::clone(&handler_error_500_requests),
                                 ));
                             }
@@ -74,6 +78,7 @@ impl TestServer {
             slow_gap_attempts,
             slow_gap_updates,
             error_404_requests,
+            error_503_requests,
             error_500_requests,
         }
     }
@@ -101,6 +106,10 @@ impl TestServer {
 
     pub fn error_404_requests(&self) -> usize {
         self.error_404_requests.load(Ordering::SeqCst)
+    }
+
+    pub fn error_503_requests(&self) -> usize {
+        self.error_503_requests.load(Ordering::SeqCst)
     }
 
     pub fn error_500_requests(&self) -> usize {
@@ -135,6 +144,7 @@ impl TestServer {
         slow_gap_updates: watch::Sender<usize>,
         slow_gap_fallback_started: Arc<AtomicBool>,
         error_404_requests: Arc<AtomicUsize>,
+        error_503_requests: Arc<AtomicUsize>,
         error_500_requests: Arc<AtomicUsize>,
     ) {
         let request = Self::read_request(&mut stream).await;
@@ -159,6 +169,8 @@ impl TestServer {
         } else {
             if path == "/error/404" || path == "/files/concurrent_404_test.bin" {
                 error_404_requests.fetch_add(1, Ordering::SeqCst);
+            } else if path == "/error/503" {
+                error_503_requests.fetch_add(1, Ordering::SeqCst);
             } else if path == "/error/500" {
                 error_500_requests.fetch_add(1, Ordering::SeqCst);
             }
@@ -441,6 +453,9 @@ impl TestServer {
             }
             "/error/500" => {
                 b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec()
+            }
+            "/error/503" => {
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec()
             }
             "/error/404" => {
                 http_404()

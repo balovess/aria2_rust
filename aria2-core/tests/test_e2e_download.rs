@@ -330,7 +330,7 @@ async fn test_e2e_max_file_not_found_retries_and_preserves_result_code() {
 async fn test_e2e_http_retry_wait_is_interruptible_when_paused() {
     let server = start_server().await;
     let dir = tmp_dir();
-    let url = format!("{}/error/500", server.base_url());
+    let url = format!("{}/error/503", server.base_url());
     let options = DownloadOptions {
         max_retries: 2,
         retry_wait: 5,
@@ -354,7 +354,7 @@ async fn test_e2e_http_retry_wait_is_interruptible_when_paused() {
     let command_task = tokio::spawn(async move { command.execute().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if server.error_500_requests() >= 1 {
+            if server.error_503_requests() >= 1 {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -379,7 +379,7 @@ async fn test_e2e_http_retry_wait_is_interruptible_when_paused() {
 async fn test_e2e_http_retry_wait_is_interruptible_when_removed() {
     let server = start_server().await;
     let dir = tmp_dir();
-    let url = format!("{}/error/500", server.base_url());
+    let url = format!("{}/error/503", server.base_url());
     let options = DownloadOptions {
         max_retries: 2,
         retry_wait: 5,
@@ -403,7 +403,7 @@ async fn test_e2e_http_retry_wait_is_interruptible_when_removed() {
     let command_task = tokio::spawn(async move { command.execute().await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if server.error_500_requests() >= 1 {
+            if server.error_503_requests() >= 1 {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

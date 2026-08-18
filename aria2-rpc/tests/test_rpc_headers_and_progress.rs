@@ -245,13 +245,11 @@ async fn test_tell_active_lists_active_downloads() {
     let _gid2: String =
         serde_json::from_value(engine.handle_request(&add2).await.result.unwrap()).unwrap();
 
-    // Set first to Active, leave second as Waiting (default)
-    {
-        let man = &group_man;
-        let g1 = man.group_by_hex(&gid1).unwrap();
-        let mut rg1 = g1.write().unwrap();
-        rg1.start().unwrap();
-    }
+    // Promote only the first group into the active scheduling store.
+    group_man.set_max_concurrent(1);
+    let promoted = group_man.fill_from_reserver();
+    assert_eq!(promoted.len(), 1);
+    assert_eq!(promoted[0].read().unwrap().gid().to_hex_string(), gid1);
 
     // tellActive follows aria2 semantics and includes only the active group.
     let req = JsonRpcRequest::new("aria2.tellActive", json!([])).with_id(3);

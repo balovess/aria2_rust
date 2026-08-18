@@ -557,7 +557,141 @@ async fn test_concurrent_http_504_retries_successfully() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: Terminal failure on one mirror fails over to a healthy mirror
+// Test 6: Bad Gateway requires retry-wait before another concurrent attempt
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_concurrent_http_502_without_retry_wait_is_terminal() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 2 * 1024 * 1024;
+    let range_attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&range_attempts);
+    server.on_get(
+        "/terminal-502",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", file_size)
+                    .body(empty_body())
+                    .unwrap();
+            }
+            attempts_for_handler.fetch_add(1, Ordering::AcqRel);
+            Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .body(empty_body())
+                .unwrap()
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let mut options = make_options(
+        Some(4),
+        Some(2),
+        &dir.path().to_string_lossy(),
+        "terminal-502.bin",
+    );
+    options.max_retries = 3;
+    options.retry_wait = 0;
+    let url = make_url(&server.base_url(), "/terminal-502");
+    let mut command = make_concurrent_command(
+        GroupId::new(409),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some("terminal-502.bin"),
+    );
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), command.execute())
+        .await
+        .expect("HTTP 502 without retry-wait must not hang");
+    assert!(matches!(
+        result,
+        Err(Aria2Error::Recoverable(RecoverableError::ServerError {
+            code: 502
+        }))
+    ));
+    assert!(range_attempts.load(Ordering::Acquire) <= 4);
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 7: Service Unavailable honors retry-wait and then completes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_concurrent_http_503_retries_after_retry_wait() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 2 * 1024 * 1024;
+    let data = generate_test_data(file_size, 97);
+    let range_attempts = Arc::new(AtomicUsize::new(0));
+    let attempts_for_handler = Arc::clone(&range_attempts);
+    let body_for_handler = data.clone();
+    server.on_get(
+        "/retry-503",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", body_for_handler.len())
+                    .body(empty_body())
+                    .unwrap();
+            }
+            let attempt = attempts_for_handler.fetch_add(1, Ordering::AcqRel);
+            if attempt == 0 {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .body(empty_body())
+                    .unwrap();
+            }
+            range_response(req, &body_for_handler)
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let mut options = make_options(
+        Some(4),
+        Some(2),
+        &dir.path().to_string_lossy(),
+        "retry-503.bin",
+    );
+    options.max_retries = 2;
+    options.retry_wait = 1;
+    let url = make_url(&server.base_url(), "/retry-503");
+    let mut command = make_concurrent_command(
+        GroupId::new(410),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some("retry-503.bin"),
+    );
+
+    command
+        .execute()
+        .await
+        .expect("HTTP 503 should honor retry-wait and complete");
+    assert_eq!(
+        tokio::fs::read(dir.path().join("retry-503.bin"))
+            .await
+            .unwrap(),
+        data
+    );
+    assert!(
+        range_attempts.load(Ordering::Acquire) >= 3,
+        "one 503 plus two successful ranges should be observed, got {}",
+        range_attempts.load(Ordering::Acquire)
+    );
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Terminal failure on one mirror fails over to a healthy mirror
 // ---------------------------------------------------------------------------
 
 #[tokio::test]

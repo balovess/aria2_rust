@@ -10,6 +10,7 @@ use crate::constants;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -155,6 +156,78 @@ impl MetalinkDownloadCommand {
         ) && !self.group.recover().can_retry_file_not_found()
     }
 
+    fn should_retry_mirror_error(
+        &self,
+        attempts: u32,
+        error: &Aria2Error,
+        retry_policy: &RetryPolicy,
+    ) -> bool {
+        match error {
+            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
+                retry_policy.can_retry_after(attempts.saturating_add(1))
+                    && self.group.recover().can_retry_file_not_found()
+            }
+            _ => retry_policy.should_retry(attempts, error),
+        }
+    }
+
+    async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
+        let notifier = self.group.recover().lifecycle_notifier();
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if let Some(error) = self.lifecycle_error() {
+            return Err(error);
+        }
+
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => self.lifecycle_error().map_or(Ok(()), Err),
+            _ = &mut notified => self.lifecycle_error().map_or(Ok(()), Err),
+        }
+    }
+
+    async fn download_payload_with_retry(
+        &mut self,
+        output_path: &Path,
+        url: &str,
+        expected_size: Option<u64>,
+    ) -> Result<PayloadDownload> {
+        let options = self.group.recover().options_arc();
+        let retry_policy =
+            RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
+        let mut attempts = 0u32;
+
+        loop {
+            match self
+                .download_payload_url(output_path, url, expected_size)
+                .await
+            {
+                Ok(payload) => return Ok(payload),
+                Err(error) => {
+                    let error = self.record_not_found_error(error);
+                    if self.lifecycle_error().is_some()
+                        || self.should_stop_after_not_found(&error)
+                        || !self.should_retry_mirror_error(attempts, &error, &retry_policy)
+                    {
+                        return Err(error);
+                    }
+
+                    attempts = attempts.saturating_add(1);
+                    let wait = retry_policy.compute_wait(attempts).unwrap_or_default();
+                    warn!(
+                        url,
+                        attempt = attempts.saturating_add(1),
+                        max_attempts = retry_policy.max_tries(),
+                        ?wait,
+                        error = %error,
+                        "Metalink mirror failed, retrying"
+                    );
+                    self.wait_for_retry(wait).await?;
+                }
+            }
+        }
+    }
+
     async fn execute_file(
         &mut self,
         complete_group: bool,
@@ -259,7 +332,7 @@ impl MetalinkDownloadCommand {
             );
 
             match self
-                .download_payload_url(&resolved_output_path, &url_entry.url, expected_size)
+                .download_payload_with_retry(&resolved_output_path, &url_entry.url, expected_size)
                 .await
             {
                 Ok(payload) => {
@@ -351,7 +424,6 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(e) => {
-                    let e = self.record_not_found_error(e);
                     warn!("Mirror download failed {}: {}", url_entry.url, e);
                     if self.lifecycle_error().is_some() {
                         global_registry().release(&resolved_output_path).await;
@@ -465,7 +537,7 @@ impl MetalinkDownloadCommand {
             .filter(|m| m.mediatype == MediaType::Torrent)
         {
             info!(url = %mu.url, "Downloading torrent from Metalink metaurl");
-            match self.download_metadata_url(&mu.url).await {
+            match self.download_metadata_url_with_retry(&mu.url).await {
                 Ok(torrent_bytes) => {
                     // Persist metadata beside the payload so the dependency
                     // can be reconstructed by the manager and after restart.
@@ -526,7 +598,6 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(e) => {
-                    let e = self.record_not_found_error(e);
                     warn!(url = %mu.url, error = %e, "Torrent metaurl failed");
                     if matches!(
                         e,
@@ -610,7 +681,7 @@ impl MetalinkDownloadCommand {
         let mut last_err = None;
         for metadata_uri in meta_urls {
             info!(url = %metadata_uri, "Downloading shared torrent from Metalink metaurl");
-            match self.download_metadata_url(&metadata_uri).await {
+            match self.download_metadata_url_with_retry(&metadata_uri).await {
                 Ok(torrent_bytes) => {
                     let metadata_path = self.output_path.with_extension("torrent");
                     tokio::fs::write(&metadata_path, &torrent_bytes)
@@ -663,7 +734,6 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(error) => {
-                    let error = self.record_not_found_error(error);
                     warn!(url = %metadata_uri, error = %error, "Shared torrent metaurl failed");
                     if matches!(
                         error,
@@ -982,6 +1052,41 @@ impl MetalinkDownloadCommand {
                 Err(self.lifecycle_error().unwrap_or_else(|| {
                     Aria2Error::DownloadFailed("Metalink metadata download halted".into())
                 }))
+            }
+        }
+    }
+
+    #[cfg(feature = "bittorrent")]
+    async fn download_metadata_url_with_retry(&self, url: &str) -> Result<Vec<u8>> {
+        let options = self.group.recover().options_arc();
+        let retry_policy =
+            RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
+        let mut attempts = 0u32;
+
+        loop {
+            match self.download_metadata_url(url).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(error) => {
+                    let error = self.record_not_found_error(error);
+                    if self.lifecycle_error().is_some()
+                        || self.should_stop_after_not_found(&error)
+                        || !self.should_retry_mirror_error(attempts, &error, &retry_policy)
+                    {
+                        return Err(error);
+                    }
+
+                    attempts = attempts.saturating_add(1);
+                    let wait = retry_policy.compute_wait(attempts).unwrap_or_default();
+                    warn!(
+                        url,
+                        attempt = attempts.saturating_add(1),
+                        max_attempts = retry_policy.max_tries(),
+                        ?wait,
+                        error = %error,
+                        "Metalink torrent metaurl failed, retrying"
+                    );
+                    self.wait_for_retry(wait).await?;
+                }
             }
         }
     }
@@ -1354,6 +1459,141 @@ mod http_status_tests {
             .await
             .expect("404 fixture should finish")
             .expect("404 fixture task should succeed");
+    }
+
+    #[tokio::test]
+    async fn mirror_504_retries_before_completing() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("504 fixture should bind");
+        let url = format!("http://{}/payload", listener.local_addr().unwrap());
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("mirror request");
+                let mut request = [0u8; 2048];
+                let _ = stream
+                    .read(&mut request)
+                    .await
+                    .expect("read mirror request");
+                server_count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .expect("write 504 response");
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+                        )
+                        .await
+                        .expect("write success response");
+                }
+            }
+        });
+
+        let output_dir = tempfile::tempdir().expect("output directory");
+        let xml = format!(
+            r#"<?xml version="1.0"?>
+<metalink xmlns="urn:ietf:params:xml:ns:metalink">
+  <file name="payload.bin">
+    <size>1</size>
+    <url>{url}</url>
+  </file>
+</metalink>"#
+        );
+        let options = DownloadOptions {
+            dir: Some(output_dir.path().to_string_lossy().into_owned()),
+            max_retries: 2,
+            retry_wait: 0,
+            ..DownloadOptions::default()
+        };
+        let mut command =
+            MetalinkDownloadCommand::new(GroupId::new(403), xml.as_bytes(), &options, None)
+                .expect("Metalink command should construct");
+
+        command.execute().await.expect("504 retry should complete");
+
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        assert_eq!(tokio::fs::read(command.output_path()).await.unwrap(), b"x");
+        server.await.expect("504 fixture should finish");
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[tokio::test]
+    async fn torrent_metaurl_504_retries_before_returning_metadata() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("torrent metaurl fixture should bind");
+        let url = format!("http://{}/payload.torrent", listener.local_addr().unwrap());
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.expect("metadata request");
+                let mut request = [0u8; 2048];
+                let _ = stream
+                    .read(&mut request)
+                    .await
+                    .expect("read metadata request");
+                server_count.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .expect("write 504 response");
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
+                        )
+                        .await
+                        .expect("write metadata response");
+                }
+            }
+        });
+
+        let options = DownloadOptions {
+            max_retries: 2,
+            retry_wait: 0,
+            ..DownloadOptions::default()
+        };
+        let command = MetalinkDownloadCommand::new(
+            GroupId::new(404),
+            br#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>http://127.0.0.1/unused</url></file></metalink>"#,
+            &options,
+            None,
+        )
+        .expect("Metalink command should construct");
+
+        let metadata = command
+            .download_metadata_url_with_retry(&url)
+            .await
+            .expect("504 retry should return metadata");
+
+        assert_eq!(metadata, b"x");
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        server.await.expect("torrent metaurl fixture should finish");
     }
 
     #[cfg(feature = "bittorrent")]
