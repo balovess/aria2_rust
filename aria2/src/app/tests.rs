@@ -2,10 +2,11 @@
 
 use super::cli::CliArgs;
 use super::*;
-use aria2_core::config::OptionValue;
+use aria2_core::config::{OptionType, OptionValue};
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::util::rwlock_ext::RwLockRecover;
-use std::collections::HashMap;
+use clap::CommandFactory;
+use std::collections::{BTreeSet, HashMap};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
@@ -122,6 +123,170 @@ async fn test_cli_metalink_options_reach_download_options() {
         Some("https")
     );
     assert_eq!(options.select_file.as_deref(), Some("2"));
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--bt-keep-alive-interval=31",
+        "--bt-timeout=181",
+        "--bt-request-timeout=61",
+        "--peer-connection-timeout=16",
+        "--bt-peer-blocklist=blocked-peers.txt",
+        "--enable-dht6=true",
+        "--dht-listen-addr=127.0.0.1",
+        "--dht-listen-addr6=::1",
+        "--dht-entry-point-host=127.0.0.1",
+        "--dht-entry-point-port=6881",
+        "--dht-entry-point6=[::1]:6882",
+        "--dht-entry-point-host6=::1",
+        "--dht-entry-point-port6=6882",
+        "--dht-file-path6=dht6.dat",
+    ])
+    .expect("BitTorrent timeout and DHT CLI options should parse");
+
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("CLI options should load into ConfigManager");
+    let (options, _) = app.download_options_with_snapshot().await;
+
+    assert_eq!(options.bt_keep_alive_interval, 31);
+    assert_eq!(options.bt_timeout, 181);
+    assert_eq!(options.bt_request_timeout, 61);
+    assert_eq!(options.peer_connection_timeout, 16);
+    assert_eq!(
+        options.bt_peer_blocklist.as_deref(),
+        Some("blocked-peers.txt")
+    );
+    assert!(options.enable_dht6);
+    assert_eq!(options.dht_listen_addr.as_deref(), Some("127.0.0.1"));
+    assert_eq!(options.dht_listen_addr6.as_deref(), Some("::1"));
+    assert_eq!(
+        options.dht_entry_point_host.as_deref(),
+        Some("127.0.0.1")
+    );
+    assert_eq!(options.dht_entry_point_port, Some(6881));
+    assert_eq!(options.dht_entry_point6.as_deref(), Some("[::1]:6882"));
+    assert_eq!(options.dht_entry_point_host6.as_deref(), Some("::1"));
+    assert_eq!(options.dht_entry_point_port6, Some(6882));
+    assert_eq!(options.dht_file_path6.as_deref(), Some("dht6.dat"));
+}
+
+#[test]
+fn every_registered_option_has_one_cli_argument() {
+    let registry = aria2_core::config::OptionRegistry::new();
+    let mut cli_names = BTreeSet::new();
+    let mut duplicate_cli_names = BTreeSet::new();
+
+    for argument in CliArgs::command().get_arguments() {
+        if let Some(name) = argument.get_long()
+            && !cli_names.insert(name.to_string())
+        {
+            duplicate_cli_names.insert(name.to_string());
+        }
+    }
+
+    assert!(
+        duplicate_cli_names.is_empty(),
+        "CLI has duplicate long option names: {duplicate_cli_names:?}"
+    );
+
+    let missing = registry
+        .all()
+        .keys()
+        .filter(|name| !cli_names.contains(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        missing.is_empty(),
+        "registered options without a CLI argument: {missing:?}"
+    );
+}
+
+fn cli_contract_value(definition: &aria2_core::config::OptionDef) -> String {
+    match definition.opt_type() {
+        OptionType::Boolean => "true".to_string(),
+        OptionType::Integer | OptionType::IntegerRange => definition
+            .min
+            .unwrap_or(1)
+            .max(0)
+            .to_string(),
+        OptionType::Float => "1.5".to_string(),
+        OptionType::List => "first,second".to_string(),
+        OptionType::Enum => definition
+            .allowed_values()
+            .first()
+            .copied()
+            .unwrap_or("contract-value")
+            .to_string(),
+        OptionType::IndexOut => "1=contract-output.bin".to_string(),
+        OptionType::PiecePriority => "head=1K".to_string(),
+        OptionType::Path | OptionType::String => {
+            if definition.name() == "checksum" {
+                "sha-256=contract-digest".to_string()
+            } else {
+                "contract-consumer-value".to_string()
+            }
+        }
+        OptionType::Size => definition
+            .min
+            .unwrap_or(1)
+            .max(1)
+            .to_string(),
+    }
+}
+
+#[tokio::test]
+async fn every_registered_option_reaches_config_manager_from_cli() {
+    let registry = aria2_core::config::OptionRegistry::new();
+    let process_only = ["conf-path", "no-conf", "torrent-file", "metalink-file"];
+
+    for definition in registry.all().values() {
+        if process_only.contains(&definition.name()) {
+            continue;
+        }
+
+        let raw = cli_contract_value(definition);
+        assert!(
+            definition.parse_value(&raw).is_ok(),
+            "contract value for '{}' must be valid: {:?}",
+            definition.name(),
+            definition.parse_value(&raw).err()
+        );
+        let argument = format!("--{}={raw}", definition.name());
+        let cli = CliArgs::try_parse_from(["aria2", argument.as_str()]).unwrap_or_else(|error| {
+            panic!(
+                "registered option '{}' must parse through the real CLI: {}",
+                definition.name(),
+                error
+            )
+        });
+
+        let mut app = App::new();
+        app.load_cli_args(cli).await.unwrap_or_else(|error| {
+            panic!(
+                "registered option '{}' must load through the real CLI adapter: {}",
+                definition.name(),
+                error
+            )
+        });
+        let actual = app
+            .config
+            .read()
+            .await
+            .get_global_option(definition.name())
+            .await;
+        let expected = definition.parse_value(&raw).expect("validated contract value");
+        assert_eq!(
+            actual,
+            Some(expected),
+            "registered option '{}' must be stored once with its registry type",
+            definition.name()
+        );
+    }
 }
 
 #[tokio::test]

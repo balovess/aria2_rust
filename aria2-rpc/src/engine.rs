@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
+use super::handlers::status::RpcReadSnapshot;
 use super::json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcWireEntry};
 use super::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
 use super::types::{GlobalOptions, SessionInfo};
@@ -40,9 +42,87 @@ pub(crate) fn rpc_method_is_read_only(method: &str) -> bool {
     )
 }
 
+/// Mutating RPCs share one ordering gate across HTTP, WebSocket, and direct
+/// library callers. Read-only requests may proceed concurrently, while
+/// lifecycle and persistence side effects retain the single-engine ordering
+/// that original clients observe.
+pub(crate) fn rpc_method_is_mutating(method: &str) -> bool {
+    matches!(
+        method,
+        "aria2.addUri"
+            | "aria2.addTorrent"
+            | "aria2.addMetalink"
+            | "aria2.remove"
+            | "aria2.pause"
+            | "aria2.forcePause"
+            | "aria2.unpause"
+            | "aria2.purgeDownloadResult"
+            | "aria2.removeDownloadResult"
+            | "aria2.changeGlobalOption"
+            | "aria2.changeOption"
+            | "aria2.pauseAll"
+            | "aria2.forcePauseAll"
+            | "aria2.unpauseAll"
+            | "aria2.changeUri"
+            | "aria2.saveSession"
+            | "aria2.changePosition"
+            | "aria2.forceRemove"
+            | "aria2.shutdown"
+            | "aria2.forceShutdown"
+    )
+}
+
+fn multicall_requires_mutation(params: &serde_json::Value) -> bool {
+    let Some(calls) = params
+        .as_array()
+        .and_then(|params| params.first())
+        .and_then(serde_json::Value::as_array)
+    else {
+        return true;
+    };
+
+    calls.iter().any(|call| {
+        let Some(method) = call.get("methodName").and_then(serde_json::Value::as_str) else {
+            return true;
+        };
+        rpc_method_is_mutating(method)
+    })
+}
+
 async fn dispatch_wire_entry(engine: &RpcEngine, entry: JsonRpcWireEntry) -> JsonRpcResponse {
+    dispatch_wire_entry_with_snapshot(engine, entry, None).await
+}
+
+pub(crate) fn rpc_method_uses_read_snapshot(method: &str) -> bool {
+    matches!(
+        method,
+        "aria2.tellActive" | "aria2.tellWaiting" | "aria2.tellStopped" | "aria2.getGlobalStat"
+    )
+}
+
+fn read_run_needs_snapshot(entries: &[JsonRpcWireEntry]) -> bool {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            JsonRpcWireEntry::Request(request) => Some(request.method.as_str()),
+            JsonRpcWireEntry::Error(_) => None,
+        })
+        .filter(|method| rpc_method_uses_read_snapshot(method))
+        .nth(1)
+        .is_some()
+}
+
+async fn dispatch_wire_entry_with_snapshot(
+    engine: &RpcEngine,
+    entry: JsonRpcWireEntry,
+    snapshot: Option<Arc<RpcReadSnapshot>>,
+) -> JsonRpcResponse {
     match entry {
-        JsonRpcWireEntry::Request(request) => engine.handle_request_owned(request).await,
+        JsonRpcWireEntry::Request(request) => {
+            engine
+                .handle_request_owned_with_snapshot(request, snapshot)
+                .await
+        }
         JsonRpcWireEntry::Error(response) => response,
     }
 }
@@ -53,8 +133,13 @@ async fn dispatch_read_only_run(
 ) -> Vec<JsonRpcResponse> {
     use futures::StreamExt;
 
+    let snapshot = if read_run_needs_snapshot(&entries) {
+        RpcReadSnapshot::capture(engine).map(Arc::new)
+    } else {
+        None
+    };
     futures::stream::iter(entries)
-        .map(|entry| dispatch_wire_entry(engine, entry))
+        .map(|entry| dispatch_wire_entry_with_snapshot(engine, entry, snapshot.clone()))
         .buffered(MAX_RPC_BATCH_CONCURRENCY)
         .collect()
         .await
@@ -105,11 +190,35 @@ pub struct RpcEngine {
     pub(crate) global_opts: GlobalOptions,
     pub event_publisher: Arc<EventPublisher>,
     pub(crate) auth_middleware: RpcAuthMiddleware,
+    pub(crate) mutation_gate: Arc<tokio::sync::Mutex<()>>,
+    mutation_ticket: AtomicU64,
+    mutation_turn: AtomicU64,
+    mutation_notify: tokio::sync::Notify,
     pub(crate) group_man: Option<Arc<RequestGroupMan>>,
     pub(crate) engine_cmd_tx: Option<EngineCommandSender>,
     pub(crate) session_info: SessionInfo,
     pub(crate) save_session_path: Option<std::path::PathBuf>,
     pub(crate) product_version: String,
+}
+
+struct MutationTurn<'a> {
+    engine: &'a RpcEngine,
+    ticket: u64,
+    _gate: tokio::sync::MutexGuard<'a, ()>,
+}
+
+impl Drop for MutationTurn<'_> {
+    fn drop(&mut self) {
+        let previous = self
+            .engine
+            .mutation_turn
+            .swap(self.ticket + 1, Ordering::Release);
+        debug_assert_eq!(
+            previous, self.ticket,
+            "mutation tickets must be released in order"
+        );
+        self.engine.mutation_notify.notify_waiters();
+    }
 }
 
 impl RpcEngine {
@@ -144,6 +253,10 @@ impl RpcEngine {
             global_opts: Arc::new(RwLock::new(defaults)),
             event_publisher: Arc::new(EventPublisher::default()),
             auth_middleware: RpcAuthMiddleware::default(),
+            mutation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            mutation_ticket: AtomicU64::new(0),
+            mutation_turn: AtomicU64::new(0),
+            mutation_notify: tokio::sync::Notify::new(),
             group_man: Some(group_man),
             engine_cmd_tx: Some(engine_cmd_tx.into()),
             session_info: SessionInfo::new(),
@@ -245,6 +358,36 @@ impl RpcEngine {
         }
     }
 
+    fn reserve_mutation_ticket(&self) -> u64 {
+        self.mutation_ticket.fetch_add(1, Ordering::Relaxed)
+    }
+
+    async fn acquire_mutation_turn(&self, ticket: u64) -> MutationTurn<'_> {
+        loop {
+            let notified = self.mutation_notify.notified();
+            if self.mutation_turn.load(Ordering::Acquire) == ticket {
+                let gate = self.mutation_gate.lock().await;
+                if self.mutation_turn.load(Ordering::Acquire) == ticket {
+                    return MutationTurn {
+                        engine: self,
+                        ticket,
+                        _gate: gate,
+                    };
+                }
+                drop(gate);
+            }
+            notified.await;
+        }
+    }
+
+    async fn run_mutation<F, T>(&self, ticket: u64, operation: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let _turn = self.acquire_mutation_turn(ticket).await;
+        operation.await
+    }
+
     /// Main request dispatcher - routes RPC methods to their handlers.
     ///
     /// This is the central entry point for all JSON-RPC requests.
@@ -273,10 +416,25 @@ impl RpcEngine {
     /// move parameter arrays into handlers instead of cloning them before the
     /// engine can inspect them.
     pub(crate) async fn handle_request_owned(&self, req: JsonRpcRequest) -> JsonRpcResponse {
+        self.handle_request_owned_with_snapshot(req, None).await
+    }
+
+    async fn handle_request_owned_with_snapshot(
+        &self,
+        req: JsonRpcRequest,
+        snapshot: Option<Arc<RpcReadSnapshot>>,
+    ) -> JsonRpcResponse {
         let is_multicall = req.method == "system.multicall";
 
         if is_multicall {
             let request_id = req.id.clone();
+            if multicall_requires_mutation(&req.params) {
+                let ticket = self.reserve_mutation_ticket();
+                let response = self
+                    .run_mutation(ticket, self.handle_multicall_owned(req))
+                    .await;
+                return response.unwrap_or_else(|e| e.into_response(request_id));
+            }
             return self
                 .handle_multicall_owned(req)
                 .await
@@ -303,7 +461,12 @@ impl RpcEngine {
             id: req.id,
         };
 
-        self.dispatch_single(&dispatch_req).await
+        if snapshot.is_none() {
+            self.dispatch_single_owned(dispatch_req).await
+        } else {
+            self.dispatch_single_owned_with_snapshot(dispatch_req, snapshot)
+                .await
+        }
     }
 
     /// Dispatch one already-authenticated, token-stripped JSON-RPC request.
@@ -457,6 +620,155 @@ impl RpcEngine {
             _ => JsonRpcResponse::error(id, 1, format!("No such method: {}", dispatch_req.method)),
         }
     }
+
+    /// Dispatch a request whose parameter DOM is owned by the network path.
+    /// Only handlers with large parameter payloads opt into moving values out
+    /// of the request; all other methods reuse the established borrowed table
+    /// so the public handler interface remains unchanged.
+    pub(crate) async fn dispatch_single_owned(
+        &self,
+        dispatch_req: JsonRpcRequest,
+    ) -> JsonRpcResponse {
+        self.dispatch_single_owned_with_snapshot(dispatch_req, None)
+            .await
+    }
+
+    async fn dispatch_single_owned_with_snapshot(
+        &self,
+        mut dispatch_req: JsonRpcRequest,
+        snapshot: Option<Arc<RpcReadSnapshot>>,
+    ) -> JsonRpcResponse {
+        #[cfg(any(feature = "bittorrent", feature = "metalink"))]
+        let request_id = dispatch_req.id.clone();
+
+        #[cfg(feature = "bittorrent")]
+        if dispatch_req.method == "aria2.addTorrent" {
+            let ticket = self.reserve_mutation_ticket();
+            let mut request = dispatch_req;
+            let prepared = self.prepare_add_torrent_owned(&mut request).await;
+            return match prepared {
+                Ok(prepared) => self
+                    .run_mutation(
+                        ticket,
+                        self.commit_prepared_torrent(request_id.clone(), prepared),
+                    )
+                    .await
+                    .unwrap_or_else(|error| error.into_response(request_id)),
+                Err(error) => {
+                    let _turn = self.acquire_mutation_turn(ticket).await;
+                    error.into_response(request_id)
+                }
+            };
+        }
+
+        #[cfg(feature = "metalink")]
+        if dispatch_req.method == "aria2.addMetalink" {
+            let ticket = self.reserve_mutation_ticket();
+            let mut request = dispatch_req;
+            let prepared = self.prepare_add_metalink_owned(&mut request).await;
+            return match prepared {
+                Ok(prepared) => self
+                    .run_mutation(
+                        ticket,
+                        self.commit_prepared_metalink(request_id.clone(), prepared),
+                    )
+                    .await
+                    .unwrap_or_else(|error| error.into_response(request_id)),
+                Err(error) => {
+                    let _turn = self.acquire_mutation_turn(ticket).await;
+                    error.into_response(request_id)
+                }
+            };
+        }
+
+        let requires_mutation_order = rpc_method_is_mutating(&dispatch_req.method);
+        if requires_mutation_order {
+            let ticket = self.reserve_mutation_ticket();
+            return self
+                .run_mutation(
+                    ticket,
+                    self.dispatch_single_owned_unlocked_with_snapshot(&mut dispatch_req, snapshot),
+                )
+                .await;
+        }
+        self.dispatch_single_owned_unlocked_with_snapshot(&mut dispatch_req, snapshot)
+            .await
+    }
+
+    pub(crate) async fn dispatch_single_owned_unlocked_with_snapshot(
+        &self,
+        dispatch_req: &mut JsonRpcRequest,
+        snapshot: Option<Arc<RpcReadSnapshot>>,
+    ) -> JsonRpcResponse {
+        let request_id = dispatch_req.id.clone();
+
+        match dispatch_req.method.as_str() {
+            "aria2.addUri" => self
+                .handle_add_uri_owned(dispatch_req)
+                .await
+                .unwrap_or_else(|error| error.into_response(request_id.clone())),
+            #[cfg(feature = "bittorrent")]
+            "aria2.addTorrent" => self
+                .handle_add_torrent_owned(dispatch_req)
+                .await
+                .unwrap_or_else(|error| error.into_response(request_id.clone())),
+            #[cfg(feature = "metalink")]
+            "aria2.addMetalink" => self
+                .handle_add_metalink_owned(dispatch_req)
+                .await
+                .unwrap_or_else(|error| error.into_response(request_id.clone())),
+            "aria2.changeOption" => self
+                .handle_change_option_owned(dispatch_req)
+                .await
+                .unwrap_or_else(|error| error.into_response(request_id.clone())),
+            "aria2.changeGlobalOption" => self
+                .handle_change_global_option_owned(dispatch_req)
+                .await
+                .unwrap_or_else(|error| error.into_response(request_id.clone())),
+            "aria2.changeUri" => self
+                .handle_change_uri_owned(dispatch_req)
+                .await
+                .unwrap_or_else(|error| error.into_response(request_id.clone())),
+            "aria2.tellActive" => {
+                if let Some(snapshot) = snapshot.as_deref() {
+                    self.handle_tell_active_snapshot(dispatch_req, snapshot)
+                        .unwrap_or_else(|error| error.into_response(request_id.clone()))
+                } else {
+                    self.handle_tell_active(dispatch_req)
+                        .await
+                        .unwrap_or_else(|error| error.into_response(request_id.clone()))
+                }
+            }
+            "aria2.tellWaiting" => {
+                if let Some(snapshot) = snapshot.as_deref() {
+                    self.handle_tell_waiting_snapshot(dispatch_req, snapshot)
+                        .unwrap_or_else(|error| error.into_response(request_id.clone()))
+                } else {
+                    self.handle_tell_waiting(dispatch_req)
+                        .await
+                        .unwrap_or_else(|error| error.into_response(request_id.clone()))
+                }
+            }
+            "aria2.tellStopped" => {
+                if let Some(snapshot) = snapshot.as_deref() {
+                    self.handle_tell_stopped_snapshot(dispatch_req, snapshot)
+                        .unwrap_or_else(|error| error.into_response(request_id.clone()))
+                } else {
+                    self.handle_tell_stopped(dispatch_req)
+                        .await
+                        .unwrap_or_else(|error| error.into_response(request_id.clone()))
+                }
+            }
+            "aria2.getGlobalStat" => {
+                if let Some(snapshot) = snapshot.as_deref() {
+                    self.handle_global_stat_snapshot(dispatch_req, snapshot)
+                } else {
+                    self.handle_global_stat(dispatch_req).await
+                }
+            }
+            _ => self.dispatch_single(dispatch_req).await,
+        }
+    }
 }
 
 impl Default for RpcEngine {
@@ -531,6 +843,117 @@ mod tests {
         assert!(resp.is_success());
         let gid: String = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert_eq!(gid.len(), 16);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_mutation_gate_blocks_lifecycle_commit_until_released() {
+        let engine = Arc::new(RpcEngine::new());
+        let _gate = engine.mutation_gate.lock().await;
+        let request = JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!([["https://example.test/gated.bin"]]),
+        )
+        .with_id(1);
+
+        let task_engine = Arc::clone(&engine);
+        let task = tokio::spawn(async move { task_engine.handle_request(&request).await });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !task.is_finished(),
+            "a lifecycle mutation must not commit while the gate is held"
+        );
+
+        drop(_gate);
+        let response = task.await.expect("mutation task should finish");
+        assert!(response.is_success());
+        assert_eq!(engine.task_count().await, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_mutation_tickets_preserve_commit_order_after_parallel_prepare() {
+        let engine = Arc::new(RpcEngine::new());
+        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let first_ticket = engine.reserve_mutation_ticket();
+        let second_ticket = engine.reserve_mutation_ticket();
+
+        let second_engine = Arc::clone(&engine);
+        let second_order = Arc::clone(&order);
+        let second = tokio::spawn(async move {
+            second_engine
+                .run_mutation(second_ticket, async move {
+                    second_order.lock().unwrap().push(2);
+                })
+                .await;
+        });
+        tokio::task::yield_now().await;
+
+        let first_engine = Arc::clone(&engine);
+        let first_order = Arc::clone(&order);
+        let first = tokio::spawn(async move {
+            first_engine
+                .run_mutation(first_ticket, async move {
+                    first_order.lock().unwrap().push(1);
+                })
+                .await;
+        });
+
+        first.await.expect("first mutation should finish");
+        second.await.expect("second mutation should finish");
+        assert_eq!(*order.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_read_batch_snapshot_shares_status_state() {
+        let engine = RpcEngine::new();
+        let add = JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!([["https://example.test/snapshot.bin"]]),
+        )
+        .with_id(1);
+        let add_response = engine.handle_request(&add).await;
+        assert!(add_response.is_success());
+
+        let responses = dispatch_wire_entries(
+            &engine,
+            vec![
+                JsonRpcWireEntry::Request(
+                    JsonRpcRequest::new("aria2.tellActive", serde_json::json!([])).with_id(2),
+                ),
+                JsonRpcWireEntry::Request(
+                    JsonRpcRequest::new("aria2.tellWaiting", serde_json::json!([0, 10])).with_id(3),
+                ),
+                JsonRpcWireEntry::Request(
+                    JsonRpcRequest::new("aria2.getGlobalStat", serde_json::json!([])).with_id(4),
+                ),
+            ],
+        )
+        .await;
+
+        assert_eq!(responses.len(), 3);
+        assert!(responses.iter().all(JsonRpcResponse::is_success));
+        assert_eq!(
+            responses[0]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            responses[1]
+                .result
+                .as_ref()
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(responses[2].result.as_ref().unwrap()["numWaiting"], "1");
     }
 
     #[tokio::test]

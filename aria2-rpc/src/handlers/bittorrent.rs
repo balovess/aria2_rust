@@ -3,13 +3,17 @@
 //! Handlers for BT-specific operations, bulk operations, L3 query methods,
 //! and system/multicall support.
 
-use crate::engine::{RpcEngine, rpc_method_requires_auth};
+use crate::engine::{
+    RpcEngine, rpc_method_is_mutating, rpc_method_requires_auth, rpc_method_uses_read_snapshot,
+};
+use crate::handlers::status::RpcReadSnapshot;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::rpc_helpers::split_auth_token_owned;
 use crate::types::{DownloadStatus, PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, VersionInfo};
 use crate::websocket::{DownloadEvent, EventType};
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
+use std::sync::Arc;
 
 impl RpcEngine {
     async fn lifecycle_gids(&self) -> Vec<String> {
@@ -393,7 +397,8 @@ impl RpcEngine {
             }
         };
 
-        self.execute_multicall(req.id.clone().unwrap_or_default(), calls)
+        let snapshot = multicall_read_snapshot(self, &calls);
+        self.execute_multicall(req.id.clone().unwrap_or_default(), calls, snapshot)
             .await
     }
 
@@ -439,13 +444,15 @@ impl RpcEngine {
             }
         };
 
-        self.execute_multicall(id, calls).await
+        let snapshot = multicall_read_snapshot(self, &calls);
+        self.execute_multicall(id, calls, snapshot).await
     }
 
     async fn execute_multicall(
         &self,
         id: serde_json::Value,
         calls: Vec<serde_json::Value>,
+        snapshot: Option<Arc<RpcReadSnapshot>>,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         if calls.is_empty() {
             return Ok(JsonRpcResponse::success(id, serde_json::json!([])));
@@ -496,15 +503,25 @@ impl RpcEngine {
             // into the handler as a positional argument and shift every
             // subsequent parameter by one.
             let (sub_token, stripped_params) = split_auth_token_owned(call_params);
-            let sub_request = JsonRpcRequest::new(method_name, stripped_params);
+            let mut sub_request = JsonRpcRequest::new(method_name, stripped_params);
 
             let sub_response = if rpc_method_requires_auth(&sub_request.method) {
                 match self.auth_middleware.validate(sub_token.as_deref()) {
-                    Ok(()) => self.dispatch_single(&sub_request).await,
+                    Ok(()) => {
+                        self.dispatch_single_owned_unlocked_with_snapshot(
+                            &mut sub_request,
+                            snapshot.clone(),
+                        )
+                        .await
+                    }
                     Err(auth_err) => auth_err.into_response(sub_request.id.clone()),
                 }
             } else {
-                self.dispatch_single(&sub_request).await
+                self.dispatch_single_owned_unlocked_with_snapshot(
+                    &mut sub_request,
+                    snapshot.clone(),
+                )
+                .await
             };
 
             // Per C++ aria2 system.multicall spec: each successful result is
@@ -527,4 +544,31 @@ impl RpcEngine {
 
         Ok(JsonRpcResponse::success(id, serde_json::json!(results)))
     }
+}
+
+/// Capture one status view for a read-only multicall. This is the common
+/// WebUI polling shape, where active/waiting/stopped/global-stat are requested
+/// together. A multicall containing any lifecycle mutation stays uncached so
+/// each sub-call observes the state produced by the preceding sub-call.
+fn multicall_read_snapshot(
+    engine: &RpcEngine,
+    calls: &[serde_json::Value],
+) -> Option<Arc<RpcReadSnapshot>> {
+    let mut snapshot_methods = 0usize;
+    for call in calls {
+        let method = call
+            .as_object()
+            .and_then(|call| call.get("methodName"))
+            .and_then(serde_json::Value::as_str)?;
+        if rpc_method_is_mutating(method) {
+            return None;
+        }
+        if rpc_method_uses_read_snapshot(method) {
+            snapshot_methods += 1;
+        }
+    }
+
+    (snapshot_methods >= 2)
+        .then(|| RpcReadSnapshot::capture(engine).map(Arc::new))
+        .flatten()
 }

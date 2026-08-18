@@ -10,7 +10,7 @@
 //! event-loop iteration. This Rust version uses a dedicated async task
 //! with `tokio::select!` for a cleaner, more idiomatic design.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,11 @@ pub struct DhtEngineConfig {
     /// The first available port is selected, matching the original DHT
     /// setup command's range binding behavior.
     pub port_range: Option<Vec<u16>>,
+    /// Optional local IP address. `None` binds the unspecified address for
+    /// the selected address family (IPv4 by default).
+    pub listen_addr: Option<IpAddr>,
+    /// Explicit bootstrap endpoints. An empty list uses the public defaults.
+    pub bootstrap_nodes: Vec<SocketAddr>,
     /// Local node ID (20 bytes). All zeros → random on start.
     pub self_id: [u8; 20],
     /// Path to persist the routing table (dht.dat).
@@ -77,6 +82,8 @@ impl Default for DhtEngineConfig {
         Self {
             port: 6881,
             port_range: None,
+            listen_addr: None,
+            bootstrap_nodes: Vec::new(),
             self_id: [0u8; 20],
             dht_file_path: None,
             refresh_check_interval: Duration::from_secs(300), // 5 min check
@@ -227,9 +234,14 @@ impl DhtEngine {
             config.self_id
         };
 
+        let listen_addr = config.listen_addr.unwrap_or(IpAddr::V4(
+            std::net::Ipv4Addr::UNSPECIFIED,
+        ));
+
         info!(
             id = %hex::encode(self_id),
             port = config.port,
+            ?listen_addr,
             "Starting DHT engine"
         );
 
@@ -238,7 +250,7 @@ impl DhtEngine {
             let mut last_error = None;
             let mut bound = None;
             for port in ports {
-                match DhtSocket::bind(*port).await {
+                match DhtSocket::bind_on(SocketAddr::new(listen_addr, *port)).await {
                     Ok(socket) => {
                         bound = Some(socket);
                         break;
@@ -253,7 +265,7 @@ impl DhtEngine {
                 )
             })?
         } else {
-            DhtSocket::bind(config.port)
+            DhtSocket::bind_on(SocketAddr::new(listen_addr, config.port))
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
         };
@@ -402,6 +414,7 @@ impl DhtEngine {
             &rt,
             &self.context.socket,
             &self.context.tracker,
+            self.context.config.query_timeout,
         )
         .await;
 
@@ -448,6 +461,7 @@ impl DhtEngine {
             &rt,
             &self.context.socket,
             &self.context.tracker,
+            self.context.config.query_timeout,
         )
         .await;
 

@@ -1,7 +1,7 @@
 use tracing::{info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
+use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit;
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -55,11 +55,13 @@ pub(super) async fn try_web_seed_fallback(
                 let web_seed_len = web_seed_data.len() as u64;
                 let web_seed_bytes = bytes::Bytes::from(web_seed_data);
                 if let Some(ref layout) = cmd.multi_file_layout {
-                    write_piece_to_multi_files_coalesced(
+                    let max_open_files = cmd.group.recover().options().bt_max_open_files;
+                    write_piece_to_multi_files_coalesced_with_limit(
                         layout,
                         next_piece_idx as u32,
                         &web_seed_bytes,
                         layout.piece_length(),
+                        max_open_files,
                     )
                     .await?;
                 } else {

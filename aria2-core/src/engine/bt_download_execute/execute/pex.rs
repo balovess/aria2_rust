@@ -26,7 +26,7 @@ use tracing::{debug, info, trace, warn};
 use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::engine::bt_peer_interaction::{BtPeerCryptoPolicy, BtPeerInteraction};
+use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
 use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -247,17 +247,12 @@ impl BtDownloadCommand {
             "[PEX] Attempting to connect to {} new peers discovered via PEX",
             peers_to_connect.len()
         );
-        let crypto_policy = {
+        let connection_options = {
             let group = self.group.recover();
-            BtPeerCryptoPolicy {
-                require_mse: group.options().bt_require_crypto || group.options().bt_force_encrypt,
-                force_encryption: group.options().bt_force_encrypt,
-                prefer_encryption: group
-                    .options()
-                    .bt_min_crypto_level
-                    .eq_ignore_ascii_case("arc4")
-                    || group.options().bt_force_encrypt,
-            }
+            BtPeerConnectionOptions::from_download_options(
+                group.options(),
+                self.local_peer_id,
+            )
         };
 
         // Attempt connections sequentially. Individual errors are logged without
@@ -267,7 +262,7 @@ impl BtDownloadCommand {
             match BtPeerInteraction::connect_peer_ready(
                 peer,
                 info_hash_raw,
-                crypto_policy,
+                &connection_options,
                 num_pieces,
                 piece_length,
                 total_size,

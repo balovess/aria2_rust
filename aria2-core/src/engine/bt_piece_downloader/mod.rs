@@ -20,5 +20,8 @@ mod tests;
 
 // Public re-exports — all items remain accessible at the same paths.
 pub use file_backed_provider::FileBackedPieceProvider;
-pub use multi_file_writer::{write_piece_to_multi_files, write_piece_to_multi_files_coalesced};
+pub use multi_file_writer::{
+    write_piece_to_multi_files, write_piece_to_multi_files_coalesced,
+    write_piece_to_multi_files_coalesced_with_limit,
+};
 pub use piece_download_state::PieceDownloadState;

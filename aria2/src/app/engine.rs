@@ -23,11 +23,7 @@ use tracing::info;
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
-        let tick_ms = self
-            .get_opt_i64("bt-request-peer-timeout")
-            .await
-            .unwrap_or(100) as u64;
-        let mut engine = DownloadEngine::new(tick_ms);
+        let mut engine = DownloadEngine::new(crate::constants::DEFAULT_TICK_INTERVAL_MS);
 
         #[cfg(feature = "bittorrent")]
         {

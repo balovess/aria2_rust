@@ -25,12 +25,13 @@ pub mod types;
 pub use interactive::BtPeerInteractive;
 pub use piece_provider::PieceProvider;
 pub use types::{
-    BtPeerCryptoPolicy, CheckHaveResult, ChokingDecision, DEFAULT_ALLOWED_FAST_SET_SIZE,
-    DEFAULT_KEEP_ALIVE_INTERVAL_SECS, DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate,
-    FLOODING_CHECK_INTERVAL_SECS, INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision,
-    MAX_UNCHOKE_WAIT_ATTEMPTS, MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS,
-    PEER_MESSAGE_TIMEOUT_SECS, PER_SEC_INTERVAL_SECS, PEX_INTERVAL_SECS, PeerConnectionResult,
-    PeerConnectionState, PeerIdCheckResult, PostHandshakeActions, UB_MAX_OUTSTANDING_REQUEST,
+    BtPeerConnectionOptions, BtPeerCryptoPolicy, CheckHaveResult, ChokingDecision,
+    DEFAULT_ALLOWED_FAST_SET_SIZE, DEFAULT_KEEP_ALIVE_INTERVAL_SECS,
+    DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate, FLOODING_CHECK_INTERVAL_SECS,
+    INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision, MAX_UNCHOKE_WAIT_ATTEMPTS,
+    MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS, PEER_MESSAGE_TIMEOUT_SECS,
+    PER_SEC_INTERVAL_SECS, PEX_INTERVAL_SECS, PeerConnectionResult, PeerConnectionState,
+    PeerIdCheckResult, PostHandshakeActions, UB_MAX_OUTSTANDING_REQUEST,
 };
 
 // ======================================================================
@@ -81,7 +82,7 @@ impl BtPeerInteraction {
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
-        crypto_policy: BtPeerCryptoPolicy,
+        connection_options: &BtPeerConnectionOptions,
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
@@ -94,7 +95,7 @@ impl BtPeerInteraction {
             match Self::connect_peer_ready(
                 addr,
                 info_hash_raw,
-                crypto_policy,
+                connection_options,
                 num_pieces,
                 piece_length,
                 total_length,
@@ -130,12 +131,16 @@ impl BtPeerInteraction {
     pub async fn connect_peer_ready(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
-        crypto_policy: BtPeerCryptoPolicy,
+        connection_options: &BtPeerConnectionOptions,
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
     ) -> Result<BtPeerConn> {
-        let mut conn = Self::connect_single_peer(addr, info_hash_raw, crypto_policy).await?;
+        let mut conn = Self::connect_single_peer(addr, info_hash_raw, connection_options).await?;
+        conn.set_timeouts(
+            connection_options.keep_alive_interval,
+            connection_options.peer_timeout,
+        );
         conn.sync_peer_identity();
         conn.allocate_session_resource(piece_length, total_length);
         info!(
@@ -146,7 +151,7 @@ impl BtPeerInteraction {
             piece_length,
             total_length
         );
-        Self::initialize_connection(&mut conn, num_pieces).await?;
+        Self::initialize_connection(&mut conn, num_pieces, connection_options).await?;
         if let Err(error) = Self::wait_for_unchoke(&mut conn, addr).await {
             warn!("[BT] No unchoke from peer {}: {}", addr.ip, error);
         }
@@ -157,31 +162,41 @@ impl BtPeerInteraction {
     async fn connect_single_peer(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
-        crypto_policy: BtPeerCryptoPolicy,
+        connection_options: &BtPeerConnectionOptions,
     ) -> Result<BtPeerConn> {
-        if crypto_policy.require_mse {
+        if connection_options.crypto.require_mse {
             // Try MSE encrypted connection
-            BtPeerConn::connect_mse(
+            BtPeerConn::connect_mse_with_options(
                 addr,
                 info_hash_raw,
-                crypto_policy.force_encryption,
-                crypto_policy.prefer_encryption,
+                connection_options.crypto.force_encryption,
+                connection_options.crypto.prefer_encryption,
+                &connection_options.local_peer_id,
+                connection_options.connection_timeout,
             )
             .await
         } else {
             // Try MSE first, fall back to plain
-            match BtPeerConn::connect_mse(
+            match BtPeerConn::connect_mse_with_options(
                 addr,
                 info_hash_raw,
-                crypto_policy.force_encryption,
-                crypto_policy.prefer_encryption,
+                connection_options.crypto.force_encryption,
+                connection_options.crypto.prefer_encryption,
+                &connection_options.local_peer_id,
+                connection_options.connection_timeout,
             )
             .await
             {
                 Ok(conn) => Ok(conn),
                 Err(_) => {
                     debug!("[BT] MSE failed, trying plain connection");
-                    BtPeerConn::connect_plain(addr, info_hash_raw).await
+                    BtPeerConn::connect_plain_with_options(
+                        addr,
+                        info_hash_raw,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                    )
+                    .await
                 }
             }
         }
@@ -193,10 +208,19 @@ impl BtPeerInteraction {
     /// - Unchoke (we allow them to request from us)
     /// - Interested (we want to download from them)
     /// - Bitfield (our current piece possession status)
-    async fn initialize_connection(conn: &mut BtPeerConn, num_pieces: u32) -> Result<()> {
+    async fn initialize_connection(
+        conn: &mut BtPeerConn,
+        num_pieces: u32,
+        connection_options: &BtPeerConnectionOptions,
+    ) -> Result<()> {
         // Send initial messages
         conn.send_unchoke().await?;
         conn.send_interested().await?;
+
+        // BEP 10 is part of the real connection setup. The peer-agent option
+        // therefore travels on the wire before the piece loop starts.
+        conn.send_extension_handshake(&connection_options.peer_agent)
+            .await?;
 
         // Send empty bitfield (we have nothing yet)
         let bf_len = (num_pieces as usize).div_ceil(8);

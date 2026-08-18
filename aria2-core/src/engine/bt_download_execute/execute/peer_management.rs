@@ -2,13 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::config::parse_integer_segments;
 use crate::engine::bt_download_command::{BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY};
 use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_handshake_validation::filter_duplicate_peer_connections;
 use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::engine::bt_peer_interaction::BtPeerCryptoPolicy;
-use crate::engine::bt_peer_interaction::BtPeerInteraction;
+use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::peer_stats::PeerStats;
@@ -284,60 +282,12 @@ impl BtDownloadCommand {
             info!("[BT] Private torrent: DHT disabled (BEP 0027)");
         }
         if enable_dht && self.dht_engine.is_none() {
-            let dht_port = { self.group.recover().options().dht_listen_port.clone() };
-            let dht_file_path = { self.group.recover().options().dht_file_path.clone() };
-            let dht_entry_points = { self.group.recover().options().dht_entry_point.clone() };
-            let dht_ports = dht_port
-                .as_deref()
-                .map(|value| {
-                    parse_integer_segments(value, 1024, u16::MAX as i64).map(|ranges| {
-                        ranges
-                            .into_iter()
-                            .flat_map(|range| range.map(|port| port as u16))
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .transpose()
-                .map_err(|error| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "invalid dht-listen-port: {error}"
-                    )))
-                })?;
-
-            // Parse custom bootstrap nodes if provided
-            let bootstrap_nodes: Vec<std::net::SocketAddr> =
-                if let Some(ref entry_points) = dht_entry_points {
-                    entry_points
-                        .iter()
-                        .filter_map(|ep| ep.parse::<std::net::SocketAddr>().ok())
-                        .collect()
-                } else {
-                    vec![]
-                };
-
-            let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
-                port: dht_ports
-                    .as_ref()
-                    .and_then(|ports| ports.first().copied())
-                    .unwrap_or(0),
-                port_range: dht_ports,
-                dht_file_path: dht_file_path.map(std::path::PathBuf::from),
-                ..Default::default()
-            };
+            let options = { self.group.recover().options().clone() };
+            let dht_config =
+                crate::engine::dht_config::build_dht_engine_config(&options).await?;
 
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
-                    // Add custom bootstrap nodes to routing table
-                    if !bootstrap_nodes.is_empty() {
-                        for addr in &bootstrap_nodes {
-                            engine.add_node(*addr).await;
-                        }
-                        tracing::info!(
-                            "[BT] Added {} custom DHT bootstrap nodes",
-                            bootstrap_nodes.len()
-                        );
-                    }
-
                     self.dht_engine = Some(engine);
                     tracing::info!("[BT] DHT engine started");
                     if let Some(dht) = self.dht_engine.as_ref() {
@@ -469,17 +419,12 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
     ) -> Result<Vec<BtPeerConn>> {
-        let crypto_policy = {
+        let connection_options = {
             let group = self.group.recover();
-            BtPeerCryptoPolicy {
-                require_mse: group.options().bt_require_crypto || group.options().bt_force_encrypt,
-                force_encryption: group.options().bt_force_encrypt,
-                prefer_encryption: group
-                    .options()
-                    .bt_min_crypto_level
-                    .eq_ignore_ascii_case("arc4")
-                    || group.options().bt_force_encrypt,
-            }
+            BtPeerConnectionOptions::from_download_options(
+                group.options(),
+                self.local_peer_id,
+            )
         };
 
         // Generate our local peer ID for this session. This is used for
@@ -546,7 +491,7 @@ impl BtDownloadCommand {
             num_pieces,
             piece_length,
             total_size,
-            crypto_policy,
+            &connection_options,
         )
         .await
         {

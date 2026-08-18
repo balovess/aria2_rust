@@ -11,6 +11,10 @@ use aria2_core::config::project_initial_options;
 use aria2_core::constants as core_constants;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::engine_command::EngineCommand;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+#[cfg(feature = "metalink")]
+use aria2_core::request::request_group::RequestGroup;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::ChangePositionMode;
 use aria2_core::session::save_session_command::SaveSessionCommand;
@@ -40,6 +44,23 @@ fn optional_position(req: &JsonRpcRequest, index: usize) -> Result<Option<usize>
         .map_err(|_| JsonRpcError::RpcExecution("Position is out of range.".into()))
 }
 
+fn optional_position_owned(
+    req: &mut JsonRpcRequest,
+    index: usize,
+) -> Result<Option<usize>, JsonRpcError> {
+    let Some(position) = req.take_optional_param::<i64>(index)? else {
+        return Ok(None);
+    };
+    if position < 0 {
+        return Err(JsonRpcError::RpcExecution(
+            "Position must be greater than or equal to 0.".into(),
+        ));
+    }
+    usize::try_from(position)
+        .map(Some)
+        .map_err(|_| JsonRpcError::RpcExecution("Position is out of range.".into()))
+}
+
 fn decode_rpc_payload_sync(input: &str) -> Result<Vec<u8>, String> {
     let encoded = if input.starts_with("data:") {
         input.split(',').nth(1).unwrap_or("")
@@ -57,6 +78,71 @@ async fn decode_rpc_payload(input: String) -> Result<Vec<u8>, JsonRpcError> {
         .map_err(JsonRpcError::InvalidParams)
 }
 
+pub(crate) struct PreparedTorrent {
+    torrent_uri: String,
+    additional_uris: Vec<String>,
+    opts: HashMap<String, serde_json::Value>,
+    position: Option<usize>,
+}
+
+#[cfg(feature = "metalink")]
+pub(crate) struct PreparedMetalink {
+    options: HashMap<String, serde_json::Value>,
+    position: Option<usize>,
+    resource_groups: Option<Vec<Arc<std::sync::RwLock<RequestGroup>>>>,
+    #[cfg(feature = "bittorrent")]
+    torrent_graphs: Option<Vec<MetalinkRequestGraph>>,
+}
+
+fn torrent_uri_from_decoded(decoded: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let prefix = &decoded[..decoded.len().min(32)];
+    let mut uri = String::with_capacity("torrent://".len() + prefix.len() * 2);
+    uri.push_str("torrent://");
+    for byte in prefix {
+        uri.push(HEX[(byte >> 4) as usize] as char);
+        uri.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    uri
+}
+
+async fn prepare_torrent(
+    torrent_data: String,
+    additional_uris: Vec<String>,
+    opts: HashMap<String, serde_json::Value>,
+    position: Option<usize>,
+) -> Result<PreparedTorrent, JsonRpcError> {
+    let decoded_bytes = decode_rpc_payload(torrent_data).await?;
+    if decoded_bytes.len() < 3
+        || decoded_bytes[0] != b'd'
+        || decoded_bytes[1] != b'8'
+        || decoded_bytes[2] != b':'
+    {
+        return Err(JsonRpcError::InvalidParams(
+            "Invalid BEncode data (not a .torrent file)".into(),
+        ));
+    }
+
+    Ok(PreparedTorrent {
+        torrent_uri: torrent_uri_from_decoded(&decoded_bytes),
+        additional_uris,
+        opts,
+        position,
+    })
+}
+
+fn validate_metalink_preview(decoded: &[u8]) -> Result<(), JsonRpcError> {
+    let preview = String::from_utf8_lossy(&decoded[..decoded.len().min(200)]);
+    if !preview.to_lowercase().contains("<metalink")
+        && !preview.contains("urn:ietf:params:xml:ns:metalink")
+    {
+        return Err(JsonRpcError::InvalidParams(
+            "Invalid Metalink XML data".into(),
+        ));
+    }
+    Ok(())
+}
+
 impl RpcEngine {
     /// Handle `aria2.addUri` - Add a new download task from URI(s).
     pub async fn handle_add_uri(
@@ -67,6 +153,32 @@ impl RpcEngine {
         let opts: HashMap<String, serde_json::Value> =
             req.get_optional_param(1)?.unwrap_or_default();
         let position = optional_position(req, 2)?;
+        self.handle_add_uri_values(req.id.clone(), uris, opts, position)
+            .await
+    }
+
+    /// Owned network path for `aria2.addUri`. The request parser has already
+    /// transferred ownership of the parameter DOM, so the large URI/options
+    /// values can be deserialized without cloning them first.
+    pub(crate) async fn handle_add_uri_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let uris: Vec<String> = req.take_param(0)?;
+        let opts: HashMap<String, serde_json::Value> =
+            req.take_optional_param(1)?.unwrap_or_default();
+        let position = optional_position_owned(req, 2)?;
+        self.handle_add_uri_values(req.id.clone(), uris, opts, position)
+            .await
+    }
+
+    async fn handle_add_uri_values(
+        &self,
+        request_id: Option<serde_json::Value>,
+        uris: Vec<String>,
+        opts: HashMap<String, serde_json::Value>,
+        position: Option<usize>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid = self.add_task(uris, opts).await?;
         if let Some(pos) = position {
             let pos_req = JsonRpcRequest::new(
@@ -76,7 +188,7 @@ impl RpcEngine {
             let _ = self.handle_change_position(&pos_req).await;
         }
         Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
+            request_id.unwrap_or_default(),
             gid,
         ))
     }
@@ -101,38 +213,53 @@ impl RpcEngine {
         let opts: HashMap<String, serde_json::Value> =
             req.get_optional_param(2)?.unwrap_or_default();
         let position = optional_position(req, 3)?;
+        self.handle_add_torrent_values(
+            req.id.clone(),
+            torrent_data,
+            additional_uris,
+            opts,
+            position,
+        )
+        .await
+    }
 
-        let _dir = opts
-            .get("dir")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".")
-            .to_string();
+    /// Owned network path for `aria2.addTorrent`.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) async fn handle_add_torrent_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let prepared = self.prepare_add_torrent_owned(req).await?;
+        self.commit_prepared_torrent(req.id.clone(), prepared).await
+    }
 
-        let decoded_bytes = decode_rpc_payload(torrent_data).await?;
+    /// Decode and validate the owned torrent request before waiting for the
+    /// lifecycle gate. Only the short synthetic torrent URI survives into the
+    /// commit phase; the decoded payload is dropped immediately.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) async fn prepare_add_torrent_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<PreparedTorrent, JsonRpcError> {
+        let torrent_data: String = req.take_param(0)?;
+        let additional_uris: Vec<String> = req.take_optional_param(1)?.unwrap_or_default();
+        let opts: HashMap<String, serde_json::Value> =
+            req.take_optional_param(2)?.unwrap_or_default();
+        let position = optional_position_owned(req, 3)?;
+        prepare_torrent(torrent_data, additional_uris, opts, position).await
+    }
 
-        if decoded_bytes.len() < 3
-            || decoded_bytes[0] != b'd'
-            || decoded_bytes[1] != b'8'
-            || decoded_bytes[2] != b':'
-        {
-            return Err(JsonRpcError::InvalidParams(
-                "Invalid BEncode data (not a .torrent file)".into(),
-            ));
-        }
-
-        // Build URIs: primary torrent URI + additional URIs/trackers from param[1]
-        let mut uris = vec![format!(
-            "torrent://{}",
-            &decoded_bytes[..std::cmp::min(32, decoded_bytes.len())]
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<String>()
-        )];
-        uris.extend(additional_uris);
-
-        let gid = self.add_task(uris, opts).await?;
-        // Apply position parameter if provided (original aria2 behavior)
-        if let Some(pos) = position {
+    /// Commit a torrent after its CPU-heavy input preparation has completed.
+    pub(crate) async fn commit_prepared_torrent(
+        &self,
+        request_id: Option<serde_json::Value>,
+        prepared: PreparedTorrent,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let mut uris = Vec::with_capacity(1 + prepared.additional_uris.len());
+        uris.push(prepared.torrent_uri);
+        uris.extend(prepared.additional_uris);
+        let gid = self.add_task(uris, prepared.opts).await?;
+        if let Some(pos) = prepared.position {
             let pos_req = JsonRpcRequest::new(
                 "aria2.changePosition",
                 serde_json::json!([&gid, pos as i64, "POS_SET"]),
@@ -140,9 +267,21 @@ impl RpcEngine {
             let _ = self.handle_change_position(&pos_req).await;
         }
         Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
+            request_id.unwrap_or_default(),
             gid,
         ))
+    }
+
+    async fn handle_add_torrent_values(
+        &self,
+        request_id: Option<serde_json::Value>,
+        torrent_data: String,
+        additional_uris: Vec<String>,
+        opts: HashMap<String, serde_json::Value>,
+        position: Option<usize>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let prepared = prepare_torrent(torrent_data, additional_uris, opts, position).await?;
+        self.commit_prepared_torrent(request_id, prepared).await
     }
 
     /// Handle `aria2.addMetalink` - Add downloads from Metalink XML.
@@ -159,74 +298,71 @@ impl RpcEngine {
         let opts: HashMap<String, serde_json::Value> =
             req.get_optional_param(1)?.unwrap_or_default();
         let position = optional_position(req, 2)?;
-
-        let decoded_bytes = decode_rpc_payload(metalink_data).await?;
-
-        let preview = String::from_utf8_lossy(&decoded_bytes[..decoded_bytes.len().min(200)]);
-        if !preview.to_lowercase().contains("<metalink")
-            && !preview.contains("urn:ietf:params:xml:ns:metalink")
-        {
-            return Err(JsonRpcError::InvalidParams(
-                "Invalid Metalink XML data".into(),
-            ));
-        }
-
-        #[cfg(feature = "metalink")]
-        if let Some(group_man) = &self.group_man {
-            let options = rpc_options_to_download_options(&opts)?;
-            let data = Arc::new(decoded_bytes);
-            let resource_data = Arc::clone(&data);
-            let resource_man = Arc::clone(group_man);
-            let resource_options = options.clone();
-            let resource_groups = tokio::task::spawn_blocking(move || {
-                let converter =
-                    aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
-                let mut gid_source = std::iter::from_fn(|| Some(resource_man.next_available_gid()));
-                converter
-                    .create_resource_groups_from_bytes(
-                        resource_data.as_ref(),
-                        &resource_options,
-                        &mut gid_source,
-                    )
-                    .map_err(|error| error.to_string())
-            })
+        self.handle_add_metalink_values(req.id.clone(), metalink_data, opts, position)
             .await
-            .map_err(|error| {
-                JsonRpcError::InternalError(format!("Metalink worker failed: {error}"))
-            })?
-            .map_err(JsonRpcError::InvalidParams)?;
-            let mut gids = Vec::new();
-            for group in resource_groups {
-                let gid = group.recover().gid();
-                group_man.add_group_arc(group);
-                gids.push(gid.to_hex_string());
+    }
+
+    /// Owned network path for `aria2.addMetalink`.
+    #[cfg(feature = "metalink")]
+    pub(crate) async fn handle_add_metalink_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let metalink_data: String = req.take_param(0)?;
+        let opts: HashMap<String, serde_json::Value> =
+            req.take_optional_param(1)?.unwrap_or_default();
+        let position = optional_position_owned(req, 2)?;
+        let prepared = self
+            .prepare_add_metalink(metalink_data, opts, position)
+            .await?;
+        self.commit_prepared_metalink(req.id.clone(), prepared)
+            .await
+    }
+
+    #[cfg(feature = "metalink")]
+    pub(crate) async fn prepare_add_metalink_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<PreparedMetalink, JsonRpcError> {
+        let metalink_data: String = req.take_param(0)?;
+        let opts: HashMap<String, serde_json::Value> =
+            req.take_optional_param(1)?.unwrap_or_default();
+        let position = optional_position_owned(req, 2)?;
+        self.prepare_add_metalink(metalink_data, opts, position)
+            .await
+    }
+
+    #[cfg(feature = "metalink")]
+    async fn prepare_add_metalink(
+        &self,
+        metalink_data: String,
+        opts: HashMap<String, serde_json::Value>,
+        position: Option<usize>,
+    ) -> Result<PreparedMetalink, JsonRpcError> {
+        let decoded_bytes = decode_rpc_payload(metalink_data).await?;
+        validate_metalink_preview(&decoded_bytes)?;
+        self.prepare_add_metalink_from_decoded(decoded_bytes, opts, position)
+            .await
+    }
+
+    #[cfg(feature = "metalink")]
+    pub(crate) async fn commit_prepared_metalink(
+        &self,
+        request_id: Option<serde_json::Value>,
+        prepared: PreparedMetalink,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let mut gids = Vec::new();
+        if let Some(group_man) = &self.group_man {
+            if let Some(resource_groups) = prepared.resource_groups {
+                for group in resource_groups {
+                    let gid = group.recover().gid();
+                    group_man.add_group_arc(group);
+                    gids.push(gid.to_hex_string());
+                }
             }
 
             #[cfg(feature = "bittorrent")]
-            {
-                let graph_data = Arc::clone(&data);
-                let graph_man = Arc::clone(group_man);
-                let graph_options = options.clone();
-                let torrent_graphs = tokio::task::spawn_blocking(move || {
-                    let converter =
-                        aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new(
-                        );
-                    let mut gid_source =
-                        std::iter::from_fn(|| Some(graph_man.next_available_gid()));
-                    converter
-                        .create_torrent_graphs_from_bytes(
-                            graph_data.as_ref(),
-                            &graph_options,
-                            &mut gid_source,
-                        )
-                        .map_err(|error| error.to_string())
-                })
-                .await
-                .map_err(|error| {
-                    JsonRpcError::InternalError(format!("Metalink worker failed: {error}"))
-                })?
-                .map_err(JsonRpcError::InvalidParams)?;
-
+            if let Some(torrent_graphs) = prepared.torrent_graphs {
                 for graph in torrent_graphs {
                     let (_, payload_gid) = group_man
                         .add_metalink_graph(graph)
@@ -236,7 +372,7 @@ impl RpcEngine {
             }
 
             if !gids.is_empty() {
-                if let Some(pos) = position {
+                if let Some(pos) = prepared.position {
                     let first_gid = GroupId::from_hex_string(&gids[0]).ok_or_else(|| {
                         JsonRpcError::InternalError("Invalid Metalink GID generated".into())
                     })?;
@@ -248,12 +384,117 @@ impl RpcEngine {
                         .map_err(|error| JsonRpcError::RpcExecution(error.to_string()))?;
                 }
                 return Ok(JsonRpcResponse::success(
-                    req.id.clone().unwrap_or_default(),
+                    request_id.unwrap_or_default(),
                     gids,
                 ));
             }
         }
 
+        self.commit_metalink_fallback(request_id, prepared.options, prepared.position)
+            .await
+    }
+
+    async fn handle_add_metalink_values(
+        &self,
+        request_id: Option<serde_json::Value>,
+        metalink_data: String,
+        opts: HashMap<String, serde_json::Value>,
+        position: Option<usize>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let decoded_bytes = decode_rpc_payload(metalink_data).await?;
+
+        validate_metalink_preview(&decoded_bytes)?;
+
+        #[cfg(feature = "metalink")]
+        {
+            let prepared = self
+                .prepare_add_metalink_from_decoded(decoded_bytes, opts, position)
+                .await?;
+            return self.commit_prepared_metalink(request_id, prepared).await;
+        }
+
+        #[cfg(not(feature = "metalink"))]
+        self.commit_metalink_fallback(request_id, opts, position)
+            .await
+    }
+
+    #[cfg(feature = "metalink")]
+    async fn prepare_add_metalink_from_decoded(
+        &self,
+        decoded_bytes: Vec<u8>,
+        opts: HashMap<String, serde_json::Value>,
+        position: Option<usize>,
+    ) -> Result<PreparedMetalink, JsonRpcError> {
+        let Some(group_man) = &self.group_man else {
+            return Ok(PreparedMetalink {
+                options: opts,
+                position,
+                resource_groups: None,
+                #[cfg(feature = "bittorrent")]
+                torrent_graphs: None,
+            });
+        };
+
+        let options = rpc_options_to_download_options(&opts)?;
+        let data = Arc::new(decoded_bytes);
+        let resource_data = Arc::clone(&data);
+        let resource_man = Arc::clone(group_man);
+        let resource_options = options.clone();
+        let resource_groups = tokio::task::spawn_blocking(move || {
+            let converter =
+                aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
+            let mut gid_source = std::iter::from_fn(|| Some(resource_man.next_available_gid()));
+            converter
+                .create_resource_groups_from_bytes(
+                    resource_data.as_ref(),
+                    &resource_options,
+                    &mut gid_source,
+                )
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| JsonRpcError::InternalError(format!("Metalink worker failed: {error}")))?
+        .map_err(JsonRpcError::InvalidParams)?;
+
+        #[cfg(feature = "bittorrent")]
+        let torrent_graphs = {
+            let graph_data = Arc::clone(&data);
+            let graph_man = Arc::clone(group_man);
+            let graph_options = options;
+            tokio::task::spawn_blocking(move || {
+                let converter =
+                    aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
+                let mut gid_source = std::iter::from_fn(|| Some(graph_man.next_available_gid()));
+                converter
+                    .create_torrent_graphs_from_bytes(
+                        graph_data.as_ref(),
+                        &graph_options,
+                        &mut gid_source,
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|error| {
+                JsonRpcError::InternalError(format!("Metalink worker failed: {error}"))
+            })?
+            .map_err(JsonRpcError::InvalidParams)?
+        };
+
+        Ok(PreparedMetalink {
+            options: opts,
+            position,
+            resource_groups: Some(resource_groups),
+            #[cfg(feature = "bittorrent")]
+            torrent_graphs: Some(torrent_graphs),
+        })
+    }
+
+    async fn commit_metalink_fallback(
+        &self,
+        request_id: Option<serde_json::Value>,
+        opts: HashMap<String, serde_json::Value>,
+        position: Option<usize>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid = self
             .add_task(vec!["metalink://download".to_string()], opts)
             .await?;
@@ -264,12 +505,8 @@ impl RpcEngine {
             );
             let _ = self.handle_change_position(&pos_req).await;
         }
-        // Return an array of GIDs matching C++ aria2 behaviour.
-        // Currently we create a single download task per metalink; when
-        // multi-file metalink parsing is implemented, this will return
-        // one GID per file in the metalink document.
         Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
+            request_id.unwrap_or_default(),
             vec![gid],
         ))
     }
@@ -434,10 +671,11 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
         let keys = crate::handlers::status::status_keys_for_request(req, 1)?;
+        let key_filter = crate::handlers::status::status_key_filter(&keys);
         match self.get_status(&gid).await {
             Some(status) => Ok(JsonRpcResponse::success(
                 req.id.clone().unwrap_or_default(),
-                crate::handlers::status::status_to_json(status, &keys)?,
+                crate::handlers::status::status_to_json_with_filter(status, key_filter.as_ref())?,
             )),
             None => Err(JsonRpcError::RpcExecution(format!("GID {} not found", gid))),
         }
@@ -529,6 +767,40 @@ impl RpcEngine {
             .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
         let man = group_man;
         let group = man
+            .group_by_hex(&gid)
+            .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
+        let result = group
+            .write()
+            .map_err(|_| JsonRpcError::InternalError("Failed to lock request group".into()))?
+            .change_uris(file_index as usize, &del_uris, &add_uris, position)
+            .map_err(|e| JsonRpcError::RpcExecution(e.to_string()))?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            serde_json::json!([result.0, result.1]),
+        ))
+    }
+
+    /// Owned network path for `aria2.changeUri`. The delete/add URI arrays
+    /// can be large, so consume them from the already-owned request.
+    pub(crate) async fn handle_change_uri_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let gid: String = req.take_param(0)?;
+        let file_index: i64 = req.take_param(1)?;
+        if file_index < 1 {
+            return Err(JsonRpcError::InvalidParams(
+                "fileIndex must be at least 1".into(),
+            ));
+        }
+        let del_uris: Vec<String> = req.take_param(2)?;
+        let add_uris: Vec<String> = req.take_param(3)?;
+        let position = optional_position_owned(req, 4)?;
+        let group_man = self
+            .group_man
+            .as_ref()
+            .ok_or_else(|| JsonRpcError::RpcExecution("RequestGroupMan is not wired".into()))?;
+        let group = group_man
             .group_by_hex(&gid)
             .ok_or_else(|| JsonRpcError::RpcExecution(format!("GID {} not found", gid)))?;
         let result = group

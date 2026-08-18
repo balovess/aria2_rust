@@ -8,7 +8,6 @@ use crate::engine::bt_download_command::{BLOCK_SIZE, BtDownloadCommand, MAX_RETR
 use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
-use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
 use crate::error::{Aria2Error, FatalError, Result};
@@ -146,7 +145,7 @@ enum PeerWaitEvent {
 impl BtDownloadCommand {
     fn next_peer_event_deadline(
         &self,
-        active_connection_count: usize,
+        active_connections: &[BtPeerConn],
         stop_timeout_deadline: Option<Instant>,
     ) -> Instant {
         let now = Instant::now();
@@ -155,7 +154,7 @@ impl BtDownloadCommand {
         if self.dht_engine.is_some()
             && let Some(delay) = self
                 .dht_periodic_lookup
-                .next_lookup_delay(active_connection_count)
+                .next_lookup_delay(active_connections.len())
         {
             deadline = deadline.min(now + delay);
         }
@@ -169,7 +168,24 @@ impl BtDownloadCommand {
         if let Some(stop_timeout_deadline) = stop_timeout_deadline {
             deadline = deadline.min(stop_timeout_deadline);
         }
+        for connection in active_connections {
+            deadline = deadline.min(connection.keepalive_deadline());
+        }
         deadline
+    }
+
+    async fn send_due_keepalives(active_connections: &mut [BtPeerConn]) {
+        for connection in active_connections {
+            if connection.should_send_keepalive()
+                && let Err(error) = connection.send_keepalive().await
+            {
+                tracing::debug!(
+                    peer = %format!("{}:{}", connection.ip_addr, connection.port),
+                    %error,
+                    "Failed to send configured BitTorrent keep-alive"
+                );
+            }
+        }
     }
 
     /// Wait for a peer/discovery event instead of waking on a fixed short
@@ -953,7 +969,7 @@ impl BtDownloadCommand {
             if active_connections.is_empty() && web_seed_manager.is_none() {
                 debug!("[BT] No peers available, waiting for peer discovery...");
                 let deadline = self
-                    .next_peer_event_deadline(active_connections.len(), stop_timeout.deadline());
+                    .next_peer_event_deadline(active_connections, stop_timeout.deadline());
                 let event = self.wait_for_peer_event(active_connections, deadline).await;
                 let incoming = Self::apply_peer_wait_event(
                     event,
@@ -975,6 +991,7 @@ impl BtDownloadCommand {
                         total_size,
                     );
                 }
+                Self::send_due_keepalives(active_connections).await;
                 continue;
             }
 
@@ -986,7 +1003,7 @@ impl BtDownloadCommand {
                 None => {
                     tracing::debug!("[BT] No piece available, waiting...");
                     let deadline = self.next_peer_event_deadline(
-                        active_connections.len(),
+                        active_connections,
                         stop_timeout.deadline(),
                     );
                     let event = self.wait_for_peer_event(active_connections, deadline).await;
@@ -1010,6 +1027,7 @@ impl BtDownloadCommand {
                             total_size,
                         );
                     }
+                    Self::send_due_keepalives(active_connections).await;
                     continue;
                 }
             };
@@ -1181,11 +1199,13 @@ impl BtDownloadCommand {
 
                         let piece_bytes = bytes::Bytes::from(piece_data);
                         if let Some(ref layout) = self.multi_file_layout {
-                            write_piece_to_multi_files_coalesced(
+                            let max_open_files = self.group.recover().options().bt_max_open_files;
+                            crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit(
                                 layout,
                                 next_piece_idx as u32,
                                 &piece_bytes,
                                 layout.piece_length(),
+                                max_open_files,
                             )
                             .await?;
                         } else {

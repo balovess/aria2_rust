@@ -27,6 +27,11 @@ impl BtPeerConn {
         self.last_message_received.elapsed() >= self.peer_timeout
     }
 
+    /// Return the next instant at which this connection's keep-alive is due.
+    pub(crate) fn keepalive_deadline(&self) -> std::time::Instant {
+        self.last_keepalive_sent + self.keep_alive_interval
+    }
+
     /// Configure the keep-alive and peer inactivity intervals for this
     /// connection. The download command applies task options here after the
     /// transport handshake completes.

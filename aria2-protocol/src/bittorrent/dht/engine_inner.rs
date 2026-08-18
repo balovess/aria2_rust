@@ -201,8 +201,17 @@ impl DhtEngineContext {
     pub(super) async fn bootstrap(&self) {
         let self_id = self.inner.read().await.self_id;
 
-        // Resolve bootstrap node hostnames via async DNS (C++ uses c-ares).
-        let entry_points = DhtBootstrap::resolve_bootstrap_nodes().await;
+        // Resolve the public defaults here. Task-specific bootstrap endpoints
+        // are resolved by the core configuration seam before engine start.
+        let entry_points = if self.config.bootstrap_nodes.is_empty() {
+            DhtBootstrap::resolve_bootstrap_nodes().await
+        } else {
+            self.config
+                .bootstrap_nodes
+                .iter()
+                .map(|addr| DhtNode::new([0u8; 20], *addr))
+                .collect()
+        };
 
         if entry_points.is_empty() {
             warn!("No DHT bootstrap nodes could be resolved — DHT may not function properly");
@@ -233,8 +242,15 @@ impl DhtEngineContext {
 
         // Do an initial find_node for our own ID to populate the routing table
         let rt = Arc::new(RwLock::new(self.inner.read().await.routing_table.clone()));
-        let _result =
-            iterative_find_node(&self_id, &self_id, &rt, &self.socket, &self.tracker).await;
+        let _result = iterative_find_node(
+            &self_id,
+            &self_id,
+            &rt,
+            &self.socket,
+            &self.tracker,
+            self.config.query_timeout,
+        )
+        .await;
 
         // Merge discovered nodes
         {
@@ -337,8 +353,15 @@ impl DhtEngineContext {
 
         for target in targets.into_iter().take(3) {
             let rt = Arc::new(RwLock::new(self.inner.read().await.routing_table.clone()));
-            let _result =
-                iterative_find_node(&target, &self_id, &rt, &self.socket, &self.tracker).await;
+            let _result = iterative_find_node(
+                &target,
+                &self_id,
+                &rt,
+                &self.socket,
+                &self.tracker,
+                self.config.query_timeout,
+            )
+            .await;
 
             // Merge discovered nodes
             let mut inner = self.inner.write().await;

@@ -25,7 +25,37 @@ impl BtPeerConn {
         force_encryption: bool,
         prefer_encryption: bool,
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, force_encryption, prefer_encryption).await {
+        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        Self::connect_mse_with_options(
+            addr,
+            info_hash,
+            force_encryption,
+            prefer_encryption,
+            &local_peer_id,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+    }
+
+    /// Connect via MSE using the task's peer identity and connection timeout.
+    pub async fn connect_mse_with_options(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash: &[u8; 20],
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
+            addr,
+            info_hash,
+            force_encryption,
+            prefer_encryption,
+            local_peer_id,
+            timeout,
+        )
+        .await
+        {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
@@ -68,8 +98,30 @@ impl BtPeerConn {
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect(addr, info_hash)
-            .await
+        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        Self::connect_plain_with_options(
+            addr,
+            info_hash,
+            &local_peer_id,
+            std::time::Duration::from_secs(15),
+        )
+        .await
+    }
+
+    /// Connect via plain TCP using the task's peer identity and timeout.
+    pub async fn connect_plain_with_options(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout(
+            addr,
+            info_hash,
+            local_peer_id,
+            timeout,
+        )
+        .await
         {
             Ok(conn) => {
                 let now = Instant::now();

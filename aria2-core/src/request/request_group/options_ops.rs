@@ -201,10 +201,7 @@ fn apply_rpc_option(
             Ok(true)
         }
         "user-agent" | "referer" | "dir" | "out" | "file-allocation" | "cookie-file"
-        | "cookies" | "dht-file-path" | "bt-peer-blocklist" | "peer-id-prefix"
-        | "peer-agent" | "dht-listen-addr6" | "dht-entry-point-host" | "dht-entry-point6"
-        | "dht-entry-point-host6" | "dht-file-path6" | "dht-listen-addr" | "http-proxy"
-        | "http-proxy-user" | "http-proxy-passwd"
+        | "cookies" | "dht-file-path" | "http-proxy" | "http-proxy-user" | "http-proxy-passwd"
         | "all-proxy" | "all-proxy-user" | "all-proxy-passwd" | "https-proxy"
         | "https-proxy-user" | "https-proxy-passwd" | "ftp-proxy" | "ftp-proxy-user"
         | "ftp-proxy-passwd" | "no-proxy" => {

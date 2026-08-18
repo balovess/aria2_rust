@@ -1,6 +1,6 @@
 # Performance Differentiators vs aria2_original
 
-Last reviewed: 2026-08-18
+Last reviewed: 2026-08-19
 
 本文档记录 `aria2-rust` 相对 `aria2_original` 的内部性能差异化实现。
 它是实现和证据索引，不是完整兼容性结论，也不把 Rust-only 微基准解释为
@@ -223,20 +223,34 @@ worker、FIFO queue、`Notify` 和 completion channel 管理分配任务。`Prea
   `handle_request_owned` 后不再为 batch dispatch 复制整棵 parameter DOM。
 - [`dispatch_wire_entries`](../aria2-rpc/src/engine.rs) 将连续只读方法分组，以最多
   64 个并发 future 执行，并保持 response 的输入顺序。
+- 当同一 wire batch 同时包含两个以上 `tellActive`、`tellWaiting`、`tellStopped`
+  或 `getGlobalStat` 请求时，批内共享一次 `RpcReadSnapshot`；这避免热门 WebUI
+  轮询对同一批任务反复遍历和构造状态对象。单请求仍使用实时 handler，避免把
+  跨请求缓存误当成一致性协议。
+- `system.multicall` 中如果全部子调用都是只读操作，并且包含至少两个上述状态
+  方法，也共享一次 `RpcReadSnapshot`；这是 WebUI 常用轮询形状。只要 multicall
+  含有生命周期 mutation，就关闭快照并按子调用顺序读取状态，保持原版可观察语义。
 - mutation 是顺序 barrier：前一段只读请求先 drain，`add/pause/remove/changeOption`
   等修改操作按输入顺序执行，之后才开始下一段只读请求。这样常见的 WebUI polling
   batch 可以并发读取，而生命周期状态不会被重排。
 - base64 payload decode、Metalink XML/graph conversion 等 CPU 或大输入处理通过
-  `spawn_blocking` 执行；`add_task` 先注册 RequestGroup，再把生命周期命令发送到
-  core engine command channel。
-- `system.multicall` 保持原版的子调用顺序、错误形状和成功结果包装；它不是为了
-  并发改写的入口。并发优化针对 HTTP/WebSocket 的 JSON-RPC wire batch。
+  `spawn_blocking` 执行。单请求 `addTorrent`/`addMetalink` 先完成这些准备工作，
+  再进入 mutation gate；gate 只覆盖 GID/RequestGroup 注册、队列提交和位置变更，
+  因此大 payload 不会阻塞其他 mutation 的最终提交。`addTorrent` 解码后的完整
+  buffer 只用于生成短 torrent URI，不会被带入提交阶段；`add_task` 仍先注册
+  RequestGroup，再把生命周期命令发送到 core engine command channel。
+- `system.multicall` 保持原版的子调用顺序、错误形状和成功结果包装；只读子调用
+  仅共享一次状态快照，不改变子调用执行顺序。并发优化主要针对 HTTP/WebSocket
+  的 JSON-RPC wire batch。
 
 ### 兼容性边界
 
 JSON-RPC/XML-RPC/WebSocket 的方法名、认证、错误码、response 顺序和
 `system.multicall` wire shape 是外部契约。只读请求的内部并发不会改变这些字段；
-mutation barrier 是保证外部可观察生命周期顺序的必要边界。
+大输入准备可以与其他连接的准备阶段重叠，但最终 mutation commit 仍通过 gate
+串行化，避免 RequestGroup 生命周期状态重排。只读 `system.multicall` 不需要取得
+mutation gate，但仍按原顺序执行子调用；包含 mutation 的 multicall 才在一个 gate
+临界区内执行。
 
 ### 证据入口
 
@@ -247,6 +261,7 @@ mutation barrier 是保证外部可观察生命周期顺序的必要边界。
 - [`server/http_routes.rs`](../aria2-rpc/src/server/http_routes.rs)
 - [`server/ws_session.rs`](../aria2-rpc/src/server/ws_session.rs)
 - [`handlers/handler_tests.rs`](../aria2-rpc/src/handlers/handler_tests.rs)
+- `engine::tests::test_mutation_gate_blocks_lifecycle_commit_until_released`
 
 ## 7. 既有事件驱动优化
 
@@ -281,6 +296,7 @@ mutation barrier 是保证外部可观察生命周期顺序的必要边界。
 ```bash
 cargo bench -p aria2-core --bench segment_scan_bench -- --noplot
 cargo bench -p aria2-protocol --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
+cargo bench -p aria2-rpc --bench rpc_bench -- read_only_multicall_poll_100_tasks --noplot
 ```
 
 最终兼容性状态仍以 [`compatibility-status.md`](compatibility-status.md) 为准；本台账

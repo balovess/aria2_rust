@@ -77,6 +77,41 @@ fn bench_get_global_stat(c: &mut Criterion) {
     });
 }
 
+fn bench_read_only_multicall_poll(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let engine = aria2_rpc::engine::RpcEngine::new();
+    rt.block_on(async {
+        for index in 0..100 {
+            let req = make_add_req(
+                &format!("setup-{index}"),
+                &format!("http://example.com/file-{index}.bin"),
+            );
+            let response = engine.handle_request(&req).await;
+            assert!(response.is_success());
+        }
+    });
+    let req = JsonRpcRequest::new(
+        "system.multicall",
+        serde_json::json!([[
+            {"methodName": "aria2.tellActive", "params": []},
+            {"methodName": "aria2.tellWaiting", "params": [0, 100]},
+            {"methodName": "aria2.tellStopped", "params": [0, 100]},
+            {"methodName": "aria2.getGlobalStat", "params": []}
+        ]]),
+    )
+    .with_id("poll");
+
+    c.bench_function("read_only_multicall_poll_100_tasks", |b| {
+        b.iter(|| {
+            let response = rt.block_on(engine.handle_request(&req));
+            black_box(response.is_success());
+        });
+    });
+}
+
 fn bench_jsonrpc_parse(c: &mut Criterion) {
     let json_str: String = r#"{"jsonrpc":"2.0","method":"aria2.addUri","params":[["http://example.com/file.zip"]],"id":"req-1"}"#.to_string();
     c.bench_function("jsonrpc_parse_request", |b| {
@@ -183,6 +218,7 @@ criterion_group!(
     bench_add_uri_qps,
     bench_tell_active_empty,
     bench_get_global_stat,
+    bench_read_only_multicall_poll,
     bench_jsonrpc_parse,
     bench_jsonrpc_streaming_wire_parse,
     bench_jsonrpc_serialize,

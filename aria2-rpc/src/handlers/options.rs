@@ -140,6 +140,25 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let new_opts: HashMap<String, serde_json::Value> = req.get_param(0)?;
+        self.handle_change_global_option_values(req.id.clone(), new_opts)
+            .await
+    }
+
+    /// Owned network path for `aria2.changeGlobalOption`.
+    pub(crate) async fn handle_change_global_option_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let new_opts: HashMap<String, serde_json::Value> = req.take_param(0)?;
+        self.handle_change_global_option_values(req.id.clone(), new_opts)
+            .await
+    }
+
+    async fn handle_change_global_option_values(
+        &self,
+        request_id: Option<serde_json::Value>,
+        new_opts: HashMap<String, serde_json::Value>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         // C++ aria2 silently ignores unknown and non-changeable options.
         let new_opts: HashMap<String, serde_json::Value> = new_opts
             .into_iter()
@@ -282,7 +301,7 @@ impl RpcEngine {
             let _ = tx.send(EngineCommand::SetPublicTrackersEnabled { enabled });
         }
         Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
+            request_id.unwrap_or_default(),
             "OK",
         ))
     }
@@ -380,6 +399,26 @@ impl RpcEngine {
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let gid: String = req.get_param(0)?;
         let raw_changes: HashMap<String, serde_json::Value> = req.get_param(1)?;
+        self.handle_change_option_values(req.id.clone(), gid, raw_changes)
+    }
+
+    /// Owned network path for `aria2.changeOption`; move the options map out
+    /// of the request instead of cloning it before normalization.
+    pub(crate) async fn handle_change_option_owned(
+        &self,
+        req: &mut JsonRpcRequest,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let gid: String = req.take_param(0)?;
+        let raw_changes: HashMap<String, serde_json::Value> = req.take_param(1)?;
+        self.handle_change_option_values(req.id.clone(), gid, raw_changes)
+    }
+
+    fn handle_change_option_values(
+        &self,
+        request_id: Option<serde_json::Value>,
+        gid: String,
+        raw_changes: HashMap<String, serde_json::Value>,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
         let changes = normalize_rpc_options(&raw_changes);
 
         let group_man = self
@@ -392,7 +431,7 @@ impl RpcEngine {
             .map_err(JsonRpcError::RpcExecution)?;
 
         Ok(JsonRpcResponse::success(
-            req.id.clone().unwrap_or_default(),
+            request_id.unwrap_or_default(),
             "OK",
         ))
     }

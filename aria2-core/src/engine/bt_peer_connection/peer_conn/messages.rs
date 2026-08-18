@@ -22,6 +22,21 @@ impl BtPeerConn {
         Ok(())
     }
 
+    /// Send the BEP 10 extension handshake using the task's peer-agent value.
+    pub async fn send_extension_handshake(&mut self, peer_agent: &str) -> Result<()> {
+        use aria2_protocol::bittorrent::message::serializer::serialize;
+        use aria2_protocol::bittorrent::message::types::BtMessage;
+        use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
+
+        let mut handshake = ExtensionHandshake::new();
+        handshake.with_version(peer_agent);
+        self.write_raw(&serialize(&BtMessage::Extended {
+            ext_id: 0,
+            payload: handshake.to_bytes(),
+        }))
+        .await
+    }
+
     // -----------------------------------------------------------------------
     // Protocol message senders (immediate flush — preserved API)
     // -----------------------------------------------------------------------
@@ -280,6 +295,28 @@ impl BtPeerConn {
                         "invalid BitTorrent peer message: {error}"
                     )))
                 })?;
+            }
+
+            if let Some(
+                aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+                    ext_id: 0,
+                    payload,
+                },
+            ) = message.as_ref()
+                && let Ok(handshake) =
+                    aria2_protocol::bittorrent::message::extension::ExtensionHandshake::from_bytes(
+                        payload,
+                    )
+            {
+                if let Some(id) = handshake.ut_metadata_id() {
+                    self.register_peer_extension("ut_metadata", id);
+                }
+                if let Some(id) = handshake.ut_pex_id() {
+                    self.register_peer_extension("ut_pex", id);
+                }
+                if let Some(resource) = &mut self.session_resource {
+                    resource.set_extended_messaging_enabled(true);
+                }
             }
             Ok(message)
         });

@@ -346,6 +346,23 @@ impl BtDownloadCommand {
         .await
     }
 
+    pub async fn write_piece_to_multi_files_coalesced_with_limit(
+        layout: &MultiFileLayout,
+        piece_idx: u32,
+        piece_data: &bytes::Bytes,
+        piece_length: u32,
+        max_open_files: usize,
+    ) -> crate::error::Result<()> {
+        crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit(
+            layout,
+            piece_idx,
+            piece_data,
+            piece_length,
+            max_open_files,
+        )
+        .await
+    }
+
     pub async fn announce_to_public_tracker(
         tracker_url: &str,
         info_hash: &[u8; 20],
@@ -449,5 +466,35 @@ mod tests {
         .expect("test torrent should construct");
 
         assert!(command.local_peer_id.starts_with(b"TEST-PREFIX-"));
+    }
+
+    #[test]
+    fn command_loads_configured_peer_blocklist_into_peer_storage() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let path = std::env::temp_dir().join(format!(
+            "aria2-rust-command-blocklist-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "10.0.0.0/8\n").expect("blocklist fixture should be writable");
+        let options = crate::request::request_group::DownloadOptions {
+            bt_peer_blocklist: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(13),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        let blocked = crate::engine::bt_peer_storage::PeerEntry::new("10.0.0.1".into(), 6881);
+        let allowed = crate::engine::bt_peer_storage::PeerEntry::new("192.0.2.1".into(), 6881);
+        let mut storage = command.peer_storage.lock().unwrap();
+        assert!(!storage.add_peer(blocked));
+        assert!(storage.add_peer(allowed));
+        drop(storage);
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -145,6 +145,7 @@ impl BtMessageHandler {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
         connections: &mut [BtPeerConn],
         piece_index: u32,

@@ -433,6 +433,32 @@ fn every_task_runtime_policy_has_a_real_download_option_consumer() {
     }
 }
 
+#[test]
+fn dump_registered_options_without_task_or_runtime_policy() {
+    use super::runtime::{
+        INITIAL_REQUEST_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+        RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS,
+    };
+
+    let registry = OptionRegistry::new();
+    let mut unclassified = registry
+        .all()
+        .keys()
+        .filter(|name| {
+            !INITIAL_REQUEST_OPTIONS.contains(&name.as_str())
+                && !RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&name.as_str())
+                && !RUNTIME_CHANGEABLE_OPTIONS.contains(&name.as_str())
+                && !RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.contains(&name.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    unclassified.sort();
+    assert!(
+        unclassified.is_empty(),
+        "registered options without a task, runtime, or process policy: {unclassified:?}"
+    );
+}
+
 #[tokio::test]
 async fn every_global_runtime_policy_reaches_config_manager_storage() {
     use super::runtime::RUNTIME_GLOBAL_CHANGEABLE_OPTIONS;

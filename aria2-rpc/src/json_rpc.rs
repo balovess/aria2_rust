@@ -157,6 +157,37 @@ impl JsonRpcRequest {
         }
     }
 
+    /// Consume one positional or named parameter without cloning its JSON
+    /// value. Network-facing dispatch owns the request document, so moving a
+    /// large URI list, options map, or encoded payload is cheaper than
+    /// materializing a second DOM subtree for `serde_json::from_value`.
+    pub(crate) fn take_param<T: serde::de::DeserializeOwned>(
+        &mut self,
+        index: usize,
+    ) -> Result<T, JsonRpcError> {
+        let value = match &mut self.params {
+            serde_json::Value::Array(arr) if index < arr.len() => {
+                std::mem::replace(&mut arr[index], serde_json::Value::Null)
+            }
+            serde_json::Value::Object(map) => {
+                let key = format!("p{index}");
+                map.remove(&key).ok_or_else(|| {
+                    JsonRpcError::InvalidParams(format!("param[{}] missing", index))
+                })?
+            }
+            _ => {
+                return Err(JsonRpcError::InvalidParams(format!(
+                    "param[{}] not found",
+                    index
+                )));
+            }
+        };
+
+        serde_json::from_value(value).map_err(|error| {
+            JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
+        })
+    }
+
     /// Return a positional parameter without changing its wire type.
     ///
     /// RPC handlers use this only when an optional parameter has multiple
@@ -187,6 +218,33 @@ impl JsonRpcRequest {
                 })
             })
             .transpose()
+    }
+
+    /// Consume an optional parameter without cloning its JSON value.
+    pub(crate) fn take_optional_param<T: serde::de::DeserializeOwned>(
+        &mut self,
+        index: usize,
+    ) -> Result<Option<T>, JsonRpcError> {
+        let value = match &mut self.params {
+            serde_json::Value::Array(arr) => {
+                let Some(value) = arr.get_mut(index) else {
+                    return Ok(None);
+                };
+                std::mem::replace(value, serde_json::Value::Null)
+            }
+            serde_json::Value::Object(map) => {
+                let key = format!("p{index}");
+                let Some(value) = map.remove(&key) else {
+                    return Ok(None);
+                };
+                value
+            }
+            _ => return Ok(None),
+        };
+
+        serde_json::from_value(value).map(Some).map_err(|error| {
+            JsonRpcError::InvalidParams(format!("param[{}] type error: {}", index, error))
+        })
     }
 
     pub fn get_param_or_default<T: serde::de::DeserializeOwned + Default>(
@@ -708,6 +766,43 @@ mod tests {
     fn test_get_param_missing() {
         let req = JsonRpcRequest::new("test", serde_json::json!(["only_one"]));
         assert!(req.get_param::<String>(1).is_err());
+    }
+
+    #[test]
+    fn test_take_param_moves_positional_value() {
+        let mut req = JsonRpcRequest::new(
+            "test",
+            serde_json::json!([["https://example.com/a", "https://example.com/b"], {"dir": "/tmp"}]),
+        );
+
+        let uris: Vec<String> = req.take_param(0).unwrap();
+
+        assert_eq!(uris.len(), 2);
+        assert!(req.params[0].is_null());
+        assert_eq!(req.params[1]["dir"], "/tmp");
+    }
+
+    #[test]
+    fn test_take_optional_param_preserves_missing_and_named_semantics() {
+        let mut req = JsonRpcRequest::new("test", serde_json::json!({"p1": {"dir": "/tmp"}}));
+
+        let missing: Option<String> = req.take_optional_param(0).unwrap();
+        let options: Option<std::collections::HashMap<String, serde_json::Value>> =
+            req.take_optional_param(1).unwrap();
+
+        assert_eq!(missing, None);
+        assert_eq!(options.unwrap()["dir"], "/tmp");
+        assert!(req.params.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_take_param_reports_type_error_like_borrowed_accessor() {
+        let mut req = JsonRpcRequest::new("test", serde_json::json!([42]));
+
+        let error = req.take_param::<String>(0).unwrap_err();
+
+        assert_eq!(error.code(), -32602);
+        assert!(error.to_string().contains("param[0] type error"));
     }
 
     #[test]

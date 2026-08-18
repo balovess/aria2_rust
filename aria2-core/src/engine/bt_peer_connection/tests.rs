@@ -297,6 +297,85 @@ fn test_bt_peer_conn_uses_configured_timing_values() {
     assert!(connection.is_peer_timed_out());
 }
 
+#[tokio::test]
+async fn test_bt_peer_conn_sends_configured_peer_agent_on_wire() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (server, endpoint) = listener.accept().await.unwrap();
+    let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+        server,
+        [0u8; 20],
+    );
+    let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
+
+    connection
+        .send_extension_handshake("contract-agent/1")
+        .await
+        .unwrap();
+
+    let mut frame_length = [0u8; 4];
+    tokio::io::AsyncReadExt::read_exact(&mut client, &mut frame_length)
+        .await
+        .unwrap();
+    let payload_length = u32::from_be_bytes(frame_length) as usize;
+    let mut frame = Vec::with_capacity(4 + payload_length);
+    frame.extend_from_slice(&frame_length);
+    let mut payload = vec![0u8; payload_length];
+    tokio::io::AsyncReadExt::read_exact(&mut client, &mut payload)
+        .await
+        .unwrap();
+    frame.extend_from_slice(&payload);
+
+    let message = aria2_protocol::bittorrent::message::factory::parse_message(&frame).unwrap();
+    match message {
+        Some(aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+            ext_id,
+            payload,
+        }) => {
+            assert_eq!(ext_id, 0);
+            let handshake =
+                aria2_protocol::bittorrent::message::extension::ExtensionHandshake::from_bytes(
+                    &payload,
+                )
+                .unwrap();
+            assert_eq!(handshake.v(), Some("contract-agent/1"));
+        }
+        other => panic!("expected extension handshake, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_bt_peer_conn_registers_remote_extension_ids() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (server, endpoint) = listener.accept().await.unwrap();
+    let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+        server,
+        [0u8; 20],
+    );
+    let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
+    connection.allocate_session_resource(16 * 1024, 16 * 1024);
+
+    let mut handshake =
+        aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new();
+    handshake.with_ut_metadata(7).with_ut_pex(9);
+    let frame = aria2_protocol::bittorrent::message::serializer::serialize(
+        &aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+            ext_id: 0,
+            payload: handshake.to_bytes(),
+        },
+    );
+    tokio::io::AsyncWriteExt::write_all(&mut client, &frame)
+        .await
+        .unwrap();
+
+    assert!(connection.read_message().await.unwrap().is_some());
+    assert_eq!(connection.peer_extension_id("ut_metadata"), Some(7));
+    assert_eq!(connection.peer_extension_id("ut_pex"), Some(9));
+}
+
 // -----------------------------------------------------------------------
 // BtPeerConn — queue_message and flush (unit test of buffer logic)
 // -----------------------------------------------------------------------

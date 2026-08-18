@@ -13,6 +13,8 @@ pub mod download_progress;
 pub mod engine_command;
 pub mod engine_loop;
 pub mod halt_watchers;
+#[cfg(feature = "bittorrent")]
+pub(crate) mod dht_config;
 pub mod http_adaptive_concurrency;
 pub mod http_segment_downloader;
 pub mod http_segment_request_executor;

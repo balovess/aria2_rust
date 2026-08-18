@@ -107,7 +107,13 @@ impl EncryptedConnection {
         // PadB has no explicit length. The later VC marker synchronizes the
         // response, just as MSEHandshake::findInitiatorVCMarker does upstream.
         let mut step1_r_buf = vec![0u8; MSE_PUBLIC_KEY_LENGTH];
-        Self::read_exact_with_timeout(&mut stream, &mut step1_r_buf, "MSE public key").await?;
+        Self::read_exact_with_timeout(
+            &mut stream,
+            &mut step1_r_buf,
+            "MSE public key",
+            timeout,
+        )
+        .await?;
 
         initiator.receive_step1(&step1_r_buf)?;
 
@@ -156,7 +162,7 @@ impl EncryptedConnection {
             crypto.is_encrypted()
         );
 
-        let mut local_handshake = Handshake::new(info_hash, &local_peer_id)
+        let mut local_handshake = Handshake::new(info_hash, local_peer_id)
             .with_dht(true)
             .to_bytes();
         crypto.encrypt(&mut local_handshake);

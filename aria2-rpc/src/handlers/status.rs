@@ -4,11 +4,89 @@
 
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::engine::RpcEngine;
 use crate::json_rpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use crate::types::{DownloadStatus, GlobalStat, StatusInfo};
 use aria2_core::request::request_group::download_result::DownloadResult;
+
+/// State captured once for a read-only wire batch. Polling clients commonly
+/// request active, waiting, stopped, and global-stat views together; sharing
+/// this snapshot avoids rebuilding the same task status several times while
+/// preserving the batch's response order.
+#[derive(Clone)]
+pub(crate) struct RpcReadSnapshot {
+    pub(crate) active: Arc<[StatusInfo]>,
+    pub(crate) waiting: Arc<[StatusInfo]>,
+    pub(crate) stopped: Arc<[StatusInfo]>,
+    pub(crate) global_stat: GlobalStat,
+}
+
+pub(crate) struct StatusKeyFilter {
+    keys: HashSet<String>,
+}
+
+pub(crate) fn status_key_filter(keys: &[String]) -> Option<StatusKeyFilter> {
+    (!keys.is_empty()).then(|| StatusKeyFilter {
+        keys: keys.iter().cloned().collect(),
+    })
+}
+
+impl RpcReadSnapshot {
+    pub(crate) fn capture(engine: &RpcEngine) -> Option<Self> {
+        let group_man = engine.group_man.as_ref()?;
+        let active: Vec<StatusInfo> = group_man
+            .get_active_groups()
+            .into_iter()
+            .map(|group_lock| {
+                let group = group_lock.recover();
+                let gid = group.gid().to_hex_string();
+                RpcEngine::build_status_from_group(&group, &gid)
+            })
+            .collect();
+        let waiting: Vec<StatusInfo> = group_man
+            .get_waiting_groups()
+            .into_iter()
+            .map(|group_lock| {
+                let group = group_lock.recover();
+                let gid = group.gid().to_hex_string();
+                RpcEngine::build_status_from_group(&group, &gid)
+            })
+            .collect();
+        let stopped: Vec<StatusInfo> = group_man
+            .get_stopped_results(0, usize::MAX)
+            .iter()
+            .map(RpcEngine::build_status_from_result)
+            .collect();
+
+        let download_speed = active
+            .iter()
+            .chain(&waiting)
+            .filter_map(|status| status.download_speed)
+            .fold(0u64, u64::saturating_add);
+        let upload_speed = active
+            .iter()
+            .chain(&waiting)
+            .filter_map(|status| status.upload_speed)
+            .fold(0u64, u64::saturating_add);
+        let global_stat = GlobalStat {
+            download_speed,
+            upload_speed,
+            num_active: active.len(),
+            num_waiting: waiting.len(),
+            num_stopped: stopped.len(),
+            num_stopped_total: stopped.len(),
+        };
+
+        Some(Self {
+            active: Arc::from(active),
+            waiting: Arc::from(waiting),
+            stopped: Arc::from(stopped),
+            global_stat,
+        })
+    }
+}
 
 pub(crate) fn status_keys_for_request(
     req: &JsonRpcRequest,
@@ -76,19 +154,18 @@ fn paginate<T>(items: Vec<T>, offset: i64, num: usize) -> Vec<T> {
     selected
 }
 
-pub(crate) fn status_to_json(
+pub(crate) fn status_to_json_with_filter(
     status: StatusInfo,
-    keys: &[String],
+    key_filter: Option<&StatusKeyFilter>,
 ) -> Result<serde_json::Value, JsonRpcError> {
     let mut value = serde_json::to_value(status)
         .map_err(|e| JsonRpcError::InternalError(format!("Serialization failed: {e}")))?;
-    if keys.is_empty() {
+    let Some(key_filter) = key_filter else {
         return Ok(value);
-    }
+    };
 
-    let requested: HashSet<&str> = keys.iter().map(String::as_str).collect();
     if let Some(fields) = value.as_object_mut() {
-        fields.retain(|key, _| requested.contains(key.as_str()));
+        fields.retain(|key, _| key_filter.keys.contains(key));
     }
     Ok(value)
 }
@@ -111,6 +188,70 @@ impl RpcEngine {
         info
     }
 
+    pub(crate) fn handle_tell_active_snapshot(
+        &self,
+        req: &JsonRpcRequest,
+        snapshot: &RpcReadSnapshot,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let keys = status_keys_for_request(req, 0)?;
+        let key_filter = status_key_filter(&keys);
+        let active = snapshot
+            .active
+            .iter()
+            .cloned()
+            .map(|status| status_to_json_with_filter(status, key_filter.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            active,
+        ))
+    }
+
+    pub(crate) fn handle_tell_waiting_snapshot(
+        &self,
+        req: &JsonRpcRequest,
+        snapshot: &RpcReadSnapshot,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let (offset, num, keys) = pagination_params(req)?;
+        let key_filter = status_key_filter(&keys);
+        let waiting = paginate(snapshot.waiting.iter().cloned().collect(), offset, num)
+            .into_iter()
+            .map(|status| status_to_json_with_filter(status, key_filter.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            waiting,
+        ))
+    }
+
+    pub(crate) fn handle_tell_stopped_snapshot(
+        &self,
+        req: &JsonRpcRequest,
+        snapshot: &RpcReadSnapshot,
+    ) -> Result<JsonRpcResponse, JsonRpcError> {
+        let (offset, num, keys) = pagination_params(req)?;
+        let key_filter = status_key_filter(&keys);
+        let stopped = paginate(snapshot.stopped.iter().cloned().collect(), offset, num)
+            .into_iter()
+            .map(|status| status_to_json_with_filter(status, key_filter.as_ref()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            stopped,
+        ))
+    }
+
+    pub(crate) fn handle_global_stat_snapshot(
+        &self,
+        req: &JsonRpcRequest,
+        snapshot: &RpcReadSnapshot,
+    ) -> JsonRpcResponse {
+        JsonRpcResponse::success(
+            req.id.clone().unwrap_or_default(),
+            snapshot.global_stat.to_json_value(),
+        )
+    }
+
     /// Handle `aria2.tellActive` - List all active/running downloads.
     ///
     /// Iterates active groups and reads live progress from their atomic fields.
@@ -119,6 +260,7 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let keys = status_keys_for_request(req, 0)?;
+        let key_filter = status_key_filter(&keys);
         let active: Vec<StatusInfo> = if let Some(group_man) = self.group_man.as_ref() {
             let man = group_man;
             let mut result = Vec::new();
@@ -135,7 +277,7 @@ impl RpcEngine {
         };
         let active = active
             .into_iter()
-            .map(|status| status_to_json(status, &keys))
+            .map(|status| status_to_json_with_filter(status, key_filter.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -153,6 +295,7 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let (offset, num, keys) = pagination_params(req)?;
+        let key_filter = status_key_filter(&keys);
         let waiting: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
             let man = group_man;
             let mut result = Vec::new();
@@ -169,7 +312,7 @@ impl RpcEngine {
         };
         let waiting = waiting
             .into_iter()
-            .map(|status| status_to_json(status, &keys))
+            .map(|status| status_to_json_with_filter(status, key_filter.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
@@ -185,6 +328,7 @@ impl RpcEngine {
         req: &JsonRpcRequest,
     ) -> Result<JsonRpcResponse, JsonRpcError> {
         let (offset, num, keys) = pagination_params(req)?;
+        let key_filter = status_key_filter(&keys);
         let stopped: Vec<StatusInfo> = if let Some(group_man) = &self.group_man {
             let man = group_man;
             let results = paginate(man.get_stopped_results(0, usize::MAX), offset, num);
@@ -196,7 +340,7 @@ impl RpcEngine {
         };
         let stopped = stopped
             .into_iter()
-            .map(|status| status_to_json(status, &keys))
+            .map(|status| status_to_json_with_filter(status, key_filter.as_ref()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(JsonRpcResponse::success(
             req.id.clone().unwrap_or_default(),
