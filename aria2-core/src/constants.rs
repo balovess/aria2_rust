@@ -63,10 +63,6 @@ pub const BT_PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
 pub const BT_HANDSHAKE_RESPONSE_SIZE: usize = 68;
 pub const BT_RECEIVE_BUFFER_SIZE: usize = 4096;
 pub const BT_RETRY_DELAY_MS: u64 = 100;
-/// Normal BitTorrent checkpoint batching threshold. Explicit lifecycle saves
-/// and halt/finalization paths still persist immediately.
-pub const BT_CHECKPOINT_SAVE_INTERVAL_SECS: u64 = 5;
-pub const BT_CHECKPOINT_SAVE_BYTES: u64 = 16 * 1024 * 1024;
 
 // BtConstants.h — Core BitTorrent protocol constants
 pub const BT_INFO_HASH_LENGTH: usize = 20;

@@ -77,17 +77,6 @@ impl super::RequestGroup {
         self.progress.set_completed_length(completed_length);
     }
 
-    /// Record a non-empty payload read without changing the displayed
-    /// completed length.
-    pub(crate) fn record_network_activity(&self) {
-        self.progress.record_network_activity();
-    }
-
-    /// Return the monotonic timestamp of the most recent payload read.
-    pub(crate) fn last_network_activity(&self) -> std::time::Instant {
-        self.progress.last_network_activity()
-    }
-
     /// Download progress as a percentage (0.0 - 100.0).
     pub fn progress(&self) -> f64 {
         let total = self.progress.total_length();
@@ -149,7 +138,7 @@ impl super::RequestGroup {
     }
 
     // ── Atomic Progress Accessors (for session persistence) ─────────────
-    // These use AtomicU64 for lock-free snapshot reads and updates.
+    // These use AtomicU64 for lock-free reads, suitable for frequent polling.
 
     /// Set completed length using atomic store (lock-free).
     pub fn set_completed_length(&self, val: u64) {

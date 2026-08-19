@@ -90,23 +90,43 @@ pub(crate) fn format_http_date(epoch: i64) -> String {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    let days_since_epoch = epoch.div_euclid(86_400);
-    let seconds = epoch.rem_euclid(86_400);
-    let (y, m, day) = civil_from_days(days_since_epoch);
-    let hour = seconds / 3_600;
-    let min = (seconds % 3_600) / 60;
-    let sec = seconds % 60;
-    // 1970-01-01 was a Thursday; convert to the Sunday=0 convention.
-    let dow = (days_since_epoch + 4).rem_euclid(7) as usize;
+    let epoch = epoch as u64;
+    let days_since_epoch = epoch / 86400;
+    let mut y = 1970u32;
+    let mut remaining = days_since_epoch as u32;
+    loop {
+        let leap = y.is_multiple_of(4) && !y.is_multiple_of(100) || y.is_multiple_of(400);
+        let days_in_year = if leap { 366 } else { 365 };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut m = 0u32;
+    while m < 12 {
+        let dim =
+            if m == 1 && (y.is_multiple_of(4) && !y.is_multiple_of(100) || y.is_multiple_of(400)) {
+                29
+            } else {
+                mdays[m as usize]
+            };
+        if remaining < dim {
+            break;
+        }
+        remaining -= dim;
+        m += 1;
+    }
+    let day = remaining + 1;
+    let secs = epoch % 86400;
+    let hour = secs / 3600;
+    let min = (secs % 3600) / 60;
+    let sec = secs % 60;
+    let dow = ((y + (y / 4) - (y / 100) + (y / 400) + (13 * m + 1) / 5 + day + 308) % 7) as usize;
     format!(
         "{}, {:02} {} {:04} {:02}:{:02}:{:02} GMT",
-        DAYS[dow],
-        day,
-        MONTHS[(m - 1) as usize],
-        y,
-        hour,
-        min,
-        sec
+        DAYS[dow], day, MONTHS[m as usize], y, hour, min, sec
     )
 }
 
@@ -251,7 +271,7 @@ pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
 
     // Step 5: Convert to Unix epoch timestamp (equivalent to C++ timegm())
     let total_days = days_since_epoch(year, month, day_of_month);
-    Some(total_days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
+    Some(total_days as i64 * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64)
 }
 
 /// Parse a time token in HH:MM:SS format.
@@ -281,32 +301,23 @@ fn leading_digits(s: &str) -> usize {
 
 /// Calculate the number of days since Unix epoch (1970-01-01 UTC) for a given date.
 /// Equivalent to C++ timegm() for date conversion.
-fn days_since_epoch(year: u32, month: u32, day: u32) -> i64 {
-    let y = year as i64 - if month <= 2 { 1 } else { 0 };
-    let era = if y >= 0 { y / 400 } else { (y - 399) / 400 };
-    let year_of_era = y - era * 400;
-    let month_from_march = month as i64 + if month > 2 { -3 } else { 9 };
-    let day_of_year = (153 * month_from_march + 2) / 5 + day as i64 - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
-}
-
-/// Convert days since 1970-01-01 to a proleptic Gregorian civil date.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 {
-        z / 146_097
-    } else {
-        (z - 146_096) / 146_097
-    };
-    let day_of_era = z - era * 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_from_march = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
-    let month = month_from_march + if month_from_march < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
-    (year, month as u32, day as u32)
+fn days_since_epoch(year: u32, month: u32, day: u32) -> u32 {
+    let mut days: u32 = 0;
+    for y in 1970..year {
+        days += if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+            366
+        } else {
+            365
+        };
+    }
+    let mdays = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    for m in 1..month {
+        days += if m == 2 && is_leap {
+            29
+        } else {
+            mdays[(m - 1) as usize]
+        };
+    }
+    days + day - 1
 }

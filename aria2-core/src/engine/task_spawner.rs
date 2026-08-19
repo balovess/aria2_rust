@@ -13,7 +13,6 @@ use super::command::Command;
 use super::engine_command::TaskResult;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::Aria2Error;
-use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -30,8 +29,6 @@ pub(crate) struct CommandDependencies {
     pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
-    #[cfg(feature = "bittorrent")]
-    pub(crate) lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
 }
 
 /// Spawns a download command as a tokio task and wires up the completion
@@ -79,7 +76,7 @@ pub(crate) fn spawn_download_task(
     // engine loop can continue processing pause/remove commands while a
     // resolver or a slow protocol constructor is waiting.
     let handle = tokio::spawn(async move {
-        let (result, connection_context) = tokio::select! {
+        let result = tokio::select! {
             command_result = create_command_for_group(
                 Arc::clone(&group),
                 first_uri,
@@ -87,23 +84,18 @@ pub(crate) fn spawn_download_task(
                 dependencies,
             ) => {
                 match command_result {
-                    Ok(mut cmd) => {
-                        // Once a command has been constructed, its protocol
-                        // loop owns lifecycle cleanup. Force-halt and remove
-                        // already update the RequestGroup, so dropping the
-                        // execute future here would bypass writer flushing and
-                        // protocol-specific checkpoints.
-                        let result = cmd.execute().await;
-                        if result.is_err() {
+                    Ok(mut cmd) => tokio::select! {
+                        result = cmd.execute() => result,
+                        _ = task_shutdown.cancelled() => {
                             cmd.shutdown().await;
+                            Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
                         }
-                        (result, cmd.connection_context())
-                    }
-                    Err(error) => (Err(error), None),
+                    },
+                    Err(error) => Err(error),
                 }
             }
             _ = task_shutdown.cancelled() => {
-                (Err(Aria2Error::DownloadFailed("download shutdown requested".into())), None)
+                Err(Aria2Error::DownloadFailed("download shutdown requested".into()))
             }
         };
         let task_result = match result {
@@ -116,11 +108,11 @@ pub(crate) fn spawn_download_task(
                     gid = gid.value(),
                     "Download task failed with recoverable error"
                 );
-                failed_task_result(Aria2Error::Recoverable(recoverable), connection_context)
+                TaskResult::Failed(Aria2Error::Recoverable(recoverable))
             }
             Err(e) => {
                 warn!(gid = gid.value(), error = %e, "Download task failed");
-                failed_task_result(e, connection_context)
+                TaskResult::Failed(e)
             }
         };
 
@@ -139,19 +131,6 @@ pub(crate) fn spawn_download_task(
     });
 
     Some((handle, shutdown))
-}
-
-fn failed_task_result(
-    error: Aria2Error,
-    connection_context: Option<ConnectionContext>,
-) -> TaskResult {
-    match connection_context {
-        Some(connection_context) => TaskResult::FailedWithContext {
-            error,
-            connection_context,
-        },
-        None => TaskResult::Failed(error),
-    }
 }
 
 fn direct_origin(uri: &str) -> Option<(String, u16)> {
@@ -197,7 +176,6 @@ async fn create_command_for_group(
         {
             command.set_bt_registry(Arc::clone(&dependencies.bt_registry));
             command.set_bt_listener(Arc::clone(&dependencies.bt_listener));
-            command.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
         }
         return Ok(Box::new(command));
     }
@@ -217,10 +195,7 @@ async fn create_command_for_uri(
     dependencies: CommandDependencies,
 ) -> crate::error::Result<Box<dyn Command>> {
     let dns_cache = &dependencies.dns_cache;
-    let use_async_dns = options.async_dns;
     let uri_lower = uri.to_lowercase();
-    #[cfg(feature = "bittorrent")]
-    let bt_metadata = group.recover().bt_metadata_data();
 
     // SFTP downloads use the engine-owned group, matching other v2 protocols.
     #[cfg(feature = "sftp")]
@@ -238,12 +213,14 @@ async fn create_command_for_uri(
         return Ok(Box::new(cmd));
     }
 
-    // BitTorrent torrent payloads. Followed torrent groups retain tracker and
-    // web-seed URIs, so their first URI is not necessarily `bt://`.
+    // BitTorrent torrent payloads. The group must already have a resolved
+    // DownloadContext, which is installed by BtDependency before promotion.
     #[cfg(feature = "bittorrent")]
-    if uri_lower.starts_with("bt://") || bt_metadata.is_some() {
+    if uri_lower.starts_with("bt://") {
         let output_dir = options.dir.as_deref();
-        let torrent_bytes = bt_metadata
+        let torrent_bytes = group
+            .recover()
+            .bt_metadata_data()
             .or_else(|| {
                 group
                     .recover()
@@ -264,7 +241,6 @@ async fn create_command_for_uri(
         )?;
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
-        cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
@@ -282,7 +258,6 @@ async fn create_command_for_uri(
             )?;
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
-        cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
@@ -302,17 +277,15 @@ async fn create_command_for_uri(
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
-        if use_async_dns {
-            cmd.set_dns_cache(Arc::clone(dns_cache));
-            if let Some((hostname, port)) = direct_origin(uri)
-                && let Ok(addresses) = dns_cache
-                    .lock()
-                    .await
-                    .resolve_with_refresh(&hostname, port)
-                    .await
-            {
-                cmd.set_resolved_addresses(addresses);
-            }
+        cmd.set_dns_cache(Arc::clone(dns_cache));
+        if let Some((hostname, port)) = direct_origin(uri)
+            && let Ok(addresses) = dns_cache
+                .lock()
+                .await
+                .resolve_with_refresh(&hostname, port)
+                .await
+        {
+            cmd.set_resolved_addresses(addresses);
         }
         return Ok(Box::new(cmd));
     }
@@ -321,17 +294,13 @@ async fn create_command_for_uri(
     let output_dir = options.dir.as_deref();
     let group_output_name = group.recover().output_name();
     let output_name = group_output_name.as_deref().or(options.out.as_deref());
-    let resolved_addresses = if use_async_dns {
-        if let Some((hostname, port)) = direct_origin(uri) {
-            dns_cache
-                .lock()
-                .await
-                .resolve_with_refresh(&hostname, port)
-                .await
-                .ok()
-        } else {
-            None
-        }
+    let resolved_addresses = if let Some((hostname, port)) = direct_origin(uri) {
+        dns_cache
+            .lock()
+            .await
+            .resolve_with_refresh(&hostname, port)
+            .await
+            .ok()
     } else {
         None
     };
@@ -348,85 +317,4 @@ async fn create_command_for_uri(
         cmd.set_global_limiter(limiter);
     }
     Ok(Box::new(cmd))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-
-    fn dependencies(dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) -> CommandDependencies {
-        CommandDependencies {
-            dns_cache,
-            global_limiter: None,
-            #[cfg(feature = "bittorrent")]
-            public_tracker_catalog: Arc::new(
-                aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList::new(),
-            ),
-            #[cfg(feature = "bittorrent")]
-            bt_registry: Arc::new(std::sync::RwLock::new(
-                crate::engine::bt_registry::BtRegistry::new(),
-            )),
-            #[cfg(feature = "bittorrent")]
-            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
-            #[cfg(feature = "bittorrent")]
-            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
-        }
-    }
-
-    #[tokio::test]
-    async fn async_dns_false_uses_the_protocol_default_resolver_path() {
-        for scheme in ["http", "ftp"] {
-            let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::new()));
-            let options = DownloadOptions {
-                async_dns: false,
-                ..DownloadOptions::default()
-            };
-            let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-                GroupId::new(70),
-                vec![format!("{scheme}://localhost/file.bin")],
-                options.clone(),
-            )));
-
-            let _command = create_command_for_uri(
-                &format!("{scheme}://localhost/file.bin"),
-                group,
-                &options,
-                dependencies(Arc::clone(&cache)),
-            )
-            .await
-            .expect("command construction should not require the shared DNS cache");
-
-            assert_eq!(
-                cache.lock().await.len(),
-                0,
-                "async-dns=false must not pre-resolve {scheme} through the shared cache"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn async_dns_true_populates_the_shared_cache_for_protocol_commands() {
-        for scheme in ["http", "ftp"] {
-            let cache = Arc::new(tokio::sync::Mutex::new(DnsCache::new()));
-            let options = DownloadOptions::default();
-            let uri = format!("{scheme}://localhost/file.bin");
-            let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-                GroupId::new(71),
-                vec![uri.clone()],
-                options.clone(),
-            )));
-
-            let _command =
-                create_command_for_uri(&uri, group, &options, dependencies(Arc::clone(&cache)))
-                    .await
-                    .expect("command construction should resolve localhost");
-
-            assert_eq!(
-                cache.lock().await.len(),
-                1,
-                "async-dns=true must use the shared cache for {scheme}"
-            );
-        }
-    }
 }

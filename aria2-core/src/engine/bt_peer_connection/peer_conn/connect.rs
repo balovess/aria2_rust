@@ -11,7 +11,7 @@ use crate::error::{Aria2Error, FatalError, Result};
 
 use super::super::types::{ConnectionType, SendBuffer};
 use super::super::utp_connection::UtpPeerConnection;
-use super::{BtPeerConn, InnerConnection, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
+use super::{BtPeerConn, InnerConnection};
 
 impl BtPeerConn {
     // -----------------------------------------------------------------------
@@ -25,37 +25,7 @@ impl BtPeerConn {
         force_encryption: bool,
         prefer_encryption: bool,
     ) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_mse_with_options(
-            addr,
-            info_hash,
-            force_encryption,
-            prefer_encryption,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
-        )
-        .await
-    }
-
-    /// Connect via MSE using the task's peer identity and connection timeout.
-    pub async fn connect_mse_with_options(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
-            addr,
-            info_hash,
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-        )
-        .await
-        {
+        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(addr, info_hash, force_encryption, prefer_encryption).await {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
@@ -74,8 +44,6 @@ impl BtPeerConn {
                     send_buffer: SendBuffer::new(),
                     last_keepalive_sent: now,
                     last_message_received: now,
-                    keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-                    peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
                     stats: PeerStats::new([0u8; 20], std::net::SocketAddr::new(
                         addr.ip.parse().map_err(|_| {
                                 Aria2Error::Fatal(FatalError::Config(format!(
@@ -86,7 +54,6 @@ impl BtPeerConn {
                             addr.port,
                     )),
                     pending_pex_peers: Vec::new(),
-                    pex_enabled: true,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -98,30 +65,8 @@ impl BtPeerConn {
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash: &[u8; 20],
     ) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_plain_with_options(
-            addr,
-            info_hash,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
-        )
-        .await
-    }
-
-    /// Connect via plain TCP using the task's peer identity and timeout.
-    pub async fn connect_plain_with_options(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout(
-            addr,
-            info_hash,
-            local_peer_id,
-            timeout,
-        )
-        .await
+        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect(addr, info_hash)
+            .await
         {
             Ok(conn) => {
                 let now = Instant::now();
@@ -141,8 +86,6 @@ impl BtPeerConn {
                     send_buffer: SendBuffer::new(),
                     last_keepalive_sent: now,
                     last_message_received: now,
-                    keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-                    peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
                     stats: PeerStats::new(
                         [0u8; 20],
                         std::net::SocketAddr::new(
@@ -156,7 +99,6 @@ impl BtPeerConn {
                         ),
                     ),
                     pending_pex_peers: Vec::new(),
-                    pex_enabled: true,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -187,11 +129,8 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
-            pex_enabled: true,
         }
     }
 
@@ -219,11 +158,8 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
-            pex_enabled: true,
         }
     }
 
@@ -272,11 +208,8 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
-            pex_enabled: true,
         }
     }
 
@@ -288,50 +221,7 @@ impl BtPeerConn {
     /// - Better performance on congested networks
     /// - NAT traversal benefits
     pub async fn connect_utp(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_utp_with_options(
-            addr,
-            info_hash,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
-            None,
-            None,
-        )
-        .await
-    }
-
-    /// Connect via uTP using the task's peer identity, timeout, and shared
-    /// socket when one is available.
-    pub async fn connect_utp_with_options(
-        addr: std::net::SocketAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
-    ) -> Result<Self> {
-        let utp_conn = match shared_socket {
-            Some(socket) => {
-                UtpPeerConnection::connect_with_shared_socket(
-                    socket,
-                    addr,
-                    info_hash,
-                    local_peer_id,
-                    timeout,
-                )
-                .await?
-            }
-            None => {
-                UtpPeerConnection::connect_with_options(
-                    addr,
-                    info_hash,
-                    local_peer_id,
-                    timeout,
-                    listen_port,
-                )
-                .await?
-            }
-        };
+        let utp_conn = UtpPeerConnection::connect(addr, info_hash).await?;
         let now = Instant::now();
 
         Ok(Self {
@@ -350,11 +240,8 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
-            pex_enabled: true,
         })
     }
 
@@ -385,14 +272,11 @@ impl BtPeerConn {
             send_buffer: SendBuffer::new(),
             last_keepalive_sent: now,
             last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
             stats: PeerStats::new(
                 [0u8; 20],
                 std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
             ),
             pending_pex_peers: Vec::new(),
-            pex_enabled: true,
         }
     }
 }

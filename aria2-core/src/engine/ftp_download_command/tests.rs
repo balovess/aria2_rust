@@ -1,6 +1,5 @@
 //! Tests for FTP download command.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use super::control::{
@@ -8,10 +7,8 @@ use super::control::{
     urlencoding_decode,
 };
 use super::types::FtpDownloadCommand;
-use crate::engine::command::Command;
 use crate::error::{Aria2Error, RecoverableError};
-use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-use crate::util::rwlock_ext::RwLockRecover;
+use crate::request::request_group::{DownloadOptions, GroupId};
 
 #[test]
 fn test_parse_uri_simple() {
@@ -45,82 +42,6 @@ fn test_retry_policy_comes_from_download_options() {
 }
 
 #[tokio::test]
-async fn ftp_proxy_records_each_payload_chunk_for_timeout() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
-
-    let first_chunk = vec![b'A'; 16 * 1024];
-    let second_chunk = vec![b'B'; 16 * 1024];
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn({
-        let first_chunk = first_chunk.clone();
-        let second_chunk = second_chunk.clone();
-        async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = [0u8; 4096];
-            let bytes_read = stream.read(&mut request).await.unwrap();
-            assert!(bytes_read > 0, "FTP proxy fixture should receive a request");
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        first_chunk.len() + second_chunk.len()
-                    )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            stream.write_all(&first_chunk).await.unwrap();
-            stream.flush().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            stream.write_all(&second_chunk).await.unwrap();
-            stream.shutdown().await.unwrap();
-        }
-    });
-
-    let output_dir = tempfile::tempdir().unwrap();
-    let url = "ftp://ftp.example.test/pub/proxy-timeout.bin".to_string();
-    let options = DownloadOptions {
-        ftp_proxy: Some(format!("http://{address}")),
-        ..DownloadOptions::default()
-    };
-    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-        GroupId::new(9002),
-        vec![url.clone()],
-        options,
-    )));
-    let mut command =
-        FtpDownloadCommand::new_with_group(Arc::clone(&group), output_dir.path().to_str(), None)
-            .unwrap();
-
-    let command_task = tokio::spawn(async move { command.execute().await });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if group.recover().completed_length() >= first_chunk.len() as u64 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("FTP proxy did not receive its first payload chunk");
-    let first_activity = group.recover().last_network_activity();
-
-    tokio::time::timeout(Duration::from_secs(5), command_task)
-        .await
-        .expect("FTP proxy command did not complete")
-        .expect("FTP proxy command panicked")
-        .expect("FTP proxy command failed");
-    server.await.unwrap();
-
-    assert!(
-        group.recover().last_network_activity() > first_activity,
-        "each non-empty FTP proxy payload chunk must refresh the inactivity clock"
-    );
-}
-
-#[tokio::test]
 async fn retry_wait_is_interruptible_when_paused() {
     let command = FtpDownloadCommand::new(
         GroupId::new(104),
@@ -145,33 +66,6 @@ async fn retry_wait_is_interruptible_when_paused() {
     ));
 }
 
-#[tokio::test]
-async fn retry_wait_wakes_when_paused_after_wait_starts() {
-    let command = FtpDownloadCommand::new(
-        GroupId::new(105),
-        "ftp://example.com/file.txt",
-        &DownloadOptions::default(),
-        None,
-        None,
-    )
-    .unwrap();
-    let group = std::sync::Arc::clone(&command.group);
-    let wait_task =
-        tokio::spawn(async move { command.wait_for_retry(Duration::from_secs(5)).await });
-
-    tokio::time::sleep(Duration::from_millis(10)).await;
-    group.write().unwrap().pause().unwrap();
-
-    let result = tokio::time::timeout(Duration::from_millis(100), wait_task)
-        .await
-        .expect("pause should wake an active FTP retry wait")
-        .expect("FTP retry wait task should not panic");
-    assert!(matches!(
-        result,
-        Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
-    ));
-}
-
 #[test]
 fn test_connect_timeout_comes_from_download_options() {
     let options = DownloadOptions {
@@ -188,28 +82,6 @@ fn test_connect_timeout_comes_from_download_options() {
     .unwrap();
 
     assert_eq!(command.connect_timeout, std::time::Duration::from_secs(12));
-}
-
-#[test]
-fn command_timeout_comes_from_download_options() {
-    let options = DownloadOptions {
-        timeout: Some(7),
-        ..DownloadOptions::default()
-    };
-    let command = FtpDownloadCommand::new(
-        GroupId::new(103),
-        "ftp://example.com/file.txt",
-        &options,
-        None,
-        None,
-    )
-    .unwrap();
-
-    assert_eq!(
-        Command::timeout(&command),
-        Some(Duration::from_secs(7)),
-        "timeout must be the configured I/O inactivity duration"
-    );
 }
 
 #[test]

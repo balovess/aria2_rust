@@ -11,7 +11,6 @@
 
 use super::bucket::Bucket;
 use super::node::DhtNode;
-use std::collections::BinaryHeap;
 
 /// K-bucket constant: maximum nodes per bucket.
 const K: usize = 8;
@@ -258,82 +257,40 @@ pub fn find_bucket_for_mut<'a>(root: &'a mut BucketTreeNode, key: &[u8; 20]) -> 
 /// then collects nodes from the parent's subtree and walks upward
 /// until K nodes are found.
 pub fn find_closest_k_nodes(root: &BucketTreeNode, key: &[u8; 20]) -> Vec<DhtNode> {
-    let mut nodes = BinaryHeap::with_capacity(K);
-    collect_closest_from_tree(root, key, &mut nodes);
-    let mut result: Vec<DhtNode> = nodes.into_iter().map(|candidate| candidate.node).collect();
-    result.sort_by(|a, b| {
-        a.distance_to(key)
-            .cmp(&b.distance_to(key))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    result
+    let mut nodes = Vec::with_capacity(K);
+    collect_closest_from_all_buckets(root, key, &mut nodes);
+    nodes
 }
 
-/// Candidate retained by the fixed-size top-K heap.
+/// Collect closest nodes by walking all leaf buckets.
 ///
-/// `BinaryHeap` keeps the farthest retained node at its root, so a new node
-/// can replace it in O(log K) without sorting the complete routing table.
-struct ClosestCandidate {
-    distance: usize,
-    node: DhtNode,
-}
-
-impl PartialEq for ClosestCandidate {
-    fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance && self.node.id == other.node.id
-    }
-}
-
-impl Eq for ClosestCandidate {}
-
-impl PartialOrd for ClosestCandidate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ClosestCandidate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.distance
-            .cmp(&other.distance)
-            .then_with(|| self.node.id.cmp(&other.node.id))
-    }
-}
-
-/// Collect closest nodes by walking the bucket tree and retaining only K.
-///
-/// The tree still has to visit each leaf because XOR distance does not map to
-/// the lexicographic bucket ranges directly. The bounded heap changes the
-/// expensive selection step from O(N log N) plus a full temporary node list to
-/// O(N log K) with at most K retained node clones.
-fn collect_closest_from_tree(
+/// We collect good nodes from all buckets, sort by distance to key,
+/// and take the K closest.
+fn collect_closest_from_all_buckets(
     root: &BucketTreeNode,
     key: &[u8; 20],
-    nodes: &mut BinaryHeap<ClosestCandidate>,
+    nodes: &mut Vec<DhtNode>,
 ) {
-    match root {
-        BucketTreeNode::Leaf { bucket } => {
-            for node in bucket.nodes() {
-                if node.is_bad() {
-                    continue;
-                }
-                let candidate = ClosestCandidate {
-                    distance: node.distance_to(key),
-                    node: node.clone(),
-                };
-                if nodes.len() < K {
-                    nodes.push(candidate);
-                } else if nodes.peek().is_some_and(|farthest| candidate < *farthest) {
-                    nodes.pop();
-                    nodes.push(candidate);
-                }
+    let mut all_buckets = Vec::new();
+    enumerate_buckets(root, &mut all_buckets);
+
+    for bucket in &all_buckets {
+        for node in bucket.nodes() {
+            if !node.is_bad() {
+                nodes.push(node.clone());
             }
         }
-        BucketTreeNode::Internal { left, right, .. } => {
-            collect_closest_from_tree(left, key, nodes);
-            collect_closest_from_tree(right, key, nodes);
-        }
     }
+
+    // Sort by distance to key (ascending = closest first).
+    let key_copy = *key;
+    nodes.sort_by(|a, b| {
+        let da = a.distance_to(&key_copy);
+        let db = b.distance_to(&key_copy);
+        da.cmp(&db)
+    });
+
+    nodes.truncate(K);
 }
 
 /// Enumerate all leaf buckets in the tree (in-order traversal).

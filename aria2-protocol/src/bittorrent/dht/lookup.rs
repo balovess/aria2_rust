@@ -24,6 +24,8 @@ use super::tracker::{QueryType, TransactionTracker};
 const K: usize = 8;
 /// Kademlia ALPHA-constant: parallel in-flight queries.
 const ALPHA: usize = 3;
+/// Per-query timeout for responses.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Maximum number of rounds before giving up.
 const MAX_ROUNDS: usize = 20;
 
@@ -81,7 +83,6 @@ pub async fn iterative_find_node(
     routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
     socket: &DhtSocket,
     tracker: &Arc<TransactionTracker>,
-    query_timeout: Duration,
 ) -> NodeLookupResult {
     let mut entries = initialize_entries(target, routing_table).await;
     let mut in_flight = 0usize;
@@ -104,7 +105,7 @@ pub async fn iterative_find_node(
         rounds += 1;
 
         // Wait for any one response
-        match tokio::time::timeout(query_timeout, recv_response(socket, query_timeout)).await {
+        match tokio::time::timeout(QUERY_TIMEOUT, recv_response(socket)).await {
             Ok(Some((response, from))) => {
                 in_flight = in_flight.saturating_sub(1);
                 nodes_contacted += 1;
@@ -172,7 +173,6 @@ pub async fn iterative_get_peers(
     routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
     socket: &DhtSocket,
     tracker: &Arc<TransactionTracker>,
-    query_timeout: Duration,
 ) -> PeerLookupResult {
     let mut entries = initialize_entries(info_hash, routing_table).await;
     let mut in_flight = 0usize;
@@ -195,7 +195,7 @@ pub async fn iterative_get_peers(
     while in_flight > 0 && rounds < MAX_ROUNDS {
         rounds += 1;
 
-        match tokio::time::timeout(query_timeout, recv_response(socket, query_timeout)).await {
+        match tokio::time::timeout(QUERY_TIMEOUT, recv_response(socket)).await {
             Ok(Some((response, from))) => {
                 in_flight = in_flight.saturating_sub(1);
                 nodes_contacted += 1;
@@ -375,12 +375,12 @@ async fn send_batch(
 }
 
 /// Receive a single UDP message and decode it.
-async fn recv_response(
-    socket: &DhtSocket,
-    query_timeout: Duration,
-) -> Option<(DhtMessage, SocketAddr)> {
+async fn recv_response(socket: &DhtSocket) -> Option<(DhtMessage, SocketAddr)> {
     let mut buf = [0u8; 4096];
-    match socket.recv_with_timeout(&mut buf, query_timeout).await {
+    match socket
+        .recv_with_timeout(&mut buf, Duration::from_secs(5))
+        .await
+    {
         Ok((len, from)) if len > 0 => match DhtMessage::decode(&buf[..len]) {
             Ok(msg) => Some((msg, from)),
             Err(_) => None,

@@ -16,9 +16,7 @@
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use crate::engine::post_download_handler::{
-    CompletedDownloadInfo, PostDownloadHandler, path_has_extension,
-};
+use crate::engine::post_download_handler::{CompletedDownloadInfo, PostDownloadHandler};
 use crate::error::Aria2Error;
 use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -89,15 +87,6 @@ impl BtTorrentPostDownloadHandler {
         }
 
         false
-    }
-
-    fn can_handle_with_source_uri(
-        content_type: Option<&str>,
-        file_path: Option<&str>,
-        source_uri: Option<&str>,
-    ) -> bool {
-        Self::can_handle_static(content_type, file_path)
-            || source_uri.is_some_and(|uri| path_has_extension(uri, BT_EXTENSIONS))
     }
 
     /// Parse a torrent file and create a request group for it.
@@ -195,7 +184,6 @@ impl BtTorrentPostDownloadHandler {
         // Set BitTorrent-specific metadata on the child group.
         // This data will be used by BtDownloadCommand when the group
         // is promoted to active.
-        child_group.set_bt_metadata_data(torrent_data.to_vec());
         {
             child_group.bt_num_pieces.store(
                 meta.info.pieces.len() as u32,
@@ -210,7 +198,7 @@ impl BtTorrentPostDownloadHandler {
         // If pause requested (PREF_PAUSE_METADATA), mark the child group.
         // C++: `rg->setPauseRequested(true)` when keepRunning && pause_metadata
         if self.pause_requested {
-            child_group.request_pause();
+            child_group.control_flags.request_pause();
         }
 
         let child = Arc::new(std::sync::RwLock::new(child_group));
@@ -233,11 +221,7 @@ impl Default for BtTorrentPostDownloadHandler {
 
 impl PostDownloadHandler for BtTorrentPostDownloadHandler {
     fn can_handle(&self, info: &CompletedDownloadInfo) -> bool {
-        Self::can_handle_with_source_uri(
-            info.content_type.as_deref(),
-            info.file_path.as_deref(),
-            info.base_uri.as_deref(),
-        )
+        Self::can_handle_static(info.content_type.as_deref(), info.file_path.as_deref())
     }
 
     fn create_child_groups(
@@ -343,20 +327,6 @@ mod tests {
         assert!(!BtTorrentPostDownloadHandler::can_handle_static(
             Some("text/html"),
             Some("index.html")
-        ));
-    }
-
-    #[test]
-    fn test_can_handle_source_uri_extension() {
-        assert!(BtTorrentPostDownloadHandler::can_handle_with_source_uri(
-            Some("application/octet-stream"),
-            None,
-            Some("https://example.test/source.torrent?token=1"),
-        ));
-        assert!(!BtTorrentPostDownloadHandler::can_handle_with_source_uri(
-            Some("application/octet-stream"),
-            None,
-            Some("https://example.test/source.bin"),
         ));
     }
 }

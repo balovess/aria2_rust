@@ -1,8 +1,10 @@
-//! Pure RPC parameter parsing and response shaping.
+//! RPC handler modules organized by category.
 //!
-//! These modules intentionally do not know how downloads are stored or
-//! executed. They turn wire requests into [`BackendRequest`] values; the
-//! application-owned backend performs the domain operation.
+//! - [`task`] — Task management: addUri, remove, pause, unpause, tellStatus, etc.
+//! - [`status`] — Status queries: tellActive, tellWaiting, tellStopped, getGlobalStat
+//! - [`options`] — Option management: getOption, changeOption, getGlobalOption, changeGlobalOption
+//! - [`bittorrent`] — BitTorrent-specific handlers: getPeers, pauseAll, unpauseAll, etc.
+//! - [`system`] — System methods: listMethods, listNotifications
 
 pub mod bittorrent;
 pub mod options;
@@ -10,44 +12,16 @@ pub mod status;
 pub mod system;
 pub mod task;
 
-use crate::backend::{BackendError, BackendEvent};
-use crate::json_rpc::{JsonRpcError, JsonRpcRequest};
-use crate::websocket::{DownloadEvent, EventType};
+#[cfg(test)]
+mod handler_tests;
 
-/// Parse a GID parameter accepting either one string or a list of strings.
-pub(crate) fn parse_gids(
-    req: &mut JsonRpcRequest,
-    index: usize,
-) -> Result<Vec<String>, JsonRpcError> {
+use crate::json_rpc::{JsonRpcError, JsonRpcRequest};
+
+/// Parse GID parameter supporting single GID string or array of GIDs.
+pub(crate) fn parse_gids(req: &JsonRpcRequest, index: usize) -> Result<Vec<String>, JsonRpcError> {
     if let Ok(gids) = req.get_param::<Vec<String>>(index) {
         return Ok(gids);
     }
-    Ok(vec![req.get_param(index)?])
-}
-
-/// Convert a backend-domain error into the wire layer's error taxonomy.
-pub(crate) fn backend_error(error: BackendError) -> JsonRpcError {
-    match error {
-        BackendError::InvalidParams(message) => JsonRpcError::InvalidParams(message),
-        BackendError::Execution(message) | BackendError::Unsupported(message) => {
-            JsonRpcError::RpcExecution(message)
-        }
-        BackendError::Internal(message) => JsonRpcError::InternalError(message),
-    }
-}
-
-/// Convert backend lifecycle effects into the notification objects owned by
-/// the RPC transport.
-pub(crate) fn event_notification(event: BackendEvent) -> (EventType, DownloadEvent) {
-    match event {
-        BackendEvent::DownloadStart(gid) => {
-            (EventType::DownloadStart, DownloadEvent::download_start(gid))
-        }
-        BackendEvent::DownloadPause(gid) => {
-            (EventType::DownloadPause, DownloadEvent::download_pause(gid))
-        }
-        BackendEvent::DownloadStop(gid) => {
-            (EventType::DownloadStop, DownloadEvent::download_stop(gid))
-        }
-    }
+    let gid: String = req.get_param(index)?;
+    Ok(vec![gid])
 }

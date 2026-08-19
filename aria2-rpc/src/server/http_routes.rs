@@ -7,7 +7,7 @@ use super::config::ServerConfig;
 use super::cors::CorsConfig;
 use super::tls::{TlsConfig, TlsError};
 use super::ws_session::handle_ws_socket;
-use crate::engine::{RpcEngine, dispatch_wire_entries};
+use crate::engine::RpcEngine;
 
 /// RPC HTTP server supporting both HTTP and HTTPS.
 ///
@@ -416,7 +416,9 @@ fn build_cors_layer(config: &CorsConfig) -> tower_http::cors::CorsLayer {
                 .filter_map(|header| header.trim().parse::<HeaderName>().ok()),
         )
     };
-    let max_age = crate::constants::CORS_MAX_AGE;
+    let max_age = aria2_core::constants::CORS_MAX_AGE
+        .parse::<u64>()
+        .unwrap_or_default();
 
     let origin = if config.is_wildcard() {
         if config.allow_credentials {
@@ -545,7 +547,7 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
 
     let has_params = params.is_some_and(|encoded| !encoded.is_empty());
     let decoded_params = params.map(|encoded| {
-        let decoded = crate::rpc_helpers::percent_decode(encoded);
+        let decoded = aria2_core::util::uri::percent_decode(encoded);
         crate::rpc_helpers::decode_aria2_base64(&decoded)
     });
 
@@ -588,7 +590,7 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
 
 struct JsonRpcHttpResponse {
     status: axum::http::StatusCode,
-    body: Vec<u8>,
+    body: String,
     close_connection: bool,
 }
 
@@ -611,12 +613,11 @@ fn serialize_jsonrpc_response(response: crate::json_rpc::JsonRpcResponse) -> Jso
         .as_ref()
         .map(|error| http_status_for_jsonrpc_error(error.code))
         .unwrap_or(axum::http::StatusCode::OK);
-    let body = response.to_bytes().unwrap_or_else(|error| {
+    let body = response.to_string().unwrap_or_else(|error| {
         format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
             serde_json::Value::String(error.to_string())
         )
-        .into_bytes()
     });
     JsonRpcHttpResponse {
         status,
@@ -639,20 +640,26 @@ async fn dispatch_jsonrpc_body(engine: &RpcEngine, body: &[u8]) -> JsonRpcHttpRe
                 .next()
                 .expect("single JSON-RPC document must contain one entry");
             let response = match entry {
-                JsonRpcWireEntry::Request(request) => engine.handle_request_owned(request).await,
+                JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
                 JsonRpcWireEntry::Error(response) => response,
             };
             serialize_jsonrpc_response(response)
         }
         Ok(document) => {
-            let body = JsonRpcBatchResponse(dispatch_wire_entries(engine, document.entries).await)
-                .to_bytes()
+            let mut responses = Vec::with_capacity(document.entries.len());
+            for entry in document.entries {
+                responses.push(match entry {
+                    JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+                    JsonRpcWireEntry::Error(response) => response,
+                });
+            }
+            let body = JsonRpcBatchResponse(responses)
+                .to_string()
                 .unwrap_or_else(|error| {
                     format!(
                         "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":-32603,\"message\":{}}}}}",
                         serde_json::Value::String(error.to_string())
                     )
-                    .into_bytes()
                 });
             // aria2 always returns HTTP 200 for a batch envelope, even when
             // individual entries contain RPC errors.
@@ -688,16 +695,9 @@ fn into_jsonrpc_http_response(
     http_response
 }
 
-fn wrap_jsonp(body: Vec<u8>, callback: Option<&str>) -> Vec<u8> {
+fn wrap_jsonp(body: String, callback: Option<&str>) -> String {
     match callback {
-        Some(callback) => {
-            let mut wrapped = Vec::with_capacity(callback.len() + body.len() + 2);
-            wrapped.extend_from_slice(callback.as_bytes());
-            wrapped.push(b'(');
-            wrapped.extend_from_slice(&body);
-            wrapped.push(b')');
-            wrapped
-        }
+        Some(callback) => format!("{callback}({body})"),
         None => body,
     }
 }

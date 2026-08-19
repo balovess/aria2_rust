@@ -83,11 +83,10 @@ async fn test_e2e_gap_download_with_partial_progress() {
 async fn test_e2e_gap_retry_with_server_error() {
     let server = start_server().await;
     let dir = tmp_dir();
-    let url = format!("{}/error/503", server.base_url());
+    let url = format!("{}/error/500", server.base_url());
 
     let options = DownloadOptions {
         max_retries: 2,
-        retry_wait: 1,
         ..Default::default()
     };
 
@@ -97,9 +96,9 @@ async fn test_e2e_gap_retry_with_server_error() {
     let result = cmd.execute().await;
     assert!(result.is_err(), "Download should fail after retries");
     assert_eq!(
-        server.error_503_requests(),
+        server.error_500_requests(),
         2,
-        "Configured retryable HTTP 503 should use both total attempts"
+        "Configured retryable HTTP 500 should use both total attempts"
     );
 }
 

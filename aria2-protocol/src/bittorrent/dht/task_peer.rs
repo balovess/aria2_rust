@@ -83,7 +83,6 @@ impl DhtTask for PeerLookupTask {
             &rt,
             &self.ctx.socket,
             &self.ctx.tracker,
-            self.ctx.query_timeout,
         )
         .await;
 
@@ -308,7 +307,6 @@ impl DhtTask for PeerAnnounceTask {
             &rt,
             &self.ctx.socket,
             &self.ctx.tracker,
-            self.ctx.query_timeout,
         )
         .await;
 

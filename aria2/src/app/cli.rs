@@ -106,8 +106,8 @@ impl FromStr for HelpRequest {
 /// `aria2/Cargo.toml`.
 #[derive(Parser, Debug)]
 #[command(
-    name = crate::identity::PRODUCT_NAME,
-    version = crate::identity::PRODUCT_VERSION,
+    name = aria2_protocol::identity::PRODUCT_NAME,
+    version = aria2_protocol::identity::PRODUCT_VERSION,
     disable_help_flag = true,
     disable_version_flag = true,
     disable_help_subcommand = true,
@@ -301,7 +301,6 @@ fn matches_help_tag(arg: &Arg, name: &str, tag: &str) -> bool {
 const BASIC_HELP_OPTIONS: &[&str] = &[
     "allow-piece-length-change",
     "always-resume",
-    "auto-save-interval",
     "bt-max-peers",
     "check-integrity",
     "continue",
@@ -376,10 +375,6 @@ pub struct GeneralArgs {
     #[arg(short = 'l', long)]
     pub log: Option<PathBuf>,
 
-    /// Number of backup log files to keep
-    #[arg(long = "log-backup-count")]
-    pub log_backup_count: Option<u64>,
-
     /// Log level (debug/info/notice/warn/error)
     #[arg(long = "log-level")]
     pub log_level: Option<String>,
@@ -418,7 +413,7 @@ pub struct GeneralArgs {
     #[arg(long = "save-session-interval")]
     pub save_session_interval: Option<u64>,
 
-    /// Save a control file (*.aria2) every N seconds during downloads
+    /// Auto-save interval
     #[arg(long = "auto-save-interval")]
     pub auto_save_interval: Option<u64>,
 
@@ -698,10 +693,6 @@ pub struct GeneralArgs {
     #[arg(long = "lowest-speed-limit")]
     pub lowest_speed_limit: Option<String>,
 
-    /// Max number of downloads to start (0=unlimited)
-    #[arg(long = "max-downloads")]
-    pub max_downloads: Option<u64>,
-
     /// Max number of 404 not-found attempts (0=stop immediately)
     #[arg(long = "max-file-not-found")]
     pub max_file_not_found: Option<u64>,
@@ -743,10 +734,6 @@ pub struct GeneralArgs {
         value_name = "true|false"
     )]
     pub async_dns: Option<bool>,
-
-    /// DNS resolution timeout in seconds
-    #[arg(long = "dns-timeout", hide = true)]
-    pub dns_timeout: Option<u64>,
 
     /// DNS server address for async resolver
     #[arg(long = "async-dns-server")]
@@ -804,21 +791,6 @@ pub struct GeneralArgs {
     /// Checksum for verification (hashType=digest format)
     #[arg(long = "checksum")]
     pub checksum: Option<String>,
-
-    /// Select the least-used host for URI selection
-    #[arg(
-        long = "select-least-used-host",
-        hide = true,
-        num_args(0..=1),
-        require_equals = true,
-        default_missing_value = "true",
-        value_name = "true|false"
-    )]
-    pub select_least_used_host: Option<bool>,
-
-    /// Startup idle time in seconds
-    #[arg(long = "startup-idle-time", hide = true)]
-    pub startup_idle_time: Option<u64>,
 
     /// Enable mmap for file allocation
     #[arg(
@@ -1004,10 +976,6 @@ pub struct HttpFtpArgs {
     /// HTTP max connections per server; adaptive download may lower it
     #[arg(short = 'x', long = "max-connection-per-server")]
     pub max_connection_per_server: Option<u64>,
-
-    /// Max pipelined HTTP requests per connection
-    #[arg(long = "max-http-pipelining", hide = true)]
-    pub max_http_pipelining: Option<u64>,
 
     /// Verify SSL certificate
     #[arg(
@@ -1253,26 +1221,6 @@ pub struct BitTorrentArgs {
     #[arg(long = "bt-max-open-files")]
     pub bt_max_open_files: Option<u64>,
 
-    /// Path to the BitTorrent peer blocklist
-    #[arg(long = "bt-peer-blocklist", hide = true)]
-    pub bt_peer_blocklist: Option<PathBuf>,
-
-    /// BitTorrent peer keep-alive interval in seconds
-    #[arg(long = "bt-keep-alive-interval", hide = true)]
-    pub bt_keep_alive_interval: Option<u64>,
-
-    /// BitTorrent peer inactivity timeout in seconds
-    #[arg(long = "bt-timeout", hide = true)]
-    pub bt_timeout: Option<u64>,
-
-    /// BitTorrent piece request timeout in seconds
-    #[arg(long = "bt-request-timeout", hide = true)]
-    pub bt_request_timeout: Option<u64>,
-
-    /// BitTorrent peer connection timeout in seconds
-    #[arg(long = "peer-connection-timeout", hide = true)]
-    pub peer_connection_timeout: Option<u64>,
-
     /// Seed without verifying hash
     #[arg(
         long = "bt-seed-unverified",
@@ -1367,21 +1315,9 @@ pub struct BitTorrentArgs {
     #[arg(long = "dht-listen-port")]
     pub dht_listen_port: Option<String>,
 
-    /// IPv4 address for DHT to listen on
-    #[arg(long = "dht-listen-addr", hide = true)]
-    pub dht_listen_addr: Option<String>,
-
     /// DHT bootstrap nodes (host:port format, comma-separated)
     #[arg(long = "dht-entry-point")]
     pub dht_entry_point: Option<String>,
-
-    /// IPv4 DHT bootstrap node hostname
-    #[arg(long = "dht-entry-point-host", hide = true)]
-    pub dht_entry_point_host: Option<String>,
-
-    /// IPv4 DHT bootstrap node port
-    #[arg(long = "dht-entry-point-port", hide = true)]
-    pub dht_entry_point_port: Option<u16>,
 
     /// Path to DHT routing table file for persistence
     #[arg(long = "dht-file-path")]
@@ -1576,14 +1512,6 @@ pub struct BitTorrentArgs {
     /// IPv6 DHT bootstrap node (hostname:port)
     #[arg(long = "dht-entry-point6")]
     pub dht_entry_point6: Option<String>,
-
-    /// IPv6 DHT bootstrap node hostname
-    #[arg(long = "dht-entry-point-host6", hide = true)]
-    pub dht_entry_point_host6: Option<String>,
-
-    /// IPv6 DHT bootstrap node port
-    #[arg(long = "dht-entry-point-port6", hide = true)]
-    pub dht_entry_point_port6: Option<u16>,
 
     /// Path to IPv6 DHT routing table file
     #[arg(long = "dht-file-path6")]
@@ -1794,14 +1722,6 @@ pub struct AdvancedArgs {
     #[arg(long = "max-resume-failure-tries")]
     pub max_resume_failure_tries: Option<u64>,
 
-    /// Max log file size before rotation
-    #[arg(long = "log-max-size")]
-    pub log_max_size: Option<String>,
-
-    /// Max rotated log files to keep
-    #[arg(long = "log-max-files")]
-    pub log_max_files: Option<u64>,
-
     /// Optimize concurrent download count based on network conditions
     #[arg(
         long = "optimize-concurrent-downloads",
@@ -1811,14 +1731,6 @@ pub struct AdvancedArgs {
         value_name = "true|false"
     )]
     pub optimize_concurrent_downloads: Option<bool>,
-
-    /// Optimization coefficient A
-    #[arg(long = "optimize-concurrent-downloads-coeffA", hide = true)]
-    pub optimize_concurrent_downloads_coeff_a: Option<f64>,
-
-    /// Optimization coefficient B
-    #[arg(long = "optimize-concurrent-downloads-coeffB", hide = true)]
-    pub optimize_concurrent_downloads_coeff_b: Option<f64>,
 }
 
 // =========================================================================
@@ -1828,8 +1740,8 @@ pub struct AdvancedArgs {
 pub(crate) fn product_banner_title() -> String {
     format!(
         "{} version {}",
-        crate::identity::PRODUCT_NAME,
-        crate::identity::PRODUCT_VERSION
+        aria2_protocol::identity::PRODUCT_NAME,
+        aria2_protocol::identity::PRODUCT_VERSION
     )
 }
 
@@ -1856,8 +1768,8 @@ mod banner_tests {
             product_banner_title(),
             format!(
                 "{} version {}",
-                crate::identity::PRODUCT_NAME,
-                crate::identity::PRODUCT_VERSION
+                aria2_protocol::identity::PRODUCT_NAME,
+                aria2_protocol::identity::PRODUCT_VERSION
             )
         );
     }

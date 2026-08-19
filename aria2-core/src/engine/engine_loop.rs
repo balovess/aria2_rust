@@ -1,16 +1,16 @@
 //! Engine main loop: promotion/demotion, EngineCommand dispatch, and
-//! deadline-driven maintenance.
+//! periodic housekeeping.
 //!
-//! Mirrors the C++ `DownloadEngine::run()` loop structure. Each pass:
+//! Mirrors the C++ `DownloadEngine::run()` loop structure. Each tick:
 //! 1. Process incoming `EngineCommand`s (add/remove/pause/unpause/halt etc.)
-//! 2. Collect completed task notifications and decrement `num_commands`
-//! 3. Demote stopped groups from active to stopped results
-//! 4. Promote reserved groups and spawn download tasks via `task_spawner`
-//! 5. Run deadline-driven maintenance (timeouts and session auto-save)
-//! 6. Check exit condition
+//! 2. Promote reserved groups to active when slots are available
+//! 3. Spawn download tasks for promoted groups via `task_spawner`
+//! 4. Collect completed task notifications and decrement `num_commands`
+//! 5. Demote stopped groups from active to stopped results
+//! 6. Run periodic housekeeping (session auto-save, socket pool eviction, etc.)
+//! 7. Check exit condition
 
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -19,63 +19,31 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use super::download_event_hooks::{DownloadEvent, DownloadEventHooks};
-use super::engine_command::{
-    EngineCommand, EngineCommandReceiver, EngineCommandTryRecvError, TaskResult,
-};
+use super::engine_command::{EngineCommand, EngineCommandReceiver, TaskResult};
 use super::task_spawner::{CommandDependencies, spawn_download_task};
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::ftp::FtpConnectionPool;
-use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId, HaltReason};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::selector::server_stat_man::ServerStatMan;
-use crate::session::auto_save_coordinator::AutoSaveCoordinator;
+use crate::session::auto_save_session::AutoSaveSession;
 use crate::util::rwlock_ext::RwLockRecover;
+
+/// Interval for periodic housekeeping tasks (session save, stats, etc.).
+/// Mirrors C++ `DEFAULT_REFRESH_INTERVAL` (1 second).
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Maximum number of stopped results to keep before pruning.
 /// Mirrors C++ `MAX_DOWNLOAD_RESULT` (default 1000).
 const MAX_STOPPED_RESULTS: usize = 1000;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
-fn should_mark_failed_connection(error: &Aria2Error) -> bool {
-    matches!(
-        error,
-        Aria2Error::Network(_)
-            | Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure { .. } | RecoverableError::Timeout
-            )
-    )
-}
-
-async fn mark_failed_connection(
-    dns_cache: &tokio::sync::Mutex<DnsCache>,
-    error: &Aria2Error,
-    context: &ConnectionContext,
-    use_async_dns: bool,
-) {
-    if !use_async_dns || !should_mark_failed_connection(error) {
-        return;
-    }
-
-    let mut dns = dns_cache.lock().await;
-    dns.mark_bad_context(context);
-    if !dns.has_good_address(&context.endpoint) {
-        dns.remove_cached(context.endpoint.hostname(), context.endpoint.port());
-    }
-}
-
-enum ProcessedTaskResult {
-    Success,
-    Failed(Aria2Error),
-    Cancelled,
-}
-
 /// Context passed into the engine loop, holding shared state that the
 /// loop needs to coordinate between EngineCommand processing, promotion,
-/// demotion, and deadline-driven maintenance.
+/// demotion, and periodic tasks.
 pub struct EngineLoopContext {
     /// The request group manager (active/reserved/stopped queues).
     pub group_man: Arc<RequestGroupMan>,
@@ -86,11 +54,8 @@ pub struct EngineLoopContext {
     /// DNS cache for dependency injection.
     pub dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
 
-    /// Unified deadline-driven coordinator for session and control-file saves.
-    pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveCoordinator>>>,
-
-    /// Lock-free session dirty signal used when `auto_save` is busy writing.
-    pub auto_save_dirty_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Auto-save session manager (optional).
+    pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveSession>>>,
 
     /// Download event hooks for firing on-download-start/complete/error/pause/stop.
     /// Mirrors C++ `util::executeHookByOptName()`.
@@ -108,14 +73,6 @@ pub struct EngineLoopContext {
 
     /// Shared server statistics used by URI selectors and housekeeping.
     pub server_stat_man: Arc<ServerStatMan>,
-
-    /// Maximum age for server-stat cleanup. `None` means unlimited.
-    pub server_stat_max_age: Option<Duration>,
-
-    /// Optional server-stat output and its deadline-driven save state.
-    pub server_stat_save_path: Option<PathBuf>,
-    pub server_stat_save_interval: Option<Duration>,
-    pub server_stat_next_save: Option<Instant>,
 
     /// Process-wide rate limiter shared across all downloads.
     /// When `Some`, passed to each spawned `DownloadCommand` so that
@@ -135,10 +92,6 @@ pub struct EngineLoopContext {
     /// Process-level BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
     pub bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
-
-    /// Process-level Local Peer Discovery manager and receive loop.
-    #[cfg(feature = "bittorrent")]
-    pub lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.
@@ -150,13 +103,13 @@ struct RunningDownload {
     shutdown: Option<CancellationToken>,
     /// Stable identity of this command instance, independent of its GID.
     generation: CommandGeneration,
-    /// Instant at which the last network payload was received.
-    last_activity: Instant,
-    /// Inactivity timeout. `None` means the task never times out.
+    /// Instant the task was spawned.
+    started: Instant,
+    /// Per-command timeout. `None` means the task never times out.
     timeout: Option<Duration>,
 }
 
-/// Mark the auto-save session as dirty so the next configured save deadline
+/// Mark the auto-save session as dirty so the next periodic housekeeping tick
 /// (subject to `save-session-interval`) actually persists state.
 ///
 /// C++ aria2's `AutoSaveCommand` unconditionally saves every interval; our
@@ -164,8 +117,10 @@ struct RunningDownload {
 /// caller that mutates download state (queue membership, status, options,
 /// progress) must flip this flag or `save_if_dirty()` never writes.
 fn mark_session_dirty(ctx: &EngineLoopContext) {
-    if let Some(signal) = &ctx.auto_save_dirty_signal {
-        signal.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(ref auto_save) = ctx.auto_save
+        && let Ok(save) = auto_save.try_lock()
+    {
+        save.mark_dirty();
     }
 }
 
@@ -176,7 +131,7 @@ fn mark_session_dirty(ctx: &EngineLoopContext) {
 /// - A shutdown signal is received via `shutdown_rx`.
 ///
 /// The loop processes `EngineCommand`s from `cmd_rx`, task completion
-/// notifications from `completion_rx`, and runs deadline-driven maintenance.
+/// notifications from `completion_rx`, and runs periodic housekeeping.
 pub async fn run_engine_loop(
     ctx: EngineLoopContext,
     cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
@@ -198,32 +153,28 @@ pub(crate) async fn run_engine_loop_with_receiver(
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     tick_interval: Duration,
 ) {
-    info!(
-        "Engine loop started (configured tick={:?}, event-driven dispatch)",
-        tick_interval
-    );
+    info!("Engine loop started (tick={:?})", tick_interval);
 
     let mut running_downloads: Vec<(GroupId, RunningDownload)> = Vec::new();
     let mut completed_generations: HashSet<CommandGeneration> = HashSet::new();
     let mut next_generation: CommandGeneration = 1;
+    let mut last_housekeeping = Instant::now();
     let mut halt_requested = false;
     let mut force_halt_requested = false;
     let mut shutdown_received = false;
-    let mut command_closed = false;
-    let mut completion_closed = false;
-    let mut first_pass = true;
-    let mut schedule_on_next_pass = false;
 
     // Completion channel: spawned tasks send (GID, TaskResult) here when done.
     let (completion_tx, mut completion_rx) =
         mpsc::channel::<(GroupId, CommandGeneration, TaskResult)>(128);
 
+    let mut ticker = tokio::time::interval(tick_interval);
+
     loop {
         // ── 1. Process all incoming EngineCommands ───────────────────────
         // Drain the command channel before doing anything else, so that
         // batch RPC requests (e.g. addUri followed by unpause) are applied
-        // atomically within the same event-processing pass.
-        let commands_processed = process_engine_commands(
+        // atomically within the same tick.
+        process_engine_commands(
             &mut ctx,
             &mut cmd_rx,
             &mut running_downloads,
@@ -232,23 +183,88 @@ pub(crate) async fn run_engine_loop_with_receiver(
         )
         .await;
 
-        // Promote groups that were already queued before the engine started.
-        // Later passes promote after completion/demotion so a requeued group
-        // is scheduled without relying on a fixed-rate wake-up.
-        if first_pass {
-            promote_reserved_groups(
-                &ctx,
-                &mut running_downloads,
-                halt_requested,
-                force_halt_requested,
-                &mut next_generation,
-                &completion_tx,
-            );
+        // ── 2. Promote reserved → active + spawn download tasks ──────────
+        // Mirrors C++ `fillRequestGroupFromReserver()`.
+        //
+        // Once a halt has been requested the engine must stop admitting new
+        // work. C++ enforces this in `FillRequestGroupCommand::execute()`,
+        // which returns early when `e_->isHaltRequested()` — without this
+        // gate a graceful shutdown would keep promoting reserved groups and
+        // never converge.
+        let promoted = if halt_requested || force_halt_requested {
+            Vec::new()
+        } else {
+            ctx.group_man.fill_from_reserver()
+        };
+
+        for group in &promoted {
+            let gid = group.recover().gid();
+            group.recover().clear_connection_contexts();
+            let generation = next_generation;
+            next_generation = next_generation.wrapping_add(1);
+            match spawn_download_task(
+                Arc::clone(group),
+                CommandDependencies {
+                    dns_cache: Arc::clone(&ctx.dns_cache),
+                    global_limiter: ctx.global_limiter.clone(),
+                    #[cfg(feature = "bittorrent")]
+                    public_tracker_catalog: Arc::clone(&ctx.public_tracker_catalog),
+                    #[cfg(feature = "bittorrent")]
+                    bt_registry: Arc::clone(&ctx.bt_registry),
+                    #[cfg(feature = "bittorrent")]
+                    bt_listener: Arc::clone(&ctx.bt_listener),
+                },
+                generation,
+                completion_tx.clone(),
+            ) {
+                Some((handle, shutdown_tx)) => {
+                    let timeout = group.recover().timeout();
+                    running_downloads.push((
+                        gid,
+                        RunningDownload {
+                            _handle: handle,
+                            shutdown: Some(shutdown_tx),
+                            generation,
+                            started: Instant::now(),
+                            timeout,
+                        },
+                    ));
+                    debug!(
+                        gid = gid.value(),
+                        "Spawned download task for promoted group"
+                    );
+
+                    // Fire on-download-start hook.
+                    // C++: `util::executeHookByOptName(groupToAdd, e->getOption(),
+                    //            PREF_ON_DOWNLOAD_START)`
+                    ctx.event_hooks
+                        .fire_event(DownloadEvent::Start, &group.recover());
+                }
+                None => {
+                    warn!(
+                        gid = gid.value(),
+                        "Failed to spawn download task for promoted group"
+                    );
+                    // The group was inserted into the active DashMap by
+                    // fill_from_reserver() but no command could be created
+                    // (e.g. empty URI list or unsupported scheme). Remove it
+                    // from active and record an error so it does not stay
+                    // in the active list forever.
+                    ctx.group_man
+                        .fail_spawned_group(gid, "Failed to spawn download task");
+                }
+            }
         }
 
-        // ── 2. Collect completed task notifications ──────────────────────
+        if !promoted.is_empty() {
+            debug!("Promoted {} groups from reserved to active", promoted.len());
+            // Promotion moved groups between queues: persist the new layout.
+            mark_session_dirty(&ctx);
+        }
+
+        // ── 3. Collect completed task notifications ──────────────────────
         // Process all pending task completion messages.
-        let completions_processed = process_task_completions(
+        process_task_completions(
             &ctx,
             &mut completion_rx,
             &mut running_downloads,
@@ -256,7 +272,7 @@ pub(crate) async fn run_engine_loop_with_receiver(
         )
         .await;
 
-        // ── 3. Demote stopped groups (active → stopped results) ──────────
+        // ── 4. Demote stopped groups (active → stopped results) ──────────
         // Mirrors C++ `removeStoppedGroup()`.
         let demoted_gids = { ctx.group_man.remove_stopped_groups(Some(&ctx.event_hooks)) };
 
@@ -264,34 +280,15 @@ pub(crate) async fn run_engine_loop_with_receiver(
             debug!("Demoted {} groups to stopped", demoted_gids.len());
             // Demotion moved groups to stopped results: persist the change.
             mark_session_dirty(&ctx);
-            run_event_cleanup(&ctx).await;
         }
 
-        // ── 4. Promote groups made runnable by this pass or the preceding
-        // event wake-up. ──────────────────────────────────────────────────
-        // A group requeued from a completion must be promoted before the
-        // engine parks. The first-pass orphan requeue is deliberately left
-        // for the next external event so an already-pending shutdown cannot
-        // turn it into new work.
-        let needs_follow_up_promotion = (!first_pass && commands_processed)
-            || completions_processed
-            || !demoted_gids.is_empty()
-            || schedule_on_next_pass;
-        if needs_follow_up_promotion {
-            promote_reserved_groups(
-                &ctx,
-                &mut running_downloads,
-                halt_requested,
-                force_halt_requested,
-                &mut next_generation,
-                &completion_tx,
-            );
+        // ── 5. Periodic housekeeping ─────────────────────────────────────
+        if last_housekeeping.elapsed() >= HOUSEKEEPING_INTERVAL {
+            run_housekeeping(&ctx, &mut running_downloads).await;
+            last_housekeeping = Instant::now();
         }
 
-        first_pass = false;
-        schedule_on_next_pass = false;
-
-        // ── 5. Check exit condition ──────────────────────────────────────
+        // ── 6. Check exit condition ──────────────────────────────────────
         let all_done = ctx.group_man.download_finished() && running_downloads.is_empty();
 
         // A graceful halt must wind the engine down even in keep-alive (RPC)
@@ -315,55 +312,10 @@ pub(crate) async fn run_engine_loop_with_receiver(
             break;
         }
 
-        // ── 6. Wait for a command, task completion, a real maintenance
-        // deadline,
-        // or shutdown signal. The engine stays parked while idle.
-        let maintenance_wait =
-            wait_for_deadline(next_maintenance_deadline(&ctx, &running_downloads).await);
-        tokio::pin!(maintenance_wait);
+        // ── 7. Wait for next tick or shutdown signal ─────────────────────
         tokio::select! {
-            command = cmd_rx.recv(), if !command_closed => {
-                match command {
-                    Ok(command) => {
-                        let mut prefetched = PrefetchedEngineCommand {
-                            first: Some(command),
-                            receiver: &mut cmd_rx,
-                        };
-                        schedule_on_next_pass |= process_engine_commands(
-                            &mut ctx,
-                            &mut prefetched,
-                            &mut running_downloads,
-                            &mut halt_requested,
-                            &mut force_halt_requested,
-                        )
-                        .await;
-                    }
-                    Err(EngineCommandTryRecvError::Closed) => command_closed = true,
-                    Err(EngineCommandTryRecvError::Empty) => unreachable!(
-                        "async engine command receive cannot return empty"
-                    ),
-                }
-            }
-            completion = completion_rx.recv(), if !completion_closed => {
-                match completion {
-                    Some(completion) => {
-                        let mut prefetched = PrefetchedCompletion {
-                            first: Some(completion),
-                            receiver: &mut completion_rx,
-                        };
-                        schedule_on_next_pass |= process_task_completions(
-                            &ctx,
-                            &mut prefetched,
-                            &mut running_downloads,
-                            &mut completed_generations,
-                        )
-                        .await;
-                    }
-                    None => completion_closed = true,
-                }
-            }
-            _ = &mut maintenance_wait => {
-                run_deadline_maintenance(&mut ctx, &mut running_downloads).await;
+            _ = ticker.tick() => {
+                // Next tick
             }
             Ok(_) = &mut shutdown_rx, if !shutdown_received => {
                 shutdown_received = true;
@@ -387,122 +339,15 @@ pub(crate) async fn run_engine_loop_with_receiver(
     info!("Engine loop exited");
 }
 
-/// Promote reserved groups and create their protocol tasks.
-///
-/// Promotion is kept in one helper because the engine may need to run it both
-/// for groups present before startup and immediately after a completion frees
-/// a slot. The latter is the event-driven replacement for the old idle scan.
-fn promote_reserved_groups(
-    ctx: &EngineLoopContext,
-    running_downloads: &mut Vec<(GroupId, RunningDownload)>,
-    halt_requested: bool,
-    force_halt_requested: bool,
-    next_generation: &mut CommandGeneration,
-    completion_tx: &mpsc::Sender<(GroupId, CommandGeneration, TaskResult)>,
-) {
-    // Once a halt has been requested the engine must stop admitting new work.
-    let promoted = if halt_requested || force_halt_requested {
-        Vec::new()
-    } else {
-        ctx.group_man.fill_from_reserver()
-    };
-
-    for group in &promoted {
-        let gid = group.recover().gid();
-        group.recover().clear_connection_contexts();
-        let generation = *next_generation;
-        *next_generation = next_generation.wrapping_add(1);
-        match spawn_download_task(
-            Arc::clone(group),
-            CommandDependencies {
-                dns_cache: Arc::clone(&ctx.dns_cache),
-                global_limiter: ctx.global_limiter.clone(),
-                #[cfg(feature = "bittorrent")]
-                public_tracker_catalog: Arc::clone(&ctx.public_tracker_catalog),
-                #[cfg(feature = "bittorrent")]
-                bt_registry: Arc::clone(&ctx.bt_registry),
-                #[cfg(feature = "bittorrent")]
-                bt_listener: Arc::clone(&ctx.bt_listener),
-                #[cfg(feature = "bittorrent")]
-                lpd_manager: Arc::clone(&ctx.lpd_manager),
-            },
-            generation,
-            completion_tx.clone(),
-        ) {
-            Some((handle, shutdown_tx)) => {
-                let timeout = group.recover().timeout();
-                running_downloads.push((
-                    gid,
-                    RunningDownload {
-                        _handle: handle,
-                        shutdown: Some(shutdown_tx),
-                        generation,
-                        last_activity: Instant::now(),
-                        timeout,
-                    },
-                ));
-                debug!(
-                    gid = gid.value(),
-                    "Spawned download task for promoted group"
-                );
-
-                // Fire on-download-start hook.
-                // C++: `util::executeHookByOptName(groupToAdd, e->getOption(),
-                //            PREF_ON_DOWNLOAD_START)`
-                ctx.event_hooks
-                    .fire_event(DownloadEvent::Start, &group.recover());
-            }
-            None => {
-                warn!(
-                    gid = gid.value(),
-                    "Failed to spawn download task for promoted group"
-                );
-                ctx.group_man
-                    .fail_spawned_group(gid, "Failed to spawn download task");
-            }
-        }
-    }
-
-    if !promoted.is_empty() {
-        debug!("Promoted {} groups from reserved to active", promoted.len());
-        mark_session_dirty(ctx);
-    }
-}
-
-trait EngineCommandQueue {
-    fn try_command(&mut self) -> Result<EngineCommand, EngineCommandTryRecvError>;
-}
-
-impl EngineCommandQueue for EngineCommandReceiver {
-    fn try_command(&mut self) -> Result<EngineCommand, EngineCommandTryRecvError> {
-        self.try_recv()
-    }
-}
-
-struct PrefetchedEngineCommand<'a, R> {
-    first: Option<EngineCommand>,
-    receiver: &'a mut R,
-}
-
-impl<R: EngineCommandQueue> EngineCommandQueue for PrefetchedEngineCommand<'_, R> {
-    fn try_command(&mut self) -> Result<EngineCommand, EngineCommandTryRecvError> {
-        self.first
-            .take()
-            .map_or_else(|| self.receiver.try_command(), Ok)
-    }
-}
-
 /// Process all pending `EngineCommand` messages from the channel.
-async fn process_engine_commands<R: EngineCommandQueue>(
+async fn process_engine_commands(
     ctx: &mut EngineLoopContext,
-    cmd_rx: &mut R,
+    cmd_rx: &mut EngineCommandReceiver,
     running_downloads: &mut [(GroupId, RunningDownload)],
     halt_requested: &mut bool,
     force_halt_requested: &mut bool,
-) -> bool {
-    let mut processed = false;
-    while let Ok(cmd) = cmd_rx.try_command() {
-        processed = true;
+) {
+    while let Ok(cmd) = cmd_rx.try_recv() {
         // Every EngineCommand mutates session state (queue membership,
         // per-group status, or options), so mark the session dirty to make
         // the periodic auto-save persist these changes.
@@ -511,8 +356,7 @@ async fn process_engine_commands<R: EngineCommandQueue>(
             EngineCommand::AddDownload { group } => {
                 let man = &ctx.group_man;
                 let gid = group.recover().gid();
-                // Add to the reserved queue; the current event pass promotes
-                // it immediately after command processing.
+                // Add to reserved queue — promotion happens on next tick.
                 man.add_group_arc(group);
                 info!(gid = gid.value(), "Added download to reserved queue");
             }
@@ -635,10 +479,6 @@ async fn process_engine_commands<R: EngineCommandQueue>(
             EngineCommand::ForceHaltAll { reason } => {
                 let man = &ctx.group_man;
                 man.force_halt_all(reason);
-                let removed = man.force_remove_reserved();
-                if removed > 0 {
-                    mark_session_dirty(ctx);
-                }
                 *force_halt_requested = true;
 
                 for (_, running) in running_downloads.iter_mut() {
@@ -727,7 +567,6 @@ async fn process_engine_commands<R: EngineCommandQueue>(
             }
         }
     }
-    processed
 }
 
 /// Process all pending task completion notifications.
@@ -774,9 +613,6 @@ fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 404 => {
             DownloadResultCode::ResourceNotFound
         }
-        Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 500 => {
-            DownloadResultCode::HttpProtocolError
-        }
         Aria2Error::Recoverable(RecoverableError::ServerError { code }) if *code == 503 => {
             DownloadResultCode::HttpServiceUnavailable
         }
@@ -817,26 +653,12 @@ impl CompletionQueue for mpsc::UnboundedReceiver<(GroupId, CommandGeneration, Ta
     }
 }
 
-struct PrefetchedCompletion<'a, R> {
-    first: Option<(GroupId, CommandGeneration, TaskResult)>,
-    receiver: &'a mut R,
-}
-
-impl<R: CompletionQueue> CompletionQueue for PrefetchedCompletion<'_, R> {
-    fn try_completion(&mut self) -> Result<(GroupId, CommandGeneration, TaskResult), ()> {
-        self.first
-            .take()
-            .map_or_else(|| self.receiver.try_completion(), Ok)
-    }
-}
-
 async fn process_task_completions<R: CompletionQueue>(
     ctx: &EngineLoopContext,
     completion_rx: &mut R,
     running_downloads: &mut Vec<(GroupId, RunningDownload)>,
     completed_generations: &mut HashSet<CommandGeneration>,
-) -> bool {
-    let mut processed = false;
+) {
     while let Ok((gid, generation, result)) = completion_rx.try_completion() {
         // A task may race with force-remove/timeout cleanup and publish more
         // than one terminal notification. Account for exactly one completion.
@@ -847,7 +669,6 @@ async fn process_task_completions<R: CompletionQueue>(
             );
             continue;
         }
-        processed = true;
 
         // A task finished: its status/progress changed, so persist it.
         mark_session_dirty(ctx);
@@ -867,28 +688,8 @@ async fn process_task_completions<R: CompletionQueue>(
                 prev, last_command, "Task completed, decremented num_commands"
             );
 
-            let result = match result {
-                TaskResult::FailedWithContext {
-                    error,
-                    connection_context,
-                } => {
-                    let use_async_dns = group.recover().options().async_dns;
-                    mark_failed_connection(
-                        &ctx.dns_cache,
-                        &error,
-                        &connection_context,
-                        use_async_dns,
-                    )
-                    .await;
-                    ProcessedTaskResult::Failed(error)
-                }
-                TaskResult::Success => ProcessedTaskResult::Success,
-                TaskResult::Failed(error) => ProcessedTaskResult::Failed(error),
-                TaskResult::Cancelled => ProcessedTaskResult::Cancelled,
-            };
-
             match result {
-                ProcessedTaskResult::Success if last_command => {
+                TaskResult::Success if last_command => {
                     let had_failure = group
                         .recover()
                         .command_failure
@@ -925,12 +726,12 @@ async fn process_task_completions<R: CompletionQueue>(
                         }
                     }
                 }
-                ProcessedTaskResult::Success => {
+                TaskResult::Success => {
                     // C++ removes a RequestGroup only after its final
                     // AbstractCommand is destroyed. Keep the group active
                     // while other command instances are still running.
                 }
-                ProcessedTaskResult::Failed(e) if !last_command => {
+                TaskResult::Failed(e) if !last_command => {
                     // A non-final command failure is recorded for the group,
                     // but terminal state is deferred until all commands have
                     // exited, matching C++ numCommand_ semantics.
@@ -942,7 +743,7 @@ async fn process_task_completions<R: CompletionQueue>(
                         .command_failure
                         .store(true, std::sync::atomic::Ordering::Release);
                 }
-                ProcessedTaskResult::Failed(e) => {
+                TaskResult::Failed(e) => {
                     // Handle failures from the final command, including pause-induced
                     // termination, before treating them as errors.
                     // (`aria2.pause` / `aria2.forcePause`
@@ -999,7 +800,7 @@ async fn process_task_completions<R: CompletionQueue>(
                         .command_failure
                         .store(false, std::sync::atomic::Ordering::Release);
                 }
-                ProcessedTaskResult::Cancelled => {
+                TaskResult::Cancelled => {
                     // Synthetic cancellation is emitted before Tokio abort, so
                     // finalize the group here rather than relying on the
                     // cancelled task to mutate its status.
@@ -1036,82 +837,29 @@ async fn process_task_completions<R: CompletionQueue>(
             }
         }
     }
-    processed
 }
 
-/// Return the earliest maintenance deadline that can be derived from live
-/// engine state. With no inactivity timeout and no pending save, the engine has
-/// no maintenance timer and waits only for notifications.
-async fn next_maintenance_deadline(
-    ctx: &EngineLoopContext,
-    running_downloads: &[(GroupId, RunningDownload)],
-) -> Option<Instant> {
-    let timeout_deadline = running_downloads
-        .iter()
-        .filter_map(|(_, running)| {
-            running
-                .timeout
-                .and_then(|timeout| running.last_activity.checked_add(timeout))
-        })
-        .min();
-
-    let has_pending_downloads = !ctx.group_man.download_finished() || !running_downloads.is_empty();
-    let save_deadline = if let Some(auto_save) = &ctx.auto_save {
-        let save = auto_save.lock().await;
-        save.next_deadline(has_pending_downloads)
-    } else {
-        None
-    };
-
-    [timeout_deadline, save_deadline]
-        .into_iter()
-        .flatten()
-        .chain(ctx.server_stat_next_save)
-        .min()
-}
-
-async fn wait_for_deadline(deadline: Option<Instant>) {
-    match deadline {
-        Some(deadline) => {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-        }
-        None => std::future::pending::<()>().await,
-    }
-}
-
-/// Run maintenance work whose deadline has fired.
+/// Run periodic housekeeping tasks.
 ///
-/// Timeouts and both persistence features are scheduled at their configured
-/// deadlines. There is deliberately no fixed-rate scan here: after the work
-/// is handled, the next loop iteration recomputes the next actual deadline.
-async fn run_deadline_maintenance(
-    ctx: &mut EngineLoopContext,
+/// Mirrors the C++ refresh-interval-based tasks:
+/// - Session auto-save
+/// - Socket pool eviction
+/// - Server statistics pruning
+/// - Prune excess stopped results
+async fn run_housekeeping(
+    ctx: &EngineLoopContext,
     running_downloads: &mut [(GroupId, RunningDownload)],
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
-    // Abort tasks whose configured inactivity timeout has elapsed. The
-    // timestamp comes from the protocol data path, not from disk progress;
-    // payload may be buffered, verified, or waiting for a writer.
+    // Abort tasks whose per-command timeout has elapsed.
+    // Mirrors C++ per-command timeout (though C++ handles this differently
+    // via the Command::STATUS_ACTIVE mechanism).
     let now = Instant::now();
     let mut timed_out = Vec::new();
-    for (gid, rd) in running_downloads.iter_mut() {
-        let last_network_activity = ctx
-            .group_man
-            .find_group(*gid)
-            .map(|group| group.recover().last_network_activity());
-        if let Some(last_network_activity) = last_network_activity
-            && last_network_activity > rd.last_activity
-        {
-            rd.last_activity = last_network_activity;
-        }
-
+    for (gid, rd) in running_downloads.iter() {
         if let Some(timeout) = rd.timeout
-            && now.duration_since(rd.last_activity) >= timeout
+            && now.duration_since(rd.started) >= timeout
         {
-            // The group is now responsible for graceful shutdown. Clear the
-            // deadline so a slow cleanup cannot turn the event loop into a
-            // tight retry loop while the task winds down.
-            rd.timeout = None;
             timed_out.push(*gid);
         }
     }
@@ -1129,9 +877,7 @@ async fn run_deadline_maintenance(
                     let protocol = parsed.scheme().to_ascii_lowercase();
                     ctx.server_stat_man
                         .mark_failure_with_protocol(host, &protocol, 408);
-                    if let Some(context) = request_context
-                        && group.recover().options().async_dns
-                    {
+                    if let Some(context) = request_context {
                         let mut dns = ctx.dns_cache.lock().await;
                         dns.mark_bad_context(&context);
                         if !dns.has_good_address(&context.endpoint) {
@@ -1154,51 +900,41 @@ async fn run_deadline_maintenance(
         }
     }
 
-    // ── Unified persistence deadlines ───────────────────────────────────
-    let has_pending_downloads = !ctx.group_man.download_finished() || !running_downloads.is_empty();
+    // ── Session auto-save ────────────────────────────────────────────────
+    // While downloads are running, progress changes every tick; keep the
+    // session dirty so `save_if_dirty` (gated by `save-session-interval`)
+    // actually persists the latest progress.
+    if !running_downloads.is_empty() {
+        mark_session_dirty(ctx);
+    }
     if let Some(ref auto_save) = ctx.auto_save {
         let mut save = auto_save.lock().await;
-        save.run_due(has_pending_downloads).await;
+        save.save_if_dirty().await;
     }
 
-    if let (Some(path), Some(interval), Some(deadline)) = (
-        ctx.server_stat_save_path.as_ref(),
-        ctx.server_stat_save_interval,
-        ctx.server_stat_next_save,
-    ) && now >= deadline
+    // ── Prune excess stopped results ─────────────────────────────────────
     {
-        ctx.server_stat_next_save = Some(now + interval);
-        match ctx.server_stat_man.save_to_file_async(path).await {
-            Ok(count) => debug!(count, path = %path.display(), "Saved server statistics"),
-            Err(error) => warn!(%error, path = %path.display(), "Failed to save server statistics"),
+        let man = &ctx.group_man;
+        let pruned = man.prune_stopped_results(MAX_STOPPED_RESULTS);
+        if pruned > 0 {
+            debug!("Pruned {} excess stopped results", pruned);
         }
     }
-}
 
-/// Perform cleanup that is caused by a completed download event.
-///
-/// These stores are bounded or event-owned, so scanning them on every idle
-/// engine wake is unnecessary. A demotion is the natural point to prune old
-/// results, stale server statistics, and idle FTP connections.
-async fn run_event_cleanup(ctx: &EngineLoopContext) {
-    let pruned = ctx.group_man.prune_stopped_results(MAX_STOPPED_RESULTS);
-    if pruned > 0 {
-        debug!("Pruned {} excess stopped results", pruned);
-    }
-
+    // ── Server statistics housekeeping ────────────────────────────────────
     // aria2_original removes statistics older than the configured freshness
     // window from the long-lived ServerStatMan.
     let stale_stats = ctx
-        .server_stat_max_age
-        .map(|max_age| ctx.server_stat_man.remove_stale(max_age))
-        .unwrap_or(0);
+        .server_stat_man
+        .remove_stale(Duration::from_secs(24 * 60 * 60));
     if stale_stats > 0 {
         debug!("Removed {} stale server statistics", stale_stats);
     }
 
+    // ── Socket pool eviction ─────────────────────────────────────────────
     // reqwest owns the HTTP/TLS pool and enforces its idle timeout internally.
-    // The FTP pool is engine-owned, so clean it when a download event gives
-    // the engine a useful point to do the bounded scan.
+    // The FTP pool is engine-owned, so it must be explicitly swept here to
+    // mirror C++ `evictSocketPool()` and release stale FTP sessions.
     let evicted = ctx.ftp_pool.cleanup_stale_count().await;
     if evicted > 0 {
         debug!("Evicted {} stale FTP connections", evicted);
@@ -1270,27 +1006,10 @@ async fn on_end_of_run(
         );
     }
 
-    #[cfg(feature = "bittorrent")]
-    {
-        ctx.lpd_manager.stop_background_announce();
-        ctx.lpd_manager.stop_receive_loop().await;
-    }
-
-    // Final control-file and session saves.
+    // Final session save.
     if let Some(ref auto_save) = ctx.auto_save {
         let mut save = auto_save.lock().await;
         save.force_save().await;
-    }
-
-    if let Some(path) = &ctx.server_stat_save_path {
-        match ctx.server_stat_man.save_to_file_async(path).await {
-            Ok(count) => {
-                debug!(count, path = %path.display(), "Saved server statistics on shutdown")
-            }
-            Err(error) => {
-                warn!(%error, path = %path.display(), "Failed to save server statistics on shutdown")
-            }
-        }
     }
 }
 
@@ -1307,15 +1026,10 @@ mod tests {
             ftp_pool: Arc::new(FtpConnectionPool::new(1)),
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             auto_save: None,
-            auto_save_dirty_signal: None,
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive,
             server_stat_man: ServerStatMan::shared().clone(),
-            server_stat_max_age: Some(Duration::from_secs(24 * 60 * 60)),
-            server_stat_save_path: None,
-            server_stat_save_interval: None,
-            server_stat_next_save: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: Arc::new(
@@ -1327,8 +1041,6 @@ mod tests {
             )),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
-            #[cfg(feature = "bittorrent")]
-            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
         }
     }
 
@@ -1374,37 +1086,6 @@ mod tests {
         .unwrap();
 
         run_until_exit(test_ctx(true), rx, sd_rx, Duration::from_secs(5)).await;
-    }
-
-    #[tokio::test]
-    async fn force_halt_removes_reserved_groups_before_exit() {
-        let ctx = test_ctx(true);
-        let gid = ctx
-            .group_man
-            .add_group(
-                vec!["http://example.com/queued-before-force-halt.bin".to_string()],
-                DownloadOptions::default(),
-            )
-            .unwrap();
-        let group_man = Arc::clone(&ctx.group_man);
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
-        tx.send(EngineCommand::ForceHaltAll {
-            reason: HaltReason::ShutdownSignal,
-        })
-        .unwrap();
-
-        run_until_exit(ctx, rx, sd_rx, Duration::from_secs(5)).await;
-
-        assert_eq!(group_man.count(), 0, "force halt must remove queued groups");
-        assert!(group_man.find_group(gid).is_none());
-        assert_eq!(group_man.stopped_results_len(), 1);
-        let result = group_man
-            .find_stopped_result(&gid.to_hex_string())
-            .expect("queued force-halted group should have a stopped result");
-        assert_eq!(result.status, DownloadStatus::Removed);
-        assert_eq!(result.code, DownloadResultCode::Removed);
     }
 
     #[tokio::test]
@@ -1482,74 +1163,6 @@ mod tests {
         run_until_exit(test_ctx(false), rx, sd_rx, Duration::from_secs(5)).await;
     }
 
-    #[tokio::test]
-    async fn server_stat_interval_persists_through_engine_maintenance() {
-        let dir = tempfile::tempdir().expect("server-stat output directory");
-        let path = dir.path().join("server-stat.json");
-        let mut ctx = test_ctx(false);
-        ctx.server_stat_man = Arc::new(ServerStatMan::new());
-        ctx.server_stat_man
-            .update_with_protocol("interval.example", "http", 1024, false);
-        ctx.server_stat_save_path = Some(path.clone());
-        ctx.server_stat_save_interval = Some(Duration::from_secs(60));
-        ctx.server_stat_next_save = Some(Instant::now() - Duration::from_secs(1));
-
-        run_deadline_maintenance(&mut ctx, &mut []).await;
-
-        let content = tokio::fs::read_to_string(&path)
-            .await
-            .expect("server-stat interval must write its configured output");
-        assert!(content.contains("interval.example"));
-        assert!(
-            ctx.server_stat_next_save
-                .is_some_and(|deadline| deadline > Instant::now()),
-            "server-stat interval must schedule its next save"
-        );
-    }
-
-    #[tokio::test]
-    async fn server_stat_timeout_controls_stale_cleanup() {
-        let dir = tempfile::tempdir().expect("server-stat input directory");
-        let path = dir.path().join("stale-server-stat.json");
-        let file = crate::selector::server_stat_man::ServerStatFile {
-            version: "1.0".to_string(),
-            saved_at: 1,
-            servers: vec![crate::selector::server_stat::ServerStatSnapshot {
-                host: "stale.example".to_string(),
-                protocol: "http".to_string(),
-                download_speed: 1,
-                single_connection_avg_speed: 1,
-                multi_connection_avg_speed: 0,
-                last_updated: 1,
-                status: 0,
-                counter: 1,
-                last_error_time: None,
-                last_error_code: 0,
-                consecutive_failures: 0,
-            }],
-        };
-        tokio::fs::write(&path, serde_json::to_vec(&file).unwrap())
-            .await
-            .expect("write stale server-stat fixture");
-
-        let mut ctx = test_ctx(false);
-        ctx.server_stat_man = Arc::new(ServerStatMan::new());
-        ctx.server_stat_man
-            .load_from_file_async(&path)
-            .await
-            .expect("load stale server-stat fixture");
-        ctx.server_stat_max_age = Some(Duration::from_secs(1));
-        assert_eq!(ctx.server_stat_man.count(), 1);
-
-        run_event_cleanup(&ctx).await;
-
-        assert_eq!(
-            ctx.server_stat_man.count(),
-            0,
-            "configured server-stat timeout must remove stale entries"
-        );
-    }
-
     /// Regression for the periodic auto-save being dead: `mark_session_dirty`
     /// had no callers, so the dirty flag stayed `false` and `save_if_dirty`
     /// never wrote the session file. This test drives a state-changing
@@ -1558,19 +1171,18 @@ mod tests {
     #[tokio::test]
     async fn state_changing_command_marks_dirty_and_persists() {
         use crate::request::request_group::{GroupId, RequestGroup};
-        use crate::session::auto_save_coordinator::AutoSaveCoordinator;
+        use crate::session::auto_save_session::AutoSaveSession;
 
         let man = Arc::new(RequestGroupMan::new());
         let dir = std::env::temp_dir();
         let path = dir.join(format!("test_engine_autosave_{}.sess", std::process::id()));
         let _ = tokio::fs::remove_file(&path).await;
 
-        let auto_save = Arc::new(tokio::sync::Mutex::new(AutoSaveCoordinator::new(
+        let auto_save = Arc::new(tokio::sync::Mutex::new(AutoSaveSession::new(
+            path.clone(),
+            Duration::from_millis(0),
             man.clone(),
-            Some((path.clone(), Duration::from_millis(0))),
-            None,
         )));
-        let auto_save_dirty_signal = auto_save.lock().await.dirty_signal();
 
         // The auto-save must share the SAME group manager that the engine
         // commands mutate, otherwise it serializes a stale/empty snapshot.
@@ -1579,15 +1191,10 @@ mod tests {
             ftp_pool: Arc::new(FtpConnectionPool::new(1)),
             dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
             auto_save: Some(auto_save.clone()),
-            auto_save_dirty_signal: Some(auto_save_dirty_signal),
             event_hooks: Arc::new(DownloadEventHooks::new()),
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive: false,
             server_stat_man: Arc::new(ServerStatMan::new()),
-            server_stat_max_age: Some(Duration::from_secs(24 * 60 * 60)),
-            server_stat_save_path: None,
-            server_stat_save_interval: None,
-            server_stat_next_save: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: Arc::new(
@@ -1599,8 +1206,6 @@ mod tests {
             )),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
-            #[cfg(feature = "bittorrent")]
-            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
         };
 
         // Send an AddDownload command through the engine-command channel.
@@ -1615,10 +1220,6 @@ mod tests {
 
         let mut halt_requested = false;
         let mut force_halt_requested = false;
-        // Hold the coordinator lock while the command mutates state. The
-        // engine must retain the dirty notification instead of dropping it
-        // because the autosave writer is busy.
-        let auto_save_guard = auto_save.lock().await;
         process_engine_commands(
             &mut ctx,
             &mut rx,
@@ -1627,11 +1228,10 @@ mod tests {
             &mut force_halt_requested,
         )
         .await;
-        drop(auto_save_guard);
 
         // The AddDownload command must have flipped the dirty flag.
         assert!(
-            auto_save.lock().await.is_session_dirty(),
+            auto_save.lock().await.is_dirty(),
             "AddDownload should mark the session dirty"
         );
 
@@ -1788,114 +1388,6 @@ mod tests {
             status,
             DownloadStatus::Paused,
             "a clean command completion must not make a paused group terminal"
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_network_task_marks_only_the_observed_dns_peer_bad() {
-        let ctx = test_ctx(false);
-        let gid = ctx
-            .group_man
-            .add_group(
-                vec!["http://localhost/dns-peer.bin".to_string()],
-                DownloadOptions::default(),
-            )
-            .unwrap();
-        let group = ctx.group_man.find_group(gid).unwrap();
-        group.recover().inc_commands();
-
-        let cached = ctx
-            .dns_cache
-            .lock()
-            .await
-            .resolve("localhost", 80)
-            .await
-            .expect("localhost should resolve for the DNS cache fixture");
-        let observed = cached[0];
-        group
-            .recover()
-            .set_connection_context(ConnectionContext::new("localhost", 80, observed));
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send((
-            gid,
-            1,
-            TaskResult::FailedWithContext {
-                error: Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "connection reset".into(),
-                }),
-                connection_context: ConnectionContext::new("localhost", 80, observed),
-            },
-        ))
-        .unwrap();
-
-        process_task_completions(&ctx, &mut rx, &mut Vec::new(), &mut HashSet::new()).await;
-
-        let remaining = ctx
-            .dns_cache
-            .lock()
-            .await
-            .resolve_no_network("localhost", 80);
-        if let Ok(addresses) = remaining {
-            assert!(
-                !addresses.contains(&observed),
-                "the peer that actually failed must not remain a good candidate"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn async_dns_disabled_does_not_modify_shared_dns_cache_on_failure() {
-        let ctx = test_ctx(false);
-        let gid = ctx
-            .group_man
-            .add_group(
-                vec!["http://localhost/dns-peer-disabled.bin".to_string()],
-                DownloadOptions {
-                    async_dns: false,
-                    ..DownloadOptions::default()
-                },
-            )
-            .unwrap();
-        let group = ctx.group_man.find_group(gid).unwrap();
-        group.recover().inc_commands();
-
-        let cached = ctx
-            .dns_cache
-            .lock()
-            .await
-            .resolve("localhost", 80)
-            .await
-            .expect("localhost should resolve for the DNS cache fixture");
-        let observed = cached[0];
-        group
-            .recover()
-            .set_connection_context(ConnectionContext::new("localhost", 80, observed));
-
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send((
-            gid,
-            1,
-            TaskResult::FailedWithContext {
-                error: Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "connection reset".into(),
-                }),
-                connection_context: ConnectionContext::new("localhost", 80, observed),
-            },
-        ))
-        .unwrap();
-
-        process_task_completions(&ctx, &mut rx, &mut Vec::new(), &mut HashSet::new()).await;
-
-        let remaining = ctx
-            .dns_cache
-            .lock()
-            .await
-            .resolve_no_network("localhost", 80)
-            .expect("async-dns=false must leave the cached address available");
-        assert!(
-            remaining.contains(&observed),
-            "async-dns=false must not mark a failed connection bad in the shared cache"
         );
     }
 
@@ -2105,12 +1597,6 @@ mod tests {
             })),
             DownloadResultCode::ResourceNotFound
         );
-        assert_eq!(
-            map_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
-                code: 500
-            })),
-            DownloadResultCode::HttpProtocolError
-        );
         for code in [502, 503, 504] {
             assert_eq!(
                 map_error_code(&Aria2Error::Recoverable(RecoverableError::ServerError {
@@ -2265,7 +1751,7 @@ mod tests {
                 _handle: handle,
                 shutdown: Some(CancellationToken::new()),
                 generation: 1,
-                last_activity: Instant::now(),
+                started: Instant::now(),
                 timeout: None,
             },
         )];

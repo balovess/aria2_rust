@@ -4,46 +4,11 @@
 //! (`num_commands`) and control flags (`DownloadControlFlags`), which
 //! are checked on every iteration of the download hot path.
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl super::RequestGroup {
-    pub(crate) fn attach_activity_signal(&mut self, signal: Arc<super::ActivitySignal>) {
-        let _ = self.activity_signal.set(Arc::clone(&signal));
-        self.progress.attach_activity_signal(signal);
-    }
-
-    /// Return the lifecycle notification handle used by async download tasks.
-    pub fn lifecycle_notifier(&self) -> std::sync::Arc<tokio::sync::Notify> {
-        std::sync::Arc::clone(&self.lifecycle_notify)
-    }
-
-    /// Wake async tasks waiting for a lifecycle transition.
-    pub(crate) fn notify_lifecycle_changed(&self) {
-        self.lifecycle_notify.notify_waiters();
-        self.notify_activity_changed();
-    }
-
-    pub(crate) fn notify_activity_changed(&self) {
-        if let Some(signal) = self.activity_signal.get() {
-            signal.notify();
-        }
-    }
-
-    /// Request a graceful pause and wake async lifecycle waiters.
-    pub fn request_pause(&self) {
-        self.control_flags.request_pause();
-        self.notify_lifecycle_changed();
-    }
-
-    /// Clear a pending pause and wake async lifecycle waiters.
-    pub fn clear_pause(&self) {
-        self.control_flags.clear_pause();
-        self.notify_lifecycle_changed();
-    }
-
     // ── Command Counter (lifecycle tracking) ────────────────────────────
 
     /// Increment the in-flight command counter (before spawning a task).
@@ -104,7 +69,6 @@ impl super::RequestGroup {
     /// Request a restart (stop current download and re-queue).
     pub fn request_restart(&self) {
         self.control_flags.request_restart();
-        self.notify_lifecycle_changed();
         tracing::info!(gid = self.gid.value(), "Restart requested");
     }
 

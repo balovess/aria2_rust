@@ -149,6 +149,7 @@ impl DiskWriter for ByteArrayDiskWriter {
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {
-        Ok(std::mem::take(&mut self.buffer))
+        let buffer = self.buffer.clone();
+        Ok(buffer)
     }
 }

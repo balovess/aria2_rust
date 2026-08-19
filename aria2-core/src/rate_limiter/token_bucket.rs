@@ -2,7 +2,6 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use crate::constants;
@@ -47,8 +46,6 @@ pub struct TokenBucket {
     /// Anchor `Instant` created at construction; used to compute elapsed nanoseconds.
     /// Never mutated — `Instant` is `Send + Sync`.
     anchor: Instant,
-    /// Broadcasts dynamic rate changes to tasks currently waiting for tokens.
-    rate_changed: watch::Sender<u64>,
 }
 
 impl fmt::Debug for TokenBucket {
@@ -73,7 +70,6 @@ impl TokenBucket {
     pub fn new(rate_bytes_per_sec: u64, burst_bytes: Option<u64>) -> Self {
         let burst = burst_bytes.unwrap_or(constants::DEFAULT_BURST_BYTES as u64);
         let anchor = Instant::now();
-        let (rate_changed, _) = watch::channel(0u64);
         Self {
             tokens_milli: AtomicU64::new(burst.saturating_mul(1000)),
             capacity_milli: burst.saturating_mul(1000),
@@ -81,7 +77,6 @@ impl TokenBucket {
             last_refill_elapsed_ns: AtomicU64::new(0),
             unlimited: AtomicBool::new(false),
             anchor,
-            rate_changed,
         }
     }
 
@@ -89,7 +84,6 @@ impl TokenBucket {
     /// succeed instantly without consuming any real tokens.
     pub fn unlimited() -> Self {
         let anchor = Instant::now();
-        let (rate_changed, _) = watch::channel(0u64);
         // Use a large but safe value to avoid overflow on arithmetic.
         let huge = u64::MAX / 4;
         Self {
@@ -99,7 +93,6 @@ impl TokenBucket {
             last_refill_elapsed_ns: AtomicU64::new(0),
             unlimited: AtomicBool::new(true),
             anchor,
-            rate_changed,
         }
     }
 
@@ -212,14 +205,6 @@ impl TokenBucket {
         let needed_milli = bytes.saturating_mul(1000);
 
         loop {
-            if self.unlimited.load(Ordering::Relaxed) {
-                return;
-            }
-
-            // Subscribe before inspecting the bucket so a concurrent rate
-            // change cannot be missed between the availability check and the
-            // wait registration.
-            let mut rate_changes = self.rate_changed.subscribe();
             self.refill();
             let current = self.tokens_milli.load(Ordering::Relaxed);
             if current >= needed_milli {
@@ -262,14 +247,7 @@ impl TokenBucket {
                 wait_ns = wait_ns,
                 "throttling: sleeping for token refill"
             );
-            tokio::select! {
-                _ = tokio::time::sleep(wait) => {}
-                changed = rate_changes.changed() => {
-                    if changed.is_ok() {
-                        continue;
-                    }
-                }
-            }
+            tokio::time::sleep(wait).await;
 
             // After sleeping, force-acquire: refill, then deduct (clamped to 0).
             // This matches the original behaviour where tokens can go negative
@@ -321,15 +299,11 @@ impl TokenBucket {
     pub fn set_rate(&self, rate_bytes_per_sec: u64) {
         self.rate_milli_per_sec
             .store(rate_bytes_per_sec.saturating_mul(1000), Ordering::Relaxed);
-        self.rate_changed
-            .send_modify(|version| *version = version.wrapping_add(1));
     }
 
     /// Toggle the unlimited flag. When set to true, acquire/try_acquire always
     /// succeed instantly without consuming tokens.
     pub fn set_unlimited(&self, unlimited: bool) {
         self.unlimited.store(unlimited, Ordering::Relaxed);
-        self.rate_changed
-            .send_modify(|version| *version = version.wrapping_add(1));
     }
 }

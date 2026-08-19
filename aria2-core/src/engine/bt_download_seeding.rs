@@ -5,7 +5,7 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
 use crate::engine::bt_upload_session::BtSeedingConfig;
-use crate::error::{Aria2Error, Result};
+use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
@@ -69,28 +69,7 @@ impl BtDownloadCommand {
             peer_id,
             self.incoming_peers.take(),
         );
-        let lifecycle_notifier = self.group.recover().lifecycle_notifier();
-        let seeding_result = loop {
-            if let Some(error) = self.seeding_lifecycle_error() {
-                manager.cancel();
-                if let Err(cleanup_error) = manager.run_seeding_loop().await {
-                    tracing::warn!(%cleanup_error, "BitTorrent seeding cleanup failed after lifecycle cancellation");
-                }
-                break Err(error);
-            }
-
-            let lifecycle_changed = lifecycle_notifier.notified();
-            tokio::pin!(lifecycle_changed);
-            tokio::select! {
-                result = manager.run_seeding_loop() => {
-                    if let Some(error) = self.seeding_lifecycle_error() {
-                        break Err(error);
-                    }
-                    break result;
-                }
-                _ = &mut lifecycle_changed => {}
-            }
-        };
+        let seeding_result = manager.run_seeding_loop().await;
         self.tracker_announcer = manager.take_announcer();
         seeding_result?;
 
@@ -104,20 +83,5 @@ impl BtDownloadCommand {
             manager.seeding_duration()
         );
         Ok(())
-    }
-
-    fn seeding_lifecycle_error(&self) -> Option<Aria2Error> {
-        let group = self.group.recover();
-        if group.is_removed() {
-            Some(Aria2Error::DownloadFailed(
-                "Download cancelled by user".into(),
-            ))
-        } else if group.is_paused_flag() {
-            Some(Aria2Error::DownloadFailed("Download paused".into()))
-        } else if group.is_force_halt_requested() || group.is_halt_requested() {
-            Some(Aria2Error::DownloadFailed("Download halted".into()))
-        } else {
-            None
-        }
     }
 }

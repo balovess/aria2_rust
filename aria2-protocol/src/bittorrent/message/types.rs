@@ -100,9 +100,7 @@ pub enum BtMessage {
     Piece {
         index: u32,
         begin: u32,
-        /// Payload owned by the frame buffer. Parsed network messages use a
-        /// zero-copy slice of that buffer.
-        data: Bytes,
+        data: Vec<u8>,
     },
     Cancel {
         request: PieceBlockRequest,
@@ -181,4 +179,3 @@ impl BtMessage {
         }
     }
 }
-use bytes::Bytes;

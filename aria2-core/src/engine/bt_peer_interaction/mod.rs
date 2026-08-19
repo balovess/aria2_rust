@@ -25,25 +25,21 @@ pub mod types;
 pub use interactive::BtPeerInteractive;
 pub use piece_provider::PieceProvider;
 pub use types::{
-    BtPeerConnectionOptions, BtPeerCryptoPolicy, CheckHaveResult, ChokingDecision,
-    DEFAULT_ALLOWED_FAST_SET_SIZE, DEFAULT_KEEP_ALIVE_INTERVAL_SECS,
-    DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate, FLOODING_CHECK_INTERVAL_SECS,
-    INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision, MAX_UNCHOKE_WAIT_ATTEMPTS,
-    MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS, PEER_MESSAGE_TIMEOUT_SECS,
-    PER_SEC_INTERVAL_SECS, PEX_INTERVAL_SECS, PeerConnectionResult, PeerConnectionState,
-    PeerIdCheckResult, PostHandshakeActions, UB_MAX_OUTSTANDING_REQUEST,
+    BtPeerCryptoPolicy, CheckHaveResult, ChokingDecision, DEFAULT_ALLOWED_FAST_SET_SIZE,
+    DEFAULT_KEEP_ALIVE_INTERVAL_SECS, DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate,
+    FLOODING_CHECK_INTERVAL_SECS, INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision,
+    MAX_UNCHOKE_WAIT_ATTEMPTS, MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS,
+    PEER_MESSAGE_TIMEOUT_SECS, PER_SEC_INTERVAL_SECS, PEX_INTERVAL_SECS, PeerConnectionResult,
+    PeerConnectionState, PeerIdCheckResult, PostHandshakeActions, UB_MAX_OUTSTANDING_REQUEST,
 };
 
 // ======================================================================
 // BtPeerInteraction — legacy static helper (preserved for backward compat)
 // ======================================================================
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use aria2_protocol::bittorrent::message::types::BtMessage;
-use futures::stream::{self, StreamExt};
-use tokio::sync::Mutex;
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -54,8 +50,6 @@ use tracing::{debug, error, info, warn};
 /// Handles the lifecycle of peer connections from initial connection
 /// through the handshake phase until they're ready for data transfer.
 pub struct BtPeerInteraction;
-
-const HAVE_BROADCAST_CONCURRENCY: usize = 64;
 
 impl BtPeerInteraction {
     /// Connect to multiple peers with automatic fallback strategies
@@ -84,8 +78,7 @@ impl BtPeerInteraction {
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
-        connection_options: &BtPeerConnectionOptions,
-        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        crypto_policy: BtPeerCryptoPolicy,
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
@@ -98,11 +91,10 @@ impl BtPeerInteraction {
             match Self::connect_peer_ready(
                 addr,
                 info_hash_raw,
-                connection_options,
+                crypto_policy,
                 num_pieces,
                 piece_length,
                 total_length,
-                utp_socket.clone(),
             )
             .await
             {
@@ -135,18 +127,12 @@ impl BtPeerInteraction {
     pub async fn connect_peer_ready(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
-        connection_options: &BtPeerConnectionOptions,
+        crypto_policy: BtPeerCryptoPolicy,
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
-        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     ) -> Result<BtPeerConn> {
-        let mut conn =
-            Self::connect_single_peer(addr, info_hash_raw, connection_options, utp_socket).await?;
-        conn.set_timeouts(
-            connection_options.keep_alive_interval,
-            connection_options.peer_timeout,
-        );
+        let mut conn = Self::connect_single_peer(addr, info_hash_raw, crypto_policy).await?;
         conn.sync_peer_identity();
         conn.allocate_session_resource(piece_length, total_length);
         info!(
@@ -157,7 +143,7 @@ impl BtPeerInteraction {
             piece_length,
             total_length
         );
-        Self::initialize_connection(&mut conn, num_pieces, connection_options).await?;
+        Self::initialize_connection(&mut conn, num_pieces).await?;
         if let Err(error) = Self::wait_for_unchoke(&mut conn, addr).await {
             warn!("[BT] No unchoke from peer {}: {}", addr.ip, error);
         }
@@ -168,74 +154,31 @@ impl BtPeerInteraction {
     async fn connect_single_peer(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
-        connection_options: &BtPeerConnectionOptions,
-        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        crypto_policy: BtPeerCryptoPolicy,
     ) -> Result<BtPeerConn> {
-        if connection_options.enable_utp && !connection_options.crypto.require_mse {
-            let endpoint = format!("{}:{}", addr.ip, addr.port)
-                .parse::<std::net::SocketAddr>()
-                .map_err(|error| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "Invalid peer address '{}:{}': {error}",
-                        addr.ip, addr.port
-                    )))
-                })?;
-            match BtPeerConn::connect_utp_with_options(
-                endpoint,
-                info_hash_raw,
-                &connection_options.local_peer_id,
-                connection_options.connection_timeout,
-                connection_options.utp_listen_port,
-                utp_socket,
-            )
-            .await
-            {
-                Ok(conn) => {
-                    debug!("[BT] Connected to peer {}:{} over uTP", addr.ip, addr.port);
-                    return Ok(conn);
-                }
-                Err(error) => {
-                    debug!(
-                        "[BT] uTP connection to {}:{} failed, trying TCP: {}",
-                        addr.ip, addr.port, error
-                    );
-                }
-            }
-        }
-
-        if connection_options.crypto.require_mse {
+        if crypto_policy.require_mse {
             // Try MSE encrypted connection
-            BtPeerConn::connect_mse_with_options(
+            BtPeerConn::connect_mse(
                 addr,
                 info_hash_raw,
-                connection_options.crypto.force_encryption,
-                connection_options.crypto.prefer_encryption,
-                &connection_options.local_peer_id,
-                connection_options.connection_timeout,
+                crypto_policy.force_encryption,
+                crypto_policy.prefer_encryption,
             )
             .await
         } else {
             // Try MSE first, fall back to plain
-            match BtPeerConn::connect_mse_with_options(
+            match BtPeerConn::connect_mse(
                 addr,
                 info_hash_raw,
-                connection_options.crypto.force_encryption,
-                connection_options.crypto.prefer_encryption,
-                &connection_options.local_peer_id,
-                connection_options.connection_timeout,
+                crypto_policy.force_encryption,
+                crypto_policy.prefer_encryption,
             )
             .await
             {
                 Ok(conn) => Ok(conn),
                 Err(_) => {
                     debug!("[BT] MSE failed, trying plain connection");
-                    BtPeerConn::connect_plain_with_options(
-                        addr,
-                        info_hash_raw,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                    )
-                    .await
+                    BtPeerConn::connect_plain(addr, info_hash_raw).await
                 }
             }
         }
@@ -247,19 +190,10 @@ impl BtPeerInteraction {
     /// - Unchoke (we allow them to request from us)
     /// - Interested (we want to download from them)
     /// - Bitfield (our current piece possession status)
-    async fn initialize_connection(
-        conn: &mut BtPeerConn,
-        num_pieces: u32,
-        connection_options: &BtPeerConnectionOptions,
-    ) -> Result<()> {
+    async fn initialize_connection(conn: &mut BtPeerConn, num_pieces: u32) -> Result<()> {
         // Send initial messages
         conn.send_unchoke().await?;
         conn.send_interested().await?;
-
-        // BEP 10 is part of the real connection setup. The peer-agent option
-        // therefore travels on the wire before the piece loop starts.
-        conn.send_extension_handshake(&connection_options.peer_agent)
-            .await?;
 
         // Send empty bitfield (we have nothing yet)
         let bf_len = (num_pieces as usize).div_ceil(8);
@@ -333,17 +267,11 @@ impl BtPeerInteraction {
     /// * `connections` - Mutable slice of active peer connections
     /// * `piece_index` - Index of the completed piece
     pub async fn broadcast_have(connections: &mut [BtPeerConn], piece_index: u32) {
-        let frame = aria2_protocol::bittorrent::message::serializer::serialize_have(piece_index);
-        stream::iter(connections.iter_mut())
-            .for_each_concurrent(HAVE_BROADCAST_CONCURRENCY, |conn| {
-                let frame = &frame;
-                async move {
-                    if let Err(e) = conn.send_have_frame(frame).await {
-                        warn!("[BT] Failed to send HAVE to peer: {}", e);
-                    }
-                }
-            })
-            .await;
+        for conn in connections.iter_mut() {
+            if let Err(e) = conn.send_have(piece_index).await {
+                warn!("[BT] Failed to send HAVE to peer: {}", e);
+            }
+        }
     }
 
     /// Return the stable key used by the peer bitfield tracker.

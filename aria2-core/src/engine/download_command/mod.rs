@@ -266,6 +266,9 @@ impl DownloadCommand {
                     .connect_timeout(Duration::from_secs(
                         constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
                     ))
+                    .timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
+                    ))
                     .gzip(options.http_accept_gzip)
                     .user_agent(constants::USER_AGENT)
                     .redirect(reqwest::redirect::Policy::none())
@@ -280,6 +283,9 @@ impl DownloadCommand {
                 let builder = reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(
                         constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                    ))
+                    .timeout(Duration::from_secs(
+                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
                     ))
                     .gzip(options.http_accept_gzip)
                     .user_agent(constants::USER_AGENT)
@@ -304,6 +310,9 @@ impl DownloadCommand {
             let mut builder = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(
                     constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                ))
+                .timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
                 ))
                 .gzip(options.http_accept_gzip)
                 .user_agent(constants::USER_AGENT)
@@ -667,9 +676,6 @@ impl DownloadCommand {
         supports_range: bool,
         split: u16,
     ) -> bool {
-        if self.group.recover().options().force_sequential {
-            return false;
-        }
         if !supports_range {
             return false;
         }

@@ -142,6 +142,15 @@ impl RoutingTable {
     /// Uses tree-based traversal to efficiently locate the closest nodes.
     pub fn find_closest(&self, target: &[u8; 20], count: usize) -> Vec<DhtNode> {
         let mut nodes = find_closest_k_nodes(&self.root, target);
+
+        // Sort by distance and take the requested count.
+        let target_copy = *target;
+        nodes.sort_by(|a, b| {
+            let da = a.distance_to(&target_copy);
+            let db = b.distance_to(&target_copy);
+            da.cmp(&db)
+        });
+
         nodes.truncate(count);
         nodes
     }

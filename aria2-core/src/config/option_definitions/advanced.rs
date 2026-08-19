@@ -52,8 +52,8 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             short_name: Some('j'),
             default_value: OptionValue::Int(5),
-            min: Some(0),
-            description: "Max concurrent downloads (0=unlimited)".into(),
+            min: Some(1),
+            description: "Max concurrent downloads".into(),
             category: OptionCategory::Advanced,
             ..Default::default()
         });
@@ -135,6 +135,13 @@ impl crate::config::OptionRegistry {
 
         // --- Server Statistics Persistence ---
         self.register(OptionDef {
+            name: "server-stat-file".into(),
+            opt_type: OptionType::Path,
+            description: "Path to save/load server performance statistics".into(),
+            category: OptionCategory::Advanced,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "save-server-stat-interval".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(0),
@@ -149,21 +156,19 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "socket-recv-buffer-size".into(),
             opt_type: OptionType::Size,
-            default_value: OptionValue::None,
+            default_value: OptionValue::Int(0),
             description: "Socket receive buffer size (0=OS default)".into(),
             category: OptionCategory::Advanced,
-            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "dscp".into(),
             opt_type: OptionType::Integer,
-            default_value: OptionValue::None,
+            default_value: OptionValue::Int(0),
             min: Some(0),
             max: Some(63),
             description: "DSCP (DiffServ) IP packet marking value (0-63)".into(),
             category: OptionCategory::Advanced,
-            supported: false,
             ..Default::default()
         });
 

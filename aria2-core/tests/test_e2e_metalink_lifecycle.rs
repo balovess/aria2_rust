@@ -6,18 +6,22 @@ mod e2e_helpers;
 mod fixtures;
 
 use aria2_core::engine::command::Command;
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::download_engine::DownloadEngine;
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
 #[cfg(feature = "bittorrent")]
 use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
 use aria2_core::filesystem::control_file::ControlFile;
-use aria2_core::request::request_group::{
-    DownloadOptions, DownloadStatus, FollowMode, GroupId, RequestGroup,
-};
+#[cfg(feature = "bittorrent")]
+use aria2_core::request::request_group::DownloadStatus;
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
+#[cfg(feature = "bittorrent")]
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use bytes::Bytes;
+#[cfg(feature = "bittorrent")]
 use e2e_helpers::mock_http_server::full_body;
 use e2e_helpers::mock_http_server::{Incoming, MockHttpServer, Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
@@ -341,90 +345,5 @@ async fn metalink_stream_remove_preserves_partial_output_and_checkpoint() {
     assert!(
         control.exists(),
         "remove must preserve the Rust checkpoint for explicit recovery"
-    );
-}
-
-#[tokio::test]
-async fn metalink_follow_mem_engine_creates_child_without_source_file() {
-    let server = MockHttpServer::start().await.unwrap();
-    let data = payload(64 * 1024);
-    let payload_url = format!("{}/payload.bin", server.base_url());
-    let document = metalink("payload.bin", &payload_url, &data);
-    let document_for_route = document.clone();
-    server.on_get("/index.meta4", move |_request: &Request<Incoming>| {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/metalink4+xml")
-            .header("Content-Length", document_for_route.len())
-            .body(full_body(document_for_route.clone()))
-            .unwrap()
-    });
-    let payload_for_route = data.clone();
-    server.on_get("/payload.bin", move |_request: &Request<Incoming>| {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header("Content-Type", "application/octet-stream")
-            .header("Content-Length", payload_for_route.len())
-            .body(full_body(payload_for_route.clone()))
-            .unwrap()
-    });
-
-    let directory = tempfile::tempdir().unwrap();
-    let source_url = format!("{}/index.meta4", server.base_url());
-    let options = DownloadOptions {
-        allow_overwrite: true,
-        dir: Some(directory.path().to_string_lossy().into_owned()),
-        follow_metalink: Some(FollowMode::Memory),
-        use_head: false,
-        ..DownloadOptions::default()
-    };
-    let gid = GroupId::new(730);
-    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-        gid,
-        vec![source_url],
-        options,
-    )));
-    let group_man = Arc::new(RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
-    engine.set_request_group_man(Arc::clone(&group_man));
-    let command_tx = engine.engine_command_sender();
-    command_tx
-        .send(EngineCommand::AddDownload {
-            group: Arc::clone(&group),
-        })
-        .unwrap();
-
-    let engine_task = tokio::spawn(engine.run());
-    tokio::time::timeout(Duration::from_secs(30), engine_task)
-        .await
-        .expect("follow-metalink=mem engine lifecycle timed out")
-        .expect("follow-metalink=mem engine task panicked")
-        .expect("follow-metalink=mem engine returned an error");
-
-    assert_eq!(group.recover().status(), DownloadStatus::Complete);
-    let parent = group_man
-        .find_stopped_result(&gid.to_hex_string())
-        .expect("completed Metalink source must have a stopped result");
-    assert_eq!(parent.status, DownloadStatus::Complete);
-    assert_eq!(
-        parent.followed_by.len(),
-        1,
-        "parent result did not record a Metalink child: {parent:?}; stopped_count={}",
-        group_man.stopped_count()
-    );
-
-    let child = group_man
-        .find_stopped_result(&parent.followed_by[0].to_hex_string())
-        .expect("followed Metalink payload must have a stopped result");
-    assert_eq!(child.status, DownloadStatus::Complete);
-    assert_eq!(
-        tokio::fs::read(directory.path().join("payload.bin"))
-            .await
-            .unwrap(),
-        data
-    );
-    assert!(
-        !directory.path().join("index.meta4").exists(),
-        "follow-metalink=mem must not materialize the source document"
     );
 }

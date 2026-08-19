@@ -3,12 +3,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use futures::StreamExt;
 use tracing::{debug, warn};
 
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::request::request_group::AtomicProgress;
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
 ///
@@ -144,21 +142,9 @@ impl WebSeedClient {
     pub async fn download_piece(
         &self,
         piece_index: u32,
-        piece_length: u64,
-        piece_offset: u64,
-        length: u64,
-    ) -> Result<Vec<u8>, String> {
-        self.download_piece_with_activity(piece_index, piece_length, piece_offset, length, None)
-            .await
-    }
-
-    pub(crate) async fn download_piece_with_activity(
-        &self,
-        piece_index: u32,
         _piece_length: u64,
         piece_offset: u64,
         length: u64,
-        network_activity: Option<&AtomicProgress>,
     ) -> Result<Vec<u8>, String> {
         let range_end = piece_offset + length.saturating_sub(1);
         let range_header = format!("bytes={}-{}", piece_offset, range_end);
@@ -188,17 +174,11 @@ impl WebSeedClient {
             return Err(format!("Unexpected HTTP status {} from web-seed", status));
         }
 
-        let mut data = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| format!("Failed to read response body: {}", e))?;
-            if !chunk.is_empty()
-                && let Some(progress) = network_activity
-            {
-                progress.record_network_activity();
-            }
-            data.extend_from_slice(&chunk);
-        }
+        let data = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Failed to read response body: {}", e))?
+            .to_vec();
 
         // Record statistics
         self.stats.record_bytes(data.len() as u64);
@@ -239,17 +219,6 @@ impl WebSeedClient {
         piece_length: u32,
         total_length: u64,
     ) -> Result<Vec<u8>, String> {
-        self.request_piece_with_activity(piece_index, piece_length, total_length, None)
-            .await
-    }
-
-    pub(crate) async fn request_piece_with_activity(
-        &self,
-        piece_index: u32,
-        piece_length: u32,
-        total_length: u64,
-        network_activity: Option<&AtomicProgress>,
-    ) -> Result<Vec<u8>, String> {
         // Check if already requesting
         if !self.can_request(piece_index) {
             return Err(format!("Piece {} already being requested", piece_index));
@@ -265,12 +234,11 @@ impl WebSeedClient {
 
         // Download
         let result = self
-            .download_piece_with_activity(
+            .download_piece(
                 piece_index,
                 piece_length as u64,
                 piece_offset,
                 actual_length,
-                network_activity,
             )
             .await;
 
@@ -296,6 +264,7 @@ impl WebSeedClient {
 
 fn build_client(tls: &ClientTlsConfig) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_max_idle_per_host(4)
         .gzip(false);

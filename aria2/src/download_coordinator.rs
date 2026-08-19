@@ -220,7 +220,10 @@ impl DownloadCoordinator {
 
         tracing::info!("Restoring downloads from session: {:?}", session_path);
 
-        let mgr = ActiveSessionManager::new(session_path.to_path_buf());
+        let mgr = ActiveSessionManager::new(
+            session_path.to_path_buf(),
+            std::time::Duration::from_secs(60),
+        );
 
         let entries = match mgr.load_session().await {
             Ok(entries) => entries,

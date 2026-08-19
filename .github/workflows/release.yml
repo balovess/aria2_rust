@@ -29,10 +29,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/sync-version.sh
-          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' aria2/Cargo.toml | head -n 1)
+          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
           if [ -z "$VERSION" ]; then
-            echo "Unable to determine the aria2 binary version" >&2
+            echo "Unable to determine the workspace version" >&2
             exit 1
           fi
 
@@ -95,13 +94,6 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.artifact }}.zip aria2c${{ matrix.extension }}
-      - name: Generate artifact checksum (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $artifact = "${{ matrix.artifact }}.zip"
-          $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}

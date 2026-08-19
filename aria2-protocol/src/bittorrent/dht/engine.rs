@@ -10,7 +10,7 @@
 //! event-loop iteration. This Rust version uses a dedicated async task
 //! with `tokio::select!` for a cleaner, more idiomatic design.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,11 +40,6 @@ pub struct DhtEngineConfig {
     /// The first available port is selected, matching the original DHT
     /// setup command's range binding behavior.
     pub port_range: Option<Vec<u16>>,
-    /// Optional local IP address. `None` binds the unspecified address for
-    /// the selected address family (IPv4 by default).
-    pub listen_addr: Option<IpAddr>,
-    /// Explicit bootstrap endpoints. An empty list uses the public defaults.
-    pub bootstrap_nodes: Vec<SocketAddr>,
     /// Local node ID (20 bytes). All zeros → random on start.
     pub self_id: [u8; 20],
     /// Path to persist the routing table (dht.dat).
@@ -82,8 +77,6 @@ impl Default for DhtEngineConfig {
         Self {
             port: 6881,
             port_range: None,
-            listen_addr: None,
-            bootstrap_nodes: Vec::new(),
             self_id: [0u8; 20],
             dht_file_path: None,
             refresh_check_interval: Duration::from_secs(300), // 5 min check
@@ -234,14 +227,9 @@ impl DhtEngine {
             config.self_id
         };
 
-        let listen_addr = config
-            .listen_addr
-            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
-
         info!(
             id = %hex::encode(self_id),
             port = config.port,
-            ?listen_addr,
             "Starting DHT engine"
         );
 
@@ -250,7 +238,7 @@ impl DhtEngine {
             let mut last_error = None;
             let mut bound = None;
             for port in ports {
-                match DhtSocket::bind_on(SocketAddr::new(listen_addr, *port)).await {
+                match DhtSocket::bind(*port).await {
                     Ok(socket) => {
                         bound = Some(socket);
                         break;
@@ -265,7 +253,7 @@ impl DhtEngine {
                 )
             })?
         } else {
-            DhtSocket::bind_on(SocketAddr::new(listen_addr, config.port))
+            DhtSocket::bind(config.port)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::AddrInUse, e))?
         };
@@ -414,7 +402,6 @@ impl DhtEngine {
             &rt,
             &self.context.socket,
             &self.context.tracker,
-            self.context.config.query_timeout,
         )
         .await;
 
@@ -461,7 +448,6 @@ impl DhtEngine {
             &rt,
             &self.context.socket,
             &self.context.tracker,
-            self.context.config.query_timeout,
         )
         .await;
 
@@ -577,24 +563,20 @@ impl DhtEngine {
             std::mem::take(&mut *background_tasks)
         };
 
-        // Give tasks a bounded opportunity to observe the shared signal before
-        // aborting a maintenance operation that is currently awaiting network
-        // I/O. JoinSet removes completed tasks as it drains them, so a timeout
-        // can resume with only the still-running tasks and never double-awaits
-        // a completed JoinHandle.
-        let mut join_set = tokio::task::JoinSet::new();
-        for task in tasks {
-            join_set.spawn(async move {
-                let _ = task.await;
-            });
-        }
-        let wait_for_tasks = async { while join_set.join_next().await.is_some() {} };
-        if tokio::time::timeout(Duration::from_millis(100), wait_for_tasks)
-            .await
-            .is_err()
+        // Give tasks a chance to observe the shared signal before aborting a
+        // maintenance operation that is currently awaiting network I/O.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(100);
+        while !tasks.iter().all(tokio::task::JoinHandle::is_finished)
+            && tokio::time::Instant::now() < deadline
         {
-            join_set.abort_all();
-            while join_set.join_next().await.is_some() {}
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        for task in tasks {
+            if !task.is_finished() {
+                task.abort();
+            }
+            let _ = task.await;
         }
 
         self.context.inner.write().await.state = DhtEngineState::ShuttingDown;

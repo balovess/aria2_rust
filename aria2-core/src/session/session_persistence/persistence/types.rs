@@ -1,9 +1,13 @@
-//! SessionPersistence struct definition, constructors, and accessors.
+//! SessionPersistence struct definition, constants, constructors, and accessors.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::http::cookie_storage::{CookieJar, CookieStorage};
+
+/// Default auto-save interval in seconds
+pub const DEFAULT_AUTO_SAVE_INTERVAL_SECS: u64 = 60;
 
 /// High-level session persistence manager
 ///
@@ -30,6 +34,10 @@ use crate::http::cookie_storage::{CookieJar, CookieStorage};
 pub struct SessionPersistence {
     /// Directory where .aria2 files are stored
     pub(crate) session_dir: PathBuf,
+    /// Auto-save interval
+    pub(crate) auto_save_interval: Duration,
+    /// Whether auto-save is enabled
+    pub(crate) auto_save_enabled: bool,
     /// Canonical shared storage persisted alongside session data.
     pub(crate) cookie_storage: Arc<CookieStorage>,
     /// Legacy cookie jar retained for JSON/API compatibility.
@@ -45,9 +53,23 @@ impl SessionPersistence {
     pub fn new(session_dir: &Path) -> Self {
         Self {
             session_dir: session_dir.to_path_buf(),
+            auto_save_interval: Duration::from_secs(DEFAULT_AUTO_SAVE_INTERVAL_SECS),
+            auto_save_enabled: true,
             cookie_storage: CookieStorage::shared(),
             cookie_jar: None,
         }
+    }
+
+    /// Create with custom auto-save interval
+    pub fn with_interval(mut self, interval_secs: u64) -> Self {
+        self.auto_save_interval = Duration::from_secs(interval_secs.max(10));
+        self
+    }
+
+    /// Disable auto-save (only manual save/load)
+    pub fn without_auto_save(mut self) -> Self {
+        self.auto_save_enabled = false;
+        self
     }
 
     /// Bind canonical shared cookie storage for persistence.

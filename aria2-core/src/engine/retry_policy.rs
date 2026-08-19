@@ -107,15 +107,7 @@ impl RetryPolicy {
     }
 
     pub fn should_retry_http(&self, status_code: u16) -> bool {
-        // Match aria2's HttpSkipResponseCommand boundary. Internal Server
-        // Error is terminal, while a busy gateway is retried only when the
-        // caller configured a non-zero retry wait. Gateway Timeout is the
-        // exception and remains retryable even without a delay.
-        match status_code {
-            500 => false,
-            502 | 503 if self.base_wait_ms == 0 => false,
-            _ => self.retryable_http_codes.contains(&status_code),
-        }
+        self.retryable_http_codes.contains(&status_code)
     }
 
     pub fn should_retry_error(&self, error_str: &str) -> bool {
@@ -250,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_retry_http_statuses_follow_server_retry_boundary() {
+    fn test_should_retry_http_408_true() {
         let p = RetryPolicy::default();
         assert!(
             p.should_retry_http(408),
@@ -261,18 +253,13 @@ mod tests {
             "Too Many Requests should be retryable"
         );
         assert!(
-            !p.should_retry_http(500),
-            "Internal Server Error should be terminal"
+            p.should_retry_http(500),
+            "Internal Server Error should be retryable"
         );
         assert!(
             p.should_retry_http(503),
             "Service Unavailable should be retryable"
         );
-
-        let no_wait = RetryPolicy::new(3, 0);
-        assert!(!no_wait.should_retry_http(502));
-        assert!(!no_wait.should_retry_http(503));
-        assert!(no_wait.should_retry_http(504));
     }
 
     #[test]
@@ -353,7 +340,7 @@ mod tests {
             })
         ));
 
-        for code in [408, 429, 502, 503, 504] {
+        for code in [408, 429, 500, 502, 503, 504] {
             assert!(
                 p.should_retry(
                     0,
@@ -362,23 +349,6 @@ mod tests {
                 "HTTP status {code} should be retryable"
             );
         }
-
-        assert!(!p.should_retry(
-            0,
-            &Aria2Error::Recoverable(RecoverableError::ServerError { code: 500 })
-        ));
-
-        let no_wait = RetryPolicy::new(3, 0);
-        for code in [502, 503] {
-            assert!(!no_wait.should_retry(
-                0,
-                &Aria2Error::Recoverable(RecoverableError::ServerError { code })
-            ));
-        }
-        assert!(no_wait.should_retry(
-            0,
-            &Aria2Error::Recoverable(RecoverableError::ServerError { code: 504 })
-        ));
 
         for error in [
             Aria2Error::Recoverable(RecoverableError::ServerError { code: 404 }),

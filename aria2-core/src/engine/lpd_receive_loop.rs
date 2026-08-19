@@ -105,18 +105,6 @@ impl LpdReceiveLoop {
         peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
         active_hashes: Arc<RwLock<HashSet<String>>>,
     ) -> Result<(), String> {
-        self.start_with_config(peers, active_hashes, constants::LPD_PORT, None)
-            .await
-    }
-
-    /// Start the loop on a configured BEP 14 port and multicast interface.
-    pub async fn start_with_config(
-        &mut self,
-        peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
-        active_hashes: Arc<RwLock<HashSet<String>>>,
-        listen_port: u16,
-        interface: Option<Ipv4Addr>,
-    ) -> Result<(), String> {
         if self.is_running.load(Ordering::Acquire) {
             debug!("LPD receive loop already running");
             return Ok(());
@@ -124,7 +112,7 @@ impl LpdReceiveLoop {
 
         // Create and configure the UDP socket synchronously.
         // This mirrors C++ `LpdMessageReceiver::init()`.
-        let socket = create_lpd_socket_with_config(listen_port, interface)?;
+        let socket = create_lpd_socket()?;
 
         // Convert to async socket for non-blocking receive in tokio runtime.
         let async_socket = tokio::net::UdpSocket::from_std(socket)
@@ -135,7 +123,7 @@ impl LpdReceiveLoop {
 
         info!(
             addr = %constants::LPD_MULTICAST_ADDRESS,
-            port = listen_port,
+            port = constants::LPD_PORT,
             "LPD receive loop starting"
         );
 
@@ -200,15 +188,6 @@ impl Default for LpdReceiveLoop {
     }
 }
 
-impl Drop for LpdReceiveLoop {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
-        if let Some(handle) = self.task_handle.take() {
-            handle.abort();
-        }
-    }
-}
-
 // ===========================================================================
 // Socket Creation — mirrors C++ LpdMessageReceiver::init()
 // ===========================================================================
@@ -231,25 +210,12 @@ impl Drop for LpdReceiveLoop {
 /// #endif
 ///     socket_->joinMulticastGroup(multicastAddress_, multicastPort_, localAddr);
 /// ```
-#[cfg(test)]
 fn create_lpd_socket() -> Result<UdpSocket, String> {
-    create_lpd_socket_with_config(constants::LPD_PORT, None)
-}
-
-fn create_lpd_socket_with_config(
-    listen_port: u16,
-    interface: Option<Ipv4Addr>,
-) -> Result<UdpSocket, String> {
-    if listen_port == 0 {
-        return Err("LPD listen port must be greater than zero".to_string());
-    }
-
     let multicast_ip: Ipv4Addr = constants::LPD_MULTICAST_ADDRESS
         .parse()
         .map_err(|e| format!("Invalid LPD multicast IP: {}", e))?;
 
-    let port = listen_port;
-    let local_interface = interface.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    let port = constants::LPD_PORT;
 
     // On Unix, create socket -> set SO_REUSEADDR -> bind -> join group.
     // SO_REUSEADDR must be set BEFORE bind so multiple processes can
@@ -344,7 +310,7 @@ fn create_lpd_socket_with_config(
         // Join multicast group on all interfaces.
         // C++: `socket_->joinMulticastGroup(multicastAddress_, multicastPort_, localAddr)`
         socket
-            .join_multicast_v4(&multicast_ip, &local_interface)
+            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
             .map_err(|e| format!("Failed to join LPD multicast group: {}", e))?;
 
         debug!(local = ?socket.local_addr().ok(), "LPD receive socket created (Unix)");
@@ -367,7 +333,7 @@ fn create_lpd_socket_with_config(
 
         // Join multicast group on all interfaces.
         socket
-            .join_multicast_v4(&multicast_ip, &local_interface)
+            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
             .map_err(|e| format!("Failed to join LPD multicast group: {}", e))?;
 
         debug!(local = ?socket.local_addr().ok(), "LPD receive socket created (Windows)");
@@ -382,7 +348,7 @@ fn create_lpd_socket_with_config(
         let socket =
             UdpSocket::bind(bind_addr).map_err(|e| format!("Failed to bind LPD socket: {}", e))?;
         socket
-            .join_multicast_v4(&multicast_ip, &local_interface)
+            .join_multicast_v4(&multicast_ip, &Ipv4Addr::UNSPECIFIED)
             .map_err(|e| format!("Failed to join LPD multicast group: {}", e))?;
         Ok(socket)
     }

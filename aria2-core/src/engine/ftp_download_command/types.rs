@@ -191,11 +191,14 @@ impl FtpDownloadCommand {
         self.dns_cache = Some(dns_cache);
     }
 
-    /// Resolve the configured FTP proxy from typed task options.
+    /// Resolve the configured FTP proxy without changing the public option
+    /// surface. The raw `proxy-method` value remains in the task snapshot so
+    /// this command can consume it without copying configuration into a new
+    /// public `DownloadOptions` field.
     pub(super) fn ftp_proxy_config(&self) -> Result<Option<(FtpProxyConfig, ProxyMethod)>> {
-        let options = {
+        let (options, snapshot) = {
             let group = self.group.recover();
-            group.options_arc()
+            (group.options_arc(), group.effective_option_snapshot())
         };
 
         if let Some(no_proxy) = options.no_proxy.as_deref() {
@@ -247,7 +250,11 @@ impl FtpDownloadCommand {
         let proxy_username = username.or(embedded_username).unwrap_or_default();
         let proxy_password = password.or(embedded_password).unwrap_or_default();
 
-        let explicit_method = ProxyMethod::parse(&options.proxy_method);
+        let explicit_method = snapshot
+            .as_ref()
+            .and_then(|values| values.get("proxy-method"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(ProxyMethod::parse);
         let method = explicit_method.unwrap_or_default();
 
         Ok(Some((

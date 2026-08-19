@@ -32,7 +32,7 @@ cargo test --workspace --all-targets
 Write-Host "  ✓ Tests passed"
 Write-Host ""
 
-# Step 2: Bump versions with cargo-release (package versions are independent)
+# Step 2: Bump version with cargo-release
 Write-Host "Step 2: Bumping version..."
 cargo release $Level --no-confirm --execute
 Write-Host "  ✓ Version bumped"
@@ -46,7 +46,7 @@ Write-Host ""
 
 # Step 4: Commit changes
 Write-Host "Step 4: Committing changes..."
-$cargoContent = Get-Content "$PROJECT_ROOT/aria2/Cargo.toml" -Raw
+$cargoContent = Get-Content "$PROJECT_ROOT/Cargo.toml" -Raw
 if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
     $Version = $matches[1]
 }

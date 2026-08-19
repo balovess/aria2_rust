@@ -12,12 +12,11 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph::MetalinkRequestGraph;
 use crate::error::Aria2Error;
-use crate::network::ConnectionContext;
 use crate::request::request_group::{GroupId, HaltReason, RequestGroup};
 
 /// Normal submissions are bounded so an RPC producer cannot grow memory
@@ -157,7 +156,6 @@ enum EngineCommandSenderBackend {
         normal_tx: mpsc::Sender<QueuedEngineCommand>,
         metrics: Arc<EngineCommandQueueMetrics>,
         pending_keys: Arc<Mutex<HashSet<EngineCommandCoalesceKey>>>,
-        wake: Arc<Notify>,
     },
     Legacy(mpsc::UnboundedSender<EngineCommand>),
 }
@@ -188,7 +186,6 @@ enum EngineCommandReceiverBackend {
         normal_rx: mpsc::Receiver<QueuedEngineCommand>,
         metrics: Arc<EngineCommandQueueMetrics>,
         pending_keys: Arc<Mutex<HashSet<EngineCommandCoalesceKey>>>,
-        wake: Arc<Notify>,
         control_closed: bool,
         normal_closed: bool,
     },
@@ -200,7 +197,6 @@ pub fn channel() -> (EngineCommandSender, EngineCommandReceiver) {
     let (normal_tx, normal_rx) = mpsc::channel(ENGINE_COMMAND_CAPACITY);
     let metrics = Arc::new(EngineCommandQueueMetrics::default());
     let pending_keys = Arc::new(Mutex::new(HashSet::new()));
-    let wake = Arc::new(Notify::new());
     (
         EngineCommandSender {
             backend: Arc::new(EngineCommandSenderBackend::Bounded {
@@ -208,7 +204,6 @@ pub fn channel() -> (EngineCommandSender, EngineCommandReceiver) {
                 normal_tx,
                 metrics: Arc::clone(&metrics),
                 pending_keys: Arc::clone(&pending_keys),
-                wake: Arc::clone(&wake),
             }),
         },
         EngineCommandReceiver {
@@ -217,7 +212,6 @@ pub fn channel() -> (EngineCommandSender, EngineCommandReceiver) {
                 normal_rx,
                 metrics,
                 pending_keys,
-                wake,
                 control_closed: false,
                 normal_closed: false,
             },
@@ -236,7 +230,6 @@ impl EngineCommandSender {
                 normal_tx,
                 metrics,
                 pending_keys,
-                wake,
             } => {
                 let target = if command.is_control() {
                     control_tx
@@ -278,7 +271,6 @@ impl EngineCommandSender {
                         queued_at: Instant::now(),
                         command,
                     });
-                    wake.notify_one();
                     return Ok(());
                 }
 
@@ -299,7 +291,6 @@ impl EngineCommandSender {
                     queued_at: Instant::now(),
                     command,
                 });
-                wake.notify_one();
                 Ok(())
             }
         }
@@ -350,7 +341,6 @@ impl EngineCommandReceiver {
                 pending_keys,
                 control_closed,
                 normal_closed,
-                ..
             } => {
                 let queued = if !*control_closed {
                     match control_rx.try_recv() {
@@ -393,35 +383,6 @@ impl EngineCommandReceiver {
                 } else {
                     Err(EngineCommandTryRecvError::Empty)
                 }
-            }
-        }
-    }
-
-    /// Wait for the next command without a fixed-interval polling delay.
-    ///
-    /// Bounded control and normal queues share a notification edge. The
-    /// receiver still drains control traffic first through `try_recv`, while
-    /// `Notify` keeps the idle engine parked until a producer enqueues work.
-    pub async fn recv(&mut self) -> Result<EngineCommand, EngineCommandTryRecvError> {
-        if let EngineCommandReceiverBackend::Legacy(receiver) = &mut self.backend {
-            return receiver
-                .recv()
-                .await
-                .ok_or(EngineCommandTryRecvError::Closed);
-        }
-
-        let wake = match &self.backend {
-            EngineCommandReceiverBackend::Bounded { wake, .. } => Arc::clone(wake),
-            EngineCommandReceiverBackend::Legacy(_) => unreachable!("legacy receiver handled"),
-        };
-
-        loop {
-            match self.try_recv() {
-                Ok(command) => return Ok(command),
-                Err(EngineCommandTryRecvError::Closed) => {
-                    return Err(EngineCommandTryRecvError::Closed);
-                }
-                Err(EngineCommandTryRecvError::Empty) => wake.notified().await,
             }
         }
     }
@@ -554,16 +515,6 @@ pub enum TaskResult {
 
     /// Download failed with an error.
     Failed(Aria2Error),
-
-    /// Download failed after observing a concrete network peer.
-    ///
-    /// Keeping the peer on the internal completion event avoids making the
-    /// engine infer DNS attribution from a group-wide history after several
-    /// concurrent requests have completed.
-    FailedWithContext {
-        error: Aria2Error,
-        connection_context: ConnectionContext,
-    },
 
     /// Download was cancelled (halt/pause requested).
     Cancelled,

@@ -25,21 +25,6 @@ use aria2_protocol::sftp::session::SftpSession;
 use super::types::SftpDownloadCommand;
 
 impl SftpDownloadCommand {
-    fn check_cancelled(&self) -> Result<()> {
-        let group = self.group.recover();
-        if group.is_removed() {
-            Err(Aria2Error::DownloadFailed(
-                "Download cancelled by user".into(),
-            ))
-        } else if group.is_paused_flag() {
-            Err(Aria2Error::DownloadFailed("Download paused".into()))
-        } else if group.is_force_halt_requested() || group.is_halt_requested() {
-            Err(Aria2Error::DownloadFailed("SFTP download halted".into()))
-        } else {
-            Ok(())
-        }
-    }
-
     /// Execute the SFTP download.
     ///
     /// This is the main entry point called by the download engine. It orchestrates
@@ -211,15 +196,7 @@ impl SftpDownloadCommand {
                 .as_ref()
                 .expect("complete local checksum candidate has a checksum");
             let checksum = Checksum::from_type_and_value(algorithm, expected)?;
-            if crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
-                &crate::checksum::check_integrity::man::shared(),
-                std::sync::Arc::clone(&self.group),
-                &self.output_path,
-                total_length,
-                checksum,
-            )
-            .await?
-            {
+            if crate::checksum::checksum::verify_file(&self.output_path, &checksum).await? {
                 self.group.recover().set_checksum_verified(true);
                 self.group.recover().set_completed_length(total_length);
                 self.group.recover_mut().complete()?;
@@ -333,12 +310,10 @@ impl SftpDownloadCommand {
             let to_read = (constants::SFTP_DISK_WRITE_CHUNK_SIZE as u64).min(remaining) as usize;
 
             // Read chunk from remote file at current offset
-            let lifecycle_notify = self.group.recover().lifecycle_notifier();
-            let lifecycle_changed = lifecycle_notify.notified();
-            tokio::pin!(lifecycle_changed);
-            lifecycle_changed.as_mut().enable();
-            let data = tokio::select! {
-                data = remote_file.read_at(self.completed_bytes, to_read as u32) => match data {
+            let data = match remote_file
+                .read_at(self.completed_bytes, to_read as u32)
+                .await
+            {
                 Ok(data) if data.is_empty() => {
                     debug!(
                         "[SFTP-CMD] EOF at offset {} (expected {})",
@@ -364,27 +339,8 @@ impl SftpDownloadCommand {
                     let err = FileOpError::from(e);
                     return Err(Self::map_file_op_error(&err, &self.host, &self.remote_path));
                 }
-                },
-                _ = &mut lifecycle_changed => {
-                    if let Err(error) = self.check_cancelled() {
-                        // CLOSE would be queued behind the stalled READ on
-                        // the same SFTP session. Dropping the handle and SSH
-                        // connection cancels the outstanding request without
-                        // waiting for a protocol response.
-                        drop(remote_file);
-                        self.finalize_partial_writer(&mut writer).await;
-                        self.flush_checkpoint().await;
-                        let _ = conn.disconnect().await;
-                        return Err(error);
-                    }
-
-                    // Save-session and other non-terminal lifecycle updates
-                    // leave the remote read alive; retry the current offset.
-                    continue;
-                }
             };
             let n = data.len();
-            self.group.recover().record_network_activity();
 
             // Write chunk to local disk via disk writer
             if let Err(e) = writer.write(&data).await {
@@ -434,7 +390,7 @@ impl SftpDownloadCommand {
 
         // Finalize disk writer (flush, sync, etc.). Completion is not valid
         // unless the local bytes have been durably finalized.
-        let mut finalized_data = match writer.finalize().await {
+        let finalized_data = match writer.finalize().await {
             Ok(data) => data,
             Err(error) => {
                 self.flush_checkpoint().await;
@@ -459,19 +415,9 @@ impl SftpDownloadCommand {
                 }
             };
             let verified = if in_memory_download {
-                let (data, verified) = checksum.verify_async(finalized_data).await?;
-                finalized_data = data;
-                verified
+                checksum.verify(&finalized_data)
             } else {
-                match crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
-                    &crate::checksum::check_integrity::man::shared(),
-                    std::sync::Arc::clone(&self.group),
-                    &self.output_path,
-                    self.completed_bytes,
-                    checksum,
-                )
-                .await
-                {
+                match crate::checksum::checksum::verify_file(&self.output_path, &checksum).await {
                     Ok(verified) => verified,
                     Err(error) => {
                         self.flush_checkpoint().await;
@@ -554,7 +500,13 @@ impl Command for SftpDownloadCommand {
                 }
                 error => error,
             };
-            let should_retry = self.should_retry_error(attempts, &error);
+            let should_retry = matches!(
+                &error,
+                Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
+            ) && self
+                .retry_policy
+                .can_retry_after(attempts.saturating_add(1))
+                && self.group.recover().can_retry_file_not_found();
             if !should_retry {
                 return Err(error);
             }
@@ -588,7 +540,7 @@ impl Command for SftpDownloadCommand {
 
     /// Return the timeout for this command.
     fn timeout(&self) -> Option<Duration> {
-        self.group.recover().timeout()
+        Some(Duration::from_secs(constants::SFTP_COMMAND_TIMEOUT_SECS))
     }
 
     async fn shutdown(&mut self) {
@@ -597,34 +549,33 @@ impl Command for SftpDownloadCommand {
 }
 
 impl SftpDownloadCommand {
-    /// Apply the shared total-attempt policy to SFTP failures.
-    ///
-    /// Remote not-found responses use the separate `max-file-not-found`
-    /// counter. Connection, timeout, and other transient transport failures
-    /// use the same retry classification as the HTTP and FTP commands.
-    pub(super) fn should_retry_error(&self, attempts: u32, error: &Aria2Error) -> bool {
-        match error {
-            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
-                self.retry_policy
-                    .can_retry_after(attempts.saturating_add(1))
-                    && self.group.recover().can_retry_file_not_found()
-            }
-            _ => self.retry_policy.should_retry(attempts, error),
-        }
-    }
-
     /// Wait between retry attempts while still honoring RequestGroup controls.
     /// A plain sleep would delay pause/remove handling for the full configured
     /// retry interval, which can be several minutes.
     pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        self.check_cancelled()?;
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = &mut notified => self.check_cancelled(),
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let halt_message = {
+                let group = self.group.recover();
+                if group.is_removed() {
+                    Some("Download cancelled by user")
+                } else if group.is_paused_flag() {
+                    Some("Download paused")
+                } else if group.is_force_halt_requested() || group.is_halt_requested() {
+                    Some("SFTP download halted")
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = halt_message {
+                return Err(Aria2Error::DownloadFailed(message.into()));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
         }
     }
 

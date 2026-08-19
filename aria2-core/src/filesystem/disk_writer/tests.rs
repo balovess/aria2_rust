@@ -38,11 +38,7 @@ async fn test_byte_array_disk_writer() {
     writer.write(b"def").await.unwrap();
     let result = writer.finalize().await.unwrap();
     assert_eq!(result, b"abcdef");
-    assert_eq!(
-        writer.len(),
-        0,
-        "finalize transfers ownership of the buffer"
-    );
+    assert_eq!(writer.len(), 6);
 }
 
 #[tokio::test]

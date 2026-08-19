@@ -2,12 +2,6 @@
 
 mod support;
 
-use std::net::TcpListener;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
@@ -66,26 +60,6 @@ async fn wait_for_response(socket: &mut ClientSocket, id: &str) -> Value {
 #[tokio::test]
 async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notifications() {
     let secret = "websocket-process-secret";
-    let download_listener =
-        TcpListener::bind(("127.0.0.1", 0)).expect("test HTTP listener must bind");
-    let download_port = download_listener
-        .local_addr()
-        .expect("test HTTP listener must have an address")
-        .port();
-    let stop_download_server = Arc::new(AtomicBool::new(false));
-    let stop_download_server_thread = Arc::clone(&stop_download_server);
-    let download_server = thread::spawn(move || {
-        download_listener
-            .set_nonblocking(true)
-            .expect("test HTTP listener must become nonblocking");
-        let mut connections = Vec::new();
-        while !stop_download_server_thread.load(Ordering::Acquire) {
-            if let Ok((stream, _)) = download_listener.accept() {
-                connections.push(stream);
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-    });
     let mut aria2 = RunningAria2::start_rpc(&[format!("--rpc-secret={secret}")]);
     let ws_url = format!("ws://127.0.0.1:{}/jsonrpc", aria2.port());
     let (mut socket, _) = connect_async(ws_url)
@@ -118,7 +92,7 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
                 "method": "aria2.addUri",
                 "params": [
                     format!("token:{secret}"),
-                    [format!("http://127.0.0.1:{download_port}/websocket-e2e.bin")],
+                    ["http://127.0.0.1:1/websocket-e2e.bin"],
                     {"out": "websocket-e2e.bin"},
                 ],
                 "id": "add",
@@ -234,10 +208,6 @@ async fn e2e_websocket_jsonrpc_client_receives_download_start_and_stop_notificat
         "shutdown must return aria2's successful result: {shutdown}"
     );
     assert!(aria2.wait_for_exit(PROCESS_EXIT_TIMEOUT).success());
-    stop_download_server.store(true, Ordering::Release);
-    download_server
-        .join()
-        .expect("test HTTP server thread must exit cleanly");
 }
 
 /// `aria2_original` limits WebSocket JSON parsing with

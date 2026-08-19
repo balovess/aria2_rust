@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::engine::{RpcEngine, dispatch_wire_entries};
+use crate::engine::RpcEngine;
 
 static NEXT_WS_SUBSCRIBER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -160,14 +160,19 @@ async fn process_ws_jsonrpc(
             .next()
             .expect("single JSON-RPC document must contain one entry");
         let resp = match entry {
-            JsonRpcWireEntry::Request(request) => engine.handle_request_owned(request).await,
+            JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
             JsonRpcWireEntry::Error(response) => response,
         };
         send_ws_response(socket, &resp).await;
     } else {
-        // Batch request — read-only runs are bounded and concurrent, while
-        // mutating calls are kept in input order by the shared dispatcher.
-        let results = dispatch_wire_entries(engine, document.entries).await;
+        // Batch request — send array of response objects
+        let mut results = Vec::with_capacity(document.entries.len());
+        for entry in document.entries {
+            results.push(match entry {
+                JsonRpcWireEntry::Request(request) => engine.handle_request(&request).await,
+                JsonRpcWireEntry::Error(response) => response,
+            });
+        }
         let batch = JsonRpcBatchResponse(results);
         match batch.to_string() {
             Ok(json_str) => {

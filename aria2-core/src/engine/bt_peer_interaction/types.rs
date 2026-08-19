@@ -5,8 +5,6 @@
 
 use crate::engine::bt_message_dispatcher::{InactiveReason, RequestSlot};
 use crate::engine::extension_registry::ExtensionUpdate;
-use crate::request::request_group::DownloadOptions;
-use std::time::Duration;
 
 /// Outbound BitTorrent crypto policy resolved from the original option names.
 ///
@@ -20,41 +18,6 @@ pub struct BtPeerCryptoPolicy {
     pub force_encryption: bool,
     /// Prefer RC4 when the peer offers both MSE methods.
     pub prefer_encryption: bool,
-}
-
-/// All task-scoped values consumed by the outbound peer connection path.
-/// Keeping them together prevents initial and PEX connections from resolving
-/// the same `DownloadOptions` independently.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BtPeerConnectionOptions {
-    pub crypto: BtPeerCryptoPolicy,
-    pub connection_timeout: Duration,
-    pub keep_alive_interval: Duration,
-    pub peer_timeout: Duration,
-    pub local_peer_id: [u8; 20],
-    pub peer_agent: String,
-    pub enable_utp: bool,
-    pub utp_listen_port: Option<u16>,
-}
-
-impl BtPeerConnectionOptions {
-    pub fn from_download_options(options: &DownloadOptions, local_peer_id: [u8; 20]) -> Self {
-        Self {
-            crypto: BtPeerCryptoPolicy {
-                require_mse: options.bt_require_crypto || options.bt_force_encrypt,
-                force_encryption: options.bt_force_encrypt,
-                prefer_encryption: options.bt_min_crypto_level.eq_ignore_ascii_case("arc4")
-                    || options.bt_force_encrypt,
-            },
-            connection_timeout: Duration::from_secs(options.peer_connection_timeout),
-            keep_alive_interval: Duration::from_secs(options.bt_keep_alive_interval),
-            peer_timeout: Duration::from_secs(options.bt_timeout),
-            local_peer_id,
-            peer_agent: options.peer_agent.clone(),
-            enable_utp: options.enable_utp,
-            utp_listen_port: options.utp_listen_port,
-        }
-    }
 }
 
 // ======================================================================

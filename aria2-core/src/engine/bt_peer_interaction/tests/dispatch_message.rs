@@ -169,7 +169,7 @@ fn test_dispatch_piece_removes_outstanding_slot() {
         BtMessage::Piece {
             index: 5,
             begin: 0,
-            data: vec![0u8; constants::BT_BLOCK_SIZE].into(),
+            data: vec![0u8; constants::BT_BLOCK_SIZE],
         },
         &mut conn,
         |_| false,

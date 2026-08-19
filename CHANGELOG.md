@@ -4,28 +4,6 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### Performance
-- Replaced fixed-sleep uTP receive retries with Tokio UDP readiness and
-  persistent fragmented-frame buffering.
-- Added bounded event-driven BitTorrent block scheduling, concurrent endgame
-  reads, and cancellation-safe TCP/MSE frame buffering.
-- Made dynamic rate-limit changes wake blocked token acquisitions immediately.
-- Reworked Bitfield/PieceStat queries and unrestricted rarest-first selection to
-  avoid repeated per-piece scans and temporary bitfield construction.
-- Changed the engine idle path to wait on commands, task completions, real
-  maintenance deadlines, or shutdown instead of scanning on a fixed tick.
-- Added a lossless `Notify` plus generation activity signal for RequestGroup
-  lifecycle, progress, file allocation, retry waits, and console rendering.
-- Unified session and control-file saves behind one earliest-deadline
-  coordinator; explicit save requests are retained across a busy save lock.
-- Added native process-exit waiting through Windows events, Linux `pidfd`, and
-  macOS/BSD `kqueue`, retaining a low-frequency fallback only where required.
-- Restored explicit SaveSession control requests and flushes the BitTorrent
-  writer before publishing a checkpoint.
-- Recorded Rust-only Criterion evidence for the scan and picker hot paths;
-  these numbers are algorithm-level regression results, not whole-download
-  throughput claims. See `docs/MIGRATION.md` for the measurements.
-
 ### Compatibility and verification
 - Added production HTTP request-policy E2E coverage for GET/HEAD selection,
   cache and digest headers, keep-alive, explicit header precedence, gzip, and
@@ -45,11 +23,11 @@ All notable changes to this project will be documented in this file.
 - Updated the active output collision resolver to use aria2-compatible `.1`, `.2`, ... filename suffixes.
 - Corrected compatibility documentation for RPC method and notification counts.
 - Documented that full feature-matrix, original-binary interoperability, and ignored E2E verification are still pending.
-- Unified active Rust crate metadata, path dependency constraints, installer fallback, examples, and benchmarks on the `aria2-rust` 0.3.2 product version.
+- Unified active Rust crate metadata, path dependency constraints, installer fallback, examples, and benchmarks on the `aria2-rust` 0.2.9 product version.
 - Synchronized Homebrew, Scoop, Python, and Node.js release metadata and test fixtures with the `aria2-rust` product version.
 - Removed upstream aria2 product-version literals from compatibility fixtures; external peer and generator inputs now use neutral test identities.
 - Removed the obsolete upstream C++ version-report text; all emitted product version values now identify `aria2-rust`.
-- CLI version output now identifies the product as `aria2-rust 0.3.2`; `aria2c` remains the compatible executable entry point.
+- CLI version output now identifies the product as `aria2-rust 0.2.9`; `aria2c` remains the compatible executable entry point.
 - CLI help and completion usage retain `aria2c` while version output remains product-owned.
 - Added shared streaming whole-file checksum verification to HTTP and FTP, including FTP existing-file revalidation and `SIZE`/`RETR` length checks.
 - Corrected `bt-prioritize-piece` to the original `head[=SIZE],tail[=SIZE]` grammar while keeping the implementation and product identity Rust-native.

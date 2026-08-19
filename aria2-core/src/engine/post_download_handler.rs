@@ -256,7 +256,6 @@ pub fn build_handler_chain(options: &DownloadOptions) -> Vec<Box<dyn PostDownloa
 pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
     let gid = group.gid();
     let options = group.options_arc();
-    let initial_source_uri = group.uris().first().cloned();
 
     let (content_type, file_path, base_uri, in_memory_download, in_memory_data) =
         if let Some(dctx) = group.download_context.recover().as_ref() {
@@ -271,7 +270,6 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
                     .cloned()
                     .or_else(|| entry.remaining_uris().front().cloned())
             });
-            let base_uri = base_uri.or(initial_source_uri.clone());
 
             // C++ uses an explicit RequestGroup flag set by the memory
             // pre-download handler. Do not infer this from an empty path:
@@ -285,7 +283,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
             (
                 group.content_type(),
                 None,
-                initial_source_uri,
+                None,
                 group.is_in_memory_download(),
                 group.in_memory_data(),
             )
@@ -300,20 +298,6 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
         in_memory_data,
         base_uri,
     }
-}
-
-/// Return whether a URI or path ends with one of the supplied extensions.
-///
-/// URL parsing removes query and fragment components without changing the
-/// existing path-based checks used by the post-download handlers. Plain local
-/// paths remain supported through the fallback branch.
-#[cfg(any(feature = "bittorrent", feature = "metalink"))]
-pub(crate) fn path_has_extension(candidate: &str, extensions: &[&str]) -> bool {
-    let path = reqwest::Url::parse(candidate)
-        .map(|url| url.path().to_owned())
-        .unwrap_or_else(|_| candidate.to_owned());
-    let path = path.to_ascii_lowercase();
-    extensions.iter().any(|extension| path.ends_with(extension))
 }
 
 use crate::util::rwlock_ext::RwLockRecover;

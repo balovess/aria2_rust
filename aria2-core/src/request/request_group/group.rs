@@ -7,17 +7,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 
-use tokio::sync::Notify;
 use tracing::info;
 
 use crate::download::DownloadContext;
 use crate::rate_limiter::RateLimiter;
 use crate::segment::Segment;
 
-use super::activity::ActivitySignal;
 use super::bt_peer_snapshot::BtPeerSnapshot;
 use super::group_id::GroupId;
 use super::halt_reason::{DownloadControlFlags, HaltReason};
@@ -127,17 +124,6 @@ pub struct RequestGroup {
     /// Atomic control flags for halt/pause/force-halt/restart signals.
     /// Checked by hot download loops without acquiring the `RwLock` on status.
     pub control_flags: DownloadControlFlags,
-
-    /// Notifies download tasks when a lifecycle control or status changes.
-    ///
-    /// This is deliberately separate from the atomic flags: the flags remain
-    /// the source of truth, while the notification only wakes an async waiter
-    /// so it can re-check those flags when a lifecycle event occurs.
-    pub lifecycle_notify: Arc<Notify>,
-
-    /// Manager-wide signal used by snapshot observers such as the console UI.
-    /// It is injected when the group enters a `RequestGroupMan`.
-    pub(super) activity_signal: OnceLock<Arc<ActivitySignal>>,
 
     /// Reason why the download was halted.
     pub halt_reason: std::sync::RwLock<HaltReason>,
@@ -264,8 +250,6 @@ impl RequestGroup {
             global_net_stat: std::sync::RwLock::new(None),
             num_commands: AtomicU32::new(0),
             control_flags: DownloadControlFlags::new(),
-            lifecycle_notify: Arc::new(Notify::new()),
-            activity_signal: OnceLock::new(),
             halt_reason: std::sync::RwLock::new(HaltReason::None),
             last_error_code: std::sync::RwLock::new(DownloadResultCode::UnknownError),
             last_error_message: std::sync::RwLock::new(String::new()),

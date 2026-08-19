@@ -1,47 +1,9 @@
-use aria2_rpc::backend::{
-    BackendError, BackendMetadata, BackendRequest, BackendResponse, BackendResult, RpcBackend,
-};
 use aria2_rpc::engine::RpcEngine;
-use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse, parse_aria2_wire_document};
+use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use aria2_rpc::server::AuthConfig;
-use aria2_rpc::types::GlobalStat;
 use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse};
-use async_trait::async_trait;
 use base64::Engine;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
-use std::sync::Arc;
-
-struct BenchBackend;
-
-#[async_trait]
-impl RpcBackend for BenchBackend {
-    fn metadata(&self) -> BackendMetadata {
-        BackendMetadata::base(env!("CARGO_PKG_VERSION"))
-    }
-
-    async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
-        match request {
-            BackendRequest::AddUri { .. } => Ok(BackendResult::response(BackendResponse::Gid(
-                "0123456789abcdef".into(),
-            ))),
-            BackendRequest::TellActive { .. }
-            | BackendRequest::TellWaiting { .. }
-            | BackendRequest::TellStopped { .. } => Ok(BackendResult::response(
-                BackendResponse::Statuses(Vec::new()),
-            )),
-            BackendRequest::GetGlobalStat => Ok(BackendResult::response(
-                BackendResponse::GlobalStat(GlobalStat::default()),
-            )),
-            request => Err(BackendError::Unsupported(format!(
-                "benchmark request: {request:?}"
-            ))),
-        }
-    }
-}
-
-fn benchmark_engine() -> RpcEngine {
-    RpcEngine::with_backend(Arc::new(BenchBackend))
-}
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
     JsonRpcRequest {
@@ -62,7 +24,7 @@ fn make_generic_req(id: &str, method: &str) -> JsonRpcRequest {
 }
 
 fn bench_add_uri_qps(c: &mut Criterion) {
-    let engine = benchmark_engine();
+    let engine = RpcEngine::new();
     let req = make_add_req("bench", "http://example.com/file.zip");
 
     c.bench_function("add_uri_single", |b| {
@@ -80,7 +42,7 @@ fn bench_add_uri_qps(c: &mut Criterion) {
 }
 
 fn bench_tell_active_empty(c: &mut Criterion) {
-    let engine = benchmark_engine();
+    let engine = RpcEngine::new();
     let req = make_generic_req("ta", "aria2.tellActive");
 
     c.bench_function("tell_active_empty_engine", |b| {
@@ -98,7 +60,7 @@ fn bench_tell_active_empty(c: &mut Criterion) {
 }
 
 fn bench_get_global_stat(c: &mut Criterion) {
-    let engine = benchmark_engine();
+    let engine = RpcEngine::new();
     let req = make_generic_req("gs", "aria2.getGlobalStat");
 
     c.bench_function("get_global_stat", |b| {
@@ -115,41 +77,6 @@ fn bench_get_global_stat(c: &mut Criterion) {
     });
 }
 
-fn bench_read_only_multicall_poll(c: &mut Criterion) {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let engine = benchmark_engine();
-    rt.block_on(async {
-        for index in 0..100 {
-            let req = make_add_req(
-                &format!("setup-{index}"),
-                &format!("http://example.com/file-{index}.bin"),
-            );
-            let response = engine.handle_request(&req).await;
-            assert!(response.is_success());
-        }
-    });
-    let req = JsonRpcRequest::new(
-        "system.multicall",
-        serde_json::json!([[
-            {"methodName": "aria2.tellActive", "params": []},
-            {"methodName": "aria2.tellWaiting", "params": [0, 100]},
-            {"methodName": "aria2.tellStopped", "params": [0, 100]},
-            {"methodName": "aria2.getGlobalStat", "params": []}
-        ]]),
-    )
-    .with_id("poll");
-
-    c.bench_function("read_only_multicall_poll_100_tasks", |b| {
-        b.iter(|| {
-            let response = rt.block_on(engine.handle_request(&req));
-            black_box(response.is_success());
-        });
-    });
-}
-
 fn bench_jsonrpc_parse(c: &mut Criterion) {
     let json_str: String = r#"{"jsonrpc":"2.0","method":"aria2.addUri","params":[["http://example.com/file.zip"]],"id":"req-1"}"#.to_string();
     c.bench_function("jsonrpc_parse_request", |b| {
@@ -157,13 +84,6 @@ fn bench_jsonrpc_parse(c: &mut Criterion) {
             let req: Result<JsonRpcRequest, _> = serde_json::from_str(&json_str);
             black_box(req.is_ok());
         });
-    });
-}
-
-fn bench_jsonrpc_streaming_wire_parse(c: &mut Criterion) {
-    let json = br#"{"jsonrpc":"2.0","method":"aria2.tellActive","params":[],"id":"req-1"}"#;
-    c.bench_function("jsonrpc_streaming_wire_parse", |b| {
-        b.iter(|| black_box(parse_aria2_wire_document(json).is_ok()));
     });
 }
 
@@ -179,18 +99,6 @@ fn bench_jsonrpc_serialize(c: &mut Criterion) {
             let s = serde_json::to_string(&response);
             black_box(s.ok());
         });
-    });
-}
-
-fn bench_jsonrpc_serialize_bytes(c: &mut Criterion) {
-    let response = JsonRpcResponse {
-        version: "2.0".into(),
-        id: serde_json::Value::String("req-1".into()),
-        result: Some(serde_json::Value::String("gid-001".into())),
-        error: None,
-    };
-    c.bench_function("jsonrpc_serialize_response_bytes", |b| {
-        b.iter(|| black_box(response.to_bytes().ok()));
     });
 }
 
@@ -256,11 +164,8 @@ criterion_group!(
     bench_add_uri_qps,
     bench_tell_active_empty,
     bench_get_global_stat,
-    bench_read_only_multicall_poll,
     bench_jsonrpc_parse,
-    bench_jsonrpc_streaming_wire_parse,
     bench_jsonrpc_serialize,
-    bench_jsonrpc_serialize_bytes,
     bench_xmlrpc_build_serialize,
     bench_xmlrpc_response,
     bench_base64_encode_decode,

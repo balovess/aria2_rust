@@ -26,7 +26,7 @@ fn test_should_retry_recoverable_error() {
 
     assert!(policy.should_retry(
         0,
-        &Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
+        &Aria2Error::Recoverable(RecoverableError::ServerError { code: 500 })
     ));
     assert!(policy.should_retry(
         0,

@@ -6,7 +6,6 @@ const CONTROL_VERSION: u16 = 1;
 const FLAG_HAS_CHECKSUM: u8 = 0x01;
 const FLAG_TORRENT_CHECKPOINT: u8 = 0x02;
 const FLAG_TORRENT_INFO_HASH: u8 = 0x04;
-const FLAG_TORRENT_PIECE_LENGTH: u8 = 0x08;
 const CONTROL_HEADER_LEN: usize = 39;
 
 #[derive(Debug, Clone)]
@@ -21,7 +20,6 @@ pub struct ControlFile {
     checksum_value: Vec<u8>,
     torrent_checkpoint: bool,
     torrent_info_hash: Option<[u8; 20]>,
-    torrent_piece_length: Option<u32>,
 }
 
 impl ControlFile {
@@ -66,15 +64,6 @@ impl ControlFile {
         self.torrent_info_hash
     }
 
-    /// Store the piece length used by a Rust-owned BitTorrent checkpoint.
-    pub fn set_torrent_piece_length(&mut self, piece_length: u32) {
-        self.torrent_piece_length = Some(piece_length);
-    }
-
-    pub fn torrent_piece_length(&self) -> Option<u32> {
-        self.torrent_piece_length
-    }
-
     /// Replace the persisted piece bitfield with a complete snapshot.
     pub fn set_bitfield(&mut self, bitfield: Vec<u8>) {
         self.bitfield = bitfield;
@@ -111,7 +100,6 @@ impl ControlFile {
                 checksum_value: Vec::new(),
                 torrent_checkpoint: false,
                 torrent_info_hash: None,
-                torrent_piece_length: None,
             })
         }
     }
@@ -209,27 +197,6 @@ impl ControlFile {
             None
         };
 
-        let torrent_piece_length = if flags & FLAG_TORRENT_PIECE_LENGTH != 0 {
-            let end = offset.checked_add(4).ok_or_else(|| {
-                Aria2Error::FileIo("Control file torrent piece length overflow".to_string())
-            })?;
-            if end > data.len() {
-                return Err(Aria2Error::FileIo(
-                    "Truncated control file torrent piece length".to_string(),
-                ));
-            }
-            let piece_length = u32_from_le(&data[offset..end]);
-            if piece_length == 0 {
-                return Err(Aria2Error::FileIo(
-                    "Control file torrent piece length must not be 0".to_string(),
-                ));
-            }
-            offset = end;
-            Some(piece_length)
-        } else {
-            None
-        };
-
         let bitfield_end = offset.checked_add(bitfield_length).ok_or_else(|| {
             Aria2Error::FileIo("Control file bitfield length overflow".to_string())
         })?;
@@ -259,7 +226,6 @@ impl ControlFile {
             checksum_value,
             torrent_checkpoint: flags & FLAG_TORRENT_CHECKPOINT != 0,
             torrent_info_hash,
-            torrent_piece_length,
         }))
     }
 
@@ -278,9 +244,6 @@ impl ControlFile {
         if self.torrent_info_hash.is_some() {
             flags |= FLAG_TORRENT_INFO_HASH;
         }
-        if self.torrent_piece_length.is_some() {
-            flags |= FLAG_TORRENT_PIECE_LENGTH;
-        }
         buf.push(flags);
         buf.extend_from_slice(&self.total_length.to_le_bytes());
         buf.extend_from_slice(&self.completed_length.to_le_bytes());
@@ -294,10 +257,6 @@ impl ControlFile {
 
         if let Some(info_hash) = self.torrent_info_hash {
             buf.extend_from_slice(&info_hash);
-        }
-
-        if let Some(piece_length) = self.torrent_piece_length {
-            buf.extend_from_slice(&piece_length.to_le_bytes());
         }
 
         buf.extend_from_slice(&self.bitfield);
@@ -381,10 +340,6 @@ impl ControlFile {
 
 fn u16_from_le(b: &[u8]) -> u16 {
     u16::from_le_bytes([b[0], b[1]])
-}
-
-fn u32_from_le(b: &[u8]) -> u32 {
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }
 
 fn u64_from_le(b: &[u8]) -> u64 {

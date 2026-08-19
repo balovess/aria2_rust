@@ -13,7 +13,6 @@ use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "bittorrent", test))]
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
@@ -311,11 +310,7 @@ impl Aria2RustSession {
                     .pause()
                     .map_err(|error| error.to_string())?;
             }
-            man.add_group_arc(Arc::clone(&group));
-            if let Err(error) = self.command_tx.send(EngineCommand::AddDownload { group }) {
-                let _ = man.remove_group_by_id(gid);
-                return Err(error.to_string());
-            }
+            man.add_group_arc(group);
             Ok::<_, String>(gid.value())
         }?;
         Ok(gid)
@@ -323,29 +318,23 @@ impl Aria2RustSession {
 
     fn run(&mut self, mode: u32) -> i32 {
         let keep_running = self.keep_running;
-        let request_man = Arc::clone(&self.request_man);
         self.runtime.block_on(async {
             if mode == 1 {
-                if !keep_running && request_man.download_finished() {
+                if !keep_running && self.request_man.download_finished() {
                     return 0;
                 }
-                tokio::task::yield_now().await;
-                return if keep_running || !request_man.download_finished() {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                return if keep_running || !self.request_man.download_finished() {
                     1
                 } else {
                     0
                 };
             }
-
-            let notifier = request_man.download_finished_notifier();
             loop {
-                let notified = notifier.notified();
-                tokio::pin!(notified);
-                notified.as_mut().enable();
-                if request_man.download_finished() {
+                if self.request_man.download_finished() {
                     return 0;
                 }
-                notified.await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
     }
@@ -666,9 +655,7 @@ pub unsafe extern "C" fn aria2_rust_add_uri(
     })
 }
 
-/// Advance the engine. Mode 0 waits for all downloads; mode 1 yields once to
-/// let queued engine commands run and then returns the current keep-running
-/// state without an arbitrary wall-clock delay.
+/// Poll the engine. Mode 0 waits for all downloads; mode 1 performs one poll.
 ///
 /// # Safety
 /// `session` must point to a live session and must not be accessed through
@@ -1155,17 +1142,15 @@ mod tests {
             0
         );
 
-        {
-            let group = unsafe { (&*session).request_man.find_group(GroupId::new(gid)) }
-                .expect("C API option change should keep the group");
-            let group = group.read().unwrap();
-            assert_eq!(group.options().dir.as_deref(), Some("reserved-dir"));
-            assert_eq!(
-                group.runtime_options().get("dir"),
-                Some(&serde_json::json!("reserved-dir"))
-            );
-            assert!(group.pending_options().is_empty());
-        }
+        let group = unsafe { (&*session).request_man.find_group(GroupId::new(gid)) }
+            .expect("C API option change should keep the group");
+        let group = group.read().unwrap();
+        assert_eq!(group.options().dir.as_deref(), Some("reserved-dir"));
+        assert_eq!(
+            group.runtime_options().get("dir"),
+            Some(&serde_json::json!("reserved-dir"))
+        );
+        assert!(group.pending_options().is_empty());
 
         assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
         assert_eq!(aria2_rust_library_deinit(), 0);

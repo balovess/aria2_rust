@@ -2,13 +2,6 @@ use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_adaptor::DiskAdaptor;
 use std::path::Path;
 
-#[cfg(unix)]
-fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
-    use std::os::unix::ffi::OsStrExt;
-
-    std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
-}
-
 /// Truncate file to the specified length.
 /// Works identically on all platforms using set_len:
 /// - Unix: ftruncate system call
@@ -67,18 +60,13 @@ pub(crate) async fn async_zero_fill_from<D: DiskAdaptor>(
 /// - **Windows**: Uses `GetDiskFreeSpaceExW`
 /// - **Other**: Returns `u64::MAX` as a sentinel
 pub async fn get_available_space(path: &Path) -> Result<u64> {
-    let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || get_available_space_sync(&path))
-        .await
-        .map_err(|error| Aria2Error::Io(format!("disk space query task failed: {error}")))?
-}
-
-fn get_available_space_sync(path: &Path) -> Result<u64> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
 
     #[cfg(target_os = "linux")]
     {
-        let _metadata = std::fs::metadata(parent).map_err(|e| Aria2Error::Io(e.to_string()))?;
+        let _metadata = tokio::fs::metadata(parent)
+            .await
+            .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         // SAFETY: statvfs64 is a standard POSIX syscall. stat is a
         // zeroed statvfs64 struct on the stack. The path pointer is
@@ -86,10 +74,10 @@ fn get_available_space_sync(path: &Path) -> Result<u64> {
         // The pointer remains valid for the duration of the syscall.
         let statvfs_result = unsafe {
             let mut stat: libc::statvfs64 = std::mem::zeroed();
-            let Some(c_path) = path_to_cstring(parent) else {
-                return Err(Aria2Error::Io("path contains an embedded NUL byte".into()));
-            };
-            let ret = libc::statvfs64(c_path.as_ptr(), &mut stat);
+            let ret = libc::statvfs64(
+                parent.to_str().unwrap_or(".").as_ptr() as *const i8,
+                &mut stat,
+            );
             (ret, stat)
         };
 
@@ -105,7 +93,9 @@ fn get_available_space_sync(path: &Path) -> Result<u64> {
     {
         // On macOS and other Unix systems, use statvfs (not statvfs64).
         // macOS statvfs already handles large files.
-        let _metadata = std::fs::metadata(parent).map_err(|e| Aria2Error::Io(e.to_string()))?;
+        let _metadata = tokio::fs::metadata(parent)
+            .await
+            .map_err(|e| Aria2Error::Io(e.to_string()))?;
 
         // SAFETY: statvfs is a standard POSIX syscall. stat is a
         // zeroed statvfs struct on the stack. The path pointer is valid
@@ -113,10 +103,10 @@ fn get_available_space_sync(path: &Path) -> Result<u64> {
         // The pointer remains valid for the duration of the syscall.
         let statvfs_result = unsafe {
             let mut stat: libc::statvfs = std::mem::zeroed();
-            let Some(c_path) = path_to_cstring(parent) else {
-                return Err(Aria2Error::Io("path contains an embedded NUL byte".into()));
-            };
-            let ret = libc::statvfs(c_path.as_ptr(), &mut stat);
+            let ret = libc::statvfs(
+                parent.to_str().unwrap_or(".").as_ptr() as *const i8,
+                &mut stat,
+            );
             (ret, stat)
         };
 

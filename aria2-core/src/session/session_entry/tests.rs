@@ -437,17 +437,6 @@ fn test_download_options_to_map_all_fields() {
             "https://tracker.example/announce".to_string(),
             "udp://tracker.example:6969".to_string(),
         ]),
-        bt_exclude_tracker: Some(vec!["https://excluded.example/announce".to_string()]),
-        bt_external_ip: Some("203.0.113.7".to_string()),
-        bt_load_saved_metadata: true,
-        bt_metadata_only: true,
-        bt_min_crypto_level: "arc4".to_string(),
-        bt_request_peer_speed_limit: 128 * 1024,
-        bt_save_metadata: true,
-        bt_tracker_interval: 17,
-        bt_tracker_connect_timeout: 11,
-        bt_tracker_timeout: 23,
-        enable_peer_exchange: false,
         // Checksum
         checksum: Some(("sha256".to_string(), "abc123".to_string())),
         // Cookies
@@ -502,8 +491,8 @@ fn test_download_options_to_map_all_fields() {
         no_want_digest_header: true,
         check_certificate: false,
         ca_certificate: Some("/tmp/ca.pem".to_string()),
-        certificate: Some("/tmp/client.pem".to_string()),
-        private_key: Some("/tmp/client.key".to_string()),
+        certificate: None,
+        private_key: None,
         min_tls_version: Some("TLSv1.3".to_string()),
         // Metalink
         metalink_version: None,
@@ -531,6 +520,7 @@ fn test_download_options_to_map_all_fields() {
         disable_ipv6: true,
         listen_port: Some("6881-6999".to_string()),
         bt_enable_lpd: true,
+        bt_lpd_interface: Some("eth0".to_string()),
         enable_rpc: false,
         pause: false,
         // Follow options
@@ -554,7 +544,6 @@ fn test_download_options_to_map_all_fields() {
         netrc_path: Some("/tmp/netrc".to_string()),
         // Conditional GET
         conditional_get: true,
-        ..DownloadOptions::default()
     };
 
     let map = download_options_to_map(&opts);
@@ -593,20 +582,6 @@ fn test_download_options_to_map_all_fields() {
         map.get("bt-tracker").unwrap(),
         "https://tracker.example/announce,udp://tracker.example:6969"
     );
-    assert_eq!(
-        map.get("bt-exclude-tracker").unwrap(),
-        "https://excluded.example/announce"
-    );
-    assert_eq!(map.get("bt-external-ip").unwrap(), "203.0.113.7");
-    assert_eq!(map.get("bt-load-saved-metadata").unwrap(), "true");
-    assert_eq!(map.get("bt-metadata-only").unwrap(), "true");
-    assert_eq!(map.get("bt-min-crypto-level").unwrap(), "arc4");
-    assert_eq!(map.get("bt-request-peer-speed-limit").unwrap(), "131072");
-    assert_eq!(map.get("bt-save-metadata").unwrap(), "true");
-    assert_eq!(map.get("bt-tracker-interval").unwrap(), "17");
-    assert_eq!(map.get("bt-tracker-connect-timeout").unwrap(), "11");
-    assert_eq!(map.get("bt-tracker-timeout").unwrap(), "23");
-    assert_eq!(map.get("enable-peer-exchange").unwrap(), "false");
     assert_eq!(map.get("enable-public-trackers").unwrap(), "false");
     assert_eq!(
         map.get("bt-piece-selection-strategy").unwrap(),
@@ -638,10 +613,7 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("bt-stop-timeout").unwrap(), "120");
     assert_eq!(map.get("disable-ipv6").unwrap(), "true");
     assert_eq!(map.get("bt-enable-lpd").unwrap(), "true");
-    assert!(
-        !map.contains_key("bt-lpd-interface"),
-        "process-level LPD interface must not be serialized into a task session"
-    );
+    assert_eq!(map.get("bt-lpd-interface").unwrap(), "eth0");
     assert_eq!(map.get("http-auth-challenge").unwrap(), "true");
     assert_eq!(map.get("http-user").unwrap(), "http-user");
     assert_eq!(map.get("http-passwd").unwrap(), "http-pass");
@@ -677,8 +649,6 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("no-want-digest-header").unwrap(), "true");
     assert_eq!(map.get("check-certificate").unwrap(), "false");
     assert_eq!(map.get("ca-certificate").unwrap(), "/tmp/ca.pem");
-    assert_eq!(map.get("certificate").unwrap(), "/tmp/client.pem");
-    assert_eq!(map.get("private-key").unwrap(), "/tmp/client.key");
     assert_eq!(map.get("min-tls-version").unwrap(), "TLSv1.3");
 
     // The same canonical string map is consumed by session restoration.
@@ -689,8 +659,6 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(restored.max_resume_failure_tries, 2);
     assert_eq!(restored.cookie_file.as_deref(), Some("/tmp/cookies.txt"));
     assert_eq!(restored.bt_max_peers, 64);
-    assert_eq!(restored.certificate.as_deref(), Some("/tmp/client.pem"));
-    assert_eq!(restored.private_key.as_deref(), Some("/tmp/client.key"));
     assert_eq!(
         restored.bt_tracker,
         Some(vec![
@@ -698,20 +666,6 @@ fn test_download_options_to_map_all_fields() {
             "udp://tracker.example:6969".to_string(),
         ])
     );
-    assert_eq!(
-        restored.bt_exclude_tracker,
-        Some(vec!["https://excluded.example/announce".to_string()])
-    );
-    assert_eq!(restored.bt_external_ip.as_deref(), Some("203.0.113.7"));
-    assert!(restored.bt_load_saved_metadata);
-    assert!(restored.bt_metadata_only);
-    assert_eq!(restored.bt_min_crypto_level, "arc4");
-    assert_eq!(restored.bt_request_peer_speed_limit, 128 * 1024);
-    assert!(restored.bt_save_metadata);
-    assert_eq!(restored.bt_tracker_interval, 17);
-    assert_eq!(restored.bt_tracker_connect_timeout, 11);
-    assert_eq!(restored.bt_tracker_timeout, 23);
-    assert!(!restored.enable_peer_exchange);
     assert_eq!(restored.listen_port.as_deref(), Some("6881-6999"));
     assert_eq!(restored.dht_listen_port.as_deref(), Some("6881-6999"));
     assert!(!restored.metalink_enable_unique_protocol);
@@ -743,8 +697,4 @@ fn test_download_options_to_map_defaults_excluded() {
     // enable_dht and enable_public_trackers default to true -> NOT saved
     assert!(!map.contains_key("enable-dht"));
     assert!(!map.contains_key("enable-public-trackers"));
-
-    // The omitted wire value must still restore aria2's typed default.
-    let restored = DownloadOptions::from_option_strings(&map);
-    assert_eq!(restored.seed_ratio, Some(1.0));
 }

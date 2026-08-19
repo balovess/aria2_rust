@@ -42,31 +42,17 @@ use super::validate::{ValidateRequestContext, validate_response};
 /// ```
 pub struct HttpResponseProcessor {
     config: ResponseProcessorConfig,
-    retry_wait_secs: u64,
 }
 
 impl HttpResponseProcessor {
     /// Create a new processor with the given configuration.
     pub fn new(config: ResponseProcessorConfig) -> Self {
-        Self {
-            config,
-            retry_wait_secs: 0,
-        }
+        Self { config }
     }
 
     /// Create a processor with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(ResponseProcessorConfig::default())
-    }
-
-    /// Configure the wait that enables retries for transient 502/503 errors.
-    ///
-    /// A zero value preserves the `retry-wait` default and classifies 502/503
-    /// as fatal. The processor returns the classification to its caller; it
-    /// does not sleep or perform the retry itself.
-    pub fn with_retry_wait(mut self, retry_wait_secs: u64) -> Self {
-        self.retry_wait_secs = retry_wait_secs;
-        self
     }
 
     /// Process an HTTP response header and determine the next action.
@@ -263,7 +249,7 @@ impl HttpResponseProcessor {
         let handler = HttpSkipResponseHandler::new(MAX_REDIRECT_COUNT)
             .with_http_auth_challenge(true)
             .with_max_file_not_found(self.config.max_file_not_found)
-            .with_retry_wait(self.retry_wait_secs);
+            .with_retry_wait(5);
 
         // Convert HttpResponseHead into the HttpResponse type expected
         // by the skip_response handler.
@@ -283,7 +269,7 @@ impl HttpResponseProcessor {
             SkipResponseResult::RetryableError {
                 status_code,
                 message,
-            } => Ok(ResponseProcessResult::RetryableError {
+            } => Ok(ResponseProcessResult::Error {
                 status_code,
                 message,
             }),

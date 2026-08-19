@@ -1,24 +1,9 @@
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
 
 use tokio::io::AsyncReadExt;
-use tokio::sync::Semaphore;
 
 use super::message_digest::{HashType, MessageDigest};
 use crate::error::{Aria2Error, Result};
-
-const MAX_CHECKSUM_WORKERS: usize = 4;
-
-fn checksum_slots() -> &'static Arc<Semaphore> {
-    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    SLOTS.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(1, MAX_CHECKSUM_WORKERS);
-        Arc::new(Semaphore::new(workers))
-    })
-}
 
 #[derive(Debug, Clone)]
 pub struct Checksum {
@@ -81,28 +66,6 @@ impl Checksum {
         computed.eq_ignore_ascii_case(&self.expected_hex)
     }
 
-    /// Verify an owned in-memory payload without hashing on the async worker.
-    ///
-    /// The payload is returned from the blocking worker so callers can retain
-    /// it for the completed in-memory download without cloning the buffer.
-    pub async fn verify_async(&self, data: Vec<u8>) -> Result<(Vec<u8>, bool)> {
-        let permit = checksum_slots()
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|error| Aria2Error::Io(format!("checksum dispatcher closed: {error}")))?;
-        let hash_type = self.hash_type;
-        let expected_hex = self.expected_hex.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let computed = MessageDigest::hash_hex(hash_type, &data);
-            let verified = computed.eq_ignore_ascii_case(&expected_hex);
-            (data, verified)
-        })
-        .await
-        .map_err(|error| Aria2Error::Io(format!("checksum task failed: {error}")))
-    }
-
     pub fn create_validator<'a>(&'a self) -> ChecksumValidator<'a> {
         ChecksumValidator {
             checksum: self,
@@ -117,7 +80,7 @@ pub async fn verify_file(path: &Path, checksum: &Checksum) -> Result<bool> {
         .await
         .map_err(|error| Aria2Error::Io(format!("Failed to open {}: {}", path.display(), error)))?;
     let mut reader = tokio::io::BufReader::with_capacity(65536, file);
-    let mut digest = MessageDigest::new(checksum.hash_type);
+    let mut validator = checksum.create_validator();
     let mut buffer = vec![0u8; 65536];
 
     loop {
@@ -127,48 +90,10 @@ pub async fn verify_file(path: &Path, checksum: &Checksum) -> Result<bool> {
         if bytes_read == 0 {
             break;
         }
-        buffer.truncate(bytes_read);
-        let (next_digest, returned_buffer) = update_digest_async(digest, buffer).await?;
-        digest = next_digest;
-        buffer = returned_buffer;
-        buffer.resize(65536, 0);
+        validator.update(&buffer[..bytes_read]);
     }
 
-    let computed = finalize_digest_async(digest).await?;
-    Ok(computed.eq_ignore_ascii_case(&checksum.expected_hex))
-}
-
-async fn update_digest_async(
-    digest: MessageDigest,
-    data: Vec<u8>,
-) -> Result<(MessageDigest, Vec<u8>)> {
-    let permit = checksum_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| Aria2Error::Io(format!("checksum dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let mut digest = digest;
-        digest.update(&data);
-        (digest, data)
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("checksum task failed: {error}")))
-}
-
-async fn finalize_digest_async(digest: MessageDigest) -> Result<String> {
-    let permit = checksum_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| Aria2Error::Io(format!("checksum dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        digest.finalize_hex()
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("checksum task failed: {error}")))
+    validator.finalize()
 }
 
 pub struct ChecksumValidator<'a> {
@@ -298,20 +223,5 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn test_verify_async_returns_owned_payload_without_copying_contract() {
-        let checksum = Checksum::new(
-            HashType::Sha256,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
-        )
-        .unwrap();
-        let payload = b"hello world".to_vec();
-
-        let (returned, verified) = checksum.verify_async(payload).await.unwrap();
-
-        assert!(verified);
-        assert_eq!(returned, b"hello world");
     }
 }

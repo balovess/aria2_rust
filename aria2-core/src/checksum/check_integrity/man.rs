@@ -39,18 +39,18 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::{Notify, RwLock, Semaphore, oneshot};
+use tokio::sync::{RwLock, oneshot};
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::Checksum;
 use crate::checksum::message_digest::{HashType, MessageDigest};
 use crate::error::{Aria2Error, Result};
-use crate::request::request_group::RequestGroup;
-use crate::util::rwlock_ext::RwLockRecover;
+
+/// How long the worker sleeps when the queue is empty before polling again.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Error reported when a queued integrity check is cancelled (engine halt).
 fn cancelled_error() -> Aria2Error {
@@ -76,63 +76,6 @@ pub struct IntegrityOutcome {
 
 fn expected_piece_count(total_length: u64, piece_length: u64) -> usize {
     total_length.div_ceil(piece_length.max(1)) as usize
-}
-
-const MAX_HASH_WORKERS: usize = 4;
-
-fn hash_slots() -> &'static Arc<Semaphore> {
-    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    HASH_SLOTS.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(1, MAX_HASH_WORKERS);
-        Arc::new(Semaphore::new(workers))
-    })
-}
-
-async fn hash_bytes_async(algo: HashType, data: Vec<u8>) -> Result<Vec<u8>> {
-    let permit = hash_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        Ok::<_, Aria2Error>(MessageDigest::hash_data(algo, &data))
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))?
-}
-
-async fn update_digest_async(digest: MessageDigest, data: Vec<u8>) -> Result<MessageDigest> {
-    let permit = hash_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let mut digest = digest;
-        digest.update(&data);
-        digest
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))
-}
-
-async fn finalize_digest_async(digest: MessageDigest) -> Result<String> {
-    let permit = hash_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        digest.finalize_hex()
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))
 }
 
 #[async_trait]
@@ -279,7 +222,10 @@ impl CheckIntegrityTask for FileChunkValidator {
             .map_err(|e| Aria2Error::Io(format!("read {}: {}", self.path.display(), e)))?;
         buf.truncate(n);
 
-        let actual = hash_bytes_async(self.algo, buf).await?;
+        let digest = MessageDigest::new(self.algo);
+        let mut digest = digest;
+        digest.update(&buf);
+        let actual = digest.finalize();
 
         let ok = self
             .expected
@@ -390,21 +336,17 @@ impl MultiFileChunkValidator {
                 .map_err(|e| Aria2Error::Io(format!("seek {}: {}", path.display(), e)))?;
             let count = (read_end - read_start) as usize;
             let mut buf = vec![0u8; count];
-            let mut read = 0;
-            while read < count {
-                let n = file
-                    .read(&mut buf[read..])
-                    .await
-                    .map_err(|e| Aria2Error::Io(format!("read {}: {}", path.display(), e)))?;
-                if n == 0 {
-                    // A physically truncated entry is an incomplete piece,
-                    // not a fatal validation error. Keep the bytes available
-                    // so the digest mismatch selects the re-download path.
-                    break;
-                }
-                read += n;
-            }
-            output.extend_from_slice(&buf[..read]);
+            file.read_exact(&mut buf)
+                .await
+                .map_err(|e| Aria2Error::Io(format!("read {}: {}", path.display(), e)))?;
+            output.extend_from_slice(&buf);
+        }
+        if output.len() != length {
+            return Err(Aria2Error::Io(format!(
+                "multi-file data short read: expected {}, got {}",
+                length,
+                output.len()
+            )));
         }
         Ok(output)
     }
@@ -428,7 +370,9 @@ impl CheckIntegrityTask for MultiFileChunkValidator {
         let offset = self.current_piece as u64 * self.piece_length;
         let length = (self.total_length - offset).min(self.piece_length) as usize;
         let data = self.read_piece(offset, length).await?;
-        let actual = hash_bytes_async(self.algo, data).await?;
+        let mut digest = MessageDigest::new(self.algo);
+        digest.update(&data);
+        let actual = digest.finalize();
         if self.expected.get(self.current_piece) != Some(&actual) {
             self.passed = false;
             self.failed_indices.push(self.current_piece);
@@ -452,105 +396,6 @@ impl CheckIntegrityTask for MultiFileChunkValidator {
     }
 }
 
-/// Validates one whole file against a configured checksum while yielding
-/// between bounded reads.
-///
-/// This is the common post-download validator for protocols that expose one
-/// whole-file checksum rather than per-piece hashes. Keeping it in the same
-/// dispatcher gives HTTP, Metalink, FTP, and SFTP the same cancellation and
-/// lifecycle behavior as piece-integrity checks.
-pub struct FileChecksumTask {
-    path: PathBuf,
-    file: Option<tokio::fs::File>,
-    total_length: u64,
-    current_length: u64,
-    expected_hex: String,
-    digest: Option<MessageDigest>,
-    finished: bool,
-    passed: bool,
-}
-
-impl FileChecksumTask {
-    pub fn new(path: PathBuf, total_length: u64, checksum: Checksum) -> Self {
-        Self {
-            path,
-            file: None,
-            total_length,
-            current_length: 0,
-            expected_hex: checksum.expected_hex().to_owned(),
-            digest: Some(MessageDigest::new(checksum.hash_type())),
-            finished: false,
-            passed: false,
-        }
-    }
-
-    async fn ensure_open(&mut self) -> Result<()> {
-        if self.file.is_none() {
-            let file = tokio::fs::File::open(&self.path).await.map_err(|error| {
-                Aria2Error::Io(format!("Failed to open {}: {}", self.path.display(), error))
-            })?;
-            self.file = Some(file);
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl CheckIntegrityTask for FileChecksumTask {
-    fn total_length(&self) -> u64 {
-        self.total_length
-    }
-
-    fn current_length(&self) -> u64 {
-        self.current_length
-    }
-
-    fn is_finished(&self) -> bool {
-        self.finished
-    }
-
-    async fn validate_chunk(&mut self) -> Result<()> {
-        if self.finished {
-            return Ok(());
-        }
-        self.ensure_open().await?;
-
-        let mut buffer = vec![0u8; 64 * 1024];
-        let bytes_read = self
-            .file
-            .as_mut()
-            .expect("file opened above")
-            .read(&mut buffer)
-            .await
-            .map_err(|error| {
-                Aria2Error::Io(format!("Failed to read {}: {}", self.path.display(), error))
-            })?;
-
-        if bytes_read == 0 {
-            let digest = self
-                .digest
-                .take()
-                .expect("checksum digest is present until EOF");
-            let actual_hex = finalize_digest_async(digest).await?;
-            self.passed = actual_hex.eq_ignore_ascii_case(&self.expected_hex);
-            self.finished = true;
-        } else {
-            buffer.truncate(bytes_read);
-            let digest = self
-                .digest
-                .take()
-                .expect("checksum digest is present before EOF");
-            self.digest = Some(update_digest_async(digest, buffer).await?);
-            self.current_length += bytes_read as u64;
-        }
-        Ok(())
-    }
-
-    fn passed(&self) -> bool {
-        self.finished && self.passed
-    }
-}
-
 // ---------------------------------------------------------------------------
 // CheckIntegrityEntry / CheckIntegrityMan
 // ---------------------------------------------------------------------------
@@ -558,7 +403,6 @@ impl CheckIntegrityTask for FileChecksumTask {
 /// Lightweight metadata of the entry currently being validated.
 #[derive(Debug, Clone)]
 struct PickedMeta {
-    gid: u64,
     total_length: u64,
     cancelled: Arc<AtomicBool>,
     progress: Arc<std::sync::atomic::AtomicU64>,
@@ -597,7 +441,6 @@ pub struct CheckIntegrityMan {
     picked: Option<PickedMeta>,
     max_concurrent: usize,
     active_count: usize,
-    wake: Arc<Notify>,
 }
 
 impl CheckIntegrityMan {
@@ -608,7 +451,6 @@ impl CheckIntegrityMan {
             picked: None,
             max_concurrent: 1,
             active_count: 0,
-            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -619,7 +461,6 @@ impl CheckIntegrityMan {
             picked: None,
             max_concurrent: max_concurrent.max(1),
             active_count: 0,
-            wake: Arc::new(Notify::new()),
         }
     }
 
@@ -631,7 +472,6 @@ impl CheckIntegrityMan {
             "Integrity check entry queued"
         );
         self.queue.push_back(entry);
-        self.wake.notify_one();
     }
 
     /// Pick the next entry, moving it out. `None` when the queue is empty or
@@ -645,7 +485,6 @@ impl CheckIntegrityMan {
         debug!(gid = entry.gid, "Integrity check entry picked by worker");
         let total = entry.task.total_length();
         self.picked = Some(PickedMeta {
-            gid: entry.gid,
             total_length: total,
             cancelled: Arc::clone(&entry.cancelled),
             progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -658,7 +497,6 @@ impl CheckIntegrityMan {
     pub fn drop_picked(&mut self) {
         if self.picked.take().is_some() {
             self.active_count = self.active_count.saturating_sub(1);
-            self.wake.notify_one();
         }
     }
 
@@ -705,47 +543,6 @@ impl CheckIntegrityMan {
         if let Some(meta) = self.picked.as_ref() {
             meta.cancelled.store(true, Ordering::Relaxed);
         }
-        self.wake.notify_one();
-    }
-
-    /// Cancel integrity work belonging to one RequestGroup.
-    ///
-    /// Queued entries are removed and their waiters are notified immediately.
-    /// A picked entry is marked for cooperative cancellation; the worker
-    /// observes the flag between validation chunks and still owns its final
-    /// cleanup and completion notification.
-    pub fn cancel_gid(&mut self, gid: u64) -> bool {
-        let mut cancelled = false;
-        let mut retained = VecDeque::with_capacity(self.queue.len());
-
-        while let Some(entry) = self.queue.pop_front() {
-            if entry.gid == gid {
-                entry.mark_cancelled();
-                if let Some(tx) = entry.done_tx {
-                    let _ = tx.send(Err(cancelled_error()));
-                }
-                cancelled = true;
-            } else {
-                retained.push_back(entry);
-            }
-        }
-        self.queue = retained;
-
-        if let Some(meta) = self.picked.as_ref()
-            && meta.gid == gid
-        {
-            meta.cancelled.store(true, Ordering::Relaxed);
-            cancelled = true;
-        }
-
-        if cancelled {
-            self.wake.notify_one();
-        }
-        cancelled
-    }
-
-    fn wake_notifier(&self) -> Arc<Notify> {
-        Arc::clone(&self.wake)
     }
 }
 
@@ -800,11 +597,6 @@ pub fn shared_with_concurrency(max: usize) -> SharedCheckIntegrityMan {
 /// then notify the waiter with the validation outcome.
 async fn worker_loop(man: SharedCheckIntegrityMan) {
     debug!("Check integrity worker started");
-    let wake = {
-        let guard = man.read().await;
-        guard.wake_notifier()
-    };
-
     loop {
         let entry = {
             let mut guard = man.write().await;
@@ -812,9 +604,7 @@ async fn worker_loop(man: SharedCheckIntegrityMan) {
         };
 
         let Some(mut entry) = entry else {
-            // Queue insertion and cancellation both notify this waiter. The
-            // worker therefore consumes no timer wakeups while idle.
-            wake.notified().await;
+            tokio::time::sleep(IDLE_POLL_INTERVAL).await;
             continue;
         };
 
@@ -880,12 +670,16 @@ async fn run_validation(entry: &mut CheckIntegrityEntry) -> Result<IntegrityOutc
 // Entry-point helpers used by download commands
 // ---------------------------------------------------------------------------
 
-/// Queue an integrity check and return its completion receiver.
-async fn enqueue_entry(
+/// Queue an integrity check and wait for its outcome.
+///
+/// Returns `Ok(true)` when the data verified, `Ok(false)` when a piece
+/// mismatched, and `Err` on I/O failure or cancellation.
+/// Queue an integrity check and wait for its detailed validation outcome.
+pub async fn enqueue_with_outcome(
     man: &SharedCheckIntegrityMan,
     gid: u64,
     task: Box<dyn CheckIntegrityTask>,
-) -> oneshot::Receiver<Result<IntegrityOutcome>> {
+) -> Result<IntegrityOutcome> {
     let (tx, rx) = oneshot::channel();
     let entry = CheckIntegrityEntry {
         gid,
@@ -896,19 +690,7 @@ async fn enqueue_entry(
         done_tx: Some(tx),
     };
     man.write().await.push_entry(entry);
-    rx
-}
-
-/// Queue an integrity check and wait for its detailed validation outcome.
-pub async fn enqueue_with_outcome(
-    man: &SharedCheckIntegrityMan,
-    gid: u64,
-    task: Box<dyn CheckIntegrityTask>,
-) -> Result<IntegrityOutcome> {
-    enqueue_entry(man, gid, task)
-        .await
-        .await
-        .map_err(|_| cancelled_error())?
+    rx.await.map_err(|_| cancelled_error())?
 }
 
 pub async fn enqueue(
@@ -916,10 +698,17 @@ pub async fn enqueue(
     gid: u64,
     task: Box<dyn CheckIntegrityTask>,
 ) -> Result<bool> {
-    let outcome = enqueue_entry(man, gid, task)
-        .await
-        .await
-        .map_err(|_| cancelled_error())??;
+    let (tx, rx) = oneshot::channel();
+    let entry = CheckIntegrityEntry {
+        gid,
+        task,
+        created_at: Instant::now(),
+        cancelled: Arc::new(AtomicBool::new(false)),
+        progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        done_tx: Some(tx),
+    };
+    man.write().await.push_entry(entry);
+    let outcome = rx.await.map_err(|_| cancelled_error())??;
     Ok(outcome.verified)
 }
 
@@ -1052,179 +841,21 @@ pub fn file_task(
     )?)))
 }
 
-/// Queue a whole-file checksum validation through the shared lifecycle-aware
-/// integrity dispatcher.
-pub async fn enqueue_file_checksum_for_group(
-    man: &SharedCheckIntegrityMan,
-    group: Arc<std::sync::RwLock<RequestGroup>>,
-    path: &Path,
-    total_length: u64,
-    checksum: Checksum,
-) -> Result<bool> {
-    let outcome = enqueue_with_outcome_for_group(
-        man,
-        group,
-        Box::new(FileChecksumTask::new(
-            path.to_path_buf(),
-            total_length,
-            checksum,
-        )),
-    )
-    .await?;
-    Ok(outcome.verified)
-}
-
 /// Cancel all pending checks and notify their waiters (engine shutdown).
 pub async fn cancel_all(man: &SharedCheckIntegrityMan) {
     man.write().await.cancel_all();
 }
 
-/// Cancel integrity validation for one RequestGroup.
-pub async fn cancel_gid(man: &SharedCheckIntegrityMan, gid: u64) -> bool {
-    man.write().await.cancel_gid(gid)
-}
-
-fn request_group_cancellation_error(group: &RequestGroup) -> Option<Aria2Error> {
-    if group.is_removed() {
-        Some(Aria2Error::DownloadFailed(
-            "Download cancelled by user".to_string(),
-        ))
-    } else if group.is_paused_flag() {
-        Some(Aria2Error::DownloadFailed("Download paused".to_string()))
-    } else if group.is_force_halt_requested() || group.is_halt_requested() {
-        Some(Aria2Error::DownloadFailed("Download halted".to_string()))
-    } else {
-        None
-    }
-}
-
-/// Queue an integrity check while observing its owning RequestGroup.
-///
-/// The validator worker remains the owner of validation state, but lifecycle
-/// control belongs to the RequestGroup. The group's lifecycle notification
-/// wakes this waiter immediately when pause/remove/halt changes state.
-pub async fn enqueue_with_outcome_for_group(
-    man: &SharedCheckIntegrityMan,
-    group: Arc<std::sync::RwLock<RequestGroup>>,
-    task: Box<dyn CheckIntegrityTask>,
-) -> Result<IntegrityOutcome> {
-    let gid = group.recover().gid().value();
-    let lifecycle_notify = group.recover().lifecycle_notifier();
-    // Queue before observing lifecycle state so cancellation can always find
-    // and complete the entry, even when the group was already stopped before
-    // this function was first polled.
-    let receiver = enqueue_entry(man, gid, task).await;
-    let mut validation = Box::pin(async move { receiver.await.map_err(|_| cancelled_error())? });
-
-    loop {
-        let lifecycle_changed = lifecycle_notify.notified();
-        tokio::pin!(lifecycle_changed);
-        lifecycle_changed.as_mut().enable();
-
-        let cancellation_error = {
-            let group_guard = group.recover();
-            request_group_cancellation_error(&group_guard)
-        };
-        if let Some(error) = cancellation_error {
-            cancel_gid(man, gid).await;
-            let _ = validation.await;
-            return Err(error);
-        }
-
-        tokio::select! {
-            result = &mut validation => return result,
-            _ = &mut lifecycle_changed => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::request_group::GroupId;
-    use async_trait::async_trait;
     use std::path::PathBuf;
-    use std::time::Duration;
-
-    struct SlowIntegrityTask {
-        remaining_chunks: usize,
-        current_length: u64,
-    }
-
-    #[async_trait]
-    impl CheckIntegrityTask for SlowIntegrityTask {
-        fn total_length(&self) -> u64 {
-            (self.remaining_chunks as u64 + 1) * 1024
-        }
-
-        fn current_length(&self) -> u64 {
-            self.current_length
-        }
-
-        fn is_finished(&self) -> bool {
-            self.remaining_chunks == 0
-        }
-
-        async fn validate_chunk(&mut self) -> Result<()> {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            self.remaining_chunks -= 1;
-            self.current_length += 1024;
-            Ok(())
-        }
-
-        fn passed(&self) -> bool {
-            self.is_finished()
-        }
-    }
 
     fn test_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("aria2_ci_{}_{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    async fn run_active_cancellation(
-        trigger: impl FnOnce(&Arc<std::sync::RwLock<RequestGroup>>),
-    ) -> Result<IntegrityOutcome> {
-        let man = shared_with_concurrency(1);
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(5),
-            vec!["http://example.test/payload".to_string()],
-            crate::request::request_group::DownloadOptions::default(),
-        )));
-        let man_for_validation = Arc::clone(&man);
-        let group_for_validation = Arc::clone(&group);
-        let validation = tokio::spawn(async move {
-            enqueue_with_outcome_for_group(
-                &man_for_validation,
-                group_for_validation,
-                Box::new(SlowIntegrityTask {
-                    remaining_chunks: 100,
-                    current_length: 0,
-                }),
-            )
-            .await
-        });
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if man.read().await.is_picked() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .expect("integrity validation should become active");
-
-        trigger(&group);
-        let result = tokio::time::timeout(Duration::from_secs(1), validation)
-            .await
-            .expect("lifecycle cancellation should be prompt")
-            .expect("validation task should not panic");
-        assert_eq!(man.read().await.active_count(), 0);
-        result
     }
 
     fn sha1_hex(data: &[u8]) -> String {
@@ -1256,36 +887,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[tokio::test]
-    async fn test_multi_file_task_truncated_existing_file_is_mismatch() {
-        let dir = test_dir("multi_truncated");
-        let first = dir.join("first");
-        let second = dir.join("second");
-        tokio::fs::write(&first, b"abcd").await.unwrap();
-        // The metadata declares six bytes, but the existing file contains only
-        // the first two. The missing bytes must be treated as a bad piece so
-        // the normal re-download path can repair the payload.
-        tokio::fs::write(&second, b"ef").await.unwrap();
-        let expected = vec![sha1_hex(b"abcdef"), sha1_hex(b"ghij")];
-        let task = multi_file_task(
-            vec![(first, 4), (second, 6)],
-            6,
-            10,
-            expected,
-            HashType::Sha1,
-        )
-        .unwrap()
-        .unwrap();
-        let outcome = enqueue_with_outcome(&shared_with_concurrency(1), 92, task)
-            .await
-            .expect("a truncated existing file is an integrity mismatch");
-
-        assert!(!outcome.verified);
-        assert_eq!(outcome.verified_piece_indices, vec![0]);
-        assert_eq!(outcome.failed_piece_indices, vec![1]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1373,126 +974,6 @@ mod tests {
         assert_eq!(outcome.failed_piece_indices, vec![1]);
 
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_file_checksum_dispatcher_streams_and_reports_mismatch() {
-        let dir = test_dir("whole_file_checksum");
-        let path = dir.join("payload.bin");
-        let data: Vec<u8> = (0..131_072).map(|index| (index % 251) as u8).collect();
-        std::fs::write(&path, &data).unwrap();
-        let expected = MessageDigest::hash_hex(HashType::Sha256, &data);
-        let man = shared_with_concurrency(1);
-
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(93),
-            vec!["http://example.test/payload".to_string()],
-            crate::request::request_group::DownloadOptions::default(),
-        )));
-        assert!(
-            enqueue_file_checksum_for_group(
-                &man,
-                group,
-                &path,
-                data.len() as u64,
-                Checksum::new(HashType::Sha256, &expected).unwrap(),
-            )
-            .await
-            .unwrap()
-        );
-
-        let mut corrupted = data;
-        corrupted[70_000] ^= 0x01;
-        std::fs::write(&path, corrupted).unwrap();
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(94),
-            vec!["http://example.test/payload".to_string()],
-            crate::request::request_group::DownloadOptions::default(),
-        )));
-        assert!(
-            !enqueue_file_checksum_for_group(
-                &man,
-                group,
-                &path,
-                131_072,
-                Checksum::new(HashType::Sha256, &expected).unwrap(),
-            )
-            .await
-            .unwrap()
-        );
-
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_group_pause_cancels_active_integrity_validation() {
-        let result = run_active_cancellation(|group| {
-            group.write().unwrap().pause().unwrap();
-        })
-        .await;
-        assert!(matches!(
-            result,
-            Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_group_remove_cancels_active_integrity_validation() {
-        let result = run_active_cancellation(|group| {
-            group.write().unwrap().remove().unwrap();
-        })
-        .await;
-        assert!(matches!(
-            result,
-            Err(Aria2Error::DownloadFailed(message)) if message == "Download cancelled by user"
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_group_halt_cancels_active_integrity_validation() {
-        let result = run_active_cancellation(|group| {
-            group
-                .read()
-                .unwrap()
-                .request_halt(crate::request::request_group::HaltReason::UserRequest);
-        })
-        .await;
-        assert!(matches!(
-            result,
-            Err(Aria2Error::DownloadFailed(message)) if message == "Download halted"
-        ));
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn test_group_already_paused_cancels_queued_integrity_validation() {
-        let man = shared_with_concurrency(1);
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            GroupId::new(6),
-            vec!["http://example.test/payload".to_string()],
-            crate::request::request_group::DownloadOptions::default(),
-        )));
-        group.write().unwrap().pause().unwrap();
-
-        let result = tokio::time::timeout(
-            Duration::from_secs(1),
-            enqueue_with_outcome_for_group(
-                &man,
-                group,
-                Box::new(SlowIntegrityTask {
-                    remaining_chunks: 100,
-                    current_length: 0,
-                }),
-            ),
-        )
-        .await
-        .expect("an already paused group must cancel queued validation promptly");
-
-        assert!(matches!(
-            result,
-            Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
-        ));
-        assert_eq!(man.read().await.count_in_queue(), 0);
-        assert_eq!(man.read().await.active_count(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1620,33 +1101,6 @@ mod tests {
         man.blocking_write().cancel_all();
         assert_eq!(man.blocking_read().count_in_queue(), 0);
         assert!(rx1.blocking_recv().unwrap().is_err());
-    }
-
-    #[test]
-    fn test_cancel_gid_notifies_only_matching_queued_entry() {
-        let mut man = CheckIntegrityMan::new();
-        let (target_tx, target_rx) = oneshot::channel();
-        let (other_tx, mut other_rx) = oneshot::channel();
-
-        for (gid, done_tx) in [(7, target_tx), (8, other_tx)] {
-            man.push_entry(CheckIntegrityEntry {
-                gid,
-                task: Box::new(SlowIntegrityTask {
-                    remaining_chunks: 1,
-                    current_length: 0,
-                }),
-                created_at: Instant::now(),
-                cancelled: Arc::new(AtomicBool::new(false)),
-                progress: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                done_tx: Some(done_tx),
-            });
-        }
-
-        assert!(man.cancel_gid(7));
-        assert_eq!(man.count_in_queue(), 1);
-        assert!(target_rx.blocking_recv().unwrap().is_err());
-        assert!(other_rx.try_recv().is_err());
-        assert_eq!(man.take_next_owned().unwrap().gid, 8);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

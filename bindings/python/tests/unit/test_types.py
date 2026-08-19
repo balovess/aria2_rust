@@ -202,11 +202,11 @@ class TestGlobalStat:
 class TestVersionInfo:
     def test_from_dict_full(self):
         data = {
-            "version": "0.3.2",
+            "version": "0.3.1",
             "enabledFeatures": ["Async DNS", "BitTorrent", "Firefox3 Cookie"],
         }
         info = VersionInfo.from_dict(data)
-        assert info.version == "0.3.2"
+        assert info.version == "0.3.1"
         assert info.enabled_features == ["Async DNS", "BitTorrent", "Firefox3 Cookie"]
 
     def test_from_dict_missing_features(self):

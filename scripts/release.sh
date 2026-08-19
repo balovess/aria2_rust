@@ -34,7 +34,7 @@ cargo test --workspace --all-targets
 echo "  ✓ Tests passed"
 echo ""
 
-# Step 2: Bump versions with cargo-release (package versions are independent)
+# Step 2: Bump version with cargo-release
 echo "Step 2: Bumping version..."
 cargo release "$LEVEL" --no-confirm --execute
 echo "  ✓ Version bumped"
@@ -49,7 +49,7 @@ echo ""
 
 # Step 4: Commit changes
 echo "Step 4: Committing changes..."
-VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' "$PROJECT_ROOT/aria2/Cargo.toml" | head -1)
+VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' "$PROJECT_ROOT/Cargo.toml" | head -1)
 git add -A
 git commit -m "chore: release v$VERSION"
 git tag "v$VERSION"

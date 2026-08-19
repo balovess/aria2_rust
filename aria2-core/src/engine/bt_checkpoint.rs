@@ -31,22 +31,14 @@ impl BtCheckpoint {
         let path = ControlFile::control_path_for(output_path);
         let expected_bitfield_len = num_pieces.div_ceil(8);
         let control_file = match ControlFile::load(&path).await {
-            Ok(Some(mut control_file))
+            Ok(Some(control_file))
                 if control_file.is_torrent_checkpoint()
                     && control_file.total_length() == total_length
                     && payload_exists
                     && control_file.bitfield().len() == expected_bitfield_len
                     && valid_trailing_bits(control_file.bitfield(), num_pieces)
-                    && control_file.torrent_info_hash() == Some(info_hash)
-                    && control_file
-                        .torrent_piece_length()
-                        .is_none_or(|stored| stored == piece_length) =>
+                    && control_file.torrent_info_hash() == Some(info_hash) =>
             {
-                // A2CF checkpoints written before piece-length persistence are
-                // still safe to restore because the torrent info hash identifies
-                // the complete info dictionary. Stamp the field on the next
-                // durable save so the invariant becomes explicit thereafter.
-                control_file.set_torrent_piece_length(piece_length);
                 Some(control_file)
             }
             Ok(Some(_)) => {
@@ -80,7 +72,6 @@ impl BtCheckpoint {
             if let Some(control_file) = checkpoint.control_file.as_mut() {
                 control_file.mark_torrent_checkpoint();
                 control_file.set_torrent_info_hash(info_hash);
-                control_file.set_torrent_piece_length(piece_length);
             }
         }
         Ok(checkpoint)
@@ -130,11 +121,6 @@ impl BtCheckpoint {
         if control_file.torrent_info_hash() != Some(self.info_hash) {
             return Err(crate::error::Aria2Error::FileIo(
                 "BitTorrent checkpoint torrent identity mismatch".into(),
-            ));
-        }
-        if control_file.torrent_piece_length() != Some(self.piece_length) {
-            return Err(crate::error::Aria2Error::FileIo(
-                "BitTorrent checkpoint piece length mismatch".into(),
             ));
         }
         control_file.set_bitfield(bitfield.to_vec());
@@ -219,54 +205,6 @@ mod tests {
             .unwrap();
         assert_eq!(restored.bitfield(), Some([0b1010_0000].as_slice()));
         assert_eq!(restored.completed_length(), 6);
-        let control = ControlFile::load(&ControlFile::control_path_for(&output))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(control.torrent_piece_length(), Some(4));
-    }
-
-    #[tokio::test]
-    async fn checkpoint_discards_different_piece_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("payload.bin");
-        std::fs::write(&output, [0u8; 10]).unwrap();
-        let info_hash = [0x55; 20];
-        let mut checkpoint = BtCheckpoint::open(&output, true, 10, 4, 3, info_hash)
-            .await
-            .unwrap();
-        checkpoint.save(&[0b1100_0000], 8).await.unwrap();
-
-        let restored = BtCheckpoint::open(&output, true, 10, 5, 3, info_hash)
-            .await
-            .unwrap();
-        assert_eq!(restored.bitfield(), Some([0u8].as_slice()));
-        assert_eq!(restored.completed_length(), 0);
-    }
-
-    #[tokio::test]
-    async fn checkpoint_accepts_legacy_sidecar_without_piece_length() {
-        let dir = tempfile::tempdir().unwrap();
-        let output = dir.path().join("payload.bin");
-        std::fs::write(&output, [0u8; 8]).unwrap();
-        let info_hash = [0x66; 20];
-        let path = ControlFile::control_path_for(&output);
-
-        let mut legacy = ControlFile::open_or_create(&path, 8, 2).await.unwrap();
-        legacy.mark_torrent_checkpoint();
-        legacy.set_torrent_info_hash(info_hash);
-        legacy.set_bitfield(vec![0xC0]);
-        legacy.update_completed_length(8);
-        legacy.save().await.unwrap();
-
-        let mut restored = BtCheckpoint::open(&output, true, 8, 4, 2, info_hash)
-            .await
-            .unwrap();
-        assert_eq!(restored.bitfield(), Some([0xC0].as_slice()));
-        restored.save(&[0xC0], 8).await.unwrap();
-
-        let upgraded = ControlFile::load(&path).await.unwrap().unwrap();
-        assert_eq!(upgraded.torrent_piece_length(), Some(4));
     }
 
     #[tokio::test]

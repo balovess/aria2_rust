@@ -5,7 +5,7 @@
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash
 #   or
-#   curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash -s -- --version v0.3.2
+#   curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash -s -- --version v0.3.1
 #
 # Options:
 #   --version VERSION    Install a specific version (default: latest)
@@ -48,7 +48,7 @@ show_help() {
     echo "  curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash"
     echo ""
     echo "  # Install specific version"
-    echo "  curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash -s -- --version v0.3.2"
+    echo "  curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash -s -- --version v0.3.1"
     echo ""
     echo "  # Install to custom directory"
     echo "  curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash -s -- --prefix ~/.local/bin"
@@ -160,8 +160,8 @@ install() {
         info "Fetching latest version..."
         VERSION=$(get_latest_version)
         if [ -z "$VERSION" ]; then
-            warn "Could not determine latest version, using v0.3.2"
-            VERSION="v0.3.2"
+            warn "Could not determine latest version, using v0.3.1"
+            VERSION="v0.3.1"
         fi
     fi
     

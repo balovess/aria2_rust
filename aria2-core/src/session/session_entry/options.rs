@@ -21,9 +21,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(v) = opts.split {
         map.insert("split".to_string(), v.to_string());
     }
-    if opts.force_sequential {
-        map.insert("force-sequential".to_string(), "true".to_string());
-    }
     if let Some(v) = opts.max_connection_per_server {
         map.insert("max-connection-per-server".to_string(), v.to_string());
     }
@@ -38,11 +35,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if let Some(ref v) = opts.out {
         map.insert("out".to_string(), v.clone());
-    }
-    if let Some(v) = opts.disk_cache
-        && v != crate::request::request_group::DEFAULT_DISK_CACHE_BYTES
-    {
-        map.insert("disk-cache".to_string(), v.to_string());
     }
     if opts.continue_download {
         map.insert("continue".to_string(), "true".to_string());
@@ -78,23 +70,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.file_allocation {
         map.insert("file-allocation".to_string(), v.clone());
     }
-    if opts.allow_piece_length_change {
-        map.insert("allow-piece-length-change".to_string(), "true".to_string());
-    }
-    map.insert("async-dns".to_string(), opts.async_dns.to_string());
     if let Some(v) = opts.mmap_threshold {
         map.insert("mmap-threshold".to_string(), v.to_string());
-    }
-    if opts.enable_mmap {
-        map.insert("enable-mmap".to_string(), "true".to_string());
-    }
-    if let Some(v) = opts.max_mmap_limit {
-        map.insert("max-mmap-limit".to_string(), v.to_string());
-    }
-    if let Some(v) = opts.no_file_allocation_limit
-        && v != 5 * 1024 * 1024
-    {
-        map.insert("no-file-allocation-limit".to_string(), v.to_string());
     }
     if opts.secure_falloc {
         map.insert("secure-falloc".to_string(), "true".to_string());
@@ -134,9 +111,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.metalink_preferred_protocol {
         map.insert("metalink-preferred-protocol".to_string(), v.clone());
     }
-    if let Some(ref v) = opts.metalink_base_uri {
-        map.insert("metalink-base-uri".to_string(), v.clone());
-    }
     if let Some(ref v) = opts.select_file {
         map.insert("select-file".to_string(), v.clone());
     }
@@ -147,24 +121,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert(
             "metalink-enable-unique-protocol".to_string(),
             "false".to_string(),
-        );
-    }
-    if let Some(v) = opts.min_split_size
-        && v != crate::constants::DEFAULT_MIN_SPLIT_SIZE
-    {
-        map.insert("min-split-size".to_string(), v.to_string());
-    }
-    if opts.parameterized_uri {
-        map.insert("parameterized-uri".to_string(), "true".to_string());
-    }
-    map.insert("reuse-uri".to_string(), opts.reuse_uri.to_string());
-    if !opts.uri_selector.is_empty() {
-        map.insert("uri-selector".to_string(), opts.uri_selector.clone());
-    }
-    if !opts.stream_piece_selector.is_empty() {
-        map.insert(
-            "stream-piece-selector".to_string(),
-            opts.stream_piece_selector.clone(),
         );
     }
 
@@ -191,105 +147,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if opts.bt_max_peers != 55 {
         map.insert("bt-max-peers".to_string(), opts.bt_max_peers.to_string());
     }
-    if let Some(ref v) = opts.bt_exclude_tracker {
-        map.insert("bt-exclude-tracker".to_string(), v.join(","));
-    }
-    if let Some(ref v) = opts.bt_external_ip {
-        map.insert("bt-external-ip".to_string(), v.clone());
-    }
-    if opts.bt_load_saved_metadata {
-        map.insert("bt-load-saved-metadata".to_string(), "true".to_string());
-    }
-    if opts.bt_metadata_only {
-        map.insert("bt-metadata-only".to_string(), "true".to_string());
-    }
-    if opts.bt_min_crypto_level != "plain" {
-        map.insert(
-            "bt-min-crypto-level".to_string(),
-            opts.bt_min_crypto_level.clone(),
-        );
-    }
-    if opts.bt_request_peer_speed_limit != 50 * 1024 {
-        map.insert(
-            "bt-request-peer-speed-limit".to_string(),
-            opts.bt_request_peer_speed_limit.to_string(),
-        );
-    }
-    if opts.bt_save_metadata {
-        map.insert("bt-save-metadata".to_string(), "true".to_string());
-    }
-    if !opts.bt_enable_web_seed {
-        map.insert("bt-enable-web-seed".to_string(), "false".to_string());
-    }
-    if opts.bt_max_open_files != 100 {
-        map.insert(
-            "bt-max-open-files".to_string(),
-            opts.bt_max_open_files.to_string(),
-        );
-    }
-    if let Some(ref v) = opts.bt_peer_blocklist {
-        map.insert("bt-peer-blocklist".to_string(), v.clone());
-    }
-    if opts.bt_keep_alive_interval != 120 {
-        map.insert(
-            "bt-keep-alive-interval".to_string(),
-            opts.bt_keep_alive_interval.to_string(),
-        );
-    }
-    if opts.bt_timeout != 180 {
-        map.insert("bt-timeout".to_string(), opts.bt_timeout.to_string());
-    }
-    if opts.bt_request_timeout != 60 {
-        map.insert(
-            "bt-request-timeout".to_string(),
-            opts.bt_request_timeout.to_string(),
-        );
-    }
-    if opts.peer_connection_timeout != 20 {
-        map.insert(
-            "peer-connection-timeout".to_string(),
-            opts.peer_connection_timeout.to_string(),
-        );
-    }
-    if opts.peer_id_prefix != aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX {
-        map.insert("peer-id-prefix".to_string(), opts.peer_id_prefix.clone());
-    }
-    if opts.peer_agent != aria2_protocol::identity::DEFAULT_PEER_AGENT {
-        map.insert("peer-agent".to_string(), opts.peer_agent.clone());
-    }
-    if opts.dht_message_timeout != 10 {
-        map.insert(
-            "dht-message-timeout".to_string(),
-            opts.dht_message_timeout.to_string(),
-        );
-    }
-    if opts.enable_dht6 {
-        map.insert("enable-dht6".to_string(), "true".to_string());
-    }
-    if let Some(ref v) = opts.dht_listen_addr6 {
-        map.insert("dht-listen-addr6".to_string(), v.clone());
-    }
-    if let Some(ref v) = opts.dht_entry_point_host {
-        map.insert("dht-entry-point-host".to_string(), v.clone());
-    }
-    if let Some(v) = opts.dht_entry_point_port {
-        map.insert("dht-entry-point-port".to_string(), v.to_string());
-    }
-    if let Some(ref v) = opts.dht_entry_point6 {
-        map.insert("dht-entry-point6".to_string(), v.clone());
-    }
-    if let Some(ref v) = opts.dht_entry_point_host6 {
-        map.insert("dht-entry-point-host6".to_string(), v.clone());
-    }
-    if let Some(v) = opts.dht_entry_point_port6 {
-        map.insert("dht-entry-point-port6".to_string(), v.to_string());
-    }
-    if let Some(ref v) = opts.dht_file_path6 {
-        map.insert("dht-file-path6".to_string(), v.clone());
-    }
-    if let Some(ref v) = opts.dht_listen_addr {
-        map.insert("dht-listen-addr".to_string(), v.clone());
-    }
     // enable_dht defaults to true; only save if disabled
     if !opts.enable_dht {
         map.insert("enable-dht".to_string(), "false".to_string());
@@ -308,27 +165,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if let Some(ref v) = opts.bt_tracker {
         map.insert("bt-tracker".to_string(), v.join(","));
-    }
-    if opts.bt_tracker_connect_timeout != 60 {
-        map.insert(
-            "bt-tracker-connect-timeout".to_string(),
-            opts.bt_tracker_connect_timeout.to_string(),
-        );
-    }
-    if opts.bt_tracker_interval != 0 {
-        map.insert(
-            "bt-tracker-interval".to_string(),
-            opts.bt_tracker_interval.to_string(),
-        );
-    }
-    if opts.bt_tracker_timeout != 60 {
-        map.insert(
-            "bt-tracker-timeout".to_string(),
-            opts.bt_tracker_timeout.to_string(),
-        );
-    }
-    if !opts.enable_peer_exchange {
-        map.insert("enable-peer-exchange".to_string(), "false".to_string());
     }
     // enable_public_trackers defaults to true; only save if disabled
     if !opts.enable_public_trackers {
@@ -464,12 +300,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.ca_certificate {
         map.insert("ca-certificate".to_string(), v.clone());
     }
-    if let Some(ref v) = opts.certificate {
-        map.insert("certificate".to_string(), v.clone());
-    }
-    if let Some(ref v) = opts.private_key {
-        map.insert("private-key".to_string(), v.clone());
-    }
     if let Some(ref v) = opts.min_tls_version {
         map.insert("min-tls-version".to_string(), v.clone());
     }
@@ -493,9 +323,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if !opts.ftp_pasv {
         map.insert("ftp-pasv".to_string(), "false".to_string());
     }
-    if !opts.ftp_type.is_empty() {
-        map.insert("ftp-type".to_string(), opts.ftp_type.clone());
-    }
     if opts.remote_time {
         map.insert("remote-time".to_string(), "true".to_string());
     }
@@ -517,38 +344,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if opts.bt_enable_lpd {
         map.insert("bt-enable-lpd".to_string(), "true".to_string());
     }
-
-    // --- Task lifecycle / HTTP response policy ---
-    if opts.pause {
-        map.insert("pause".to_string(), "true".to_string());
+    if let Some(ref v) = opts.bt_lpd_interface {
+        map.insert("bt-lpd-interface".to_string(), v.clone());
     }
-    if opts.pause_metadata {
-        map.insert("pause-metadata".to_string(), "true".to_string());
-    }
-    if opts.force_save {
-        map.insert("force-save".to_string(), "true".to_string());
-    }
-    map.insert(
-        "save-not-found".to_string(),
-        opts.save_not_found.to_string(),
-    );
-    map.insert(
-        "rpc-save-upload-metadata".to_string(),
-        opts.rpc_save_upload_metadata.to_string(),
-    );
-    if opts.content_disposition_default_utf8 {
-        map.insert(
-            "content-disposition-default-utf8".to_string(),
-            "true".to_string(),
-        );
-    }
-    if !opts.proxy_method.is_empty() {
-        map.insert("proxy-method".to_string(), opts.proxy_method.clone());
-    }
-    map.insert(
-        "max-file-not-found".to_string(),
-        opts.max_file_not_found.to_string(),
-    );
 
     // --- Authentication and netrc ---
     if opts.http_auth_challenge {
@@ -604,38 +402,5 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("on-bt-download-complete".to_string(), v.clone());
     }
 
-    map
-}
-
-/// Add the small set of initial options whose original wire spelling must be
-/// preserved alongside typed execution options.
-pub fn download_options_to_map_with_snapshot(
-    opts: &DownloadOptions,
-    snapshot: Option<&HashMap<String, serde_json::Value>>,
-) -> HashMap<String, String> {
-    let mut map = download_options_to_map(opts);
-    let Some(snapshot) = snapshot else {
-        return map;
-    };
-
-    let registry = crate::config::OptionRegistry::new();
-    for name in crate::config::INITIAL_SNAPSHOT_WIRE_OPTIONS {
-        let Some(value) = snapshot
-            .get(*name)
-            .and_then(crate::request::request_group::option_value_to_string)
-        else {
-            continue;
-        };
-
-        let is_default = registry.get(name).is_some_and(|definition| {
-            definition
-                .parse_value(&value)
-                .ok()
-                .is_some_and(|parsed| parsed.to_string() == definition.default_value().to_string())
-        });
-        if !is_default {
-            map.insert((*name).to_string(), value);
-        }
-    }
     map
 }

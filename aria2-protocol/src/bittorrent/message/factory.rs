@@ -1,5 +1,4 @@
 use super::types::{BtMessage, MessageType, PieceBlockRequest};
-use bytes::Bytes;
 use tracing::debug;
 
 pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
@@ -109,43 +108,8 @@ fn parse_piece(payload: &[u8]) -> Result<Option<BtMessage>, String> {
     }
     let index = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
     let begin = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
-    let data = Bytes::copy_from_slice(&payload[8..]);
+    let data = payload[8..].to_vec();
     Ok(Some(BtMessage::Piece { index, begin, data }))
-}
-
-/// Parse a complete frame while retaining the frame allocation for Piece data.
-///
-/// `BytesMut::freeze` can hand the frame to this function without copying. A
-/// Piece payload is then a shared slice of that frame; other message kinds use
-/// the established parser because their payloads are small or need owned
-/// protocol-specific representations.
-pub fn parse_message_bytes(data: Bytes) -> Result<Option<BtMessage>, String> {
-    if data.len() < 5 {
-        return parse_message(&data);
-    }
-
-    let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-    if len == 0 || data.len() < 4 + len {
-        return parse_message(&data);
-    }
-
-    if data[4] == MessageType::Piece as u8 {
-        if len < 9 {
-            return Err(format!(
-                "Piece message payload too short: {} bytes",
-                len.saturating_sub(1)
-            ));
-        }
-        let index = u32::from_be_bytes([data[5], data[6], data[7], data[8]]);
-        let begin = u32::from_be_bytes([data[9], data[10], data[11], data[12]]);
-        return Ok(Some(BtMessage::Piece {
-            index,
-            begin,
-            data: data.slice(13..4 + len),
-        }));
-    }
-
-    parse_message(&data)
 }
 
 fn parse_port(payload: &[u8]) -> Result<Option<BtMessage>, String> {
@@ -335,24 +299,9 @@ mod tests {
             Some(BtMessage::Piece {
                 index: 0,
                 begin: 0,
-                data: Bytes::from_static(b"hi")
+                data: b"hi".to_vec()
             })
         );
-    }
-
-    #[test]
-    fn test_parse_piece_bytes_reuses_frame_storage() {
-        let frame = Bytes::from_static(&[0, 0, 0, 13, 7, 0, 0, 0, 3, 0, 0, 0, 4, 1, 2, 3, 4]);
-        let parsed = parse_message_bytes(frame.clone()).unwrap().unwrap();
-        match parsed {
-            BtMessage::Piece { index, begin, data } => {
-                assert_eq!(index, 3);
-                assert_eq!(begin, 4);
-                assert_eq!(data, Bytes::from_static(&[1, 2, 3, 4]));
-                assert_eq!(data.as_ptr(), unsafe { frame.as_ptr().add(13) });
-            }
-            other => panic!("expected piece, got {other:?}"),
-        }
     }
 
     #[test]

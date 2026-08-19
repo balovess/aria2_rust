@@ -1,25 +1,24 @@
 //! Batched disk writer: coalesces small writes into larger sequential flushes.
 //!
 //! This writer implements [`SeekableDiskWriter`] by buffering writes in a
-//! `BTreeMap<u64, Bytes>` and flushing them when a configurable threshold
+//! `BTreeMap<u64, Vec<u8>>` and flushing them when a configurable threshold
 //! (total buffered bytes or pending write count) is exceeded. This reduces the
 //! number of `pwrite`/`seek_write` syscalls for workloads with many small,
 //! non-contiguous writes.
 
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tracing::debug;
 
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::disk_writer::SeekableDiskWriter;
-use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 pub struct BatchedDiskWriter {
-    file: Option<PositionedDiskWriter>,
+    file: Option<tokio::fs::File>,
     path: PathBuf,
-    buffer: BTreeMap<u64, Bytes>,
+    buffer: BTreeMap<u64, Vec<u8>>,
     flush_threshold_bytes: usize,
     total_buffered: usize,
     max_pending_writes: usize,
@@ -52,26 +51,20 @@ impl BatchedDiskWriter {
     /// Open (or create) the file without truncating existing data.
     async fn ensure_open(&mut self) -> Result<()> {
         if !self.opened {
-            let mut writer = PositionedDiskWriter::new(&self.path, None);
-            writer.open().await.map_err(|error| {
-                Aria2Error::FileOpen(format!("Failed to open {}: {}", self.path.display(), error))
-            })?;
-            self.file = Some(writer);
+            let f = tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .read(true)
+                .open(&self.path)
+                .await
+                .map_err(|e| {
+                    Aria2Error::FileOpen(format!("Failed to open {}: {}", self.path.display(), e))
+                })?;
+            self.file = Some(f);
             self.opened = true;
         }
         Ok(())
-    }
-
-    fn append_buffered(&mut self, offset: u64, data: Bytes) {
-        self.total_buffered += data.len();
-        if let Some(existing) = self.buffer.get_mut(&offset) {
-            let mut merged = BytesMut::with_capacity(existing.len() + data.len());
-            merged.extend_from_slice(existing);
-            merged.extend_from_slice(&data);
-            *existing = merged.freeze();
-        } else {
-            self.buffer.insert(offset, data);
-        }
     }
 
     fn should_flush(&self) -> bool {
@@ -101,7 +94,11 @@ impl SeekableDiskWriter for BatchedDiskWriter {
             return Ok(());
         }
 
-        self.append_buffered(offset, Bytes::copy_from_slice(data));
+        self.buffer
+            .entry(offset)
+            .or_default()
+            .extend_from_slice(data);
+        self.total_buffered += data.len();
 
         if self.should_flush() {
             self.flush().await?;
@@ -111,37 +108,33 @@ impl SeekableDiskWriter for BatchedDiskWriter {
     }
 
     async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
-        self.ensure_open().await?;
-
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        self.append_buffered(offset, data);
-
-        if self.should_flush() {
-            self.flush().await?;
-        }
-
-        Ok(())
+        self.write_at(offset, &data).await
     }
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        self.flush().await?;
         self.ensure_open().await?;
         let file = self.file.as_mut().ok_or_else(|| {
             Aria2Error::Io("file not open after ensure_open — invariant violated".into())
         })?;
-        file.read_at(offset, buf).await
+        use tokio::io::AsyncReadExt;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| Aria2Error::Io(format!("seek failed at offset {}: {}", offset, e)))?;
+        let n = file
+            .read(buf)
+            .await
+            .map_err(|e| Aria2Error::Io(format!("read failed at offset {}: {}", offset, e)))?;
+        Ok(n)
     }
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
-        self.flush().await?;
         self.ensure_open().await?;
         let file = self.file.as_mut().ok_or_else(|| {
             Aria2Error::Io("file not open after ensure_open — invariant violated".into())
         })?;
-        file.truncate(length).await
+        file.set_len(length)
+            .await
+            .map_err(|e| Aria2Error::Io(format!("set_len({}) failed: {}", length, e)))
     }
 
     async fn flush(&mut self) -> Result<()> {
@@ -150,7 +143,7 @@ impl SeekableDiskWriter for BatchedDiskWriter {
         }
 
         self.ensure_open().await?;
-        let writer = self.file.as_mut().ok_or_else(|| {
+        let file = self.file.as_mut().ok_or_else(|| {
             Aria2Error::Io("file not open after ensure_open — invariant violated".into())
         })?;
 
@@ -160,11 +153,18 @@ impl SeekableDiskWriter for BatchedDiskWriter {
             self.total_buffered
         );
 
-        for (&offset, data) in &self.buffer {
-            writer.write_bytes_at(offset, data.clone()).await?;
+        for (&offset, data) in self.buffer.iter() {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|e| Aria2Error::Io(format!("seek failed at offset {}: {}", offset, e)))?;
+            file.write_all(data)
+                .await
+                .map_err(|e| Aria2Error::Io(format!("write failed at offset {}: {}", offset, e)))?;
         }
 
-        writer.flush().await?;
+        file.flush()
+            .await
+            .map_err(|e| Aria2Error::Io(format!("flush failed: {}", e)))?;
 
         self.buffer.clear();
         self.total_buffered = 0;
@@ -173,7 +173,11 @@ impl SeekableDiskWriter for BatchedDiskWriter {
 
     async fn len(&self) -> Result<u64> {
         match self.file.as_ref() {
-            Some(writer) => writer.len().await,
+            Some(f) => f
+                .metadata()
+                .await
+                .map(|m| m.len())
+                .map_err(|e| Aria2Error::Io(format!("metadata failed: {}", e))),
             None => Ok(0),
         }
     }
@@ -184,8 +188,10 @@ impl SeekableDiskWriter for BatchedDiskWriter {
 
     async fn close(&mut self) -> Result<()> {
         self.flush().await?;
-        if let Some(mut writer) = self.file.take() {
-            writer.close().await?;
+        if let Some(f) = self.file.take() {
+            f.sync_all()
+                .await
+                .map_err(|e| Aria2Error::Io(format!("sync failed: {}", e)))?;
         }
         self.opened = false;
         Ok(())

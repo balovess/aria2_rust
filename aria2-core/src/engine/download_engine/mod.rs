@@ -18,7 +18,7 @@ use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
-use crate::session::auto_save_coordinator::AutoSaveCoordinator;
+use crate::session::auto_save_session::AutoSaveSession;
 #[cfg(feature = "bittorrent")]
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerCatalogConfig};
 
@@ -34,18 +34,8 @@ pub struct DownloadEngine {
     pub(crate) global_limiter: Option<RateLimiter>,
     pub(crate) save_session_path: Option<PathBuf>,
     pub(crate) save_session_interval: Option<Duration>,
-    pub(crate) auto_save_interval: Option<Duration>,
-    /// Maximum age of server statistics. `None` disables stale cleanup.
-    pub(crate) server_stat_max_age: Option<Duration>,
-    /// Optional input file loaded before the engine loop starts.
-    pub(crate) server_stat_input_path: Option<PathBuf>,
-    /// Optional output file written on configured intervals and shutdown.
-    pub(crate) server_stat_output_path: Option<PathBuf>,
-    /// Periodic server-stat save interval. `None` disables periodic saves.
-    pub(crate) server_stat_save_interval: Option<Duration>,
     pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
-    pub(crate) auto_save: Option<Arc<Mutex<AutoSaveCoordinator>>>,
-    pub(crate) auto_save_dirty_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) auto_save: Option<Arc<Mutex<AutoSaveSession>>>,
     /// FTP connection pool for connection reuse across FTP downloads.
     /// Created during engine initialization and passed down via dependency injection.
     pub(crate) ftp_pool: Arc<FtpConnectionPool>,
@@ -68,9 +58,6 @@ pub struct DownloadEngine {
     /// Process-wide BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
-    /// Process-wide Local Peer Discovery manager and receive loop.
-    #[cfg(feature = "bittorrent")]
-    pub(crate) lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -86,38 +73,6 @@ impl DownloadEngine {
     }
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
-        #[cfg(feature = "bittorrent")]
-        {
-            Self::with_retry_policy_and_lpd_manager(
-                tick_interval_ms,
-                policy,
-                Arc::new(crate::engine::lpd_manager::LpdManager::new()),
-            )
-        }
-
-        #[cfg(not(feature = "bittorrent"))]
-        Self::with_retry_policy_and_lpd_manager(tick_interval_ms, policy)
-    }
-
-    /// Construct an engine with the process-wide LPD manager supplied by the
-    /// application layer.
-    #[cfg(feature = "bittorrent")]
-    pub fn with_lpd_manager(
-        tick_interval_ms: u64,
-        lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
-    ) -> Self {
-        Self::with_retry_policy_and_lpd_manager(
-            tick_interval_ms,
-            RetryPolicy::default(),
-            lpd_manager,
-        )
-    }
-
-    fn with_retry_policy_and_lpd_manager(
-        tick_interval_ms: u64,
-        policy: RetryPolicy,
-        #[cfg(feature = "bittorrent")] lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
-    ) -> Self {
         let (engine_cmd_tx, engine_cmd_rx) = channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -134,14 +89,8 @@ impl DownloadEngine {
             global_limiter: None,
             save_session_path: None,
             save_session_interval: None,
-            auto_save_interval: None,
-            server_stat_max_age: Some(Duration::from_secs(24 * 60 * 60)),
-            server_stat_input_path: None,
-            server_stat_output_path: None,
-            server_stat_save_interval: None,
             request_group_man: None,
             auto_save: None,
-            auto_save_dirty_signal: None,
             ftp_pool: Arc::new(FtpConnectionPool::new(
                 constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
             )),
@@ -153,8 +102,6 @@ impl DownloadEngine {
             public_tracker_catalog: Arc::new(PublicTrackerList::new()),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
-            #[cfg(feature = "bittorrent")]
-            lpd_manager,
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
@@ -184,8 +131,7 @@ impl DownloadEngine {
     }
 
     pub fn set_request_group_man(&mut self, man: Arc<RequestGroupMan>) {
-        self.request_group_man = Some(Arc::clone(&man));
-        self.refresh_auto_save(man);
+        self.request_group_man = Some(man);
     }
 
     pub fn set_save_session(
@@ -196,13 +142,15 @@ impl DownloadEngine {
     ) {
         self.save_session_path = Some(path.clone());
         self.save_session_interval = interval;
-        self.request_group_man = Some(Arc::clone(&man));
-        self.refresh_auto_save(man);
+        self.request_group_man = Some(man);
 
-        if let Some(interval) = interval {
+        if let (Some(interval), Some(man_ref)) = (interval, &self.request_group_man) {
+            let path_clone = path.clone();
+            let auto_save = AutoSaveSession::new(path, interval, man_ref.clone());
+            self.auto_save = Some(Arc::new(Mutex::new(auto_save)));
             info!(
                 "Auto-save session enabled: path={}, interval={:.1}s",
-                path.display(),
+                path_clone.display(),
                 interval.as_secs_f64()
             );
         } else {
@@ -210,62 +158,11 @@ impl DownloadEngine {
         }
     }
 
-    pub fn set_auto_save_interval(&mut self, interval: Option<Duration>) {
-        self.auto_save_interval = interval;
-        if let Some(man) = self.request_group_man.clone() {
-            self.refresh_auto_save(man);
-        }
-    }
-
-    /// Configure the server-stat freshness window. Zero means unlimited.
-    pub fn set_server_stat_timeout(&mut self, seconds: u64) {
-        self.server_stat_max_age = (seconds > 0).then_some(Duration::from_secs(seconds));
-    }
-
-    /// Configure server-stat input/output persistence owned by this engine.
-    pub fn set_server_stat_persistence(
-        &mut self,
-        input_path: Option<PathBuf>,
-        output_path: Option<PathBuf>,
-        interval: Option<Duration>,
-    ) {
-        self.server_stat_input_path = input_path;
-        self.server_stat_output_path = output_path;
-        self.server_stat_save_interval = interval.filter(|value| !value.is_zero());
-    }
-
-    pub fn server_stat_max_age(&self) -> Option<Duration> {
-        self.server_stat_max_age
-    }
-
-    pub fn server_stat_input_path(&self) -> Option<&PathBuf> {
-        self.server_stat_input_path.as_ref()
-    }
-
-    pub fn server_stat_output_path(&self) -> Option<&PathBuf> {
-        self.server_stat_output_path.as_ref()
-    }
-
-    pub fn server_stat_save_interval(&self) -> Option<Duration> {
-        self.server_stat_save_interval
-    }
-
-    fn refresh_auto_save(&mut self, man: Arc<RequestGroupMan>) {
-        let session = self
-            .save_session_path
-            .clone()
-            .zip(self.save_session_interval);
-        // Keep the coordinator even when both intervals are disabled. Its
-        // shutdown path still requests the final protocol-owned checkpoints,
-        // matching aria2's guarantee that stopping saves control files.
-        let coordinator = AutoSaveCoordinator::new(man, session, self.auto_save_interval);
-        self.auto_save_dirty_signal = Some(coordinator.dirty_signal());
-        self.auto_save = Some(Arc::new(Mutex::new(coordinator)));
-    }
-
     pub fn mark_session_dirty(&self) {
-        if let Some(signal) = &self.auto_save_dirty_signal {
-            signal.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(ref auto_save) = self.auto_save
+            && let Ok(auto) = auto_save.try_lock()
+        {
+            auto.mark_dirty();
         }
     }
 
@@ -318,18 +215,6 @@ impl DownloadEngine {
     #[cfg(feature = "bittorrent")]
     pub fn set_public_tracker_config(&mut self, config: TrackerCatalogConfig) {
         self.public_tracker_catalog.set_config_now(config);
-    }
-
-    /// Configure the process-wide Local Peer Discovery manager before `run()`.
-    #[cfg(feature = "bittorrent")]
-    pub fn set_lpd_manager(&mut self, manager: Arc<crate::engine::lpd_manager::LpdManager>) {
-        self.lpd_manager = manager;
-    }
-
-    /// Get the process-wide Local Peer Discovery manager.
-    #[cfg(feature = "bittorrent")]
-    pub fn lpd_manager(&self) -> &Arc<crate::engine::lpd_manager::LpdManager> {
-        &self.lpd_manager
     }
 
     /// Get the shared public tracker catalog.
@@ -399,18 +284,6 @@ mod tests {
         assert!(reg.is_empty(), "new engine should have empty BtRegistry");
         assert_eq!(reg.tcp_port(), 0);
         assert_eq!(reg.udp_port(), 0);
-    }
-
-    #[cfg(feature = "bittorrent")]
-    #[test]
-    fn test_lpd_manager_is_injected_at_engine_construction() {
-        let manager = Arc::new(crate::engine::lpd_manager::LpdManager::new());
-        let engine = DownloadEngine::with_lpd_manager(100, Arc::clone(&manager));
-
-        assert!(
-            Arc::ptr_eq(engine.lpd_manager(), &manager),
-            "engine must retain the one configured LPD manager supplied by the application"
-        );
     }
 
     #[cfg(feature = "bittorrent")]

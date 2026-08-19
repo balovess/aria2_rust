@@ -200,16 +200,6 @@ impl MirrorCoordinator {
             .report_segment_failed(seg_idx, error_code)
     }
 
-    /// Report a terminal failure and move the segment to another mirror.
-    ///
-    /// Unlike an ordinary retry, this does not consume the segment retry
-    /// budget. The failed URI is terminal for this attempt, while a remaining
-    /// mirror still gets the same opportunity as aria2's next URI request.
-    pub fn on_terminal_segment_failed(&mut self, seg_idx: u32, error_code: u16) -> Option<usize> {
-        self.segment_manager
-            .report_segment_failed_without_retry(seg_idx, error_code)
-    }
-
     /// Return a capacity-limited segment to the pending queue without using
     /// the ordinary retry budget.
     pub fn requeue_segment(&mut self, seg_idx: u32) -> bool {
@@ -350,11 +340,6 @@ impl MirrorCoordinator {
         self.segment_manager.has_pending_segments()
     }
 
-    /// Whether at least one mirror can accept another segment immediately.
-    pub fn any_mirror_available(&self) -> bool {
-        self.segment_manager.any_mirror_available()
-    }
-
     /// Get download progress as a percentage.
     pub fn progress(&self) -> f64 {
         self.segment_manager.progress()
@@ -385,15 +370,8 @@ impl MirrorCoordinator {
         &self.config
     }
 
-    /// Return the number of prior attempts for one segment.
-    ///
-    /// The concurrent pipeline uses this value to apply the shared retry
-    /// policy without exposing the segment manager itself.
-    pub(crate) fn segment_retry_count(&self, seg_idx: u32) -> u32 {
-        self.segment_manager.segment_retry_count(seg_idx)
-    }
-
-    /// Expose the manager to the coordinator's white-box tests only.
+    /// Get the segment manager (test-only access; cfg-gated so the
+    /// production build does not carry an unused method).
     #[cfg(test)]
     pub(crate) fn segment_manager(&self) -> &ConcurrentSegmentManager {
         &self.segment_manager

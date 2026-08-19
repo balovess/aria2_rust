@@ -3,7 +3,6 @@
 // Mirrors the C++ `HttpSkipResponseCommand::processResponse()` flow
 // for 401/407 responses: resolve credentials, retry with Authorization.
 
-use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
@@ -15,7 +14,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::SequentialDownloader;
 
 fn classify_auth_retry_status(status_code: u16) -> Aria2Error {
-    if status_code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&status_code) {
+    if status_code >= 500 {
         Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
     } else {
         Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
@@ -345,17 +344,6 @@ mod tests {
             classify_auth_retry_status(503),
             Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
         ));
-    }
-
-    #[test]
-    fn classifies_configured_4xx_transients_as_server_errors() {
-        for status_code in [408, 429] {
-            assert!(matches!(
-                classify_auth_retry_status(status_code),
-                Aria2Error::Recoverable(RecoverableError::ServerError { code })
-                    if code == status_code
-            ));
-        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::http::header_processor::HttpHeaderProcessor;
 use crate::http::request_response::HttpMethod;
 
 use super::processor::HttpResponseProcessor;
-use super::types::{ResponseProcessResult, ResponseProcessorConfig};
+use super::types::ResponseProcessResult;
 
 /// Helper: parse raw HTTP response bytes into HttpResponseHead.
 fn parse_head(raw: &[u8]) -> crate::http::header_processor::HttpResponseHead {
@@ -450,106 +450,6 @@ fn test_404_error_delegation() {
         }
         _ => panic!("Expected Error, got {:?}", result),
     }
-}
-
-#[test]
-fn test_502_retry_classification_uses_configured_retry_wait() {
-    let head = parse_head(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
-
-    let fatal = HttpResponseProcessor::with_defaults()
-        .process(
-            &head,
-            HttpMethod::Get,
-            "http://example.com/file.bin",
-            None,
-            false,
-            false,
-            true,
-            false,
-        )
-        .unwrap();
-    assert!(matches!(
-        fatal,
-        ResponseProcessResult::Error {
-            status_code: 502,
-            ..
-        }
-    ));
-
-    let retryable = HttpResponseProcessor::with_defaults()
-        .with_retry_wait(5)
-        .process(
-            &head,
-            HttpMethod::Get,
-            "http://example.com/file.bin",
-            None,
-            false,
-            false,
-            true,
-            false,
-        )
-        .unwrap();
-    assert!(matches!(
-        retryable,
-        ResponseProcessResult::RetryableError {
-            status_code: 502,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn test_404_retry_classification_is_preserved() {
-    let head = parse_head(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
-    let processor = HttpResponseProcessor::new(ResponseProcessorConfig {
-        max_file_not_found: 2,
-        ..ResponseProcessorConfig::default()
-    });
-    let result = processor
-        .process(
-            &head,
-            HttpMethod::Get,
-            "http://example.com/missing",
-            None,
-            false,
-            false,
-            true,
-            false,
-        )
-        .unwrap();
-
-    assert!(matches!(
-        result,
-        ResponseProcessResult::RetryableError {
-            status_code: 404,
-            ..
-        }
-    ));
-}
-
-#[test]
-fn test_504_is_always_retryable() {
-    let head = parse_head(b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\n\r\n");
-    let result = HttpResponseProcessor::with_defaults()
-        .process(
-            &head,
-            HttpMethod::Get,
-            "http://example.com/file.bin",
-            None,
-            false,
-            false,
-            true,
-            false,
-        )
-        .unwrap();
-
-    assert!(matches!(
-        result,
-        ResponseProcessResult::RetryableError {
-            status_code: 504,
-            ..
-        }
-    ));
 }
 
 // ==================== HTTP/1.0 response ====================

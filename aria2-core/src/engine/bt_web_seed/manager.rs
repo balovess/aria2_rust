@@ -7,7 +7,6 @@ use tracing::{debug, warn};
 use super::client::WebSeedClient;
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::request::request_group::AtomicProgress;
 
 /// Manages multiple web-seed endpoints with automatic fallback.
 ///
@@ -101,14 +100,6 @@ impl WebSeedManager {
     /// * `Ok(Vec<u8>)` - Piece data from first successful web-seed
     /// * `Err(String)` - All web-seeds failed
     pub async fn request_piece(&self, piece_index: u32) -> Result<Vec<u8>, String> {
-        self.request_piece_with_activity(piece_index, None).await
-    }
-
-    pub(crate) async fn request_piece_with_activity(
-        &self,
-        piece_index: u32,
-        network_activity: Option<&AtomicProgress>,
-    ) -> Result<Vec<u8>, String> {
         if self.clients.is_empty() {
             return Err("No web-seeds configured".to_string());
         }
@@ -126,12 +117,7 @@ impl WebSeedManager {
             }
 
             match client
-                .request_piece_with_activity(
-                    piece_index,
-                    self.piece_length,
-                    self.total_length,
-                    network_activity,
-                )
+                .request_piece(piece_index, self.piece_length, self.total_length)
                 .await
             {
                 Ok(data) => {

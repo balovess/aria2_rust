@@ -10,14 +10,13 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 
 use crate::constants;
-use crate::engine::command::WRITE_CHANNEL_CAPACITY;
+use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate, WRITE_CHANNEL_CAPACITY};
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
-use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTracker, WriteChunk};
+use crate::engine::http_segment_downloader::WriteChunk;
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
 };
-use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -90,13 +89,8 @@ pub async fn execute_with_coordinator(
         );
 
     let use_mmap = dl.file_allocation == "mmap" && total_length >= dl.mmap_threshold;
-    let disk_cache = dl.group.recover().options().disk_cache_size_bytes();
-    let mut writer = CachedDiskWriter::new_with_mmap_bytes(
-        &dl.output_path,
-        Some(total_length),
-        disk_cache,
-        use_mmap,
-    );
+    let mut writer =
+        CachedDiskWriter::new_with_mmap(&dl.output_path, Some(total_length), None, use_mmap);
 
     let num_pieces = coordinator.num_segments().max(1);
     let ctrl_path = ControlFile::control_path_for(&dl.output_path);
@@ -233,7 +227,6 @@ pub async fn execute_with_coordinator(
         .into_iter()
         .collect();
     let retry_wait = dl.group.recover().options().retry_wait;
-    let retry_policy = RetryPolicy::new(max_retries_per_segment, retry_wait.saturating_mul(1000));
     let mut adaptive = HashMap::new();
     for key in &server_keys {
         adaptive.insert(
@@ -253,18 +246,10 @@ pub async fn execute_with_coordinator(
     );
     let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut active: HashMap<u32, (usize, Instant)> = HashMap::new();
-    let progress_tracker =
-        SegmentProgressTracker::new(coordinator.completed_bytes(), Arc::clone(&dl.progress));
-    let mut segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();
-    // Lifecycle changes wake the scheduler even when all segment requests are
-    // blocked on slow network reads.
-    let lifecycle_notify = dl.group.recover().lifecycle_notifier();
+    let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
 
     while coordinator.has_pending_segments() || !coordinator.is_complete() {
-        let lifecycle_changed = lifecycle_notify.notified();
-        tokio::pin!(lifecycle_changed);
-        lifecycle_changed.as_mut().enable();
-
         if let Err(error) = dl.check_cancelled() {
             super::segment::cancel_and_persist(
                 executor,
@@ -274,6 +259,7 @@ pub async fn execute_with_coordinator(
                 dl.global_limiter.as_ref(),
                 &mut ctrl_file,
                 coordinator.completed_bytes(),
+                &mut progress_handles,
             )
             .await?;
             return Err(error);
@@ -313,7 +299,14 @@ pub async fn execute_with_coordinator(
             scheduling_attempts += 1;
             let key = authority_key(&mirror_url).unwrap_or_else(|| mirror_url.clone());
 
-            let progress = progress_tracker.new_segment();
+            let (seg_progress_tx, mut seg_progress_rx) =
+                mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
+            let progress_for_listener = Arc::clone(&dl.progress);
+            let progress_handle = tokio::spawn(async move {
+                while let Some(update) = seg_progress_rx.recv().await {
+                    progress_for_listener.set_completed_length(update.completed_bytes);
+                }
+            });
 
             let submitted = executor.try_submit(HttpSegmentRequest {
                 mirror_index: mirror_idx,
@@ -323,18 +316,18 @@ pub async fn execute_with_coordinator(
                 offset,
                 length,
                 cookie_header: dl.cookie_helper.build_cookie_header(&mirror_url),
-                progress: Arc::clone(&progress),
+                progress_tx: seg_progress_tx,
                 write_tx: write_tx.clone(),
                 expected_entity_length: total_length,
             });
             if !submitted {
-                segment_progress.remove(&seg_idx);
+                progress_handle.abort();
                 coordinator.requeue_segment(seg_idx);
                 break;
             }
 
             active.insert(seg_idx, (mirror_idx, Instant::now()));
-            segment_progress.insert(seg_idx, progress);
+            progress_handles.insert(seg_idx, progress_handle);
             tracing::debug!(
                 seg_idx,
                 mirror_idx,
@@ -370,7 +363,7 @@ pub async fn execute_with_coordinator(
                 .filter_map(|c| c.cooldown_remaining())
                 .max()
             {
-                dl.wait_for_retry(wait).await?;
+                tokio::time::sleep(wait).await;
                 continue;
             }
             if coordinator.has_failed_segments() {
@@ -382,16 +375,8 @@ pub async fn execute_with_coordinator(
                 ));
             }
             if coordinator.has_pending_segments() {
-                let message = if coordinator.any_mirror_available() {
-                    "HTTP segment scheduler made no progress"
-                } else {
-                    "HTTP segment download has no available mirrors"
-                };
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: message.into(),
-                    },
-                ));
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
             }
         }
 
@@ -401,7 +386,9 @@ pub async fn execute_with_coordinator(
                 let Some((mirror_idx, seg_start)) = active.remove(&seg_idx) else {
                     continue;
                 };
-                let segment_progress_for_result = segment_progress.remove(&seg_idx);
+                if let Some(progress_handle) = progress_handles.remove(&seg_idx) {
+                    let _ = progress_handle.await;
+                }
 
                 let result_authority_key = pool_result.authority_key.clone();
                 match pool_result.result {
@@ -439,9 +426,6 @@ pub async fn execute_with_coordinator(
                         }
                     }
                     Err(e) => {
-                        if let Some(progress) = segment_progress_for_result {
-                            progress.rollback();
-                        }
                         let e = if matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
@@ -451,14 +435,18 @@ pub async fn execute_with_coordinator(
                             e
                         };
                         tracing::warn!(seg_idx, mirror_idx, error = %e, "Pooled segment download failed");
+                        let is_file_not_found = matches!(
+                            &e,
+                            Aria2Error::Recoverable(
+                                RecoverableError::ResourceNotFound
+                                    | RecoverableError::MaxFileNotFound
+                            )
+                        );
                         let file_not_found_retry_allowed = !matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
                         ) && dl.group.recover().can_retry_file_not_found();
-                        if matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                        ) {
+                        if is_file_not_found && !file_not_found_retry_allowed {
                             super::segment::cancel_and_persist(
                                 executor,
                                 &mut write_rx,
@@ -467,6 +455,7 @@ pub async fn execute_with_coordinator(
                                 dl.global_limiter.as_ref(),
                                 &mut ctrl_file,
                                 coordinator.completed_bytes(),
+                                &mut progress_handles,
                             )
                             .await?;
                             return Err(e);
@@ -500,44 +489,17 @@ pub async fn execute_with_coordinator(
                         if should_fallback {
                             break;
                         }
-                        let retry_count = coordinator.segment_retry_count(seg_idx);
-                        let retry_allowed = super::should_retry_segment(
-                            &retry_policy,
-                            retry_count,
-                            &e,
-                            file_not_found_retry_allowed,
-                        );
-                        if !retry_allowed {
-                            let failed_over = coordinator.num_mirrors() > 1
-                                && coordinator
-                                    .on_terminal_segment_failed(seg_idx, error_code)
-                                    .is_some();
-                            if !failed_over {
-                                super::segment::cancel_and_persist(
-                                    executor,
-                                    &mut write_rx,
-                                    &mut writer,
-                                    None,
-                                    dl.global_limiter.as_ref(),
-                                    &mut ctrl_file,
-                                    coordinator.completed_bytes(),
-                                )
-                                .await?;
-                                return Err(e);
-                            }
+                        let preserve_retry_budget = adaptive
+                            .get(&result_authority_key)
+                            .is_some_and(HttpAdaptiveConcurrency::preserve_retry_budget);
+                        if is_capacity_limited && preserve_retry_budget {
+                            coordinator.requeue_segment(seg_idx);
                         } else {
-                            let preserve_retry_budget = adaptive
-                                .get(&result_authority_key)
-                                .is_some_and(HttpAdaptiveConcurrency::preserve_retry_budget);
-                            if is_capacity_limited && preserve_retry_budget {
-                                coordinator.requeue_segment(seg_idx);
-                            } else {
-                                coordinator.on_segment_failed(
-                                    mirror_idx,
-                                    seg_idx,
-                                    error_code,
-                                );
-                            }
+                            coordinator.on_segment_failed(
+                                mirror_idx,
+                                seg_idx,
+                                error_code,
+                            );
                         }
                     }
                 }
@@ -573,7 +535,7 @@ pub async fn execute_with_coordinator(
                 )
                 .await?;
             }
-            _ = &mut lifecycle_changed => {
+            _ = cancel_tick.tick() => {
                 flush_requested_control_file(
                     dl,
                     &mut writer,
@@ -590,6 +552,7 @@ pub async fn execute_with_coordinator(
                         dl.global_limiter.as_ref(),
                         &mut ctrl_file,
                         coordinator.completed_bytes(),
+                        &mut progress_handles,
                     )
                     .await?;
                     return Err(error);
@@ -611,6 +574,7 @@ pub async fn execute_with_coordinator(
             dl.global_limiter.as_ref(),
             &mut ctrl_file,
             coordinator.completed_bytes(),
+            &mut progress_handles,
         )
         .await?;
     } else {
@@ -667,13 +631,6 @@ pub async fn execute_with_coordinator(
         dl.output_path.display(),
         dl.progress_updater.last_progress_update(),
         final_speed
-    );
-    let progress_stats = progress_tracker.stats();
-    tracing::debug!(
-        segments = progress_stats.segments,
-        progress_updates = progress_stats.updates,
-        progress_rollbacks = progress_stats.rollbacks,
-        "HTTP multi-mirror progress aggregation summary"
     );
     if let Some(control_file) = ctrl_file.as_mut() {
         control_file.update_completed_length(coordinator.completed_bytes());

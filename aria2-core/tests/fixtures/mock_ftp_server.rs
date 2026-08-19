@@ -45,13 +45,6 @@ impl MockFtpServer {
         Self::start_with_options([127, 0, 0, 1], Some(Duration::from_millis(5)), false).await
     }
 
-    /// Start a server whose next transfer chunk is separated by a long delay.
-    /// This is used to keep the client inside an in-flight data read while a
-    /// lifecycle command is delivered.
-    pub async fn start_with_transfer_delay(delay: Duration) -> Self {
-        Self::start_with_options([127, 0, 0, 1], Some(delay), false).await
-    }
-
     pub async fn start_with_pasv_advertised_host(advertised_host: [u8; 4]) -> Self {
         Self::start_with_options(advertised_host, None, false).await
     }

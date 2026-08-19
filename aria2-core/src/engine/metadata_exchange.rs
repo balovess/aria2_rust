@@ -155,10 +155,6 @@ impl MetadataExchangeSession {
         Self { config }
     }
 
-    fn can_retry_piece(&self, retry_count: usize) -> bool {
-        retry_count.saturating_add(1) < self.config.max_attempts
-    }
-
     pub async fn fetch_metadata(
         &self,
         info_hash: &[u8; 20],
@@ -294,7 +290,7 @@ impl MetadataExchangeSession {
         // Track in-flight metadata requests with timeout (C++ UTMetadataRequestTracker)
         let mut tracker = UTMetadataRequestTracker::new();
 
-        // Collect pieces while treating max_attempts as the total attempts per piece.
+        // Collect pieces, retrying timed-out pieces up to max_attempts times
         let mut retry_counts: std::collections::HashMap<u32, usize> =
             std::collections::HashMap::new();
         let mut pending_pieces: Vec<u32> = (0..num_pieces).collect();
@@ -304,7 +300,7 @@ impl MetadataExchangeSession {
             let timed_out = tracker.remove_timeout_entries();
             for idx in timed_out {
                 let retries = retry_counts.entry(idx).or_insert(0);
-                if self.can_retry_piece(*retries) {
+                if *retries < self.config.max_attempts {
                     *retries += 1;
                     debug!(
                         piece = idx,
@@ -370,7 +366,7 @@ impl MetadataExchangeSession {
                     debug!("Piece {} rejected by {}", piece, peer_addr);
                     // Requeue for retry
                     let retries = retry_counts.entry(piece).or_insert(0);
-                    if self.can_retry_piece(*retries) {
+                    if *retries < self.config.max_attempts {
                         *retries += 1;
                         pending_pieces.push(piece);
                     } else {
@@ -586,18 +582,5 @@ mod tests {
 
         let cfg_zero = MetadataExchangeConfig::default().with_max_attempts(0);
         assert_eq!(cfg_zero.max_attempts, 1);
-    }
-
-    #[test]
-    fn test_piece_retry_budget_uses_total_attempts() {
-        let one_attempt =
-            MetadataExchangeSession::new(MetadataExchangeConfig::default().with_max_attempts(1));
-        assert!(!one_attempt.can_retry_piece(0));
-
-        let three_attempts =
-            MetadataExchangeSession::new(MetadataExchangeConfig::default().with_max_attempts(3));
-        assert!(three_attempts.can_retry_piece(0));
-        assert!(three_attempts.can_retry_piece(1));
-        assert!(!three_attempts.can_retry_piece(2));
     }
 }

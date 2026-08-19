@@ -396,7 +396,6 @@ impl crate::config::OptionRegistry {
             max: Some(8),
             description: "Max pipelined HTTP requests per connection".into(),
             category: OptionCategory::HttpFtp,
-            supported: false,
             hidden: true,
             ..Default::default()
         });

@@ -180,7 +180,7 @@ class MockAria2Server:
             return None, {"code": 1, "message": f"GID {gid} not found"}
 
         elif method == "aria2.getVersion":
-            return {"version": "0.3.2", "enabledFeatures": ["JSON-RPC 2.0", "WebSocket RPC"]}, None
+            return {"version": "0.3.1", "enabledFeatures": ["JSON-RPC 2.0", "WebSocket RPC"]}, None
 
         elif method == "aria2.getSessionInfo":
             return {"sessionId": "test-session"}, None

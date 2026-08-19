@@ -13,21 +13,17 @@ pub use aria2_protocol::bittorrent::tracker::public_list::TrackerCatalogConfig;
 pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
     ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
-    OptionOwner, OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator,
-    PiecePriorityRule, RangeValidator, RegexValidator, UrlValidator, parse_index_out,
-    parse_integer_segments, parse_piece_priority,
+    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, PiecePriorityRule,
+    RangeValidator, RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
+    parse_piece_priority,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use runtime::{
-    ChangeableKind, INITIAL_IDENTITY_OPTIONS, INITIAL_REQUEST_OPTIONS,
-    INITIAL_SNAPSHOT_WIRE_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
+    ChangeableKind, INITIAL_REQUEST_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
     RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS, is_global_option_changeable,
     is_initial_option, is_option_changeable, project_initial_options,
 };
 pub use uri_list::{UriListEntry, UriListError, UriListFile};
-
-#[cfg(test)]
-mod contract_tests;
 
 /// Emitted when a global option value changes via `set_global_option`.
 ///
@@ -92,20 +88,6 @@ impl ConfigManager {
         }
     }
 
-    /// Create a configuration manager with identity defaults supplied by an
-    /// embedding product. Standalone core users should use [`Self::new`].
-    pub fn new_with_identity(user_agent: impl Into<String>, peer_agent: impl Into<String>) -> Self {
-        let mut registry = OptionRegistry::new();
-        registry
-            .set_default_value("user-agent", OptionValue::Str(user_agent.into()))
-            .expect("the built-in user-agent option must be registered");
-
-        // `peer-agent` is feature-gated in the core registry, so a non-
-        // BitTorrent build simply keeps the standalone registry shape.
-        let _ = registry.set_default_value("peer-agent", OptionValue::Str(peer_agent.into()));
-        Self::new_with_registry(registry)
-    }
-
     /// Create a `ConfigManager` with a custom `OptionRegistry`.
     ///
     /// Use this when you need to register custom options beyond the
@@ -156,11 +138,7 @@ impl ConfigManager {
 
     /// Get a global option value by name.
     pub async fn get_global_option(&self, name: &str) -> Option<OptionValue> {
-        self.global_opts
-            .read()
-            .await
-            .get(OptionRegistry::canonical_name(name))
-            .cloned()
+        self.global_opts.read().await.get(name).cloned()
     }
 
     /// Convenience: get a global option as a `String`.
@@ -170,7 +148,7 @@ impl ConfigManager {
         self.global_opts
             .read()
             .await
-            .get(OptionRegistry::canonical_name(name))
+            .get(name)
             .and_then(|v| match v {
                 OptionValue::Str(s) => Some(s.clone()),
                 _ => None,
@@ -184,7 +162,7 @@ impl ConfigManager {
         self.global_opts
             .read()
             .await
-            .get(OptionRegistry::canonical_name(name))
+            .get(name)
             .and_then(|v| match v {
                 OptionValue::Int(n) => Some(*n),
                 _ => None,
@@ -198,7 +176,7 @@ impl ConfigManager {
         self.global_opts
             .read()
             .await
-            .get(OptionRegistry::canonical_name(name))
+            .get(name)
             .and_then(|v| match v {
                 OptionValue::Bool(b) => Some(*b),
                 _ => None,
@@ -218,17 +196,16 @@ impl ConfigManager {
         if !self.registry.contains(name) {
             return Err(format!("unknown option '{}'", name));
         }
-        let canonical_name = OptionRegistry::canonical_name(name).to_string();
-        let def = self.registry.get(&canonical_name).unwrap();
+        let def = self.registry.get(name).unwrap();
         let parsed = def.parse_value(&value.to_string())?;
-        let old = self.global_opts.read().await.get(&canonical_name).cloned();
+        let old = self.global_opts.read().await.get(name).cloned();
         {
             let mut opts = self.global_opts.write().await;
-            opts.insert(canonical_name.clone(), parsed.clone());
+            opts.insert(name.to_string(), parsed.clone());
         }
-        self.parser.set(canonical_name.clone(), value);
+        self.parser.set(name, value);
         let _ = self.change_tx.send(ConfigChangeEvent {
-            key: canonical_name,
+            key: name.to_string(),
             old_value: old.unwrap_or(OptionValue::None),
             new_value: parsed,
         });
@@ -266,14 +243,13 @@ impl ConfigManager {
     }
 
     pub async fn get_task_default(&self, gid: &str, name: &str) -> Option<OptionValue> {
-        let canonical_name = OptionRegistry::canonical_name(name);
         let tasks = self.task_defaults.read().await;
-        let task_val = tasks.get(gid).and_then(|m| m.get(canonical_name)).cloned();
+        let task_val = tasks.get(gid).and_then(|m| m.get(name)).cloned();
         if task_val.is_some() {
             return task_val;
         }
         drop(tasks);
-        self.global_opts.read().await.get(canonical_name).cloned()
+        self.global_opts.read().await.get(name).cloned()
     }
 
     pub async fn set_task_option(
@@ -285,12 +261,11 @@ impl ConfigManager {
         if !self.registry.contains(name) {
             return Err(format!("unknown option '{}'", name));
         }
-        let canonical_name = OptionRegistry::canonical_name(name).to_string();
-        let def = self.registry.get(&canonical_name).unwrap();
+        let def = self.registry.get(name).unwrap();
         let parsed = def.parse_value(&value.to_string())?;
         let mut tasks = self.task_defaults.write().await;
         let entry = tasks.entry(gid.to_string()).or_insert_with(HashMap::new);
-        entry.insert(canonical_name, parsed);
+        entry.insert(name.to_string(), parsed);
         Ok(())
     }
 
@@ -405,22 +380,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_embedding_identity_overrides_only_identity_defaults() {
-        let mgr = ConfigManager::new_with_identity("aria2-rust/9.9.9", "aria2-rust/9.9.9");
-
-        assert_eq!(
-            mgr.get_global_str("user-agent").await.as_deref(),
-            Some("aria2-rust/9.9.9")
-        );
-        #[cfg(feature = "bittorrent")]
-        assert_eq!(
-            mgr.get_global_str("peer-agent").await.as_deref(),
-            Some("aria2-rust/9.9.9")
-        );
-        assert_eq!(mgr.get_global_str("dir").await, Some(".".to_string()));
-    }
-
-    #[tokio::test]
     async fn test_get_and_set_global() {
         let mut mgr = ConfigManager::new();
         let result = mgr.set_global_option("split", OptionValue::Int(8)).await;
@@ -436,21 +395,6 @@ mod tests {
             .set_global_option("nonexistent-option", OptionValue::Str("value".into()))
             .await;
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_set_unsupported_http_pipeline_limit_fails() {
-        let mut mgr = ConfigManager::new();
-        let result = mgr
-            .set_global_option("max-http-pipelining", OptionValue::Int(2))
-            .await;
-
-        let error = result.expect_err("unsupported pipeline limits must be rejected");
-        assert!(
-            error.contains("max-http-pipelining"),
-            "unexpected error: {error}"
-        );
-        assert_eq!(mgr.get_global_i64("max-http-pipelining").await, None);
     }
 
     #[tokio::test]

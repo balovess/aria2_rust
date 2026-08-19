@@ -65,20 +65,6 @@ where
     pub fn limiter(&self) -> &RateLimiter {
         &self.limiter
     }
-
-    async fn acquire_for_write(&self, bytes: usize, per_limited: bool, global_limited: bool) {
-        let bytes = bytes as u64;
-        if per_limited {
-            self.limiter.acquire_download(bytes).await;
-        }
-        if global_limited {
-            self.global_limiter
-                .as_ref()
-                .expect("global limiter must exist when global limiting is enabled")
-                .acquire_download(bytes)
-                .await;
-        }
-    }
 }
 
 #[async_trait]
@@ -100,16 +86,29 @@ where
         // Acquire tokens per-chunk (not batched for the entire buffer).
         //
         // Rationale: reqwest's `bytes_stream()` yields chunks whose sizes grow
-        // adaptively (8K -> 16K -> 32K -> ... -> 256K+) on fast links. Keeping
-        // acquisition and writes interleaved prevents one large transport
-        // chunk from delaying all disk I/O behind a single long wait. The
-        // TokenBucket also listens for rate changes, so `changeOption` wakes a
-        // pending acquire and the next chunk uses the new rate immediately.
-        // The lock-free CAS in `TokenBucket::acquire` keeps this accounting
-        // overhead low even at high rates.
+        // adaptively (8K → 16K → 32K → … → 256K+) on fast links. A single
+        // batched `acquire_download(entire_buffer)` for a 417 KB chunk at
+        // 80 KB/s would sleep for ~5.2 s. That sleep is a fixed
+        // `tokio::time::sleep` and is NOT interrupted when `changeOption`
+        // updates the rate mid-sleep, making dynamic rate changes appear to
+        // stall the download.
+        //
+        // Per-chunk acquisition bounds each `acquire` to
+        // `chunk_size / rate` seconds (e.g. 8 KB / 80 KB/s = 0.1 s), so a
+        // rate change takes effect within at most one chunk's duration. The
+        // lock-free CAS in `TokenBucket::acquire` keeps overhead negligible
+        // even at high rates where `try_acquire`-style fast paths trigger.
         if data.len() <= self.chunk_size {
-            self.acquire_for_write(data.len(), per_limited, global_limited)
-                .await;
+            if per_limited {
+                self.limiter.acquire_download(data.len() as u64).await;
+            }
+            if global_limited {
+                self.global_limiter
+                    .as_ref()
+                    .unwrap()
+                    .acquire_download(data.len() as u64)
+                    .await;
+            }
             return self.inner.write(data).await;
         }
 
@@ -117,8 +116,17 @@ where
         while offset < data.len() {
             let end = (offset + self.chunk_size).min(data.len());
             let chunk = &data[offset..end];
-            self.acquire_for_write(chunk.len(), per_limited, global_limited)
-                .await;
+            let chunk_len = chunk.len() as u64;
+            if per_limited {
+                self.limiter.acquire_download(chunk_len).await;
+            }
+            if global_limited {
+                self.global_limiter
+                    .as_ref()
+                    .unwrap()
+                    .acquire_download(chunk_len)
+                    .await;
+            }
             self.inner.write(chunk).await?;
             offset = end;
         }
@@ -200,25 +208,7 @@ where
         if !per_limited && !global_limited {
             return self.inner.write_bytes_at(offset, data).await;
         }
-
-        if data.len() <= self.chunk_size {
-            self.acquire_for_write(data.len(), per_limited, global_limited)
-                .await;
-            return self.inner.write_bytes_at(offset, data).await;
-        }
-
-        let mut current_offset = offset;
-        let mut data_offset = 0usize;
-        while data_offset < data.len() {
-            let end = (data_offset + self.chunk_size).min(data.len());
-            let chunk = data.slice(data_offset..end);
-            self.acquire_for_write(chunk.len(), per_limited, global_limited)
-                .await;
-            self.inner.write_bytes_at(current_offset, chunk).await?;
-            current_offset += (end - data_offset) as u64;
-            data_offset = end;
-        }
-        Ok(())
+        self.write_at(offset, &data).await
     }
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {

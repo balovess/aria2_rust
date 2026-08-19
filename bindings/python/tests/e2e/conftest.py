@@ -129,18 +129,16 @@ class Aria2Server:
         ]
         if self.token:
             cmd.extend(["--rpc-secret", self.token])
-        # The E2E fixture does not consume child output. Leaving either pipe
-        # connected can fill the Windows pipe buffer during a concurrent RPC
-        # test and block the server itself.
         self._process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         deadline = asyncio.get_running_loop().time() + 10
         last_error: Optional[BaseException] = None
         while asyncio.get_running_loop().time() < deadline:
             if self._process.poll() is not None:
-                self._process.wait(timeout=1)
-                raise RuntimeError("aria2-rust failed to start")
+                _, stderr = self._process.communicate(timeout=1)
+                detail = stderr.decode(errors="replace") if stderr else ""
+                raise RuntimeError(f"aria2-rust failed to start: {detail}")
             try:
                 reader, writer = await asyncio.open_connection("127.0.0.1", self.port)
                 writer.close()

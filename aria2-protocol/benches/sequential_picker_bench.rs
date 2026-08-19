@@ -4,7 +4,7 @@
 use aria2_protocol::bittorrent::piece::picker::{
     PiecePicker, PiecePriorityMode, PieceSelectionStrategy,
 };
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_sequential_selection(c: &mut Criterion) {
     let mut group = c.benchmark_group("sequential_selection");
@@ -104,72 +104,6 @@ fn bench_cursor_update(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_rarest_selection(c: &mut Criterion) {
-    let mut group = c.benchmark_group("rarest_selection");
-
-    for size in [1_000usize, 10_000, 50_000] {
-        let frequencies = (0..size)
-            .map(|index| ((index * 37) % size) as u32)
-            .collect::<Vec<_>>();
-        let frequency_input = frequencies.clone();
-        group.bench_with_input(
-            BenchmarkId::new("legacy_linear_scan", size),
-            &size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let mut completed = vec![false; size];
-                        for piece in &mut completed[..size / 2] {
-                            *piece = true;
-                        }
-                        completed
-                    },
-                    |completed| {
-                        let mut best = None;
-                        for index in 0..size {
-                            if completed[index] {
-                                continue;
-                            }
-                            if best.is_none_or(|best_index| {
-                                frequency_input[index] < frequency_input[best_index]
-                            }) {
-                                best = Some(index);
-                            }
-                        }
-                        black_box(best)
-                    },
-                    BatchSize::SmallInput,
-                );
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("sorted_cursor", size),
-            &size,
-            |b, &size| {
-                b.iter_batched(
-                    || {
-                        let mut picker = PiecePicker::new(size as u32);
-                        let frequencies = frequency_input
-                            .iter()
-                            .map(|&frequency| frequency as usize)
-                            .collect::<Vec<_>>();
-                        picker.set_frequencies_from_peers(&frequencies);
-                        for piece in 0..size / 2 {
-                            picker.mark_completed(piece as u32);
-                        }
-                        picker
-                    },
-                    |mut picker| black_box(picker.pick_next_without_endgame()),
-                    BatchSize::SmallInput,
-                );
-            },
-        );
-    }
-
-    group.finish();
-}
-
 fn bench_real_world_scenario(c: &mut Criterion) {
     let mut group = c.benchmark_group("real_world");
 
@@ -219,7 +153,6 @@ criterion_group!(
     benches,
     bench_sequential_selection,
     bench_cursor_update,
-    bench_rarest_selection,
     bench_real_world_scenario
 );
 criterion_main!(benches);

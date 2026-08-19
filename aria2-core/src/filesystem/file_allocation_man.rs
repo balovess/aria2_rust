@@ -25,8 +25,7 @@
 //!   it takes the next entry, drives the `FileAllocationIterator` chunk-by-chunk
 //!   with `tokio::task::yield_now()` between chunks (so the runtime stays
 //!   responsive, the async equivalent of C++'s per-tick `allocateChunk()`), then
-//!   signals completion through a `oneshot` channel. When no entry is queued, the
-//!   worker waits on a `Notify` instead of periodically waking up to poll.
+//!   signals completion through a `oneshot` channel.
 //! - `enqueue_path` / `enqueue_multi` are the entry points used by download
 //!   commands; they wait for the completion notification, so the calling command
 //!   resumes exactly when allocation is done (mirroring C++ where the download
@@ -47,7 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use tokio::sync::{Notify, RwLock, oneshot};
+use tokio::sync::{RwLock, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, FatalError, Result};
@@ -56,6 +55,9 @@ use crate::filesystem::file_allocation::{self, AllocationStrategy};
 use crate::filesystem::file_allocation_iterator::{
     AdaptiveFileAllocationIterator, FileAllocationIterator,
 };
+
+/// How long the worker sleeps when the queue is empty before polling again.
+const IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// Error reported when an allocation is cancelled (engine halt / shutdown).
 fn cancelled_error() -> Aria2Error {
@@ -246,9 +248,6 @@ pub struct FileAllocationMan {
     /// Queue of pending allocation entries.
     queue: VecDeque<FileAllocationEntry>,
 
-    /// Wakes the worker when a new allocation enters an empty queue.
-    queue_notify: Arc<Notify>,
-
     /// Metadata of the currently active allocation entry (if any).
     picked: Option<PickedMeta>,
 
@@ -268,7 +267,6 @@ impl FileAllocationMan {
     pub fn new() -> Self {
         Self {
             queue: VecDeque::new(),
-            queue_notify: Arc::new(Notify::new()),
             picked: None,
             current_bytes: 0,
             max_concurrent: 1, // Sequential by default, matching C++
@@ -280,7 +278,6 @@ impl FileAllocationMan {
     pub fn with_concurrency(max_concurrent: usize) -> Self {
         Self {
             queue: VecDeque::new(),
-            queue_notify: Arc::new(Notify::new()),
             picked: None,
             current_bytes: 0,
             max_concurrent: max_concurrent.max(1),
@@ -298,12 +295,6 @@ impl FileAllocationMan {
             "File allocation entry queued"
         );
         self.queue.push_back(entry);
-        self.queue_notify.notify_one();
-    }
-
-    /// Return the notification source used by the background worker.
-    pub fn queue_notifier(&self) -> Arc<Notify> {
-        Arc::clone(&self.queue_notify)
     }
 
     /// Pick the next entry from the queue for allocation, moving it out.
@@ -541,21 +532,15 @@ pub fn shared_file_allocation_man_with_concurrency(max: usize) -> SharedFileAllo
 async fn worker_loop(man: SharedFileAllocationMan) {
     debug!("File allocation worker started");
     loop {
-        // Arm the notification before inspecting the queue. `enable()` closes
-        // the race where an enqueue happens between the empty-queue check and
-        // the await below.
-        let notifier = { man.read().await.queue_notifier() };
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-
         let entry = {
             let mut guard = man.write().await;
             guard.take_next_owned()
         };
 
         let Some(mut entry) = entry else {
-            notified.await;
+            // Queue empty: poll again shortly. This also gives cancelled
+            // waiters a chance to be cleaned up by `cancel_all`.
+            tokio::time::sleep(IDLE_POLL_INTERVAL).await;
             continue;
         };
 
@@ -640,7 +625,7 @@ async fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 async fn check_disk_space(path: &Path, length: u64) -> Result<()> {
     // K5.3: Pre-allocation disk space check (same as `preallocate_file`).
-    if let Err(_e) = file_allocation::check_disk_space_async(path, length).await {
+    if let Err(_e) = file_allocation::check_disk_space(path, length) {
         return Err(Aria2Error::Fatal(FatalError::DiskSpaceExhausted));
     }
     Ok(())

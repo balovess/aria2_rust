@@ -44,14 +44,6 @@ impl AutoSaveSession {
         self.interval
     }
 
-    /// Return the next point at which an interval-gated save may run.
-    ///
-    /// The engine uses this to park until the real persistence deadline
-    /// instead of waking on a fixed housekeeping tick.
-    pub fn next_save_deadline(&self) -> Instant {
-        self.last_saved + self.interval
-    }
-
     /// Save the session if the dirty flag is set and the interval has elapsed.
     ///
     /// Unlike the `Command::execute()` interface, this is a direct method
@@ -115,6 +107,8 @@ impl Command for AutoSaveSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::progress_checkpoint::ProgressCheckpoint;
+    use crate::filesystem::control_file::ControlFile;
     use crate::request::request_group::DownloadOptions;
     use crate::util::rwlock_ext::RwLockRecover;
 
@@ -221,7 +215,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_save_requests_control_file_save() {
+    async fn auto_save_request_is_consumed_by_checkpoint_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        let session = dir.path().join("session.txt");
+        tokio::fs::write(&output, [0u8; 4]).await.unwrap();
+
         let man = Arc::new(RequestGroupMan::new());
         let gid = man
             .add_group(
@@ -229,20 +228,22 @@ mod tests {
                 DownloadOptions::default(),
             )
             .unwrap();
-        let session = std::env::temp_dir().join(format!(
-            "test_session_without_control_save_{}.sess",
-            std::process::id()
-        ));
-        let mut auto = AutoSaveSession::new(session.clone(), Duration::ZERO, man.clone());
+        let group = man.get_group(gid).unwrap();
+        let mut checkpoint = ProgressCheckpoint::open(&output, 4, 0).await;
+        group.recover().set_completed_length(4);
+
+        let mut auto = AutoSaveSession::new(session, Duration::ZERO, man);
         auto.mark_dirty();
         auto.execute().await.unwrap();
 
-        assert!(
-            man.get_group(gid)
-                .unwrap()
-                .recover()
-                .is_save_control_file_requested()
-        );
-        let _ = tokio::fs::remove_file(session).await;
+        assert!(group.recover().is_save_control_file_requested());
+        let save_requested = group.recover().take_save_control_file_request();
+        checkpoint.update(4, save_requested).await;
+
+        let saved = ControlFile::load(&ControlFile::control_path_for(&output))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.completed_length(), 4);
     }
 }

@@ -104,12 +104,11 @@ enum ScanOrder {
 ///
 /// # Complexity
 ///
-/// Sequential orders (`Forward` / `Backward`) and unrestricted rarest-first
-/// picks are amortised **O(1)** thanks to monotone cursors: every piece before
-/// the cursor is known to be completed or unavailable. The rarest order is
-/// rebuilt in O(n log n) when frequencies change. Peer-restricted selection
-/// remains O(n), because a different peer bitfield can make any earlier piece
-/// unavailable.
+/// Sequential orders (`Forward` / `Backward`) are amortised **O(1)** thanks to
+/// monotone cursors: every piece below `head_cursor` (resp. above
+/// `tail_cursor`) is known to be completed or already in flight, so repeated
+/// picks never rescan the prefix. The remaining orders are O(n) per pick,
+/// which matches aria2's C++ `RarestPieceSelector` behaviour.
 pub struct PiecePicker {
     /// Total number of pieces in the torrent
     num_pieces: u32,
@@ -119,10 +118,6 @@ pub struct PiecePicker {
     priority_mode: PiecePriorityMode,
     /// Per-piece availability frequency (from peer bitfields)
     frequencies: Vec<u32>,
-    /// Piece indexes sorted by availability, then by index for stable ties.
-    rarest_order: Vec<usize>,
-    /// Cursor into `rarest_order` for unrestricted normal-mode selection.
-    rarest_cursor: usize,
     /// Per-piece completion tracking (true = piece verified and written)
     completed: Vec<bool>,
     /// Per-piece selection filter (true = piece is requested by this task).
@@ -162,8 +157,6 @@ impl PiecePicker {
             strategy: PieceSelectionStrategy::RarestFirst,
             priority_mode: PiecePriorityMode::RarestFirst,
             frequencies: vec![0; n],
-            rarest_order: (0..n).collect(),
-            rarest_cursor: 0,
             completed: vec![false; n],
             allowed: vec![true; n],
             in_progress: vec![false; n],
@@ -248,7 +241,6 @@ impl PiecePicker {
             .count();
         self.head_cursor = 0;
         self.tail_cursor = self.num_pieces as usize;
-        self.rarest_cursor = 0;
         self.refresh_endgame_candidates();
     }
 
@@ -344,9 +336,6 @@ impl PiecePicker {
         if i + 1 > self.tail_cursor {
             self.tail_cursor = i + 1;
         }
-        // The sorted rarity order is independent from the piece index, so a
-        // reopened piece may live anywhere before the cursor.
-        self.rarest_cursor = 0;
     }
 
     /// Core selection routine shared by [`Self::select`] and [`Self::pick_next`].
@@ -379,20 +368,6 @@ impl PiecePicker {
         }
 
         let order = self.scan_order();
-
-        // The BT download scheduler asks for an unrestricted piece. In that
-        // case the sorted rarity order can advance once per piece instead of
-        // rescanning every completed piece on every selection.
-        if bitfield.is_none() && !allow_in_progress && matches!(order, ScanOrder::Rarest) {
-            while self.rarest_cursor < self.rarest_order.len() {
-                let i = self.rarest_order[self.rarest_cursor];
-                self.rarest_cursor += 1;
-                if i < n && self.is_available(i) {
-                    return Some(i as u32);
-                }
-            }
-            return None;
-        }
 
         // Cursor fast paths — only valid when in-progress pieces are excluded,
         // because the cursor invariant counts them as unavailable.
@@ -524,16 +499,6 @@ impl PiecePicker {
         self.pick_internal(None, n, allow_in_progress)
     }
 
-    /// Pick the next piece without peer restrictions or end-game duplicates.
-    ///
-    /// The BT scheduler uses this when its own end-game threshold says normal
-    /// selection is still active. Keeping the flag explicit avoids coupling
-    /// the protocol picker to a caller-owned threshold.
-    pub fn pick_next_without_endgame(&mut self) -> Option<u32> {
-        let n = self.num_pieces as usize;
-        self.pick_internal(None, n, false)
-    }
-
     /// Whether end-game mode is currently active.
     pub fn endgame_active(&self) -> bool {
         let remaining = self.remaining_count();
@@ -567,9 +532,6 @@ impl PiecePicker {
         for (dst, src) in self.frequencies.iter_mut().zip(freqs.iter()).take(len) {
             *dst = *src as u32;
         }
-        self.rarest_order
-            .sort_unstable_by_key(|&index| (self.frequencies[index], index));
-        self.rarest_cursor = 0;
     }
 
     /// Iterator over all pieces, yielding [`PieceInfo`] for each.
@@ -1030,27 +992,6 @@ mod tests {
         assert_eq!(picker.pick_next(), Some(2));
         picker.mark_completed(2);
         assert_eq!(picker.pick_next(), Some(1));
-    }
-
-    #[test]
-    fn test_rarest_cursor_reopens_piece_after_frequency_order_scan() {
-        let mut picker = PiecePicker::new(4u32);
-        picker.set_frequencies_from_peers(&[9, 1, 4, 7]);
-        picker.mark_in_progress(1, true);
-
-        assert_eq!(picker.pick_next_without_endgame(), Some(2));
-        picker.mark_in_progress(1, false);
-        assert_eq!(picker.pick_next_without_endgame(), Some(1));
-    }
-
-    #[test]
-    fn test_pick_next_without_endgame_excludes_in_progress_piece() {
-        let mut picker = PiecePicker::new(4u32);
-        picker.set_endgame_threshold(4);
-        picker.mark_in_progress(0, true);
-
-        assert_eq!(picker.pick_next(), Some(0));
-        assert_eq!(picker.pick_next_without_endgame(), Some(1));
     }
 
     #[test]

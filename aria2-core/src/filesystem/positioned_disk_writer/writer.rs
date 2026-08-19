@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use tracing::debug;
@@ -12,17 +12,22 @@ use super::platform_io::{read_exact_at, write_all_at};
 /// A disk writer that performs positioned (offset-based) I/O via OS-native
 /// `pwrite`/`seek_write` syscalls.
 ///
-/// The file descriptor is shared through an [`Arc`], and blocking filesystem
-/// calls are dispatched to Tokio's blocking pool. Positioned reads and writes
-/// do not mutate the file cursor, so they do not need a per-write mutex.
+/// The file descriptor is protected by a [`std::sync::Mutex`] held only for
+/// the duration of each synchronous syscall — never across `.await` points.
+/// This enables true concurrency for non-overlapping writes when multiple
+/// writers reference the same file.
 ///
 /// Uses [`std::fs::File`] (not `tokio::fs::File`) because `FileExt::write_at`
-/// is a synchronous method available only on `std::fs::File`. The syscall is
-/// nevertheless allowed to wait on filesystem pressure, so it must not run on
-/// a Tokio worker thread.
+/// is a synchronous method available only on `std::fs::File`. Since `pwrite`
+/// is a fast non-blocking syscall (it never waits on async I/O completion),
+/// running it synchronously inside a tokio task is acceptable — it does not
+/// stall the runtime for meaningful durations.
 pub struct PositionedDiskWriter {
-    /// `std::fs::File` is wrapped in `Option` to support lazy opening.
-    file: Option<Arc<std::fs::File>>,
+    /// `std::fs::File` wrapped in `Option` to support lazy open from `&self`.
+    /// The `std::sync::Mutex` (NOT `tokio::sync::Mutex`) is intentional: the
+    /// lock is held only for the synchronous syscall, never across await
+    /// points, so it cannot deadlock the async runtime.
+    file: Mutex<Option<std::fs::File>>,
     path: PathBuf,
     total_size: Option<u64>,
 }
@@ -36,7 +41,7 @@ impl PositionedDiskWriter {
     /// without per-write file extension.
     pub fn new(path: &Path, total_size: Option<u64>) -> Self {
         Self {
-            file: None,
+            file: Mutex::new(None),
             path: path.to_path_buf(),
             total_size,
         }
@@ -47,25 +52,59 @@ impl PositionedDiskWriter {
         self.total_size
     }
 
-    /// Lazily open the underlying file on Tokio's blocking pool.
-    async fn ensure_open(&mut self) -> Result<()> {
-        if self.file.is_some() {
+    /// Lazily open the underlying file if not already open.
+    ///
+    /// This is synchronous because `pwrite`/`seek_write` are synchronous
+    /// syscalls. The `std::sync::Mutex` is held only for the file open
+    /// operation (microseconds), never across await points.
+    ///
+    /// Idempotent: if the file is already open, returns `Ok(())` immediately.
+    fn ensure_open_sync(&self) -> Result<()> {
+        let mut guard = self
+            .file
+            .lock()
+            .map_err(|e| Aria2Error::Io(format!("file mutex poisoned: {e}")))?;
+        if guard.is_some() {
             return Ok(());
         }
 
-        let path = self.path.clone();
-        let total_size = self.total_size;
-        let file = tokio::task::spawn_blocking(move || open_file(&path, total_size))
-            .await
-            .map_err(|e| Aria2Error::Io(format!("positioned writer open task failed: {e}")))??;
-        self.file = Some(Arc::new(file));
+        // Create parent directories if needed (resume scenario may have missing dirs)
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
+            debug!("Created parent directories for {:?}", self.path);
+        }
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).write(true).read(true);
+        let file = opts
+            .open(&self.path)
+            .map_err(|e| Aria2Error::FileOpen(format!("path {}: {e}", self.path.display())))?;
+        debug!("Opened file for positioned I/O: {:?}", self.path);
+
+        // Pre-allocate the file if a total size was specified and the file is
+        // newly created (current size 0). For resume scenarios where the file
+        // already has content, we do NOT truncate — preserving existing data.
+        if let Some(size) = self.total_size {
+            let current_size = file.metadata()?.len();
+            if current_size == 0 && size > 0 {
+                file.set_len(size)?;
+                debug!("Pre-allocated file to {} bytes: {:?}", size, self.path);
+            }
+        }
+
+        *guard = Some(file);
         Ok(())
     }
 
-    fn file_handle(&self) -> Result<Arc<std::fs::File>> {
-        self.file.as_ref().cloned().ok_or_else(|| {
-            Aria2Error::Io("file not open after ensure_open - invariant violated".into())
-        })
+    /// Acquire the file mutex guard, returning a descriptive error if poisoned.
+    fn lock_file(&self) -> Result<std::sync::MutexGuard<'_, Option<std::fs::File>>> {
+        self.file
+            .lock()
+            .map_err(|e| Aria2Error::Io(format!("file mutex poisoned: {e}")))
     }
 
     /// Returns the raw file descriptor of the underlying file, if open.
@@ -79,94 +118,53 @@ impl PositionedDiskWriter {
     /// file open.
     #[cfg(unix)]
     pub fn raw_fd(&self) -> Option<std::os::unix::io::RawFd> {
-        self.file
-            .as_ref()
-            .map(std::os::unix::io::AsRawFd::as_raw_fd)
+        let guard = self.file.lock().ok()?;
+        guard.as_ref().map(std::os::unix::io::AsRawFd::as_raw_fd)
     }
-}
-
-fn open_file(path: &Path, total_size: Option<u64>) -> Result<std::fs::File> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| Aria2Error::DirCreate(format!("{}: {e}", parent.display())))?;
-        debug!("Created parent directories for {:?}", path);
-    }
-
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .read(true)
-        .open(path)
-        .map_err(|e| Aria2Error::FileOpen(format!("path {}: {e}", path.display())))?;
-    debug!("Opened file for positioned I/O: {:?}", path);
-
-    // Preserve existing data on resume. Apply the expected size only to a new
-    // zero-length file.
-    if let Some(size) = total_size {
-        let current_size = file.metadata()?.len();
-        if current_size == 0 && size > 0 {
-            file.set_len(size)?;
-            debug!("Pre-allocated file to {} bytes: {:?}", size, path);
-        }
-    }
-
-    Ok(file)
 }
 
 #[async_trait]
 impl SeekableDiskWriter for PositionedDiskWriter {
     async fn open(&mut self) -> Result<()> {
-        self.ensure_open().await
+        self.ensure_open_sync()
     }
 
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        self.write_bytes_at(offset, bytes::Bytes::copy_from_slice(data))
-            .await
+        self.ensure_open_sync()?;
+        let guard = self.lock_file()?;
+        let file = guard.as_ref().ok_or_else(|| {
+            Aria2Error::Io("file not open after ensure_open_sync — invariant violated".into())
+        })?;
+        write_all_at(file, data, offset)
     }
 
     /// Zero-copy write: accepts `Bytes` directly. Since `pwrite` takes `&[u8]`,
     /// we simply dereference the `Bytes` (no copy — `Bytes` derefs to `[u8]`).
     async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
-        self.ensure_open().await?;
-        let file = self.file_handle()?;
-        tokio::task::spawn_blocking(move || write_all_at(file.as_ref(), &data, offset))
-            .await
-            .map_err(|e| Aria2Error::Io(format!("positioned write task failed: {e}")))?
+        self.write_at(offset, &data).await
     }
 
     async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<usize> {
-        self.ensure_open().await?;
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let file = self.file_handle()?;
-        let len = buf.len();
-        let (data, n) = tokio::task::spawn_blocking(move || {
-            let mut data = vec![0u8; len];
-            let n = read_exact_at(file.as_ref(), &mut data, offset)?;
-            Ok::<_, Aria2Error>((data, n))
-        })
-        .await
-        .map_err(|e| Aria2Error::Io(format!("positioned read task failed: {e}")))??;
-        buf[..n].copy_from_slice(&data[..n]);
-        Ok(n)
+        self.ensure_open_sync()?;
+        let guard = self.lock_file()?;
+        let file = guard.as_ref().ok_or_else(|| {
+            Aria2Error::Io("file not open after ensure_open_sync — invariant violated".into())
+        })?;
+        read_exact_at(file, buf, offset)
     }
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
-        self.ensure_open().await?;
-        let file = self.file_handle()?;
-        tokio::task::spawn_blocking(move || file.set_len(length))
-            .await
-            .map_err(|e| Aria2Error::Io(format!("positioned truncate task failed: {e}")))??;
+        self.ensure_open_sync()?;
+        let guard = self.lock_file()?;
+        if let Some(ref file) = *guard {
+            file.set_len(length)?;
+        }
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<()> {
-        if self.file.is_some() {
+        let guard = self.lock_file()?;
+        if let Some(ref _file) = *guard {
             // Do NOT call sync_all (fsync) here — that is only needed on
             // close/finalize to guarantee durability. The download hot path
             // calls flush() to push data from the write-back cache to the
@@ -185,11 +183,9 @@ impl SeekableDiskWriter for PositionedDiskWriter {
     }
 
     async fn len(&self) -> Result<u64> {
-        if let Some(file) = self.file.as_ref().cloned() {
-            tokio::task::spawn_blocking(move || file.metadata().map(|metadata| metadata.len()))
-                .await
-                .map_err(|e| Aria2Error::Io(format!("positioned metadata task failed: {e}")))?
-                .map_err(Aria2Error::from)
+        let guard = self.lock_file()?;
+        if let Some(ref file) = *guard {
+            Ok(file.metadata()?.len())
         } else if let Some(size) = self.total_size {
             Ok(size)
         } else {
@@ -202,15 +198,17 @@ impl SeekableDiskWriter for PositionedDiskWriter {
     }
 
     async fn close(&mut self) -> Result<()> {
-        if let Some(file) = self.file.as_ref().cloned() {
+        let guard = self.lock_file()?;
+        if let Some(ref file) = *guard {
             // Ensure all buffered data reaches stable storage before closing.
             // This is the ONLY place sync_all (fsync) is called — the hot-path
             // flush() intentionally skips it for throughput.
-            tokio::task::spawn_blocking(move || file.sync_all())
-                .await
-                .map_err(|e| Aria2Error::Io(format!("positioned close task failed: {e}")))??;
+            file.sync_all()?;
         }
-        self.file = None;
+        // Drop the file handle by taking it out of the Option
+        drop(guard);
+        let mut guard = self.lock_file()?;
+        *guard = None;
         Ok(())
     }
 }

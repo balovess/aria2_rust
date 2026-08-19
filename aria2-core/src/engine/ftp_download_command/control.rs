@@ -353,19 +353,14 @@ impl RawFtpControl {
         }
     }
 
-    /// Set the configured FTP transfer representation (TYPE I or TYPE A).
-    pub(super) async fn set_transfer_type(&mut self, transfer_type: &str) -> Result<()> {
-        let (command, label) = if transfer_type.eq_ignore_ascii_case("ascii") {
-            ("TYPE A", "ASCII")
-        } else {
-            ("TYPE I", "binary")
-        };
-        debug!(command, "Setting FTP transfer mode");
-        let resp = self.command(command).await?;
+    /// Set binary transfer mode (TYPE I)
+    pub(super) async fn set_binary_mode(&mut self) -> Result<()> {
+        debug!("Setting transfer mode to binary (TYPE I)");
+        let resp = self.command("TYPE I").await?;
         if resp.0 != 200 {
             return Err(Aria2Error::Recoverable(
                 RecoverableError::FtpProtocolError {
-                    message: format!("{} ({}) failed: {} {}", command, label, resp.0, resp.1),
+                    message: format!("TYPE I failed: {} {}", resp.0, resp.1),
                 },
             ));
         }

@@ -113,18 +113,6 @@ impl ConcurrentSegmentManager {
         }
     }
 
-    fn mark_mirror_failed(&mut self, mirror_idx: Option<usize>) {
-        if let Some(mi) = mirror_idx
-            && let Some(mirror) = self.mirrors.get_mut(mi)
-        {
-            mirror.active_segments = mirror.active_segments.saturating_sub(1);
-            mirror.consecutive_failures += 1;
-            if mirror.consecutive_failures >= self.max_mirror_failures {
-                mirror.disabled = true;
-            }
-        }
-    }
-
     /// Mark a segment as failed and attempt reassignment to another mirror.
     ///
     /// Returns `Some(new_mirror_idx)` if the segment was reassigned, or `None`
@@ -136,7 +124,15 @@ impl ConcurrentSegmentManager {
             (seg.assigned_mirror, seg.retry_count + 1)
         };
 
-        self.mark_mirror_failed(prev_mirror);
+        if let Some(mi) = prev_mirror
+            && let Some(m) = self.mirrors.get_mut(mi)
+        {
+            m.active_segments = m.active_segments.saturating_sub(1);
+            m.consecutive_failures += 1;
+            if m.consecutive_failures >= self.max_mirror_failures {
+                m.disabled = true;
+            }
+        }
 
         if self.max_retries_per_segment != 0 && new_retry >= self.max_retries_per_segment {
             if let Some(seg) = self.segments.get_mut(index as usize) {
@@ -153,27 +149,6 @@ impl ConcurrentSegmentManager {
             }
             reassign
         }
-    }
-
-    /// Stop retrying the failed mirror and move the segment to another mirror.
-    ///
-    /// Terminal HTTP responses must not consume the retry budget for the
-    /// replacement mirror. This mirrors aria2's behavior of aborting the
-    /// current URI and creating the next request from the remaining URI pool.
-    pub fn fail_segment_without_retry(&mut self, index: u32) -> Option<usize> {
-        let prev_mirror = self
-            .segments
-            .get(index as usize)
-            .and_then(|segment| segment.assigned_mirror);
-        self.mark_mirror_failed(prev_mirror);
-
-        let reassign = self.find_available_mirror_for_reassignment(prev_mirror.unwrap_or(0));
-        if let Some(segment) = self.segments.get_mut(index as usize) {
-            segment.status = SegmentStatus::Pending;
-            segment.assigned_mirror = reassign;
-            segment.retry_count = 0;
-        }
-        reassign
     }
 
     /// Find the first available mirror that is not `exclude`.

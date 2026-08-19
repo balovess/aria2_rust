@@ -86,8 +86,9 @@ impl TimerA2 {
 
         loop {
             if self.timers.is_empty() {
-                debug!("No active timers, stopping timer system");
-                return Ok(());
+                debug!("No active timers, waiting for new timer");
+                tokio::task::yield_now().await;
+                continue;
             }
 
             let now = TokioInstant::now();

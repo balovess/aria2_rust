@@ -38,7 +38,7 @@ pub struct SftpDownloadCommand {
     pub(super) started: bool,
     /// Total bytes completed so far (for progress tracking)
     pub(super) completed_bytes: u64,
-    /// Retry policy for transient transport and remote not-found responses.
+    /// Retry policy for remote not-found responses.
     pub(super) retry_policy: RetryPolicy,
     /// Remote server hostname or IP
     pub(super) host: String,

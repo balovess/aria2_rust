@@ -12,7 +12,7 @@ use super::throttled_writer::ThrottledWriter;
 #[cfg(test)]
 use super::token_bucket::TokenBucket;
 #[cfg(test)]
-use crate::filesystem::disk_writer::{DiskWriter, SeekableDiskWriter};
+use crate::filesystem::disk_writer::DiskWriter;
 
 #[tokio::test]
 async fn test_token_bucket_unlimited() {
@@ -176,106 +176,6 @@ async fn test_throttled_writer_chunk_size() {
     tw.write(&large_data).await.unwrap();
     let result = tw.finalize().await.unwrap();
     assert_eq!(result.len(), 10_000);
-}
-
-#[cfg(test)]
-struct TrackingSeekableWriter {
-    bytes_writes: usize,
-    slice_writes: usize,
-    data: Vec<u8>,
-}
-
-#[cfg(test)]
-impl TrackingSeekableWriter {
-    fn new() -> Self {
-        Self {
-            bytes_writes: 0,
-            slice_writes: 0,
-            data: Vec::new(),
-        }
-    }
-
-    fn store(&mut self, offset: u64, data: &[u8]) -> crate::error::Result<()> {
-        let offset = usize::try_from(offset)
-            .map_err(|_| crate::error::Aria2Error::Io("offset exceeds usize range".into()))?;
-        let end = offset
-            .checked_add(data.len())
-            .ok_or_else(|| crate::error::Aria2Error::Io("write range overflow".into()))?;
-        if self.data.len() < end {
-            self.data.resize(end, 0);
-        }
-        self.data[offset..end].copy_from_slice(data);
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-#[async_trait::async_trait]
-impl SeekableDiskWriter for TrackingSeekableWriter {
-    async fn open(&mut self) -> crate::error::Result<()> {
-        Ok(())
-    }
-
-    async fn write_at(&mut self, offset: u64, data: &[u8]) -> crate::error::Result<()> {
-        self.slice_writes += 1;
-        self.store(offset, data)
-    }
-
-    async fn write_bytes_at(
-        &mut self,
-        offset: u64,
-        data: bytes::Bytes,
-    ) -> crate::error::Result<()> {
-        self.bytes_writes += 1;
-        self.store(offset, &data)
-    }
-
-    async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> crate::error::Result<usize> {
-        let offset = usize::try_from(offset)
-            .map_err(|_| crate::error::Aria2Error::Io("offset exceeds usize range".into()))?;
-        if offset >= self.data.len() {
-            return Ok(0);
-        }
-        let count = buf.len().min(self.data.len() - offset);
-        buf[..count].copy_from_slice(&self.data[offset..offset + count]);
-        Ok(count)
-    }
-
-    async fn truncate(&mut self, length: u64) -> crate::error::Result<()> {
-        let length = usize::try_from(length)
-            .map_err(|_| crate::error::Aria2Error::Io("length exceeds usize range".into()))?;
-        self.data.resize(length, 0);
-        Ok(())
-    }
-
-    async fn flush(&mut self) -> crate::error::Result<()> {
-        Ok(())
-    }
-
-    async fn len(&self) -> crate::error::Result<u64> {
-        Ok(self.data.len() as u64)
-    }
-
-    fn path(&self) -> &std::path::Path {
-        std::path::Path::new("tracking")
-    }
-}
-
-#[tokio::test]
-async fn test_throttled_seekable_bytes_preserves_bytes_path() {
-    let cfg = RateLimiterConfig::new(Some(1_000_000), None).with_burst(Some(1_000_000), None);
-    let rl = RateLimiter::new(&cfg);
-    let chunk_size = crate::constants::RATE_LIMITER_MIN_CHUNK_SIZE;
-    let payload = bytes::Bytes::from(vec![0x5A; chunk_size * 2 + 1]);
-    let mut writer =
-        ThrottledWriter::new(TrackingSeekableWriter::new(), rl).with_chunk_size(chunk_size);
-
-    writer.write_bytes_at(3, payload.clone()).await.unwrap();
-    let writer = writer.into_inner();
-
-    assert_eq!(writer.bytes_writes, 3);
-    assert_eq!(writer.slice_writes, 0);
-    assert_eq!(&writer.data[3..3 + payload.len()], payload.as_ref());
 }
 
 #[tokio::test]
@@ -516,23 +416,6 @@ async fn test_rate_limiter_set_upload_rate() {
     assert!(!rl.is_upload_limited());
     let config = rl.config().await;
     assert!(config.upload_rate().is_none());
-}
-
-#[tokio::test]
-async fn test_token_bucket_unlimited_wakes_waiting_acquire() {
-    let bucket = Arc::new(TokenBucket::new(100, Some(0)));
-    let waiting_bucket = Arc::clone(&bucket);
-    let acquire = tokio::spawn(async move {
-        waiting_bucket.acquire(100).await;
-    });
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
-    bucket.set_unlimited(true);
-
-    tokio::time::timeout(Duration::from_millis(300), acquire)
-        .await
-        .expect("changing the rate should wake a blocked acquire")
-        .expect("acquire task should not panic");
 }
 
 /// Verify that `RateLimiter` clones share the inner token bucket state —

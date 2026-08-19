@@ -4,7 +4,7 @@
 //! byte-offset ranges, and missing/unused piece collections.
 
 use super::core::BitfieldMan;
-use crate::segment::bitfield_util::{byte_at, test_bit, valid_bits_mask};
+use crate::segment::bitfield_util::{set_bit, test_bit};
 
 impl BitfieldMan {
     // ── Peer-aware missing piece queries ──────────────────────────────────
@@ -17,20 +17,16 @@ impl BitfieldMan {
     /// - IS in the peer's bitfield (peer has it)
     /// - (if filter enabled) Has its filter bit set (selected for download)
     pub fn has_missing_piece_with_bitfield(&self, peer_bitfield: &[u8]) -> bool {
-        let num_bytes = self.num_pieces.div_ceil(8);
-        let last_mask = valid_bits_mask(self.num_pieces);
-        for byte_index in 0..num_bytes {
-            let mask = if byte_index + 1 == num_bytes {
-                last_mask
-            } else {
-                u8::MAX
-            };
-            let mut available = !self.bitfield[byte_index] & byte_at(peer_bitfield, byte_index);
-            if self.filter_enabled {
-                available &= self.filter_bitfield[byte_index];
-            }
-            if available & mask != 0 {
-                return true;
+        for i in 0..self.num_pieces {
+            // We need this piece (not completed)
+            if !test_bit(&self.bitfield, self.num_pieces, i) {
+                // Peer has this piece
+                if test_bit(peer_bitfield, self.num_pieces, i) {
+                    // If filter enabled, only consider filtered pieces
+                    if !self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i) {
+                        return true;
+                    }
+                }
             }
         }
         false
@@ -49,18 +45,13 @@ impl BitfieldMan {
         let num_bytes = self.num_pieces.div_ceil(8);
         let mut result = vec![0u8; num_bytes];
 
-        let last_mask = valid_bits_mask(self.num_pieces);
-        for (byte_index, output) in result.iter_mut().enumerate() {
-            let mask = if byte_index + 1 == num_bytes {
-                last_mask
-            } else {
-                u8::MAX
-            };
-            let mut available = !self.bitfield[byte_index] & byte_at(peer_bitfield, byte_index);
-            if self.filter_enabled {
-                available &= self.filter_bitfield[byte_index];
+        for i in 0..self.num_pieces {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && test_bit(peer_bitfield, self.num_pieces, i)
+                && (!self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i))
+            {
+                set_bit(&mut result, self.num_pieces, i);
             }
-            *output = available & mask;
         }
 
         result
@@ -75,18 +66,12 @@ impl BitfieldMan {
         let num_bytes = self.num_pieces.div_ceil(8);
         let mut result = vec![0u8; num_bytes];
 
-        let last_mask = valid_bits_mask(self.num_pieces);
-        for (byte_index, output) in result.iter_mut().enumerate() {
-            let mask = if byte_index + 1 == num_bytes {
-                last_mask
-            } else {
-                u8::MAX
-            };
-            let mut available = !self.bitfield[byte_index];
-            if self.filter_enabled {
-                available &= self.filter_bitfield[byte_index];
+        for i in 0..self.num_pieces {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && (!self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i))
+            {
+                set_bit(&mut result, self.num_pieces, i);
             }
-            *output = available & mask;
         }
 
         result
@@ -105,20 +90,14 @@ impl BitfieldMan {
         let num_bytes = self.num_pieces.div_ceil(8);
         let mut result = vec![0u8; num_bytes];
 
-        let last_mask = valid_bits_mask(self.num_pieces);
-        for (byte_index, output) in result.iter_mut().enumerate() {
-            let mask = if byte_index + 1 == num_bytes {
-                last_mask
-            } else {
-                u8::MAX
-            };
-            let mut available = !self.bitfield[byte_index]
-                & !self.use_bitfield[byte_index]
-                & byte_at(peer_bitfield, byte_index);
-            if self.filter_enabled {
-                available &= self.filter_bitfield[byte_index];
+        for i in 0..self.num_pieces {
+            if !test_bit(&self.bitfield, self.num_pieces, i)
+                && !test_bit(&self.use_bitfield, self.num_pieces, i)
+                && test_bit(peer_bitfield, self.num_pieces, i)
+                && (!self.filter_enabled || test_bit(&self.filter_bitfield, self.num_pieces, i))
+            {
+                set_bit(&mut result, self.num_pieces, i);
             }
-            *output = available & mask;
         }
 
         result

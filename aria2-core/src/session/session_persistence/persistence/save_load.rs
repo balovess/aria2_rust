@@ -422,6 +422,59 @@ impl SessionPersistence {
 
         Ok(group)
     }
+
+    /// Start background auto-save task
+    ///
+    /// Spawns a Tokio task that periodically calls save_state().
+    /// The task runs until the returned handle is dropped or cancelled.
+    ///
+    /// # Arguments
+    ///
+    /// * `groups` - Arc-wrapped shared reference to the groups vector
+    ///
+    /// # Returns
+    ///
+    /// A JoinHandle that can be used to cancel the auto-save task
+    pub fn start_auto_save(
+        &self,
+        groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        if !self.auto_save_enabled {
+            debug!("Auto-save is disabled");
+            return None;
+        }
+
+        let session_dir = self.session_dir.clone();
+        let interval = self.auto_save_interval;
+
+        info!(
+            interval_secs = interval.as_secs(),
+            dir = %session_dir.display(),
+            "Starting auto-save task"
+        );
+
+        Some(tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+
+            loop {
+                ticker.tick().await;
+
+                let groups_read = groups.read().await;
+                let persistence = SessionPersistence::new(&session_dir).without_auto_save();
+
+                match persistence.save_state(&groups_read).await {
+                    Ok(count) => {
+                        if count > 0 {
+                            debug!(count, "Auto-save completed successfully");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Auto-save failed, will retry next interval");
+                    }
+                }
+            }
+        }))
+    }
 }
 
 async fn remove_stale_resume_files(

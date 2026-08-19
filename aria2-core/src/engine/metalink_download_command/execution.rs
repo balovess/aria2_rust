@@ -1,18 +1,14 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::Checksum;
+use crate::checksum::checksum::{Checksum, verify_file};
 use crate::checksum::message_digest::HashType;
-use crate::constants;
 use crate::engine::active_output_registry::global_registry;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
-use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DefaultDiskWriter, DiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
@@ -26,11 +22,7 @@ use super::MetalinkDownloadCommand;
 fn classify_metalink_http_status(status_code: u16) -> Aria2Error {
     if status_code == 404 {
         Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-    } else if status_code == 401 || status_code == 407 {
-        Aria2Error::Recoverable(RecoverableError::HttpAuthFailed {
-            message: format!("authentication failed: HTTP {status_code}"),
-        })
-    } else if status_code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&status_code) {
+    } else if status_code >= 500 {
         Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
     } else {
         Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
@@ -82,7 +74,7 @@ impl Command for MetalinkDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        self.group.recover().timeout()
+        Some(Duration::from_secs(600))
     }
 }
 
@@ -144,93 +136,6 @@ impl MetalinkDownloadCommand {
                 self.group.recover().file_not_found_error()
             }
             error => error,
-        }
-    }
-
-    /// Return whether a recorded not-found response must stop mirror failover.
-    ///
-    /// `max-file-not-found=0` disables 404 retries, so the first 404 is
-    /// terminal even though its public result remains `ResourceNotFound`.
-    /// Positive limits become terminal through `MaxFileNotFound` once the
-    /// configured count is reached.
-    fn should_stop_after_not_found(&self, error: &Aria2Error) -> bool {
-        matches!(
-            error,
-            Aria2Error::Recoverable(
-                RecoverableError::ResourceNotFound | RecoverableError::MaxFileNotFound
-            )
-        ) && !self.group.recover().can_retry_file_not_found()
-    }
-
-    fn should_retry_mirror_error(
-        &self,
-        attempts: u32,
-        error: &Aria2Error,
-        retry_policy: &RetryPolicy,
-    ) -> bool {
-        match error {
-            Aria2Error::Recoverable(RecoverableError::ResourceNotFound) => {
-                retry_policy.can_retry_after(attempts.saturating_add(1))
-                    && self.group.recover().can_retry_file_not_found()
-            }
-            _ => retry_policy.should_retry(attempts, error),
-        }
-    }
-
-    async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if let Some(error) = self.lifecycle_error() {
-            return Err(error);
-        }
-
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => self.lifecycle_error().map_or(Ok(()), Err),
-            _ = &mut notified => self.lifecycle_error().map_or(Ok(()), Err),
-        }
-    }
-
-    async fn download_payload_with_retry(
-        &mut self,
-        output_path: &Path,
-        url: &str,
-        expected_size: Option<u64>,
-    ) -> Result<PayloadDownload> {
-        let options = self.group.recover().options_arc();
-        let retry_policy =
-            RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
-        let mut attempts = 0u32;
-
-        loop {
-            match self
-                .download_payload_url(output_path, url, expected_size)
-                .await
-            {
-                Ok(payload) => return Ok(payload),
-                Err(error) => {
-                    let error = self.record_not_found_error(error);
-                    if self.lifecycle_error().is_some()
-                        || self.should_stop_after_not_found(&error)
-                        || !self.should_retry_mirror_error(attempts, &error, &retry_policy)
-                    {
-                        return Err(error);
-                    }
-
-                    attempts = attempts.saturating_add(1);
-                    let wait = retry_policy.compute_wait(attempts).unwrap_or_default();
-                    warn!(
-                        url,
-                        attempt = attempts.saturating_add(1),
-                        max_attempts = retry_policy.max_tries(),
-                        ?wait,
-                        error = %error,
-                        "Metalink mirror failed, retrying"
-                    );
-                    self.wait_for_retry(wait).await?;
-                }
-            }
         }
     }
 
@@ -338,15 +243,12 @@ impl MetalinkDownloadCommand {
             );
 
             match self
-                .download_payload_with_retry(&resolved_output_path, &url_entry.url, expected_size)
+                .download_payload_url(&resolved_output_path, &url_entry.url, expected_size)
                 .await
             {
                 Ok(payload) => {
                     let hash_valid = match hash_entry_owned.as_ref() {
-                        Some(hash) => match self
-                            .verify_file_hash(&payload.path, payload.total_length, hash)
-                            .await
-                        {
+                        Some(hash) => match self.verify_file_hash(&payload.path, hash).await {
                             Ok(valid) => valid,
                             Err(error) => {
                                 self.discard_checkpoint(&payload.path).await;
@@ -430,6 +332,7 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(e) => {
+                    let e = self.record_not_found_error(e);
                     warn!("Mirror download failed {}: {}", url_entry.url, e);
                     if self.lifecycle_error().is_some() {
                         global_registry().release(&resolved_output_path).await;
@@ -438,8 +341,7 @@ impl MetalinkDownloadCommand {
                     if matches!(
                         e,
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                    ) || self.should_stop_after_not_found(&e)
-                    {
+                    ) {
                         global_registry().release(&resolved_output_path).await;
                         return Err(e);
                     }
@@ -490,8 +392,6 @@ impl MetalinkDownloadCommand {
                 bt_registry: self.bt_registry.clone(),
                 #[cfg(feature = "bittorrent")]
                 bt_listener: self.bt_listener.clone(),
-                #[cfg(feature = "bittorrent")]
-                lpd_manager: self.lpd_manager.clone(),
             };
             match command.execute_file(false, false).await {
                 Ok(()) => {
@@ -545,7 +445,7 @@ impl MetalinkDownloadCommand {
             .filter(|m| m.mediatype == MediaType::Torrent)
         {
             info!(url = %mu.url, "Downloading torrent from Metalink metaurl");
-            match self.download_metadata_url_with_retry(&mu.url).await {
+            match self.download_metadata_url(&mu.url).await {
                 Ok(torrent_bytes) => {
                     // Persist metadata beside the payload so the dependency
                     // can be reconstructed by the manager and after restart.
@@ -591,10 +491,6 @@ impl MetalinkDownloadCommand {
                     if let Some(listener) = self.bt_listener.clone() {
                         bt_cmd.set_bt_listener(listener);
                     }
-                    #[cfg(feature = "bittorrent")]
-                    if let Some(manager) = self.lpd_manager.clone() {
-                        bt_cmd.set_lpd_manager(manager);
-                    }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
                     {
@@ -610,12 +506,12 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(e) => {
+                    let e = self.record_not_found_error(e);
                     warn!(url = %mu.url, error = %e, "Torrent metaurl failed");
                     if matches!(
                         e,
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                    ) || self.should_stop_after_not_found(&e)
-                    {
+                    ) {
                         return Err(e);
                     }
                     last_err = Some(e);
@@ -693,7 +589,7 @@ impl MetalinkDownloadCommand {
         let mut last_err = None;
         for metadata_uri in meta_urls {
             info!(url = %metadata_uri, "Downloading shared torrent from Metalink metaurl");
-            match self.download_metadata_url_with_retry(&metadata_uri).await {
+            match self.download_metadata_url(&metadata_uri).await {
                 Ok(torrent_bytes) => {
                     let metadata_path = self.output_path.with_extension("torrent");
                     tokio::fs::write(&metadata_path, &torrent_bytes)
@@ -735,10 +631,6 @@ impl MetalinkDownloadCommand {
                     if let Some(listener) = self.bt_listener.clone() {
                         bt_cmd.set_bt_listener(listener);
                     }
-                    #[cfg(feature = "bittorrent")]
-                    if let Some(manager) = self.lpd_manager.clone() {
-                        bt_cmd.set_lpd_manager(manager);
-                    }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().completed_length();
                     self.completed = true;
@@ -750,12 +642,12 @@ impl MetalinkDownloadCommand {
                     return Ok(());
                 }
                 Err(error) => {
+                    let error = self.record_not_found_error(error);
                     warn!(url = %metadata_uri, error = %error, "Shared torrent metaurl failed");
                     if matches!(
                         error,
                         Aria2Error::Recoverable(RecoverableError::MaxFileNotFound)
-                    ) || self.should_stop_after_not_found(&error)
-                    {
+                    ) {
                         return Err(error);
                     }
                     last_err = Some(error);
@@ -971,9 +863,6 @@ impl MetalinkDownloadCommand {
                 self.flush_checkpoint().await;
                 return Err(lifecycle_error);
             }
-            if !bytes.is_empty() {
-                self.group.recover().record_network_activity();
-            }
             if let Err(error) = writer.write(&bytes).await {
                 self.finalize_partial_writer(&mut writer).await;
                 return Err(Aria2Error::FileIo(format!(
@@ -1027,12 +916,11 @@ impl MetalinkDownloadCommand {
     }
 
     async fn wait_for_lifecycle_change(&self) {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        if self.lifecycle_error().is_none() {
-            notified.await;
+        loop {
+            if self.lifecycle_error().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
 
@@ -1075,58 +963,15 @@ impl MetalinkDownloadCommand {
         }
     }
 
-    #[cfg(feature = "bittorrent")]
-    async fn download_metadata_url_with_retry(&self, url: &str) -> Result<Vec<u8>> {
-        let options = self.group.recover().options_arc();
-        let retry_policy =
-            RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
-        let mut attempts = 0u32;
-
-        loop {
-            match self.download_metadata_url(url).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(error) => {
-                    let error = self.record_not_found_error(error);
-                    if self.lifecycle_error().is_some()
-                        || self.should_stop_after_not_found(&error)
-                        || !self.should_retry_mirror_error(attempts, &error, &retry_policy)
-                    {
-                        return Err(error);
-                    }
-
-                    attempts = attempts.saturating_add(1);
-                    let wait = retry_policy.compute_wait(attempts).unwrap_or_default();
-                    warn!(
-                        url,
-                        attempt = attempts.saturating_add(1),
-                        max_attempts = retry_policy.max_tries(),
-                        ?wait,
-                        error = %error,
-                        "Metalink torrent metaurl failed, retrying"
-                    );
-                    self.wait_for_retry(wait).await?;
-                }
-            }
-        }
-    }
-
     async fn verify_file_hash(
         &self,
         path: &Path,
-        total_length: u64,
         hash: &aria2_protocol::metalink::parser::HashEntry,
     ) -> Result<bool> {
         let hash_type = HashType::from_str(hash.algo.as_standard_name())
             .ok_or_else(|| Aria2Error::Parse("unsupported Metalink hash algorithm".into()))?;
         let checksum = Checksum::new(hash_type, &hash.value)?;
-        crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
-            &crate::checksum::check_integrity::man::shared(),
-            std::sync::Arc::clone(&self.group),
-            path,
-            total_length,
-            checksum,
-        )
-        .await
+        verify_file(path, &checksum).await
     }
 
     /// Verify a whole-file download against Metalink `<pieces>` chunk hashes.
@@ -1220,8 +1065,7 @@ impl MetalinkDownloadCommand {
                 }
                 read += count;
             }
-            let (actual, returned_buffer) = digest_hex_async(buffer, read, pieces.type_).await?;
-            buffer = returned_buffer;
+            let actual = digest_hex(&buffer[..read], pieces.type_);
             if !actual.eq_ignore_ascii_case(expected_hash) {
                 warn!(piece = index, "Metalink piece hash mismatch");
                 return Ok(false);
@@ -1294,39 +1138,6 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
     }
 }
 
-const MAX_METALINK_HASH_WORKERS: usize = 4;
-
-fn metalink_hash_slots() -> &'static Arc<Semaphore> {
-    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    HASH_SLOTS.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(1, MAX_METALINK_HASH_WORKERS);
-        Arc::new(Semaphore::new(workers))
-    })
-}
-
-async fn digest_hex_async(
-    data: Vec<u8>,
-    used: usize,
-    algo: aria2_protocol::metalink::parser::HashAlgorithm,
-) -> Result<(String, Vec<u8>)> {
-    debug_assert!(used <= data.len());
-    let permit = metalink_hash_slots()
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|error| Aria2Error::Io(format!("Metalink hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let digest = digest_hex(&data[..used], algo);
-        (digest, data)
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("Metalink hash task failed: {error}")))
-}
-
 #[cfg(test)]
 mod http_status_tests {
     use super::*;
@@ -1341,33 +1152,11 @@ mod http_status_tests {
     }
 
     #[test]
-    fn classifies_configured_4xx_transients_as_retryable_server_errors() {
-        for status_code in [408, 429] {
-            assert!(matches!(
-                classify_metalink_http_status(status_code),
-                Aria2Error::Recoverable(RecoverableError::ServerError { code })
-                    if code == status_code
-            ));
-        }
-    }
-
-    #[test]
     fn classifies_not_found_as_resource_not_found() {
         assert!(matches!(
             classify_metalink_http_status(404),
             Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
         ));
-    }
-
-    #[test]
-    fn classifies_authentication_statuses_as_http_auth_failures() {
-        for status_code in [401, 407] {
-            assert!(matches!(
-                classify_metalink_http_status(status_code),
-                Aria2Error::Recoverable(RecoverableError::HttpAuthFailed { message })
-                    if message == format!("authentication failed: HTTP {status_code}")
-            ));
-        }
     }
 
     #[tokio::test]
@@ -1436,228 +1225,6 @@ mod http_status_tests {
         ));
         assert_eq!(request_count.load(Ordering::SeqCst), 2);
         server.await.expect("404 fixture should finish");
-    }
-
-    #[tokio::test]
-    async fn mirror_not_found_zero_does_not_fail_over_to_next_mirror() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("404 fixture should bind");
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let server_count = Arc::clone(&request_count);
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("first 404 request");
-            let mut request = [0u8; 2048];
-            let _ = stream.read(&mut request).await.expect("read first request");
-            server_count.fetch_add(1, Ordering::SeqCst);
-            stream
-                .write_all(
-                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                )
-                .await
-                .expect("write first 404 response");
-
-            if let Ok(Ok((mut stream, _))) =
-                tokio::time::timeout(std::time::Duration::from_millis(500), listener.accept()).await
-            {
-                let _ = stream
-                    .read(&mut request)
-                    .await
-                    .expect("read second request");
-                server_count.fetch_add(1, Ordering::SeqCst);
-                stream
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
-                    )
-                    .await
-                    .expect("write second response");
-            }
-        });
-
-        let output_dir = tempfile::tempdir().expect("output directory");
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<metalink xmlns="urn:ietf:params:xml:ns:metalink">
-  <file name="payload.bin">
-    <size>1</size>
-    <url>{base_url}/first</url>
-    <url>{base_url}/second</url>
-  </file>
-</metalink>"#
-        );
-        let options = DownloadOptions {
-            dir: Some(output_dir.path().to_string_lossy().into_owned()),
-            ..DownloadOptions::default()
-        };
-        let mut command =
-            MetalinkDownloadCommand::new(GroupId::new(402), xml.as_bytes(), &options, None)
-                .expect("Metalink command should construct");
-        command
-            .group
-            .recover_mut()
-            .set_option_snapshot(std::collections::HashMap::from([(
-                "max-file-not-found".to_string(),
-                serde_json::json!("0"),
-            )]));
-
-        let output_path = command.output_path.clone();
-        let error = command
-            .execute()
-            .await
-            .expect_err("max-file-not-found=0 must stop after the first 404");
-        assert!(matches!(
-            error,
-            Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
-        ));
-        assert_eq!(request_count.load(Ordering::SeqCst), 1);
-        assert!(!output_path.exists());
-        tokio::time::timeout(std::time::Duration::from_secs(2), server)
-            .await
-            .expect("404 fixture should finish")
-            .expect("404 fixture task should succeed");
-    }
-
-    #[tokio::test]
-    async fn mirror_504_retries_before_completing() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("504 fixture should bind");
-        let url = format!("http://{}/payload", listener.local_addr().unwrap());
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let server_count = Arc::clone(&request_count);
-        let server = tokio::spawn(async move {
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.expect("mirror request");
-                let mut request = [0u8; 2048];
-                let _ = stream
-                    .read(&mut request)
-                    .await
-                    .expect("read mirror request");
-                server_count.fetch_add(1, Ordering::SeqCst);
-                if attempt == 0 {
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        )
-                        .await
-                        .expect("write 504 response");
-                } else {
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
-                        )
-                        .await
-                        .expect("write success response");
-                }
-            }
-        });
-
-        let output_dir = tempfile::tempdir().expect("output directory");
-        let xml = format!(
-            r#"<?xml version="1.0"?>
-<metalink xmlns="urn:ietf:params:xml:ns:metalink">
-  <file name="payload.bin">
-    <size>1</size>
-    <url>{url}</url>
-  </file>
-</metalink>"#
-        );
-        let options = DownloadOptions {
-            dir: Some(output_dir.path().to_string_lossy().into_owned()),
-            max_retries: 2,
-            retry_wait: 0,
-            ..DownloadOptions::default()
-        };
-        let mut command =
-            MetalinkDownloadCommand::new(GroupId::new(403), xml.as_bytes(), &options, None)
-                .expect("Metalink command should construct");
-
-        command.execute().await.expect("504 retry should complete");
-
-        assert_eq!(request_count.load(Ordering::SeqCst), 2);
-        assert_eq!(tokio::fs::read(command.output_path()).await.unwrap(), b"x");
-        server.await.expect("504 fixture should finish");
-    }
-
-    #[cfg(feature = "bittorrent")]
-    #[tokio::test]
-    async fn torrent_metaurl_504_retries_before_returning_metadata() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("torrent metaurl fixture should bind");
-        let url = format!("http://{}/payload.torrent", listener.local_addr().unwrap());
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let server_count = Arc::clone(&request_count);
-        let server = tokio::spawn(async move {
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.expect("metadata request");
-                let mut request = [0u8; 2048];
-                let _ = stream
-                    .read(&mut request)
-                    .await
-                    .expect("read metadata request");
-                server_count.fetch_add(1, Ordering::SeqCst);
-                if attempt == 0 {
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 504 Gateway Timeout\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        )
-                        .await
-                        .expect("write 504 response");
-                } else {
-                    stream
-                        .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\nx",
-                        )
-                        .await
-                        .expect("write metadata response");
-                }
-            }
-        });
-
-        let options = DownloadOptions {
-            max_retries: 2,
-            retry_wait: 0,
-            ..DownloadOptions::default()
-        };
-        let command = MetalinkDownloadCommand::new(
-            GroupId::new(404),
-            br#"<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="payload.bin"><url>http://127.0.0.1/unused</url></file></metalink>"#,
-            &options,
-            None,
-        )
-        .expect("Metalink command should construct");
-
-        let metadata = command
-            .download_metadata_url_with_retry(&url)
-            .await
-            .expect("504 retry should return metadata");
-
-        assert_eq!(metadata, b"x");
-        assert_eq!(request_count.load(Ordering::SeqCst), 2);
-        server.await.expect("torrent metaurl fixture should finish");
     }
 
     #[cfg(feature = "bittorrent")]

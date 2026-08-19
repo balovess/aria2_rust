@@ -95,11 +95,11 @@ describe('HttpTransport', () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: () =>
-        Promise.resolve({ jsonrpc: '2.0', id: 1, result: { version: '0.3.2' } }),
+        Promise.resolve({ jsonrpc: '2.0', id: 1, result: { version: '0.3.1' } }),
     });
 
     const result = await transport.sendRequest('aria2.getVersion', []);
-    expect(result).toEqual({ version: '0.3.2' });
+    expect(result).toEqual({ version: '0.3.1' });
   });
 
   it('throws RpcError on error response', async () => {

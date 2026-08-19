@@ -165,9 +165,14 @@ impl UdpTrackerClient {
         !self.inflight.is_empty()
     }
 
-    pub(crate) async fn receive_next_with_timeout(&mut self, timeout: Duration) -> bool {
+    pub(crate) async fn receive_next(&mut self) -> bool {
         let mut buffer = [0u8; 4096];
-        match tokio::time::timeout(timeout, self.socket.recv_from(&mut buffer)).await {
+        match tokio::time::timeout(
+            Duration::from_secs(REQUEST_TIMEOUT_SECS),
+            self.socket.recv_from(&mut buffer),
+        )
+        .await
+        {
             Ok(Ok((len, from))) => {
                 self.handle_response(&buffer[..len], &from).await;
                 true
@@ -303,19 +308,15 @@ impl UdpTrackerClient {
     }
 
     pub async fn handle_timeouts(&mut self) {
-        self.handle_timeouts_with_timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .await;
-    }
-
-    pub async fn handle_timeouts_with_timeout(&mut self, timeout: Duration) {
         let now = std::time::Instant::now();
         let expired: Vec<usize> = self
             .inflight
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                r.dispatched_at
-                    .is_some_and(|t| now.duration_since(t) > timeout)
+                r.dispatched_at.is_some_and(|t| {
+                    now.duration_since(t) > Duration::from_secs(REQUEST_TIMEOUT_SECS)
+                })
             })
             .map(|(i, _)| i)
             .collect();

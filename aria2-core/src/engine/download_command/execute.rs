@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::checksum::checksum::Checksum;
+use crate::checksum::checksum::{Checksum, verify_file};
 use crate::checksum::message_digest::HashType;
 use crate::constants;
 use crate::engine::active_output_registry::{OutputPathPolicy, global_registry};
@@ -261,13 +261,7 @@ impl DownloadCommand {
                     )? {
                         let gid = self.group.recover().gid().value();
                         info!(gid, "Checking integrity of existing data against piece hashes");
-                        let outcome = ci_man::enqueue_with_outcome_for_group(
-                            &ci_man::shared(),
-                            Arc::clone(&self.group),
-                            task,
-                        )
-                        .await?;
-                        let ok = outcome.verified;
+                        let ok = ci_man::enqueue(&ci_man::shared(), gid, task).await?;
                         if !ok {
                             warn!(
                                 gid,
@@ -454,17 +448,7 @@ impl DownloadCommand {
                 && let Some(ht) = HashType::from_str(algo)
             {
                 let cs = Checksum::new(ht, expected)?;
-                let total_length = self.group.recover().total_length();
-                let verified =
-                    crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
-                        &crate::checksum::check_integrity::man::shared(),
-                        Arc::clone(&self.group),
-                        &self.output_path,
-                        total_length,
-                        cs,
-                    )
-                    .await?;
-                if !verified {
+                if !verify_file(&self.output_path, &cs).await? {
                     tracing::error!(
                         algo = %algo,
                         path = %self.output_path.display(),
@@ -613,7 +597,9 @@ impl Command for DownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        self.group.recover().timeout()
+        Some(Duration::from_secs(
+            constants::HTTP_DEFAULT_COMMAND_TIMEOUT_SECS,
+        ))
     }
 }
 
@@ -686,47 +672,30 @@ impl DownloadCommand {
         Ok(())
     }
 
-    /// Download a metadata source into a memory buffer, retrying transient
-    /// failures according to the original HTTP skip-response contract.
+    /// Download a metadata source into a memory buffer, retrying 404s when
+    /// `max-file-not-found` permits another attempt.
     async fn execute_in_memory(&mut self, uri: &str) -> Result<()> {
         let options = self.group.recover().options_arc();
-        let retry_policy =
-            RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
         let mut attempt = 0u32;
         loop {
             match self.execute_in_memory_attempt(uri).await {
                 Ok(()) => return Ok(()),
                 Err(error)
-                    if should_retry_in_memory_error(
+                    if matches!(
                         &error,
-                        attempt,
-                        &retry_policy,
-                        options.retry_wait,
-                        self.group.recover().can_retry_file_not_found(),
-                    ) =>
+                        Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound)
+                    ) && self.group.recover().can_retry_file_not_found()
+                        && (options.max_retries == 0
+                            || attempt.saturating_add(1) < options.max_retries) =>
                 {
                     attempt = attempt.saturating_add(1);
                     if options.retry_wait > 0 {
-                        self.wait_for_retry(Duration::from_secs(options.retry_wait))
-                            .await?;
+                        tokio::time::sleep(std::time::Duration::from_secs(options.retry_wait))
+                            .await;
                     }
                 }
                 Err(error) => return Err(error),
             }
-        }
-    }
-
-    /// Wait between metadata retries while still honoring RequestGroup
-    /// pause, remove, and halt requests.
-    pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        self.check_cancelled()?;
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = &mut notified => self.check_cancelled(),
         }
     }
 
@@ -809,17 +778,11 @@ impl DownloadCommand {
         };
         let mut stream = response.bytes_stream();
         let mut completed = 0u64;
-        let lifecycle_notify = self.group.recover().lifecycle_notifier();
 
         loop {
-            let lifecycle_changed = lifecycle_notify.notified();
-            tokio::pin!(lifecycle_changed);
-            lifecycle_changed.as_mut().enable();
-            self.check_cancelled()?;
-
             let chunk = tokio::select! {
                 chunk = stream.next() => chunk,
-                _ = lifecycle_changed => {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {
                     self.check_cancelled()?;
                     continue;
                 }
@@ -833,11 +796,6 @@ impl DownloadCommand {
                     message: error.to_string(),
                 })
             })?;
-            if !chunk.is_empty() {
-                // The timeout tracks transport activity, independently of
-                // buffering and the coarser displayed progress counter.
-                self.progress.record_network_activity();
-            }
             completed = completed.saturating_add(chunk.len() as u64);
             data.extend_from_slice(&chunk);
             self.progress.set_completed_length(completed);
@@ -863,38 +821,5 @@ impl DownloadCommand {
         self.completed = true;
         self.group.recover_mut().complete()?;
         Ok(())
-    }
-}
-
-/// Return whether an in-memory HTTP metadata failure should start another
-/// request. This deliberately has a narrower status policy than the normal
-/// file downloader: it mirrors `HttpSkipResponseCommand` for the metadata
-/// pre-download path.
-pub(super) fn should_retry_in_memory_error(
-    error: &Aria2Error,
-    attempt: u32,
-    retry_policy: &RetryPolicy,
-    retry_wait_secs: u64,
-    can_retry_file_not_found: bool,
-) -> bool {
-    if !retry_policy.can_retry_after(attempt.saturating_add(1)) {
-        return false;
-    }
-
-    match error {
-        Aria2Error::Recoverable(crate::error::RecoverableError::ResourceNotFound) => {
-            can_retry_file_not_found
-        }
-        Aria2Error::Recoverable(
-            crate::error::RecoverableError::TemporaryNetworkFailure { .. }
-            | crate::error::RecoverableError::Timeout,
-        ) => true,
-        Aria2Error::Recoverable(crate::error::RecoverableError::ServerError { code }) => match code
-        {
-            504 => true,
-            502 | 503 => retry_wait_secs > 0,
-            _ => false,
-        },
-        _ => false,
     }
 }

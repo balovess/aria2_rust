@@ -177,7 +177,7 @@ describe('Aria2Client', () => {
 
   describe('getVersion', () => {
     it('returns VersionInfo', async () => {
-      const version = { version: '0.3.2', enabledFeatures: ['Async DNS'] };
+      const version = { version: '0.3.1', enabledFeatures: ['Async DNS'] };
       mockTransport.sendRequest.mockResolvedValue(version);
       const result = await client.getVersion();
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getVersion', []);

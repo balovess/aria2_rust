@@ -216,12 +216,12 @@ impl BtPieceSelector {
         }
 
         let next_piece_idx = if is_endgame {
-            // In endgame mode, pick from endgame candidates.
+            // In endgame mode, pick from endgame candidates
             piece_picker.pick_next()
         } else {
-            // The scheduler is not selecting for one peer here, so avoid
-            // allocating an all-ones bitfield and use the picker fast path.
-            piece_picker.pick_next_without_endgame()
+            // Normal mode: use configured strategy
+            let all_ones_bf = vec![0xFFu8; (self.num_pieces as usize).div_ceil(8)];
+            piece_picker.select(&all_ones_bf, self.num_pieces as usize)
         }
         .map(|v| v as usize);
 

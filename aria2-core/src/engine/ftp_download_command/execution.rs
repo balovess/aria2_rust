@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use tokio::io::AsyncReadExt;
 use tracing::{debug, error, info, warn};
 
-use crate::checksum::checksum::Checksum;
+use crate::checksum::checksum::{Checksum, verify_file};
 use crate::constants;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -186,38 +186,40 @@ impl Command for FtpDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        self.group.recover().timeout()
+        Some(Duration::from_secs(
+            constants::FTP_DEFAULT_COMMAND_TIMEOUT_SECS,
+        ))
     }
 }
 
 impl FtpDownloadCommand {
-    fn check_cancelled(&self) -> Result<()> {
-        let group = self.group.recover();
-        if group.is_removed() {
-            Err(Aria2Error::DownloadFailed(
-                "Download cancelled by user".into(),
-            ))
-        } else if group.is_paused_flag() {
-            Err(Aria2Error::DownloadFailed("Download paused".into()))
-        } else if group.is_force_halt_requested() || group.is_halt_requested() {
-            Err(Aria2Error::DownloadFailed("FTP download halted".into()))
-        } else {
-            Ok(())
-        }
-    }
-
     /// Wait between retry attempts while still honoring RequestGroup controls.
     /// A plain sleep would delay pause/remove handling for the full configured
     /// retry interval, which can be several minutes.
     pub(super) async fn wait_for_retry(&self, wait: Duration) -> Result<()> {
-        let notifier = self.group.recover().lifecycle_notifier();
-        let notified = notifier.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        self.check_cancelled()?;
-        tokio::select! {
-            _ = tokio::time::sleep(wait) => self.check_cancelled(),
-            _ = &mut notified => self.check_cancelled(),
+        let deadline = tokio::time::Instant::now() + wait;
+        loop {
+            let halt_message = {
+                let group = self.group.recover();
+                if group.is_removed() {
+                    Some("Download cancelled by user")
+                } else if group.is_paused_flag() {
+                    Some("Download paused")
+                } else if group.is_force_halt_requested() || group.is_halt_requested() {
+                    Some("FTP download halted")
+                } else {
+                    None
+                }
+            };
+            if let Some(message) = halt_message {
+                return Err(Aria2Error::DownloadFailed(message.into()));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            tokio::time::sleep((deadline - now).min(Duration::from_millis(50))).await;
         }
     }
 
@@ -346,9 +348,8 @@ impl FtpDownloadCommand {
         // Step 2: Authenticate
         ctrl.authenticate(&self.username, &self.password).await?;
 
-        // Step 3: Set the configured transfer representation.
-        let ftp_type = self.group.recover().options().ftp_type.clone();
-        ctrl.set_transfer_type(&ftp_type).await?;
+        // Step 3: Set binary transfer mode
+        ctrl.set_binary_mode().await?;
 
         // Step 4: Resolve the URI directory and retain only the file name for
         // SIZE/RETR, matching the original FTP command sequence.
@@ -445,14 +446,7 @@ impl FtpDownloadCommand {
                                         ))
                                     })?;
                             let checksum = Checksum::new(hash_type, &expected)?;
-                            crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
-                                &crate::checksum::check_integrity::man::shared(),
-                                std::sync::Arc::clone(&self.group),
-                                &self.output_path,
-                                actual_size,
-                                checksum,
-                            )
-                            .await?
+                            verify_file(&self.output_path, &checksum).await?
                         }
                         None => true,
                     }
@@ -708,12 +702,7 @@ impl FtpDownloadCommand {
                 )));
             }
 
-            let lifecycle_notify = self.group.recover().lifecycle_notifier();
-            let lifecycle_changed = lifecycle_notify.notified();
-            tokio::pin!(lifecycle_changed);
-            lifecycle_changed.as_mut().enable();
-            let bytes_read = tokio::select! {
-                bytes_read = data_stream.read(&mut buffer) => match bytes_read {
+            let bytes_read = match data_stream.read(&mut buffer).await {
                 Ok(bytes_read) => bytes_read,
                 Err(error) => {
                     use std::io::ErrorKind;
@@ -738,49 +727,12 @@ impl FtpDownloadCommand {
                     ctrl.quit().await.ok();
                     return Err(FtpAttemptError::from(error));
                 }
-                },
-                _ = &mut lifecycle_changed => {
-                    let halted = {
-                        let group = self.group.recover();
-                        group.is_removed()
-                            || group.is_force_halt_requested()
-                            || group.is_halt_requested()
-                    };
-                    if !halted {
-                        // Save-session and other non-terminal lifecycle
-                        // notifications do not cancel an in-flight transfer.
-                        continue;
-                    }
-
-                    let halt_error = {
-                        let group = self.group.recover();
-                        if group.is_removed() {
-                            "Download cancelled by user"
-                        } else if group.is_paused_flag() {
-                            "Download paused"
-                        } else {
-                            "FTP download halted"
-                        }
-                    };
-                    drop(data_stream);
-                    self.finalize_partial_writer(&mut writer).await;
-                    self.flush_checkpoint().await;
-                    // The data connection may still be in a server-side
-                    // transfer. Dropping the control connection is the only
-                    // bounded cleanup here; waiting for ABOR/QUIT can block
-                    // behind the stalled data transfer.
-                    return Err(FtpAttemptError::from(Aria2Error::DownloadFailed(
-                        halt_error.into(),
-                    )));
-                }
             };
 
             if bytes_read == 0 {
                 debug!("End of data stream reached");
                 break;
             }
-
-            self.group.recover().record_network_activity();
 
             // Write to disk (with rate limiting if enabled)
             if let Err(error) = writer.write(&buffer[..bytes_read]).await {
@@ -836,7 +788,7 @@ impl FtpDownloadCommand {
         drop(data_stream); // Close data connection
 
         // Finalize disk writer (flush buffers, etc.)
-        let mut finalized_data = match writer.finalize().await {
+        let finalized_data = match writer.finalize().await {
             Ok(data) => data,
             Err(error) => {
                 self.flush_checkpoint().await;
@@ -857,18 +809,9 @@ impl FtpDownloadCommand {
                 })?;
             let checksum = Checksum::new(hash_type, &expected)?;
             let verified = if in_memory_download {
-                let (data, verified) = checksum.verify_async(finalized_data).await?;
-                finalized_data = data;
-                verified
+                checksum.verify(&finalized_data)
             } else {
-                crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
-                    &crate::checksum::check_integrity::man::shared(),
-                    std::sync::Arc::clone(&self.group),
-                    &self.output_path,
-                    self.completed_bytes,
-                    checksum,
-                )
-                .await?
+                verify_file(&self.output_path, &checksum).await?
             };
             if !verified {
                 return Err(FtpAttemptError::from(Aria2Error::Checksum(format!(

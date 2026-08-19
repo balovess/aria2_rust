@@ -1,19 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Aria2Client } from '../../src/client.js';
 import { RpcError, ConnectionError, TimeoutError } from '../../src/errors.js';
-import { skipIfNoBinary, startAria2Server, startDelayedRpcServer } from './helpers.js';
+import { skipIfNoBinary, startAria2Server } from './helpers.js';
 
 describe.skipIf(skipIfNoBinary())('Error Handling E2E', () => {
   let aria2Server: { url: string; stop: () => Promise<void> } | undefined;
-  let delayedRpcServer: { url: string; stop: () => Promise<void> } | undefined;
 
   beforeAll(async () => {
     aria2Server = await startAria2Server();
-    delayedRpcServer = await startDelayedRpcServer();
   });
 
   afterAll(async () => {
-    await delayedRpcServer?.stop();
     await aria2Server?.stop();
   });
 
@@ -30,7 +27,7 @@ describe.skipIf(skipIfNoBinary())('Error Handling E2E', () => {
   });
 
   it('timeout throws TimeoutError', async () => {
-    const client = new Aria2Client(delayedRpcServer.url, { timeout: 10 });
+    const client = new Aria2Client(aria2Server.url, { timeout: 1 });
     try {
       await client.getVersion();
       expect.unreachable('Should have thrown');

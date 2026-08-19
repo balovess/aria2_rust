@@ -6,10 +6,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 impl BtDownloadCommand {
     /// Initialize the web seed manager if web seeds are configured.
     pub fn init_web_seed_manager(&mut self, piece_length: u32, total_length: u64) {
-        if self.group.recover().options().bt_enable_web_seed
-            && !self.web_seed_urls.is_empty()
-            && self.web_seed_manager.is_none()
-        {
+        if !self.web_seed_urls.is_empty() && self.web_seed_manager.is_none() {
             info!(
                 count = self.web_seed_urls.len(),
                 "Initializing web seed manager with {} URL(s)",
@@ -50,7 +47,7 @@ impl BtDownloadCommand {
 
     /// Check if web seeds are available.
     pub fn has_web_seeds(&self) -> bool {
-        self.group.recover().options().bt_enable_web_seed && !self.web_seed_urls.is_empty()
+        !self.web_seed_urls.is_empty()
     }
 
     /// Get web seed download statistics.

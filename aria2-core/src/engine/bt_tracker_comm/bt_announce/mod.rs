@@ -132,26 +132,6 @@ impl BtAnnounce {
         elapsed >= effective_interval && !self.announce_list.all_tiers_failed()
     }
 
-    /// Return the delay until a default announce can be issued.
-    ///
-    /// Tracker responses define this deadline, so callers can sleep until the
-    /// protocol event instead of repeatedly checking `is_default_announce_ready`.
-    pub fn next_default_announce_delay(&self) -> Option<Duration> {
-        if self.trackers != 0 || self.announce_list.all_tiers_failed() {
-            return None;
-        }
-
-        let effective_interval = if self.user_defined_interval > Duration::ZERO {
-            self.user_defined_interval
-        } else {
-            self.min_interval
-        };
-        Some(match self.prev_announce_time {
-            Some(last) => effective_interval.saturating_sub(last.elapsed()),
-            None => Duration::ZERO,
-        })
-    }
-
     /// Returns true if a "stopped" announce is ready.
     ///
     /// Conditions (matching C++ isStoppedAnnounceReady):

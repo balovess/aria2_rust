@@ -193,36 +193,6 @@ impl ConcurrentSegmentManager {
         reassign
     }
 
-    /// Report a terminal failure and move the segment to another mirror
-    /// without consuming the retry budget for that replacement mirror.
-    pub fn report_segment_failed_without_retry(
-        &mut self,
-        seg_idx: u32,
-        error_code: u16,
-    ) -> Option<usize> {
-        let mirror_idx = self
-            .segments
-            .get(seg_idx as usize)
-            .and_then(|segment| segment.assigned_mirror);
-        let reassign = self.fail_segment_without_retry(seg_idx);
-
-        if let (Some(idx), Some(stat_man)) = (mirror_idx, &self.stat_man)
-            && let Some(url) = self.mirror_urls.get(idx)
-            && let Some((host, protocol)) = extract_host_and_protocol(url)
-        {
-            stat_man.get_or_create_with_protocol(&host, &protocol);
-            stat_man.mark_failure_with_protocol(&host, &protocol, error_code);
-            if let Some(stat) = stat_man.find_stat_by_protocol(&host, &protocol)
-                && !stat.is_available()
-                && let Some(mirror) = self.mirrors.get_mut(idx)
-            {
-                mirror.disabled = true;
-            }
-        }
-
-        reassign
-    }
-
     /// Get the URL for a specific mirror index.
     pub fn get_mirror_url(&self, mirror_idx: usize) -> Option<&str> {
         self.mirror_urls.get(mirror_idx).map(|s| s.as_str())

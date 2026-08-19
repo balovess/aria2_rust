@@ -8,14 +8,11 @@
 //! - Authentication middleware
 //! - CORS configuration
 
-mod common;
-
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse};
 use aria2_rpc::server::{
     AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig, TlsError,
 };
-use common::test_engine;
 use serde_json::json;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -253,7 +250,7 @@ fn test_server_config_without_tls() {
 
 #[tokio::test]
 async fn test_json_rpc_add_uri_request() {
-    let engine = test_engine();
+    let engine = RpcEngine::new();
 
     let request = JsonRpcRequest {
         version: Some("2.0".to_string()),
@@ -293,7 +290,7 @@ async fn test_json_rpc_get_version_request() {
 
 #[tokio::test]
 async fn test_json_rpc_get_global_stat_request() {
-    let engine = test_engine();
+    let engine = RpcEngine::new();
 
     let request = JsonRpcRequest {
         version: Some("2.0".to_string()),
@@ -468,7 +465,7 @@ struct MockRpcHandler {
 impl MockRpcHandler {
     fn new(auth_token: &str, cors_origins: &str) -> Self {
         Self {
-            engine: test_engine(),
+            engine: RpcEngine::new(),
             auth: RpcAuthMiddleware::new(auth_token),
             cors: CorsConfig::from_option_value(cors_origins),
         }
@@ -716,7 +713,7 @@ fn test_full_request_flow_https_config() {
 
 #[test]
 fn test_batch_json_rpc_requests() {
-    let engine = test_engine();
+    let engine = RpcEngine::new();
 
     // Create batch request
     let requests = [

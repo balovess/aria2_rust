@@ -1,9 +1,9 @@
 use async_trait::async_trait;
-use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::config::parse_integer_segments;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -17,7 +17,6 @@ pub struct MagnetDownloadCommand {
     output_path: std::path::PathBuf,
     started: bool,
     completed_bytes: u64,
-    metadata_complete: bool,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// Carried through to the internally-created `BtDownloadCommand`.
@@ -29,8 +28,6 @@ pub struct MagnetDownloadCommand {
     bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     #[cfg(feature = "bittorrent")]
     bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>>,
-    #[cfg(feature = "bittorrent")]
-    lpd_manager: Option<Arc<crate::engine::lpd_manager::LpdManager>>,
 }
 
 impl MagnetDownloadCommand {
@@ -106,7 +103,6 @@ impl MagnetDownloadCommand {
             output_path: path,
             started: false,
             completed_bytes: 0,
-            metadata_complete: false,
             dht_engine: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
@@ -115,8 +111,6 @@ impl MagnetDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             bt_registry: None,
-            #[cfg(feature = "bittorrent")]
-            lpd_manager: None,
         })
     }
 
@@ -144,139 +138,8 @@ impl MagnetDownloadCommand {
         self.bt_registry = Some(registry);
     }
 
-    #[cfg(feature = "bittorrent")]
-    pub fn set_lpd_manager(&mut self, manager: Arc<crate::engine::lpd_manager::LpdManager>) {
-        self.lpd_manager = Some(manager);
-    }
-
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         self.group.recover()
-    }
-
-    fn saved_metadata_path(&self, info_hash: &[u8; 20]) -> std::path::PathBuf {
-        self.output_path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new("."))
-            .join(format!("{}.torrent", hex::encode(info_hash)))
-    }
-
-    fn load_saved_metadata(&self, info_hash: &[u8; 20]) -> Option<Vec<u8>> {
-        let path = self.saved_metadata_path(info_hash);
-        let data = match std::fs::read(&path) {
-            Ok(data) => data,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(error) => {
-                warn!(path = %path.display(), %error, "Failed to read saved BitTorrent metadata");
-                return None;
-            }
-        };
-
-        match aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&data) {
-            Ok(meta) if meta.info_hash.bytes == *info_hash => {
-                info!(path = %path.display(), "Loaded BitTorrent metadata from saved torrent file");
-                Some(data)
-            }
-            Ok(meta) => {
-                warn!(
-                    path = %path.display(),
-                    actual_info_hash = %meta.info_hash.as_hex(),
-                    expected_info_hash = %hex::encode(info_hash),
-                    "Ignoring saved BitTorrent metadata with unexpected info-hash"
-                );
-                None
-            }
-            Err(error) => {
-                warn!(path = %path.display(), %error, "Ignoring invalid saved BitTorrent metadata");
-                None
-            }
-        }
-    }
-
-    fn save_metadata_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<bool> {
-        let mut file = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-            Err(error) => return Err(error),
-        };
-
-        if let Err(error) = file.write_all(data).and_then(|_| file.flush()) {
-            let _ = std::fs::remove_file(path);
-            return Err(error);
-        }
-        Ok(true)
-    }
-
-    async fn fetch_magnet_metadata(
-        &mut self,
-        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
-    ) -> Result<Vec<u8>> {
-        let (enable_dht, options) = {
-            let group = self.group.recover();
-            (group.options().enable_dht, group.options().clone())
-        };
-
-        if enable_dht && self.dht_engine.is_none() {
-            let dht_config = crate::engine::dht_config::build_dht_engine_config(&options).await?;
-            match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
-                Ok(engine) => {
-                    self.dht_engine = Some(engine);
-                    self.dht_engine.as_ref().unwrap().start_maintenance_loop();
-                    info!("Magnet: DHT engine started for peer discovery");
-                }
-                Err(error) => {
-                    warn!("Magnet: DHT engine start failed: {}", error);
-                }
-            }
-        }
-
-        let discovered_peers = if let Some(ref engine) = self.dht_engine {
-            match engine.find_peers(&magnet.info_hash).await {
-                Ok(result) => {
-                    info!(
-                        "Magnet: DHT discovered {} peers (contacted {} nodes)",
-                        result.peers.len(),
-                        result.nodes_contacted
-                    );
-                    result.peers
-                }
-                Err(error) => {
-                    warn!("Magnet: DHT find_peers failed: {}", error);
-                    vec![]
-                }
-            }
-        } else {
-            warn!("Magnet: DHT disabled, no peers available");
-            vec![]
-        };
-
-        if discovered_peers.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: "No peers found via DHT".into(),
-                },
-            ));
-        }
-
-        let meta_session = MetadataExchangeSession::new(MetadataExchangeConfig {
-            max_peers_to_try: discovered_peers.len().min(5),
-            connect_timeout: Duration::from_secs(15),
-            request_timeout: Duration::from_secs(10),
-            piece_size: 16 * 1024,
-            ..MetadataExchangeConfig::default()
-        });
-
-        meta_session
-            .fetch_metadata(&magnet.info_hash, &discovered_peers)
-            .await
-            .map_err(|error| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Metadata fetch failed: {}", error),
-                })
-            })
     }
 
     /// BEP 0027 (Private Torrent) enforcement after metadata exchange.
@@ -348,24 +211,90 @@ impl Command for MagnetDownloadCommand {
             })?;
         }
 
-        let (load_saved_metadata, save_metadata, metadata_only) = {
-            let group = self.group.recover();
-            (
-                group.options().bt_load_saved_metadata,
-                group.options().bt_save_metadata,
-                group.options().bt_metadata_only,
-            )
-        };
+        let enable_dht = { self.group.recover().options().enable_dht };
+        let dht_port = { self.group.recover().options().dht_listen_port.clone() };
 
-        let torrent_bytes = if load_saved_metadata {
-            if let Some(data) = self.load_saved_metadata(&ml.info_hash) {
-                data
-            } else {
-                self.fetch_magnet_metadata(&ml).await?
+        if enable_dht && self.dht_engine.is_none() {
+            let dht_ports = dht_port
+                .as_deref()
+                .map(|value| {
+                    parse_integer_segments(value, 1024, u16::MAX as i64).map(|ranges| {
+                        ranges
+                            .into_iter()
+                            .flat_map(|range| range.map(|port| port as u16))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .transpose()
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "invalid dht-listen-port: {error}"
+                    )))
+                })?;
+            let dht_config = aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+                port: dht_ports
+                    .as_ref()
+                    .and_then(|ports| ports.first().copied())
+                    .unwrap_or(0),
+                port_range: dht_ports,
+                ..Default::default()
+            };
+            match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
+                Ok(engine) => {
+                    self.dht_engine = Some(engine);
+                    self.dht_engine.as_ref().unwrap().start_maintenance_loop();
+                    info!("Magnet: DHT engine started for peer discovery");
+                }
+                Err(e) => {
+                    warn!("Magnet: DHT engine start failed: {}", e);
+                }
+            }
+        }
+
+        let discovered_peers = if let Some(ref engine) = self.dht_engine {
+            match engine.find_peers(&ml.info_hash).await {
+                Ok(result) => {
+                    info!(
+                        "Magnet: DHT discovered {} peers (contacted {} nodes)",
+                        result.peers.len(),
+                        result.nodes_contacted
+                    );
+                    result.peers
+                }
+                Err(e) => {
+                    warn!("Magnet: DHT find_peers failed: {}", e);
+                    vec![]
+                }
             }
         } else {
-            self.fetch_magnet_metadata(&ml).await?
+            warn!("Magnet: DHT disabled, no peers available");
+            vec![]
         };
+
+        if discovered_peers.is_empty() {
+            return Err(Aria2Error::Recoverable(
+                RecoverableError::TemporaryNetworkFailure {
+                    message: "No peers found via DHT".into(),
+                },
+            ));
+        }
+
+        let meta_session = MetadataExchangeSession::new(MetadataExchangeConfig {
+            max_peers_to_try: discovered_peers.len().min(5),
+            connect_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_secs(10),
+            piece_size: 16 * 1024,
+            ..MetadataExchangeConfig::default()
+        });
+
+        let torrent_bytes = meta_session
+            .fetch_metadata(&ml.info_hash, &discovered_peers)
+            .await
+            .map_err(|e| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("Metadata fetch failed: {}", e),
+                })
+            })?;
 
         info!("Fetched torrent metadata: {} bytes", torrent_bytes.len());
 
@@ -375,26 +304,6 @@ impl Command for MagnetDownloadCommand {
         // BtDownloadCommand (created from the same bytes) will also enforce
         // BEP 0027 by refusing to start its own DHT when is_private is set.
         self.enforce_bep0027_after_metadata(&torrent_bytes).await?;
-
-        if save_metadata {
-            let path = self.saved_metadata_path(&ml.info_hash);
-            match Self::save_metadata_file(&path, &torrent_bytes) {
-                Ok(true) => info!(path = %path.display(), "Saved BitTorrent metadata"),
-                Ok(false) => {
-                    info!(path = %path.display(), "BitTorrent metadata file already exists; keeping it")
-                }
-                Err(error) => {
-                    warn!(path = %path.display(), %error, "Failed to save BitTorrent metadata")
-                }
-            }
-        }
-
-        if metadata_only {
-            self.group.recover_mut().complete()?;
-            self.metadata_complete = true;
-            info!("Magnet metadata download complete; payload download skipped");
-            return Ok(());
-        }
 
         use crate::engine::bt_download_command::BtDownloadCommand;
         let mut bt_cmd = BtDownloadCommand::new(
@@ -416,9 +325,6 @@ impl Command for MagnetDownloadCommand {
         if let Some(registry) = self.bt_registry.clone() {
             bt_cmd.set_bt_registry(registry);
         }
-        if let Some(manager) = self.lpd_manager.clone() {
-            bt_cmd.set_lpd_manager(manager);
-        }
 
         bt_cmd.execute().await?;
 
@@ -433,12 +339,7 @@ impl Command for MagnetDownloadCommand {
     }
 
     fn status(&self) -> CommandStatus {
-        if self.metadata_complete
-            || self.group.recover().status()
-                == crate::request::request_group::DownloadStatus::Complete
-        {
-            CommandStatus::Completed
-        } else if self.completed_bytes > 0 {
+        if self.completed_bytes > 0 {
             CommandStatus::Running
         } else {
             CommandStatus::Pending
@@ -457,7 +358,7 @@ impl Command for MagnetDownloadCommand {
     }
 
     fn timeout(&self) -> Option<Duration> {
-        self.group.recover().timeout()
+        Some(Duration::from_secs(900))
     }
 }
 
@@ -480,114 +381,6 @@ mod tests {
             None,
         )
         .expect("Failed to create test MagnetDownloadCommand")
-    }
-
-    fn make_test_command_in_dir(dir: &std::path::Path) -> MagnetDownloadCommand {
-        MagnetDownloadCommand::new(
-            GroupId::new(2),
-            TEST_MAGNET_URI,
-            &DownloadOptions::default(),
-            dir.to_str(),
-        )
-        .expect("Failed to create MagnetDownloadCommand in temporary directory")
-    }
-
-    #[test]
-    fn saved_metadata_is_loaded_only_when_info_hash_matches() {
-        let temp_dir = tempfile::tempdir().expect("temporary metadata directory");
-        let command = make_test_command_in_dir(temp_dir.path());
-        let torrent = build_test_torrent();
-        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
-            .expect("test torrent parses")
-            .info_hash
-            .bytes;
-        let path = command.saved_metadata_path(&info_hash);
-        std::fs::write(&path, &torrent).expect("write saved metadata");
-
-        assert_eq!(command.load_saved_metadata(&info_hash), Some(torrent));
-        let mismatched_path = command.saved_metadata_path(&[0u8; 20]);
-        std::fs::write(&mismatched_path, build_test_torrent())
-            .expect("write mismatched saved metadata");
-        assert!(command.load_saved_metadata(&[0u8; 20]).is_none());
-    }
-
-    #[tokio::test]
-    async fn magnet_metadata_options_drive_saved_load_and_metadata_only_execution() {
-        let temp_dir = tempfile::tempdir().expect("temporary metadata directory");
-        let torrent = build_test_torrent();
-        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
-            .expect("test torrent parses")
-            .info_hash
-            .bytes;
-        let magnet = format!(
-            "magnet:?xt=urn:btih:{}&dn=test_file",
-            hex::encode(info_hash)
-        );
-        let options = DownloadOptions {
-            bt_load_saved_metadata: true,
-            bt_save_metadata: true,
-            bt_metadata_only: true,
-            enable_dht: false,
-            ..DownloadOptions::default()
-        };
-        let mut command = MagnetDownloadCommand::new(
-            GroupId::new(3),
-            &magnet,
-            &options,
-            temp_dir.path().to_str(),
-        )
-        .expect("magnet command should be constructible");
-        let saved_path = command.saved_metadata_path(&info_hash);
-        std::fs::write(&saved_path, &torrent).expect("write saved torrent metadata");
-
-        command
-            .execute()
-            .await
-            .expect("saved metadata should avoid network discovery");
-
-        assert_eq!(command.status(), CommandStatus::Completed);
-        assert_eq!(
-            command.group().status(),
-            crate::request::request_group::DownloadStatus::Complete
-        );
-        assert_eq!(
-            std::fs::read(saved_path).expect("read saved torrent"),
-            torrent
-        );
-    }
-
-    #[test]
-    fn saving_metadata_never_overwrites_an_existing_file() {
-        let temp_dir = tempfile::tempdir().expect("temporary metadata directory");
-        let path = temp_dir.path().join("metadata.torrent");
-        std::fs::write(&path, b"original").expect("write existing metadata");
-
-        assert!(
-            !MagnetDownloadCommand::save_metadata_file(&path, b"replacement")
-                .expect("create_new should not fail for an existing file")
-        );
-        assert_eq!(
-            std::fs::read(&path).expect("read existing metadata"),
-            b"original"
-        );
-
-        let new_path = temp_dir.path().join("new.torrent");
-        assert!(
-            MagnetDownloadCommand::save_metadata_file(&new_path, b"metadata")
-                .expect("write new metadata")
-        );
-        assert_eq!(
-            std::fs::read(new_path).expect("read new metadata"),
-            b"metadata"
-        );
-    }
-
-    #[test]
-    fn metadata_only_command_reports_completion_without_payload_bytes() {
-        let mut command = make_test_command();
-        assert_eq!(command.status(), CommandStatus::Pending);
-        command.metadata_complete = true;
-        assert_eq!(command.status(), CommandStatus::Completed);
     }
 
     /// Start a real DhtEngine on an ephemeral port for testing.

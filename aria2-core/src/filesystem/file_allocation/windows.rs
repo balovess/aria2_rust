@@ -91,12 +91,16 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
     // held across an await point (the future is required to be `Send` by
     // callers). We therefore size the file first via `truncate` (which does
     // not need the handle), then fetch the handle and invoke
-    // SetFileValidData on the blocking pool while the handle is live.
+    // SetFileValidData synchronously with no await while the handle is live.
     // The zero-fill (which may await) happens AFTER the handle goes out of
     // scope, using a boolean flag to carry the result across the scope
     // boundary.
     let existing_length = adaptor.size().await?.min(length);
     adaptor.truncate(length).await?;
+    // Attempt to enable SE_MANAGE_VOLUME_PRIVILEGE — this exists in the
+    // token for admin processes but is disabled by default. Non-admin
+    // processes will fail here and correctly fall back to sparse files.
+    let _ = try_enable_volume_privilege();
     let valid_data_succeeded: bool = if let Some(handle) = adaptor.windows_raw_handle() {
         // Validate length fits in i64 for SetFileValidData
         if length > i64::MAX as u64 {
@@ -106,60 +110,16 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
         }
         // Extend the valid data length up to `length`, forcing the
         // filesystem to allocate real blocks rather than a sparse hole.
-        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-        use windows_sys::Win32::Foundation::{
-            DUPLICATE_SAME_ACCESS, DuplicateHandle, GetLastError, HANDLE,
+        // SAFETY: handle is a valid file handle obtained from
+        // adaptor.windows_raw_handle(). length as i64 is safe for
+        // practical file sizes (< 2^63 bytes). SetFileValidData is
+        // a standard Win32 API call.
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::SetFileValidData(handle, length as i64)
         };
-        use windows_sys::Win32::System::Threading::GetCurrentProcess;
-
-        // Keep a duplicated handle alive if the allocation future is cancelled
-        // while the blocking call is still running.
-        let duplicate_result: std::result::Result<usize, u32> = {
-            let current_process = unsafe { GetCurrentProcess() };
-            let mut duplicated_handle: HANDLE = std::ptr::null_mut();
-            let duplicated = unsafe {
-                DuplicateHandle(
-                    current_process,
-                    handle,
-                    current_process,
-                    &mut duplicated_handle,
-                    0,
-                    0,
-                    DUPLICATE_SAME_ACCESS,
-                )
-            };
-            if duplicated == 0 {
-                Err(unsafe { GetLastError() })
-            } else {
-                Ok(duplicated_handle as usize)
-            }
-        };
-        let allocation_result = match duplicate_result {
-            Err(error) => Err(error),
-            Ok(handle_value) => tokio::task::spawn_blocking(move || {
-                // SAFETY: the integer was produced by a successful
-                // DuplicateHandle call immediately before this closure was
-                // queued, and ownership is transferred exactly once here.
-                let owned_handle = unsafe { OwnedHandle::from_raw_handle(handle_value as HANDLE) };
-                // The privilege lookup and SetFileValidData call can both
-                // enter the filesystem/token manager, so keep the whole
-                // operation off the Tokio worker thread.
-                let _ = try_enable_volume_privilege();
-                let handle = owned_handle.as_raw_handle() as HANDLE;
-                let ok = unsafe {
-                    windows_sys::Win32::Storage::FileSystem::SetFileValidData(handle, length as i64)
-                };
-                if ok == 0 {
-                    let error = unsafe { windows_sys::Win32::Foundation::GetLastError() };
-                    Err(error)
-                } else {
-                    Ok(())
-                }
-            })
-            .await
-            .map_err(|error| Aria2Error::Io(format!("SetFileValidData task failed: {error}")))?,
-        };
-        if let Err(err) = allocation_result {
+        if ok == 0 {
+            // SAFETY: GetLastError() is always safe to call on Windows.
+            let err = unsafe { windows_sys::Win32::Foundation::GetLastError() };
             if err == windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD {
                 // Promote to warn: SetFileValidData failure causes a 2x I/O
                 // penalty because the writer must zero-fill every block on

@@ -2,18 +2,10 @@
 
 use super::deserialization::deserialize;
 use super::*;
-use crate::download::download_context::DownloadContext;
-use crate::download::file_entry::FileEntry;
-use crate::request::request_group::{
-    DownloadOptions, DownloadResult, DownloadResultCode, DownloadStatus, FileEntry as ResultFile,
-    GroupId, RequestGroup, UriEntry,
-};
-use crate::selector::uri_selector::InorderUriSelector;
+use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 use std::collections::HashMap;
 use std::path::Path;
-
-use tempfile::tempdir;
 
 #[tokio::test]
 async fn test_serialize_multiple_groups() {
@@ -79,163 +71,6 @@ fn test_group_session_entry_preserves_min_split_size_snapshot() {
     assert_eq!(
         restored[0].options.get("min-split-size"),
         Some(&"10M".to_string())
-    );
-}
-
-#[test]
-fn test_group_session_entry_includes_spent_uris_and_deduplicates_them() {
-    let group = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
-        GroupId::new(4),
-        vec!["https://stale.example/file".to_string()],
-        DownloadOptions::default(),
-    )));
-
-    let spent_uri = "https://spent.example/file";
-    let remaining_uri = "https://remaining.example/file";
-    let mut context = DownloadContext::new_default();
-    context.set_file_entries(vec![FileEntry::new(
-        "/tmp/file.bin".to_string(),
-        0,
-        0,
-        vec![
-            spent_uri.to_string(),
-            remaining_uri.to_string(),
-            spent_uri.to_string(),
-        ],
-    )]);
-
-    let request = context.get_file_entries_mut()[0]
-        .get_request(&InorderUriSelector::new(), false, &[], "", "GET")
-        .expect("the first URI should be dispatched");
-    assert_eq!(request.uri(), spent_uri);
-
-    group
-        .recover()
-        .set_download_context(std::sync::Arc::new(context));
-
-    let entry = group_to_entry(&group.recover()).expect("waiting group should be serializable");
-    assert_eq!(
-        entry.uris,
-        vec![remaining_uri.to_string(), spent_uri.to_string()]
-    );
-
-    let restored = deserialize(&entry.serialize()).expect("session entry should deserialize");
-    assert_eq!(restored[0].uris, entry.uris);
-}
-
-#[test]
-fn test_terminal_result_snapshot_captures_file_uri_state() {
-    let group = RequestGroup::new(
-        GroupId::new(5),
-        vec!["https://initial.example/file".to_string()],
-        DownloadOptions::default(),
-    );
-    let mut context = DownloadContext::new_default();
-    context.set_file_entries(vec![FileEntry::new(
-        "/tmp/file.bin".to_string(),
-        10,
-        0,
-        vec![
-            "https://spent.example/file".to_string(),
-            "https://remaining.example/file".to_string(),
-        ],
-    )]);
-    context.get_file_entries_mut()[0]
-        .get_request(&InorderUriSelector::new(), false, &[], "", "GET")
-        .expect("the first URI should be dispatched");
-    group.set_download_context(std::sync::Arc::new(context));
-    group.mark_complete();
-
-    let result = group.create_download_result();
-    assert_eq!(result.files.len(), 1);
-    assert_eq!(
-        result.files[0]
-            .uris
-            .iter()
-            .map(|uri| (uri.uri.as_str(), uri.status.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            ("https://spent.example/file", "used"),
-            ("https://remaining.example/file", "waiting"),
-        ]
-    );
-}
-
-#[test]
-fn test_terminal_result_force_save_is_resumable_and_policy_filtered() {
-    let mut result = DownloadResult::new(
-        GroupId::new(6),
-        DownloadStatus::Complete,
-        DownloadResultCode::Finished,
-    );
-    result.files = vec![ResultFile {
-        index: 1,
-        path: "/tmp/file.bin".to_string(),
-        length: 10,
-        completed_length: 10,
-        selected: true,
-        uris: vec![
-            UriEntry {
-                uri: "https://spent.example/file".to_string(),
-                status: "used".to_string(),
-            },
-            UriEntry {
-                uri: "https://remaining.example/file".to_string(),
-                status: "waiting".to_string(),
-            },
-        ],
-    }];
-    result.completed_length = 10;
-    result.total_length = 10;
-    result.set_option_snapshot(Some(HashMap::from([
-        ("force-save".to_string(), serde_json::json!(true)),
-        ("split".to_string(), serde_json::json!("4")),
-    ])));
-
-    let entry = download_result_to_entry(&result).expect("forced result should be serializable");
-    assert_eq!(
-        entry.uris,
-        vec![
-            "https://remaining.example/file".to_string(),
-            "https://spent.example/file".to_string(),
-        ]
-    );
-    assert_eq!(entry.status, "waiting");
-    assert_eq!(entry.options.get("split"), Some(&"4".to_string()));
-
-    let groups = Vec::new();
-    let serialized = serialize_groups_with_results(&groups, &[result]);
-    assert!(
-        serialized
-            .unwrap()
-            .contains("https://remaining.example/file")
-    );
-
-    let mut not_forced = DownloadResult::finished();
-    not_forced.gid = GroupId::new(7);
-    not_forced.files = vec![ResultFile {
-        index: 1,
-        path: String::new(),
-        length: 0,
-        completed_length: 0,
-        selected: true,
-        uris: entry
-            .uris
-            .iter()
-            .map(|uri| UriEntry {
-                uri: uri.clone(),
-                status: "waiting".to_string(),
-            })
-            .collect(),
-    }];
-    not_forced.set_option_snapshot(Some(HashMap::from([(
-        "force-save".to_string(),
-        serde_json::json!(false),
-    )])));
-    assert!(
-        serialize_groups_with_results(&groups, &[not_forced])
-            .unwrap()
-            .is_empty()
     );
 }
 
@@ -502,40 +337,4 @@ fn test_error_messages_are_english() {
     // For now, just verify the function signature exists
     // In production, you'd want integration tests with actual FS errors
     let _ = path; // Suppress unused warning
-}
-
-#[tokio::test]
-async fn test_gzip_session_file_roundtrip_is_atomic() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("aria2.session.gz");
-    let entries = vec![
-        SessionEntry::new(7, vec!["https://example.com/file.bin".to_string()])
-            .with_options(HashMap::from([(String::from("split"), String::from("4"))])),
-    ];
-
-    save_to_file_with_entries(&path, &entries).await.unwrap();
-
-    let bytes = tokio::fs::read(&path).await.unwrap();
-    assert_eq!(&bytes[..2], &[0x1f, 0x8b]);
-    assert!(!path.with_extension("sess.tmp").exists());
-
-    let restored = load_from_file(&path).await.unwrap();
-    assert_eq!(restored.len(), 1);
-    assert_eq!(restored[0].gid, 7);
-    assert_eq!(restored[0].uris, entries[0].uris);
-    assert_eq!(restored[0].options.get("split"), Some(&String::from("4")));
-}
-
-#[tokio::test]
-async fn test_gzip_session_file_rejects_invalid_payload() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("aria2.session.gz");
-    tokio::fs::write(&path, b"not a gzip stream").await.unwrap();
-
-    let error = load_from_file(&path).await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("Failed to decompress session file")
-    );
 }

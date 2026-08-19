@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
-use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use bytes::Bytes;
 use e2e_helpers::mock_http_server::{
@@ -250,140 +250,6 @@ async fn adaptive_concurrency_reduces_after_429_and_finishes() {
         std::fs::read(output_dir.path().join("adaptive.bin")).unwrap(),
         *body
     );
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn adaptive_cooldown_is_interruptible_when_paused() {
-    let server = MockHttpServer::start().await.unwrap();
-    let body = data();
-    let stats = ServerStats::default();
-    register_range_server(
-        &server,
-        "/adaptive-pause",
-        Arc::clone(&body),
-        stats.clone(),
-        1,
-        Duration::from_millis(100),
-    );
-
-    let output_dir = tempfile::tempdir().unwrap();
-    let url = format!("{}/adaptive-pause", server.base_url());
-    let mut options = options(8, 4);
-    options.retry_wait = 5;
-    options.dir = Some(output_dir.path().to_string_lossy().into_owned());
-    options.out = Some("adaptive-pause.bin".to_string());
-    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-        GroupId::new(9001),
-        vec![url.clone()],
-        options.clone(),
-    )));
-    group.recover().set_total_length(body.len() as u64);
-    let mut command = DownloadCommand::new_with_group(
-        Arc::clone(&group),
-        &url,
-        &options,
-        options.dir.as_deref(),
-        options.out.as_deref(),
-    )
-    .unwrap();
-    set_test_min_split_size(&mut command);
-
-    let command_task = tokio::spawn(async move { command.execute().await });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if stats.capacity_hits.load(Ordering::Acquire) > 0
-                && stats.active.load(Ordering::Acquire) == 0
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("adaptive cooldown test did not observe a 429 response");
-
-    group.recover_mut().pause().unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(1), command_task)
-        .await
-        .expect("pause must interrupt adaptive HTTP cooldown")
-        .expect("adaptive cooldown pause task panicked");
-    assert!(
-        matches!(
-            &result,
-            Err(aria2_core::error::Aria2Error::DownloadFailed(message))
-                if message == "Download paused"
-        ),
-        "unexpected adaptive cooldown pause result: {result:?}"
-    );
-    assert!(group.read().unwrap().status().is_paused());
-    server.shutdown().await;
-}
-
-#[tokio::test]
-async fn adaptive_cooldown_is_interruptible_when_removed() {
-    let server = MockHttpServer::start().await.unwrap();
-    let body = data();
-    let stats = ServerStats::default();
-    register_range_server(
-        &server,
-        "/adaptive-remove",
-        Arc::clone(&body),
-        stats.clone(),
-        1,
-        Duration::from_millis(100),
-    );
-
-    let output_dir = tempfile::tempdir().unwrap();
-    let url = format!("{}/adaptive-remove", server.base_url());
-    let mut options = options(8, 4);
-    options.retry_wait = 5;
-    options.dir = Some(output_dir.path().to_string_lossy().into_owned());
-    options.out = Some("adaptive-remove.bin".to_string());
-    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-        GroupId::new(9002),
-        vec![url.clone()],
-        options.clone(),
-    )));
-    group.recover().set_total_length(body.len() as u64);
-    let mut command = DownloadCommand::new_with_group(
-        Arc::clone(&group),
-        &url,
-        &options,
-        options.dir.as_deref(),
-        options.out.as_deref(),
-    )
-    .unwrap();
-    set_test_min_split_size(&mut command);
-
-    let command_task = tokio::spawn(async move { command.execute().await });
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if stats.capacity_hits.load(Ordering::Acquire) > 0
-                && stats.active.load(Ordering::Acquire) == 0
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("adaptive cooldown test did not observe a 429 response");
-
-    group.recover_mut().mark_removed();
-    let result = tokio::time::timeout(Duration::from_secs(1), command_task)
-        .await
-        .expect("remove must interrupt adaptive HTTP cooldown")
-        .expect("adaptive cooldown remove task panicked");
-    assert!(
-        matches!(
-            &result,
-            Err(aria2_core::error::Aria2Error::DownloadFailed(message))
-                if message == "Download cancelled by user"
-        ),
-        "unexpected adaptive cooldown remove result: {result:?}"
-    );
-    assert!(group.read().unwrap().is_removed());
     server.shutdown().await;
 }
 

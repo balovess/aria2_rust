@@ -4,8 +4,6 @@
 // helper used by one client workflow is intentionally unused by another.
 #![allow(dead_code)]
 
-pub mod rpc;
-
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::process::{Child, Command, ExitStatus, Stdio};

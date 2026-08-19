@@ -29,7 +29,7 @@ impl super::RequestGroupMan {
     /// Scan the active DashMap for groups that have no more in-flight commands
     /// and are in a terminal state. Returns the list of demoted groups.
     ///
-    /// The engine calls this after an event-processing pass and then:
+    /// The engine should call this each tick and then:
     /// 1. Remove each group from the active DashMap
     /// 2. Add each `DownloadResult` to the stopped storage
     /// 3. Fire any on_download_complete events
@@ -210,7 +210,7 @@ impl super::RequestGroupMan {
     /// Process all stopped groups: find them, demote them, and return
     /// the list of demoted GIDs for event notification.
     ///
-    /// This is the main entry point for an event-processing pass.
+    /// This is the main entry point the engine should call each tick.
     /// Groups that are paused (or otherwise have no terminal status) are
     /// first re-queued to the reserved queue; only genuinely terminal groups
     /// are demoted to stopped results. After demoting each group, if the
@@ -381,7 +381,7 @@ impl super::RequestGroupMan {
     /// When a group completes and is demoted to stopped, we need to
     /// find any reserved groups that were waiting for this GID and
     /// mark their dependency as resolved. This enables them to be
-    /// promoted when the scheduler next processes an event.
+    /// promoted on the next tick.
     ///
     /// Mirrors C++ `RequestGroupMan` dependency resolution that happens
     /// inside `fillRequestGroupFromReserver` when it encounters a

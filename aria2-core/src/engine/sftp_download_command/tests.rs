@@ -208,28 +208,6 @@ fn test_map_network_error_to_recoverable() {
 }
 
 #[test]
-fn sftp_retries_transient_network_failures_with_total_attempt_semantics() {
-    let mut command = create_test_cmd();
-    command.retry_policy = crate::engine::retry_policy::RetryPolicy::new(2, 0);
-    let error = Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-        message: "connection reset".into(),
-    });
-
-    assert!(command.should_retry_error(0, &error));
-    assert!(!command.should_retry_error(1, &error));
-}
-
-#[test]
-fn sftp_does_not_retry_authentication_failures() {
-    let command = create_test_cmd();
-    let error = Aria2Error::Fatal(FatalError::PermissionDenied {
-        path: "example.com:2222".into(),
-    });
-
-    assert!(!command.should_retry_error(0, &error));
-}
-
-#[test]
 fn test_resume_offset_accepts_existing_prefix() {
     assert_eq!(
         SftpDownloadCommand::validate_resume_offset(256, 1024).unwrap(),

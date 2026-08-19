@@ -98,11 +98,7 @@ pub fn serialize_cancel(index: u32, begin: u32, length: u32) -> Vec<u8> {
     })
 }
 pub fn serialize_piece(index: u32, begin: u32, data: Vec<u8>) -> Vec<u8> {
-    serialize(&BtMessage::Piece {
-        index,
-        begin,
-        data: data.into(),
-    })
+    serialize(&BtMessage::Piece { index, begin, data })
 }
 pub fn serialize_port(port: u16) -> Vec<u8> {
     serialize(&BtMessage::Port { port })

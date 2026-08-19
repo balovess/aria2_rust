@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
 use super::DhtEngine;
@@ -22,9 +22,6 @@ use super::message::DhtMessage;
 use super::message::DhtMessageBuilder;
 use super::node::DhtNode;
 use super::tracker::TransactionTracker;
-
-const INBOUND_QUEUE_CAPACITY: usize = 1024;
-const INBOUND_WORKERS: usize = 4;
 
 // Note: DhtTaskQueue and DhtTaskFactory are available in the `task` and
 // `task_peer` modules. The periodic task scheduler currently uses direct
@@ -42,36 +39,12 @@ impl DhtEngine {
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
         let context = Arc::clone(&self.context);
-        let socket = context.socket.shared_socket();
+        let socket = context.socket.clone();
         let tracker = Arc::clone(&context.tracker);
-        let tracker_notify = tracker.change_notifier();
         let handler_self_id = context.handler_self_id;
 
         let handle = tokio::spawn(async move {
-            let (inbound_tx, inbound_rx) =
-                mpsc::channel::<(Vec<u8>, SocketAddr)>(INBOUND_QUEUE_CAPACITY);
-            let shared_rx = Arc::new(Mutex::new(inbound_rx));
-            let mut workers = tokio::task::JoinSet::new();
-
-            for _ in 0..INBOUND_WORKERS {
-                let worker_context = Arc::clone(&context);
-                let worker_tracker = Arc::clone(&tracker);
-                let worker_rx = Arc::clone(&shared_rx);
-                let worker_handler = DhtQueryHandler::new(handler_self_id);
-                workers.spawn(async move {
-                    loop {
-                        let packet = {
-                            let mut rx = worker_rx.lock().await;
-                            rx.recv().await
-                        };
-                        let Some((data, from)) = packet else { break };
-                        worker_context
-                            .process_inbound_message(&data, from, &worker_tracker, &worker_handler)
-                            .await;
-                    }
-                });
-            }
-
+            let handler = DhtQueryHandler::new(handler_self_id);
             info!("DHT receive loop started");
             let mut buf = [0u8; 4096];
 
@@ -80,63 +53,38 @@ impl DhtEngine {
                     break;
                 }
 
-                let timeout_wait = async {
-                    match tracker.next_timeout() {
-                        Some(timeout) => tokio::time::sleep(timeout).await,
-                        None => std::future::pending::<()>().await,
-                    }
-                };
-                tokio::pin!(timeout_wait);
-                let transaction_changed = tracker_notify.notified();
-                tokio::pin!(transaction_changed);
-                transaction_changed.as_mut().enable();
-
-                tokio::select! {
+                let recv_result = tokio::select! {
                     result = shutdown_rx.changed() => {
                         if result.is_ok() {
                             info!("DHT receive loop shutting down");
                         }
                         break;
                     }
-                    result = socket.recv_from(&mut buf) => {
-                        match result {
-                            Ok((len, from)) if len > 0 => {
-                                match inbound_tx.try_send((buf[..len].to_vec(), from)) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(_)) => {
-                                        debug!("DHT inbound queue full; dropping packet from {}", from);
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => break,
-                                }
-                            }
-                            Ok(_) => { /* empty packet, ignore */ }
-                            Err(e) => {
-                                debug!("DHT recv error: {}", e);
-                                break;
-                            }
-                        }
+                    result = socket.recv_with_timeout(&mut buf, Duration::from_secs(1)) => {
+                        result
                     }
-                    _ = &mut timeout_wait => {}
-                    _ = &mut transaction_changed => {
-                        continue;
+                };
+
+                match recv_result {
+                    Ok((len, from)) if len > 0 => {
+                        context
+                            .process_inbound_message(&buf[..len], from, &tracker, &handler)
+                            .await;
+                    }
+                    Ok(_) => { /* empty packet, ignore */ }
+                    Err(e) if e.contains("timeout") => { /* normal timeout, continue */ }
+                    Err(e) => {
+                        debug!("DHT recv error: {}", e);
                     }
                 }
 
+                // Process transaction timeouts
                 let timed_out = tracker.handle_timeouts();
                 for (addr, _query_type, node_id) in timed_out {
                     context.handle_timeout(addr, node_id).await;
                 }
             }
 
-            drop(inbound_tx);
-            let wait_for_workers = async { while workers.join_next().await.is_some() {} };
-            if tokio::time::timeout(Duration::from_millis(100), wait_for_workers)
-                .await
-                .is_err()
-            {
-                workers.abort_all();
-                while workers.join_next().await.is_some() {}
-            }
             info!("DHT receive loop exited");
         });
         self.register_background_task(handle);
@@ -201,17 +149,8 @@ impl DhtEngineContext {
     pub(super) async fn bootstrap(&self) {
         let self_id = self.inner.read().await.self_id;
 
-        // Resolve the public defaults here. Task-specific bootstrap endpoints
-        // are resolved by the core configuration seam before engine start.
-        let entry_points = if self.config.bootstrap_nodes.is_empty() {
-            DhtBootstrap::resolve_bootstrap_nodes().await
-        } else {
-            self.config
-                .bootstrap_nodes
-                .iter()
-                .map(|addr| DhtNode::new([0u8; 20], *addr))
-                .collect()
-        };
+        // Resolve bootstrap node hostnames via async DNS (C++ uses c-ares).
+        let entry_points = DhtBootstrap::resolve_bootstrap_nodes().await;
 
         if entry_points.is_empty() {
             warn!("No DHT bootstrap nodes could be resolved — DHT may not function properly");
@@ -232,6 +171,9 @@ impl DhtEngineContext {
             }
         }
 
+        // Wait briefly for responses, then do a find_node for our own ID
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
         // Add any responding bootstrap nodes to routing table
         {
             let mut inner = self.inner.write().await;
@@ -242,15 +184,8 @@ impl DhtEngineContext {
 
         // Do an initial find_node for our own ID to populate the routing table
         let rt = Arc::new(RwLock::new(self.inner.read().await.routing_table.clone()));
-        let _result = iterative_find_node(
-            &self_id,
-            &self_id,
-            &rt,
-            &self.socket,
-            &self.tracker,
-            self.config.query_timeout,
-        )
-        .await;
+        let _result =
+            iterative_find_node(&self_id, &self_id, &rt, &self.socket, &self.tracker).await;
 
         // Merge discovered nodes
         {
@@ -295,20 +230,10 @@ impl DhtEngineContext {
                 tracker.handle_response(&tx_id, msg, from);
             }
             super::message::DhtMessageType::Query => {
+                let rt = self.inner.read().await.routing_table.clone();
                 let (response, mark_good, sender_id) = {
-                    // The handler only borrows the table during synchronous
-                    // bencode/routing work. Keep the read guard scoped to this
-                    // block instead of cloning every bucket and node for each
-                    // inbound packet.
-                    let inner = self.inner.read().await;
                     let tt = self.token_tracker.lock().unwrap_or_else(|e| e.into_inner());
-                    let result = handler.handle_query(
-                        &msg,
-                        from,
-                        &inner.routing_table,
-                        &tt,
-                        &self.peer_storage,
-                    );
+                    let result = handler.handle_query(&msg, from, &rt, &tt, &self.peer_storage);
                     (result.response, result.mark_good, result.sender_id)
                 };
                 // tt lock is released here, before any .await
@@ -353,15 +278,8 @@ impl DhtEngineContext {
 
         for target in targets.into_iter().take(3) {
             let rt = Arc::new(RwLock::new(self.inner.read().await.routing_table.clone()));
-            let _result = iterative_find_node(
-                &target,
-                &self_id,
-                &rt,
-                &self.socket,
-                &self.tracker,
-                self.config.query_timeout,
-            )
-            .await;
+            let _result =
+                iterative_find_node(&target, &self_id, &rt, &self.socket, &self.tracker).await;
 
             // Merge discovered nodes
             let mut inner = self.inner.write().await;

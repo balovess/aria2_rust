@@ -8,13 +8,11 @@
 
 mod connection_limiter;
 mod downloader;
-mod progress;
 mod segment_size;
 
 // Public re-exports — preserve the original `http_segment_downloader::X` API surface
 pub use connection_limiter::ConnectionLimiter;
 pub use downloader::{HttpSegmentDownloader, WriteChunk};
-pub(crate) use progress::{SegmentProgress, SegmentProgressTracker};
 pub use segment_size::calculate_dynamic_segment_size;
 
 // Re-export score_source for convenience (was in the original monolithic file)
