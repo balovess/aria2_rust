@@ -17,6 +17,7 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
 #[cfg(feature = "metalink")]
 use aria2_protocol::metalink::parser::MetalinkDocument;
+use std::io::IsTerminal;
 use std::sync::Arc;
 use tracing::info;
 
@@ -53,26 +54,22 @@ impl App {
                 .await
                 .and_then(|port| u16::try_from(port).ok())
                 .unwrap_or(aria2_core::constants::LPD_PORT);
-            let lpd_interface = config
-                .get_global_option("bt-lpd-interface")
-                .await
-                .and_then(|value| match value {
-                    aria2_core::config::OptionValue::Str(value) if !value.trim().is_empty() => {
-                        match value.parse::<std::net::Ipv4Addr>() {
-                            Ok(interface) => Some(Some(interface)),
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    value = %value,
-                                    "Ignoring invalid bt-lpd-interface"
-                                );
-                                Some(None)
-                            }
+            let lpd_interface = match config.get_global_option("bt-lpd-interface").await {
+                Some(aria2_core::config::OptionValue::Str(value)) if !value.trim().is_empty() => {
+                    match value.parse::<std::net::Ipv4Addr>() {
+                        Ok(interface) => Some(interface),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                value = %value,
+                                "Ignoring invalid bt-lpd-interface"
+                            );
+                            None
                         }
                     }
-                    _ => Some(None),
-                })
-                .flatten();
+                }
+                _ => None,
+            };
             let lpd_manager = match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
                 aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
                 lpd_interface,
@@ -400,8 +397,8 @@ impl App {
     ///
     /// * `keep_alive` - If true, the engine stays alive with no pending commands
     ///   (used for RPC listen mode).
-    /// * `show_progress` - If true, wait for download activity and render
-    ///   progress to stdout via the [`ConsoleProgressReporter`].
+    /// * `show_progress` - If true, render progress to stdout. TTY output is
+    ///   rendered in place; redirected output uses plain flushed lines.
     pub async fn run_engine(
         &self,
         keep_alive: bool,
@@ -461,7 +458,10 @@ impl App {
             let (_reporter_stop_tx, reporter_handle) = if show_progress {
                 let group_man = self.request_man.clone();
                 let (mut reporter, stop_tx) =
-                    crate::ui::console_progress::ConsoleProgressReporter::new(group_man);
+                    crate::ui::console_progress::ConsoleProgressReporter::new(
+                        group_man,
+                        std::io::stdout().is_terminal(),
+                    );
                 let handle = tokio::spawn(async move {
                     reporter.run().await;
                 });

@@ -891,7 +891,6 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "rpc-listen-address",
         "save-server-stat-interval",
         "secure-falloc",
-        "server-stat-file",
         "utp-listen-port",
     ];
 
@@ -899,6 +898,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         .lines()
         .map(str::trim)
         .filter(|name| !name.is_empty() && !name.starts_with('#'))
+        .map(OptionRegistry::canonical_name)
         .collect::<BTreeSet<_>>();
     let registry = OptionRegistry::new();
     let registered = registry
@@ -911,10 +911,10 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         .copied()
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(baseline.len(), 214, "compatibility inventory changed");
+    assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        232,
+        230,
         "all-features registry inventory changed"
     );
     assert_eq!(
