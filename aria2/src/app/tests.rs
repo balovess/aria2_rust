@@ -12,6 +12,20 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[test]
+fn redirected_stdout_keeps_plain_console_progress_enabled() {
+    assert!(
+        console_progress_enabled(true, false),
+        "Scoop captures aria2 stdout, but must still receive live progress readout"
+    );
+}
+
+#[test]
+fn console_progress_respects_readout_and_quiet_options() {
+    assert!(!console_progress_enabled(false, false));
+    assert!(!console_progress_enabled(true, true));
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 async fn spawn_torrent_metadata_server(
     body: Vec<u8>,
@@ -244,13 +258,14 @@ async fn every_registered_option_reaches_config_manager_from_cli() {
         if !definition.is_supported() {
             let raw = cli_contract_value(definition);
             let argument = format!("--{}={raw}", definition.name());
-            let cli = CliArgs::try_parse_from(["aria2", argument.as_str()]).unwrap_or_else(|error| {
-                panic!(
-                    "registered option '{}' must remain addressable through the real CLI: {}",
-                    definition.name(),
-                    error
-                )
-            });
+            let cli =
+                CliArgs::try_parse_from(["aria2", argument.as_str()]).unwrap_or_else(|error| {
+                    panic!(
+                        "registered option '{}' must remain addressable through the real CLI: {}",
+                        definition.name(),
+                        error
+                    )
+                });
             let mut app = App::new();
             let error = app
                 .load_cli_args(cli)
@@ -514,6 +529,7 @@ async fn test_original_cli_options_reach_config_registry() {
         Some(false)
     );
     assert_eq!(app.get_opt_bool("pause-metadata").await, Some(true));
+    assert_eq!(app.get_opt_bool("show-console-readout").await, Some(false));
     assert_eq!(app.get_opt_i64("max-resume-failure-tries").await, Some(3));
 }
 

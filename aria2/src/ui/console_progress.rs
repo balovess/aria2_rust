@@ -15,6 +15,8 @@
 //! Overall: [████████░░░░░░░░░░] 42%  (450MiB / 1.07GiB)  DL:5.67MiB/s  3 active / 8 total
 //! ```
 
+use std::io::IsTerminal;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -30,6 +32,9 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 pub struct ConsoleProgressReporter {
     group_man: Arc<RequestGroupMan>,
     interval: Duration,
+    /// Whether stdout is a terminal. Non-terminal output must stay line based
+    /// for consumers such as Scoop's PowerShell pipeline.
+    terminal_output: bool,
     /// Signal receiver – when the sender is dropped/sent, the loop exits.
     stop_rx: Option<oneshot::Receiver<()>>,
     /// Number of lines printed in the last render (for cursor-up overwriting)
@@ -52,6 +57,7 @@ impl ConsoleProgressReporter {
         let reporter = Self {
             group_man,
             interval: Duration::from_millis(crate::constants::PROGRESS_BAR_RENDER_INTERVAL_MS),
+            terminal_output: io::stdout().is_terminal(),
             stop_rx: Some(stop_rx),
             last_line_count: 0,
             has_rendered: false,
@@ -111,8 +117,8 @@ impl ConsoleProgressReporter {
             }
         }
 
-        if self.last_line_count > 0 {
-            println!();
+        if self.terminal_output && self.last_line_count > 0 {
+            self.write_stdout("\n");
         }
     }
 
@@ -163,7 +169,9 @@ impl ConsoleProgressReporter {
         // Nothing to show: clear any stale output and return.
         if tasks.is_empty() {
             if self.last_line_count > 0 {
-                self.clear_previous_output();
+                if self.terminal_output {
+                    self.clear_previous_output();
+                }
                 self.last_line_count = 0;
                 self.has_rendered = false;
             }
@@ -178,13 +186,16 @@ impl ConsoleProgressReporter {
         let output = bar.render();
         let line_count = output.lines().count();
 
-        // Overwrite previous output block.
-        if self.has_rendered && self.last_line_count > 0 {
+        // Overwrite terminal output in place. A redirected stream receives
+        // complete plain-text frames and an explicit flush instead.
+        let mut frame = String::new();
+        if self.terminal_output && self.has_rendered && self.last_line_count > 0 {
             // Move cursor up by last_line_count lines, then clear everything
             // from cursor to end of screen before writing new content.
-            print!("\x1b[{}A\x1b[J", self.last_line_count);
+            frame.push_str(&format!("\x1b[{}A\x1b[J", self.last_line_count));
         }
-        print!("{}", output);
+        frame.push_str(&output);
+        self.write_stdout(&frame);
 
         self.last_line_count = line_count;
         self.has_rendered = true;
@@ -193,9 +204,15 @@ impl ConsoleProgressReporter {
 
     /// Clear the previously rendered output block from the terminal.
     fn clear_previous_output(&self) {
-        if self.has_rendered && self.last_line_count > 0 {
-            print!("\x1b[{}A\x1b[J", self.last_line_count);
+        if self.terminal_output && self.has_rendered && self.last_line_count > 0 {
+            self.write_stdout(&format!("\x1b[{}A\x1b[J", self.last_line_count));
         }
+    }
+
+    fn write_stdout(&self, output: &str) {
+        let mut stdout = io::stdout().lock();
+        let _ = stdout.write_all(output.as_bytes());
+        let _ = stdout.flush();
     }
 }
 

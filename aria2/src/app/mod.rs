@@ -58,6 +58,10 @@ pub struct App {
     detected_inputs: Vec<DetectedInput>,
 }
 
+fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
+    show_console_readout && !quiet
+}
+
 impl App {
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
@@ -352,8 +356,15 @@ impl App {
             None
         };
 
-        // Step 7: Run engine (always show console progress when stdout is interactive)
-        let show_progress = std::io::stdout().is_terminal();
+        // Step 7: Run engine with the configured console readout. Redirected
+        // stdout is still a valid consumer of plain progress lines, as with
+        // aria2_original and Scoop's PowerShell pipeline.
+        let show_progress = console_progress_enabled(
+            self.get_opt_bool("show-console-readout")
+                .await
+                .unwrap_or(true),
+            self.get_opt_bool("quiet").await.unwrap_or(false),
+        );
         let run_result = self.run_engine(rpc_enabled, show_progress).await;
 
         // Step 8: Shutdown RPC server
