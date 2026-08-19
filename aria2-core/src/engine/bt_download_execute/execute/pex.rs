@@ -266,6 +266,7 @@ impl BtDownloadCommand {
                 num_pieces,
                 piece_length,
                 total_size,
+                self.utp_socket.clone(),
             )
             .await
             {

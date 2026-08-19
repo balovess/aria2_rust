@@ -148,6 +148,7 @@ dependencies = [
  "aria2-core",
  "aria2-protocol",
  "aria2-rpc",
+ "async-trait",
  "base64 0.21.7",
  "clap",
  "clap_complete",
@@ -268,8 +269,6 @@ name = "aria2-rpc"
 version = "0.3.2"
 dependencies = [
  "anyhow",
- "aria2-core",
- "aria2-protocol",
  "async-trait",
  "axum",
  "base64 0.21.7",

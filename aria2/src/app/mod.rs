@@ -42,6 +42,7 @@ pub mod cli;
 use cli::CliArgs;
 mod config;
 mod engine;
+pub mod rpc_backend;
 // Public so integration tests can exercise the core → RPC notification bridge
 // (`rpc::CoreEventBridge`) without spinning up a real RPC server.
 pub mod rpc;
@@ -256,13 +257,20 @@ impl App {
         self.print_banner();
 
         // Apply engine-level options from config (CLI/file/env) BEFORE tasks
-        // are added. max-concurrent-downloads drives the engine's slot limit;
-        // the RequestGroupMan default is 5 (matching aria2).
+        // are added. Zero is the explicit unlimited value, so it must also
+        // override the manager's default of five.
         if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await
-            && max > 0
+            && let Ok(max) = u32::try_from(max)
         {
-            self.request_man.set_max_concurrent(max as u32);
-            info!("Max concurrent downloads set to {} (from config)", max);
+            self.request_man.set_max_concurrent(max);
+            info!(
+                "Max concurrent downloads set to {} (from config)",
+                if max == 0 {
+                    "unlimited".to_string()
+                } else {
+                    max.to_string()
+                }
+            );
         }
 
         // Initialize engine (must be before session restore)

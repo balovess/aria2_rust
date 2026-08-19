@@ -1,9 +1,47 @@
+use aria2_rpc::backend::{
+    BackendError, BackendMetadata, BackendRequest, BackendResponse, BackendResult, RpcBackend,
+};
 use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::{JsonRpcRequest, JsonRpcResponse, parse_aria2_wire_document};
 use aria2_rpc::server::AuthConfig;
+use aria2_rpc::types::GlobalStat;
 use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse};
+use async_trait::async_trait;
 use base64::Engine;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use std::sync::Arc;
+
+struct BenchBackend;
+
+#[async_trait]
+impl RpcBackend for BenchBackend {
+    fn metadata(&self) -> BackendMetadata {
+        BackendMetadata::base(env!("CARGO_PKG_VERSION"))
+    }
+
+    async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
+        match request {
+            BackendRequest::AddUri { .. } => Ok(BackendResult::response(BackendResponse::Gid(
+                "0123456789abcdef".into(),
+            ))),
+            BackendRequest::TellActive { .. }
+            | BackendRequest::TellWaiting { .. }
+            | BackendRequest::TellStopped { .. } => Ok(BackendResult::response(
+                BackendResponse::Statuses(Vec::new()),
+            )),
+            BackendRequest::GetGlobalStat => Ok(BackendResult::response(
+                BackendResponse::GlobalStat(GlobalStat::default()),
+            )),
+            request => Err(BackendError::Unsupported(format!(
+                "benchmark request: {request:?}"
+            ))),
+        }
+    }
+}
+
+fn benchmark_engine() -> RpcEngine {
+    RpcEngine::with_backend(Arc::new(BenchBackend))
+}
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
     JsonRpcRequest {
@@ -24,7 +62,7 @@ fn make_generic_req(id: &str, method: &str) -> JsonRpcRequest {
 }
 
 fn bench_add_uri_qps(c: &mut Criterion) {
-    let engine = RpcEngine::new();
+    let engine = benchmark_engine();
     let req = make_add_req("bench", "http://example.com/file.zip");
 
     c.bench_function("add_uri_single", |b| {
@@ -42,7 +80,7 @@ fn bench_add_uri_qps(c: &mut Criterion) {
 }
 
 fn bench_tell_active_empty(c: &mut Criterion) {
-    let engine = RpcEngine::new();
+    let engine = benchmark_engine();
     let req = make_generic_req("ta", "aria2.tellActive");
 
     c.bench_function("tell_active_empty_engine", |b| {
@@ -60,7 +98,7 @@ fn bench_tell_active_empty(c: &mut Criterion) {
 }
 
 fn bench_get_global_stat(c: &mut Criterion) {
-    let engine = RpcEngine::new();
+    let engine = benchmark_engine();
     let req = make_generic_req("gs", "aria2.getGlobalStat");
 
     c.bench_function("get_global_stat", |b| {
@@ -82,7 +120,7 @@ fn bench_read_only_multicall_poll(c: &mut Criterion) {
         .enable_all()
         .build()
         .unwrap();
-    let engine = aria2_rpc::engine::RpcEngine::new();
+    let engine = benchmark_engine();
     rt.block_on(async {
         for index in 0..100 {
             let req = make_add_req(

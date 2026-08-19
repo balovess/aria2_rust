@@ -152,6 +152,20 @@ fn every_registered_option_uses_one_parser_contract() {
     let mut rpc_options = std::collections::HashMap::new();
 
     for definition in registry.all().values() {
+        if !definition.is_supported() {
+            assert!(
+                definition.parse_default_value().is_none(),
+                "unsupported option '{}' must not inject a default",
+                definition.name()
+            );
+            assert!(
+                definition.parse_value("1").is_err(),
+                "unsupported option '{}' must reject explicit values",
+                definition.name()
+            );
+            continue;
+        }
+
         let raw = sample_value(definition);
         assert!(
             definition.parse_value(&raw).is_ok(),
@@ -184,8 +198,6 @@ fn every_registered_option_uses_one_parser_contract() {
         "config-file errors: {:?}",
         file_parser.errors()
     );
-    assert_eq!(file_parser.options().len(), registry.count());
-
     let cli_refs = cli_args.iter().map(String::as_str).collect::<Vec<_>>();
     let mut cli_parser = ConfigParser::new();
     cli_parser.parse_cli_args(&cli_refs);
@@ -194,7 +206,13 @@ fn every_registered_option_uses_one_parser_contract() {
         "CLI errors: {:?}",
         cli_parser.errors()
     );
-    assert_eq!(cli_parser.options().len(), registry.count());
+    let supported_count = registry
+        .all()
+        .values()
+        .filter(|definition| definition.is_supported())
+        .count();
+    assert_eq!(file_parser.options().len(), supported_count);
+    assert_eq!(cli_parser.options().len(), supported_count);
 
     for (name, value) in rpc_options {
         assert!(
@@ -203,6 +221,50 @@ fn every_registered_option_uses_one_parser_contract() {
             name
         );
     }
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn compatibility_aliases_use_one_canonical_storage_key() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&[
+        "--enable-lpd=true",
+        "--dht-message-path=legacy-dht.dat",
+        "--max-retries=7",
+    ]);
+    assert!(!parser.has_errors(), "alias parse errors: {:?}", parser.errors());
+    assert_eq!(parser.get_bool("bt-enable-lpd"), Some(true));
+    assert_eq!(parser.get_bool("enable-lpd"), Some(true));
+    assert_eq!(parser.get_str("dht-file-path"), Some("legacy-dht.dat"));
+    assert_eq!(parser.get_i64("max-tries"), Some(7));
+    assert!(!parser.options().contains_key("enable-lpd"));
+    assert!(!parser.options().contains_key("dht-message-path"));
+    assert!(!parser.options().contains_key("max-retries"));
+
+    let mut manager = super::ConfigManager::new();
+    manager
+        .set_global_option("enable-lpd", OptionValue::Bool(true))
+        .await
+        .expect("LPD alias must validate");
+    manager
+        .set_global_option("dht-message-path", OptionValue::Str("manager-dht.dat".into()))
+        .await
+        .expect("DHT path alias must validate");
+    manager
+        .set_global_option("max-retries", OptionValue::Int(9))
+        .await
+        .expect("retry alias must validate");
+
+    assert_eq!(manager.get_global_bool("bt-enable-lpd").await, Some(true));
+    assert_eq!(
+        manager.get_global_str("dht-file-path").await.as_deref(),
+        Some("manager-dht.dat")
+    );
+    assert_eq!(manager.get_global_i64("max-tries").await, Some(9));
+    let all = manager.get_all_global_options().await;
+    assert!(!all.contains_key("enable-lpd"));
+    assert!(!all.contains_key("dht-message-path"));
+    assert!(!all.contains_key("max-retries"));
 }
 
 #[test]
@@ -434,28 +496,32 @@ fn every_task_runtime_policy_has_a_real_download_option_consumer() {
 }
 
 #[test]
-fn dump_registered_options_without_task_or_runtime_policy() {
-    use super::runtime::{
-        INITIAL_REQUEST_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
-        RUNTIME_CHANGEABLE_OPTIONS, RUNTIME_GLOBAL_CHANGEABLE_OPTIONS,
-    };
-
+fn every_registered_option_has_one_explicit_production_owner() {
     let registry = OptionRegistry::new();
-    let mut unclassified = registry
-        .all()
-        .keys()
-        .filter(|name| {
-            !INITIAL_REQUEST_OPTIONS.contains(&name.as_str())
-                && !RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&name.as_str())
-                && !RUNTIME_CHANGEABLE_OPTIONS.contains(&name.as_str())
-                && !RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.contains(&name.as_str())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    unclassified.sort();
+    let mut owners = std::collections::HashMap::<super::OptionOwner, Vec<String>>::new();
+
+    for (name, definition) in registry.all() {
+        let expected = OptionRegistry::owner_for_name(name).unwrap_or_else(|| {
+            panic!(
+                "registered option '{}' has no canonical production owner mapping",
+                name
+            )
+        });
+        assert_eq!(definition.owner(), expected);
+        owners
+            .entry(definition.owner())
+            .or_default()
+            .push(name.clone());
+    }
+
+    assert!(!owners.is_empty(), "the registry must contain owned options");
     assert!(
-        unclassified.is_empty(),
-        "registered options without a task, runtime, or process policy: {unclassified:?}"
+        owners
+            .values()
+            .flatten()
+            .all(|name| OptionRegistry::canonical_name(name) == name),
+        "registry must contain canonical names only: {:?}",
+        owners
     );
 }
 
@@ -729,11 +795,19 @@ fn registered_defaults_are_explicitly_reparsable() {
     for definition in registry.all().values() {
         if !matches!(definition.default_value(), OptionValue::None) {
             let raw = definition.default_value().to_string();
-            assert!(
-                definition.parse_value(&raw).is_ok(),
-                "default for '{}' is not accepted by its own definition",
-                definition.name()
-            );
+            if definition.is_supported() {
+                assert!(
+                    definition.parse_value(&raw).is_ok(),
+                    "default for '{}' is not accepted by its own definition",
+                    definition.name()
+                );
+            } else {
+                assert!(
+                    definition.parse_default_value().is_none(),
+                    "unsupported option '{}' must not expose a runtime default",
+                    definition.name()
+                );
+            }
         }
     }
 }

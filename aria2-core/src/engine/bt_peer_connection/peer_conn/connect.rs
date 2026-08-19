@@ -288,7 +288,50 @@ impl BtPeerConn {
     /// - Better performance on congested networks
     /// - NAT traversal benefits
     pub async fn connect_utp(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
-        let utp_conn = UtpPeerConnection::connect(addr, info_hash).await?;
+        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        Self::connect_utp_with_options(
+            addr,
+            info_hash,
+            &local_peer_id,
+            std::time::Duration::from_secs(15),
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Connect via uTP using the task's peer identity, timeout, and shared
+    /// socket when one is available.
+    pub async fn connect_utp_with_options(
+        addr: std::net::SocketAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    ) -> Result<Self> {
+        let utp_conn = match shared_socket {
+            Some(socket) => {
+                UtpPeerConnection::connect_with_shared_socket(
+                    socket,
+                    addr,
+                    info_hash,
+                    local_peer_id,
+                    timeout,
+                )
+                .await?
+            }
+            None => {
+                UtpPeerConnection::connect_with_options(
+                    addr,
+                    info_hash,
+                    local_peer_id,
+                    timeout,
+                    listen_port,
+                )
+                .await?
+            }
+        };
         let now = Instant::now();
 
         Ok(Self {

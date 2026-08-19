@@ -589,6 +589,10 @@ impl MetalinkDownloadCommand {
                     if let Some(listener) = self.bt_listener.clone() {
                         bt_cmd.set_bt_listener(listener);
                     }
+                    #[cfg(feature = "bittorrent")]
+                    if let Some(manager) = self.lpd_manager.clone() {
+                        bt_cmd.set_lpd_manager(manager);
+                    }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().total_length();
                     {
@@ -728,6 +732,10 @@ impl MetalinkDownloadCommand {
                     #[cfg(feature = "bittorrent")]
                     if let Some(listener) = self.bt_listener.clone() {
                         bt_cmd.set_bt_listener(listener);
+                    }
+                    #[cfg(feature = "bittorrent")]
+                    if let Some(manager) = self.lpd_manager.clone() {
+                        bt_cmd.set_lpd_manager(manager);
                     }
                     bt_cmd.execute().await?;
                     self.completed_bytes = self.group.recover().completed_length();

@@ -464,6 +464,20 @@ impl BtDownloadCommand {
             }
             Arc::new(std::sync::Mutex::new(storage))
         };
+        let utp_socket = if options.enable_utp {
+            let socket = match options.utp_listen_port {
+                Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+                None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
+            }
+            .map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "Failed to bind uTP socket: {error}"
+                )))
+            })?;
+            Some(Arc::new(tokio::sync::Mutex::new(socket)))
+        } else {
+            None
+        };
         let mut command = Self {
             local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
                 &options.peer_id_prefix,
@@ -512,7 +526,10 @@ impl BtDownloadCommand {
             // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,
             progress_save_interval: Duration::from_secs(60),
+            // LPD is process-wide. The engine/task spawner injects its one
+            // shared manager after construction.
             lpd_manager: None,
+            lpd_registered_info_hash: None,
             hook_manager: None,
 
             // PEX integration fields default values
@@ -557,6 +574,7 @@ impl BtDownloadCommand {
             peer_rejection: crate::engine::bt_peer_storage::PeerRejectionState::shared(),
             peer_storage,
             incoming_peers: None,
+            utp_socket,
             // Direct command users do not pass through DownloadEngine's
             // dependency injector. Give that public construction path a
             // listener manager; the engine replaces it with its shared

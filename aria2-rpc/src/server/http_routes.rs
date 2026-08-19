@@ -416,9 +416,7 @@ fn build_cors_layer(config: &CorsConfig) -> tower_http::cors::CorsLayer {
                 .filter_map(|header| header.trim().parse::<HeaderName>().ok()),
         )
     };
-    let max_age = aria2_core::constants::CORS_MAX_AGE
-        .parse::<u64>()
-        .unwrap_or_default();
+    let max_age = crate::constants::CORS_MAX_AGE;
 
     let origin = if config.is_wildcard() {
         if config.allow_credentials {
@@ -547,7 +545,7 @@ fn parse_json_get_query(query: &str) -> JsonGetRequest {
 
     let has_params = params.is_some_and(|encoded| !encoded.is_empty());
     let decoded_params = params.map(|encoded| {
-        let decoded = aria2_core::util::uri::percent_decode(encoded);
+        let decoded = crate::rpc_helpers::percent_decode(encoded);
         crate::rpc_helpers::decode_aria2_base64(&decoded)
     });
 

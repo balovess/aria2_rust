@@ -10,8 +10,70 @@ use tokio::sync::RwLock;
 
 use crate::wire;
 
-// Re-export DownloadStatus from aria2-core as the canonical definition
-pub use aria2_core::DownloadStatus;
+/// Public download lifecycle state used by RPC DTOs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum DownloadStatus {
+    #[default]
+    Waiting,
+    Active,
+    Paused,
+    Error(String),
+    Complete,
+    Removed,
+}
+
+impl Serialize for DownloadStatus {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Waiting => "waiting",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Error(_) => "error",
+            Self::Complete => "complete",
+            Self::Removed => "removed",
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for DownloadStatus {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "waiting" => Ok(Self::Waiting),
+            "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
+            "error" => Ok(Self::Error(String::new())),
+            "complete" => Ok(Self::Complete),
+            "removed" => Ok(Self::Removed),
+            value => Err(serde::de::Error::unknown_variant(
+                value,
+                &[
+                    "waiting", "active", "paused", "error", "complete", "removed",
+                ],
+            )),
+        }
+    }
+}
+
+impl DownloadStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Error(_) => "error",
+            Self::Complete => "complete",
+            Self::Removed => "removed",
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Active | Self::Waiting)
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        !self.is_active()
+    }
+}
 
 /// Type alias for global configuration options shared across all downloads.
 pub type GlobalOptions = Arc<RwLock<HashMap<String, serde_json::Value>>>;
@@ -463,17 +525,6 @@ impl<'de> Deserialize<'de> for UriStatus {
     }
 }
 
-impl UriStatus {
-    /// Convert the core URI lifecycle snapshot to aria2's public vocabulary.
-    pub(crate) fn from_core_status(value: &str) -> Self {
-        match value {
-            "used" | "spent" => Self::Used,
-            "waiting" => Self::Waiting,
-            _ => Self::Waiting,
-        }
-    }
-}
-
 /// URI information returned by `aria2.getUris`.
 ///
 /// Type alias for [`UriEntry`] for API compatibility.
@@ -663,8 +714,8 @@ impl VersionInfo {
     /// Create our product version in the aria2-compatible public shape.
     ///
     /// Enabled features are dynamically generated based on compile-time
-    /// protocol support available in the current build. The list reflects
-    /// which protocols and capabilities aria2-core is compiled with.
+    /// protocol support available in the current RPC build. The embedding
+    /// application can provide its own product version and feature catalog.
     pub fn from_env() -> Self {
         Self::from_version(env!("CARGO_PKG_VERSION"))
     }

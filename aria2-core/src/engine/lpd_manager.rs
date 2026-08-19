@@ -39,7 +39,7 @@ pub use announce::LpdAnnouncer;
 pub use discovery::{is_private_address, parse_lpd_announcement};
 
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -142,15 +142,31 @@ pub struct LpdManager {
     peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
     /// Track which info hashes we're currently announcing
     pub active_hashes: Arc<RwLock<HashSet<String>>>,
+    /// TCP listen port to advertise for each registered torrent.
+    announce_ports: Arc<RwLock<HashMap<String, u16>>>,
     /// Handle to the background announce task
-    _announce_task: Option<tokio::task::JoinHandle<()>>,
+    announce_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Background receive loop for continuous LPD announcement processing
-    receive_loop: LpdReceiveLoop,
+    receive_loop: tokio::sync::Mutex<LpdReceiveLoop>,
+    /// BEP 14 multicast/receive port configured for this process.
+    listen_port: u16,
+    /// Local IPv4 interface used for multicast membership.
+    interface: Option<Ipv4Addr>,
 }
 
 impl Default for LpdManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for LpdManager {
+    fn drop(&mut self) {
+        if let Ok(mut task) = self.announce_task.lock()
+            && let Some(handle) = task.take()
+        {
+            handle.abort();
+        }
     }
 }
 
@@ -161,21 +177,59 @@ impl LpdManager {
     /// internal state tracking. The receive loop is not started
     /// automatically; call `start_receive_loop()` to begin receiving.
     pub fn new() -> Self {
-        let announcer = LpdAnnouncer::new().unwrap_or_else(|_| {
+        Self::with_interval_and_interface_and_port(
+            constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
+            None,
+            constants::LPD_PORT,
+        )
+        .unwrap_or_else(|_| {
             // If we can't create real socket, create a dummy one for testing
             // In production this would be an error
             warn!("Could not create LPD announcer, LPD will be disabled");
-            LpdAnnouncer::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
-                .unwrap_or_else(|_| panic!("Fatal: cannot create LPD announcer"))
-        });
+            let announcer = LpdAnnouncer::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
+                .unwrap_or_else(|_| panic!("Fatal: cannot create LPD announcer"));
+            Self {
+                announcer: Arc::new(announcer),
+                peers: Arc::new(RwLock::new(HashMap::new())),
+                active_hashes: Arc::new(RwLock::new(HashSet::new())),
+                announce_ports: Arc::new(RwLock::new(HashMap::new())),
+                announce_task: std::sync::Mutex::new(None),
+                receive_loop: tokio::sync::Mutex::new(LpdReceiveLoop::new()),
+                listen_port: constants::LPD_PORT,
+                interface: None,
+            }
+        })
+    }
 
-        Self {
+    /// Create an LPD manager with an explicit multicast port and interface.
+    pub fn with_interval_and_interface_and_port(
+        announce_interval_secs: u64,
+        interface: Option<Ipv4Addr>,
+        listen_port: u16,
+    ) -> Result<Self, String> {
+        if announce_interval_secs == 0 {
+            return Err("LPD announce interval must be greater than zero".to_string());
+        }
+        if listen_port == 0 {
+            return Err("LPD listen port must be greater than zero".to_string());
+        }
+
+        let announcer = LpdAnnouncer::with_interface_and_port(
+            announce_interval_secs,
+            interface,
+            listen_port,
+        )?;
+
+        Ok(Self {
             announcer: Arc::new(announcer),
             peers: Arc::new(RwLock::new(HashMap::new())),
             active_hashes: Arc::new(RwLock::new(HashSet::new())),
-            _announce_task: None,
-            receive_loop: LpdReceiveLoop::new(),
-        }
+            announce_ports: Arc::new(RwLock::new(HashMap::new())),
+            announce_task: std::sync::Mutex::new(None),
+            receive_loop: tokio::sync::Mutex::new(LpdReceiveLoop::new()),
+            listen_port,
+            interface,
+        })
     }
 
     /// Create LpdManager with custom configuration
@@ -186,21 +240,13 @@ impl LpdManager {
     /// Create an LPD manager with an optional local IPv4 multicast interface.
     pub fn with_interval_and_interface(
         announce_interval_secs: u64,
-        interface: Option<std::net::Ipv4Addr>,
+        interface: Option<Ipv4Addr>,
     ) -> Result<Self, String> {
-        if announce_interval_secs == 0 {
-            return Err("LPD announce interval must be greater than zero".to_string());
-        }
-
-        let announcer = LpdAnnouncer::with_interface(announce_interval_secs, interface)?;
-
-        Ok(Self {
-            announcer: Arc::new(announcer),
-            peers: Arc::new(RwLock::new(HashMap::new())),
-            active_hashes: Arc::new(RwLock::new(HashSet::new())),
-            _announce_task: None,
-            receive_loop: LpdReceiveLoop::new(),
-        })
+        Self::with_interval_and_interface_and_port(
+            announce_interval_secs,
+            interface,
+            constants::LPD_PORT,
+        )
     }
 
     /// Register a torrent for LPD announcements
@@ -216,6 +262,17 @@ impl LpdManager {
         info_hash: &str,
         private_torrent: bool,
     ) -> Result<(), String> {
+        self.register_torrent_with_port(info_hash, private_torrent, 0)
+            .await
+    }
+
+    /// Register a torrent and remember the TCP port used by its announces.
+    pub async fn register_torrent_with_port(
+        &self,
+        info_hash: &str,
+        private_torrent: bool,
+        port: u16,
+    ) -> Result<(), String> {
         if private_torrent {
             debug!(
                 info_hash = %&info_hash[..8],
@@ -226,6 +283,9 @@ impl LpdManager {
 
         let mut active = self.active_hashes.write().await;
         active.insert(info_hash.to_string());
+
+        let mut announce_ports = self.announce_ports.write().await;
+        announce_ports.insert(info_hash.to_string(), port);
 
         // Ensure peer set exists
         let mut peers_map = self.peers.write().await;
@@ -239,6 +299,10 @@ impl LpdManager {
     pub async fn unregister_torrent(&self, info_hash: &str) {
         let mut active = self.active_hashes.write().await;
         active.remove(info_hash);
+        drop(active);
+
+        let mut announce_ports = self.announce_ports.write().await;
+        announce_ports.remove(info_hash);
 
         info!(info_hash = %&info_hash[..8], "Torrent unregistered from LPD");
     }
@@ -277,19 +341,28 @@ impl LpdManager {
     /// # Returns
     ///
     /// JoinHandle that can be used to cancel the task
-    pub fn start_background_announce(&mut self, port: u16) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn start_background_announce(&self, _port: u16) -> Option<tokio::task::JoinHandle<()>> {
         if !self.announcer.is_enabled() {
             debug!("LPD is disabled, not starting background announce");
             return None;
         }
 
+        let mut task_slot = self
+            .announce_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if task_slot.is_some() {
+            return None;
+        }
+
         let announcer = Arc::clone(&self.announcer);
         let active_hashes = Arc::clone(&self.active_hashes);
+        let announce_ports = Arc::clone(&self.announce_ports);
         let interval = self.announcer.announce_interval();
 
         info!(
             interval_secs = interval.as_secs(),
-            port, "Starting LPD background announce task"
+            "Starting LPD background announce task"
         );
 
         let handle = tokio::spawn(async move {
@@ -298,13 +371,25 @@ impl LpdManager {
             loop {
                 ticker.tick().await;
 
-                let hashes: Vec<String> = {
+                let torrents: Vec<(String, u16)> = {
                     let active = active_hashes.read().await;
-                    active.iter().cloned().collect()
+                    let ports = announce_ports.read().await;
+                    active
+                        .iter()
+                        .map(|info_hash| {
+                            (
+                                info_hash.clone(),
+                                ports.get(info_hash).copied().unwrap_or_default(),
+                            )
+                        })
+                        .collect()
                 };
 
-                for info_hash in &hashes {
-                    if let Err(e) = announcer.announce(info_hash, port) {
+                for (info_hash, port) in &torrents {
+                    if *port == 0 {
+                        continue;
+                    }
+                    if let Err(e) = announcer.announce(info_hash, *port) {
                         warn!(
                             info_hash = %&info_hash[..8.min(info_hash.len())],
                             error = %e,
@@ -314,24 +399,51 @@ impl LpdManager {
                 }
 
                 debug!(
-                    count = hashes.len(),
+                    count = torrents.len(),
                     "LPD background announce cycle completed"
                 );
             }
         });
 
-        self._announce_task = Some(handle);
+        *task_slot = Some(handle);
         // Note: JoinHandle is not Clone, so we cannot return a copy.
         // The task is stored internally and can be stopped via stop_background_announce().
         None
     }
 
     /// Stop background announce task
-    pub fn stop_background_announce(&mut self) {
-        if let Some(handle) = self._announce_task.take() {
+    pub fn stop_background_announce(&self) {
+        let mut task_slot = self
+            .announce_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(handle) = task_slot.take() {
             handle.abort();
             info!("LPD background announce task stopped");
         }
+    }
+
+    /// Start the process-level receive and announce tasks once.
+    pub async fn ensure_runtime_started(&self) {
+        if !self.announcer.is_enabled() {
+            return;
+        }
+
+        let mut receive_loop = self.receive_loop.lock().await;
+        if !receive_loop.is_running()
+            && let Err(error) = receive_loop
+                .start_with_config(
+                    Arc::clone(&self.peers),
+                    Arc::clone(&self.active_hashes),
+                    self.listen_port,
+                    self.interface,
+                )
+                .await
+        {
+            warn!(%error, "LPD receive loop unavailable; announcements will still be sent");
+        }
+        drop(receive_loop);
+        let _ = self.start_background_announce(0);
     }
 
     /// Start the background LPD receive loop.
@@ -352,14 +464,21 @@ impl LpdManager {
     ///
     /// Returns `Err` if the UDP socket cannot be bound (e.g., port
     /// already in use, multicast unavailable in this environment).
-    pub async fn start_receive_loop(&mut self) -> Result<(), String> {
+    pub async fn start_receive_loop(&self) -> Result<(), String> {
         if !self.announcer.is_enabled() {
             debug!("LPD is disabled, not starting receive loop");
             return Ok(());
         }
 
         self.receive_loop
-            .start(Arc::clone(&self.peers), Arc::clone(&self.active_hashes))
+            .lock()
+            .await
+            .start_with_config(
+                Arc::clone(&self.peers),
+                Arc::clone(&self.active_hashes),
+                self.listen_port,
+                self.interface,
+            )
             .await
     }
 
@@ -368,13 +487,16 @@ impl LpdManager {
     /// Signals the receive task to stop via `CancellationToken` and
     /// waits for it to finish. After stopping, `start_receive_loop()`
     /// can be called again to restart.
-    pub async fn stop_receive_loop(&mut self) {
-        self.receive_loop.stop().await;
+    pub async fn stop_receive_loop(&self) {
+        self.receive_loop.lock().await.stop().await;
     }
 
     /// Check if the LPD receive loop is currently running.
     pub fn is_receive_loop_running(&self) -> bool {
-        self.receive_loop.is_running()
+        self.receive_loop
+            .try_lock()
+            .map(|receive_loop| receive_loop.is_running())
+            .unwrap_or(false)
     }
 
     /// Get a clone of the receive loop's cancellation token.
@@ -383,7 +505,10 @@ impl LpdManager {
     /// sequence) to cancel the receive loop without holding a mutable
     /// reference to `LpdManager`.
     pub fn receive_loop_cancellation_token(&self) -> CancellationToken {
-        self.receive_loop.cancellation_token()
+        self.receive_loop
+            .try_lock()
+            .map(|receive_loop| receive_loop.cancellation_token())
+            .unwrap_or_else(|_| CancellationToken::new())
     }
 
     /// Update peer registry with newly discovered peers

@@ -55,6 +55,24 @@ fn command_timeout_comes_from_download_options() {
 }
 
 #[test]
+fn force_sequential_disables_concurrent_range_downloads() {
+    let options = DownloadOptions {
+        force_sequential: true,
+        ..DownloadOptions::default()
+    };
+    let command = DownloadCommand::new(
+        GroupId::new(1002),
+        "http://example.com/file.bin",
+        &options,
+        None,
+        None,
+    )
+    .expect("HTTP command should accept a valid URI");
+
+    assert!(!command.should_use_concurrent(16 * 1024 * 1024, true, 4));
+}
+
+#[test]
 fn in_memory_metadata_retry_classification_matches_http_contract() {
     let policy = RetryPolicy::new(2, 0);
     let server_error = |code| Aria2Error::Recoverable(RecoverableError::ServerError { code });

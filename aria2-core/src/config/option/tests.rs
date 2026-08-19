@@ -141,6 +141,17 @@ fn test_rpc_basic_auth_options_match_original_deprecation_metadata() {
     );
 }
 
+#[test]
+fn max_http_pipelining_is_explicitly_rejected_without_runtime_support() {
+    let registry = OptionRegistry::new();
+
+    let error = registry
+        .parse_rpc_value("max-http-pipelining", &serde_json::json!(2))
+        .expect_err("unsupported HTTP pipeline limits must not be silently stored");
+
+    assert!(error.contains("max-http-pipelining"), "unexpected error: {error}");
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn test_hidden_and_deprecated_option_sets_match_original_boundary() {
@@ -630,6 +641,29 @@ fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {
 fn test_default_registry() {
     let reg = OptionRegistry::default();
     assert!(reg.count() > 0);
+}
+
+#[test]
+fn max_concurrent_zero_is_valid_unlimited_value() {
+    let registry = OptionRegistry::new();
+    let definition = registry
+        .get("max-concurrent-downloads")
+        .expect("max-concurrent-downloads must be registered");
+
+    assert_eq!(definition.min, Some(0));
+    assert_eq!(definition.parse_value("0").unwrap().as_i64(), Some(0));
+    assert_eq!(
+        registry
+            .parse_rpc_value("max-concurrent-downloads", &serde_json::json!(0))
+            .unwrap()
+            .as_i64(),
+        Some(0)
+    );
+
+    let mut parser = crate::config::ConfigParser::new();
+    parser.parse_cli_args(&["--max-concurrent-downloads=0"]);
+    assert!(!parser.has_errors(), "CLI errors: {:?}", parser.errors());
+    assert_eq!(parser.get_i64("max-concurrent-downloads"), Some(0));
 }
 
 // ==================== Validator Tests ====================

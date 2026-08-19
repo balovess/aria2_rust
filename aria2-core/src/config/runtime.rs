@@ -161,13 +161,11 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "auto-file-renaming",
     "bt-enable-hook-after-hash-check",
     "bt-enable-lpd",
-    "bt-enable-web-seed",
     "bt-exclude-tracker",
     "bt-external-ip",
     "bt-force-encryption",
     "bt-hash-check-seed",
     "bt-load-saved-metadata",
-    "bt-max-open-files",
     "bt-max-peers",
     "bt-metadata-only",
     "bt-min-crypto-level",
@@ -177,32 +175,11 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "bt-require-crypto",
     "bt-save-metadata",
     "bt-seed-unverified",
-    "bt-peer-blocklist",
-    "bt-keep-alive-interval",
-    "bt-timeout",
-    "bt-request-timeout",
-    "peer-connection-timeout",
-    "peer-id-prefix",
-    "peer-agent",
     "bt-stop-timeout",
     "bt-tracker",
     "bt-tracker-connect-timeout",
     "bt-tracker-interval",
     "bt-tracker-timeout",
-    "dht-message-timeout",
-    "enable-dht",
-    "enable-dht6",
-    "dht-listen-port",
-    "dht-listen-addr",
-    "dht-listen-addr6",
-    "dht-entry-point",
-    "dht-entry-point-host",
-    "dht-entry-point-port",
-    "dht-entry-point6",
-    "dht-entry-point-host6",
-    "dht-entry-point-port6",
-    "dht-file-path",
-    "dht-file-path6",
     "check-integrity",
     "checksum",
     "conditional-get",
@@ -313,10 +290,17 @@ pub fn project_initial_options<I>(options: I) -> HashMap<String, serde_json::Val
 where
     I: IntoIterator<Item = (String, serde_json::Value)>,
 {
-    options
-        .into_iter()
-        .filter(|(name, _)| is_initial_option(name))
-        .collect()
+    let mut projected = HashMap::new();
+    for (name, value) in options {
+        let canonical_name = crate::config::OptionRegistry::canonical_name(&name).to_string();
+        if !is_initial_option(&canonical_name) {
+            continue;
+        }
+        if name == canonical_name || !projected.contains_key(&canonical_name) {
+            projected.insert(canonical_name, value);
+        }
+    }
+    projected
 }
 
 /// Returns whether a name is accepted by `changeGlobalOption`.

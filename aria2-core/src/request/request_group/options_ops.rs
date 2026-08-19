@@ -396,8 +396,13 @@ fn apply_rpc_option(
             opts.enable_utp = rpc_option_bool(value, key)?;
             Ok(true)
         }
-        "utp-listen-port" => {
-            opts.utp_listen_port = Some(rpc_option_u16(value, key)?);
+        "utp-listen-port" | "lpd-listen-port" => {
+            let value = rpc_option_u16(value, key)?;
+            match key {
+                "utp-listen-port" => opts.utp_listen_port = Some(value),
+                "lpd-listen-port" => opts.lpd_listen_port = Some(value),
+                _ => unreachable!("UDP listen port option handled above"),
+            }
             Ok(true)
         }
         "check-integrity"

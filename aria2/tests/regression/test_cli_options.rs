@@ -877,8 +877,6 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-peer-blocklist",
         "bt-tracker-source",
         "bt-tracker-update-interval",
-        "dht-message-path",
-        "enable-lpd",
         "enable-public-trackers",
         "enable-utp",
         "log-backup-count",
@@ -916,7 +914,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 214, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        234,
+        232,
         "all-features registry inventory changed"
     );
     assert_eq!(

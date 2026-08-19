@@ -667,6 +667,9 @@ impl DownloadCommand {
         supports_range: bool,
         split: u16,
     ) -> bool {
+        if self.group.recover().options().force_sequential {
+            return false;
+        }
         if !supports_range {
             return false;
         }

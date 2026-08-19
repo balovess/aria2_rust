@@ -11,7 +11,7 @@ use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::peer_stats::PeerStats;
 use crate::engine::udp_tracker_client::UdpTrackerClient;
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -271,6 +271,56 @@ impl BtDownloadCommand {
                 })
                 .collect();
 
+        // Register before reading the peer registry and send one announce
+        // immediately. The registration must not depend on another peer
+        // already being present: the first announce is how this torrent
+        // becomes discoverable by another client on the LAN.
+        if !self.is_private
+            && self.group.recover().options().bt_enable_lpd
+            && let Some(lpd) = self.lpd_manager.as_ref().cloned()
+        {
+            let info_hash_hex = hex::encode(*info_hash_raw);
+            if self.lpd_registered_info_hash.as_deref() != Some(info_hash_hex.as_str()) {
+                lpd.register_torrent_with_port(&info_hash_hex, false, self.listen_port)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::Fatal(FatalError::Config(format!(
+                            "LPD torrent registration failed: {error}"
+                        )))
+                    })?;
+                self.lpd_registered_info_hash = Some(info_hash_hex.clone());
+            }
+            lpd.ensure_runtime_started().await;
+            if let Err(error) = lpd.announce_torrent(&info_hash_hex, self.listen_port).await {
+                warn!(%error, "Initial LPD announce failed");
+            }
+
+            let lpd_peers = lpd.get_peers_for(&info_hash_hex).await;
+            if !lpd_peers.is_empty() {
+                let before = peer_addrs.len();
+                for lpd_peer in &lpd_peers {
+                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+                        &lpd_peer.addr.to_string(),
+                        lpd_peer.port,
+                    );
+                    if !self.is_peer_temporarily_rejected(&paddr.ip)
+                        && !peer_addrs
+                            .iter()
+                            .any(|peer| peer.ip == paddr.ip && peer.port == paddr.port)
+                    {
+                        peer_addrs.push(paddr);
+                    }
+                }
+                info!(
+                    lpd_count = lpd_peers.len(),
+                    total_added = peer_addrs.len() - before,
+                    "LPD discovered local peers"
+                );
+            } else {
+                debug!("LPD no local peers found for this torrent");
+            }
+        }
+
         if peer_addrs.is_empty() {
             tracing::error!("[BT] ERROR: No peers from tracker");
         }
@@ -341,49 +391,9 @@ impl BtDownloadCommand {
         if self.is_private {
             info!("[BT] Private torrent: public trackers disabled (BEP 0027)");
         }
-        // P2: Integrate LPD-discovered LAN peers
-        // BEP 0027 (Private Torrent): LPD (Local Peer Discovery) uses UDP
-        // multicast which would leak the info_hash to the local network, so it
-        // must be disabled for private torrents.
-        if self.is_private {
-            if self.lpd_manager.is_some() {
-                info!("[BT] Private torrent: LPD disabled (BEP 0027)");
-            }
-        } else if let Some(ref lpd) = self.lpd_manager {
-            // Convert raw 20-byte info_hash to 40-char hex string for LPD
-            let info_hash_hex = hex::encode(*info_hash_raw);
-            let lpd_peers = lpd.get_peers_for(&info_hash_hex).await;
-            if !lpd_peers.is_empty() {
-                let before = peer_addrs.len();
-                for lpd_peer in &lpd_peers {
-                    let ip_str = lpd_peer.addr.to_string();
-                    let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                        &ip_str,
-                        lpd_peer.port,
-                    );
-                    if !self.is_peer_temporarily_rejected(&paddr.ip)
-                        && !peer_addrs
-                            .iter()
-                            .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                    {
-                        peer_addrs.push(paddr);
-                    }
-                }
-
-                info!(
-                    lpd_count = lpd_peers.len(),
-                    total_added = peer_addrs.len() - before,
-                    "LPD discovered local peers"
-                );
-
-                // Register current download for LPD announcement.
-                // Pass private_torrent from TorrentAttribute (BEP 0027):
-                // private torrents must NOT be announced via LPD.
-                let is_private = self.is_private;
-                let _ = lpd.register_torrent(&info_hash_hex, is_private).await;
-            } else {
-                debug!("LPD no local peers found for this torrent");
-            }
+        // BEP 0027: private torrents never enter the LPD branch above.
+        if self.is_private && self.lpd_manager.is_some() {
+            info!("[BT] Private torrent: LPD disabled (BEP 0027)");
         }
 
         Ok(peer_addrs)
@@ -492,6 +502,7 @@ impl BtDownloadCommand {
             piece_length,
             total_size,
             &connection_options,
+            self.utp_socket.clone(),
         )
         .await
         {
@@ -716,6 +727,44 @@ mod tests {
         download_speed_is_below_peer_request_limit, effective_peer_speed_threshold,
         prepare_tracker_tiers,
     };
+    use crate::engine::bt_download_command::BtDownloadCommand;
+    use crate::engine::bt_download_command_tests::build_test_torrent;
+    use crate::engine::lpd_manager::LpdManager;
+    use crate::request::request_group::{DownloadOptions, GroupId};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn lpd_registers_public_torrent_before_empty_peer_results() {
+        let torrent = build_test_torrent();
+        let meta =
+            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent).unwrap();
+        let options = DownloadOptions {
+            bt_enable_lpd: true,
+            enable_dht: false,
+            enable_public_trackers: false,
+            bt_exclude_tracker: Some(vec!["*".to_string()]),
+            ..DownloadOptions::default()
+        };
+        let mut command = BtDownloadCommand::new(GroupId::new(7001), &torrent, &options, None)
+            .expect("test torrent should construct");
+        let manager = Arc::new(LpdManager::new());
+        command.set_lpd_manager(Arc::clone(&manager));
+
+        let peers = command
+            .discover_peers(&meta, meta.total_size(), &meta.info_hash.bytes)
+            .await
+            .expect("discovery without network trackers should succeed");
+
+        assert!(peers.is_empty());
+        assert!(
+            manager
+                .active_hashes
+                .read()
+                .await
+                .contains(&meta.info_hash.as_hex()),
+            "LPD must register a public torrent even when no peer is discovered"
+        );
+    }
 
     #[test]
     fn tracker_exclusions_and_user_trackers_follow_announce_policy() {

@@ -60,6 +60,9 @@ pub struct DownloadEngine {
     /// Process-wide BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    /// Process-wide Local Peer Discovery manager and receive loop.
+    #[cfg(feature = "bittorrent")]
+    pub(crate) lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -106,6 +109,8 @@ impl DownloadEngine {
             public_tracker_catalog: Arc::new(PublicTrackerList::new()),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
@@ -238,6 +243,18 @@ impl DownloadEngine {
         self.public_tracker_catalog.set_config_now(config);
     }
 
+    /// Configure the process-wide Local Peer Discovery manager before `run()`.
+    #[cfg(feature = "bittorrent")]
+    pub fn set_lpd_manager(&mut self, manager: Arc<crate::engine::lpd_manager::LpdManager>) {
+        self.lpd_manager = manager;
+    }
+
+    /// Get the process-wide Local Peer Discovery manager.
+    #[cfg(feature = "bittorrent")]
+    pub fn lpd_manager(&self) -> &Arc<crate::engine::lpd_manager::LpdManager> {
+        &self.lpd_manager
+    }
+
     /// Get the shared public tracker catalog.
     #[cfg(feature = "bittorrent")]
     pub fn public_tracker_catalog(&self) -> &Arc<PublicTrackerList> {
@@ -305,6 +322,18 @@ mod tests {
         assert!(reg.is_empty(), "new engine should have empty BtRegistry");
         assert_eq!(reg.tcp_port(), 0);
         assert_eq!(reg.udp_port(), 0);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn test_lpd_manager_is_injected_at_engine_construction() {
+        let manager = Arc::new(crate::engine::lpd_manager::LpdManager::new());
+        let engine = DownloadEngine::with_lpd_manager(100, Arc::clone(&manager));
+
+        assert!(
+            Arc::ptr_eq(engine.lpd_manager(), &manager),
+            "engine must retain the one configured LPD manager supplied by the application"
+        );
     }
 
     #[cfg(feature = "bittorrent")]

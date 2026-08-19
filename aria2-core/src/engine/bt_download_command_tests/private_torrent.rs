@@ -23,6 +23,22 @@ fn test_non_private_torrent_is_private_flag_false() {
 }
 
 #[test]
+fn test_public_torrent_waits_for_engine_owned_lpd_manager() {
+    let torrent = build_test_torrent();
+    let options = DownloadOptions {
+        bt_enable_lpd: true,
+        ..Default::default()
+    };
+    let command = BtDownloadCommand::new(GroupId::new(2), &torrent, &options, None)
+        .expect("public torrent should construct");
+
+    assert!(
+        command.get_lpd_manager().is_none(),
+        "BT construction must not create a second process-level LPD manager"
+    );
+}
+
+#[test]
 fn test_private_torrent_dht_engine_not_started() {
     let cmd = create_private_test_command();
     // DHT engine is never initialized for private torrents. Even though it

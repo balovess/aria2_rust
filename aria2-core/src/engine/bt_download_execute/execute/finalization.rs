@@ -76,6 +76,12 @@ impl BtDownloadCommand {
             checkpoint.remove().await?;
         }
 
+        if let (Some(manager), Some(info_hash)) =
+            (&self.lpd_manager, self.lpd_registered_info_hash.take())
+        {
+            manager.unregister_torrent(&info_hash).await;
+        }
+
         if let Some(ref hooks) = self.hook_manager {
             let context = HookContext {
                 gid: self.group.recover().gid(),

@@ -38,10 +38,12 @@ pub use types::{
 // BtPeerInteraction — legacy static helper (preserved for backward compat)
 // ======================================================================
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use aria2_protocol::bittorrent::message::types::BtMessage;
 use futures::stream::{self, StreamExt};
+use tokio::sync::Mutex;
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -83,6 +85,7 @@ impl BtPeerInteraction {
         piece_length: u32,
         total_length: u64,
         connection_options: &BtPeerConnectionOptions,
+        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
@@ -99,6 +102,7 @@ impl BtPeerInteraction {
                 num_pieces,
                 piece_length,
                 total_length,
+                utp_socket.clone(),
             )
             .await
             {
@@ -135,8 +139,15 @@ impl BtPeerInteraction {
         num_pieces: u32,
         piece_length: u32,
         total_length: u64,
+        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     ) -> Result<BtPeerConn> {
-        let mut conn = Self::connect_single_peer(addr, info_hash_raw, connection_options).await?;
+        let mut conn = Self::connect_single_peer(
+            addr,
+            info_hash_raw,
+            connection_options,
+            utp_socket,
+        )
+        .await?;
         conn.set_timeouts(
             connection_options.keep_alive_interval,
             connection_options.peer_timeout,
@@ -163,7 +174,40 @@ impl BtPeerInteraction {
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
         connection_options: &BtPeerConnectionOptions,
+        utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     ) -> Result<BtPeerConn> {
+        if connection_options.enable_utp && !connection_options.crypto.require_mse {
+            let endpoint = format!("{}:{}", addr.ip, addr.port)
+                .parse::<std::net::SocketAddr>()
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Invalid peer address '{}:{}': {error}",
+                        addr.ip, addr.port
+                    )))
+                })?;
+            match BtPeerConn::connect_utp_with_options(
+                endpoint,
+                info_hash_raw,
+                &connection_options.local_peer_id,
+                connection_options.connection_timeout,
+                connection_options.utp_listen_port,
+                utp_socket,
+            )
+            .await
+            {
+                Ok(conn) => {
+                    debug!("[BT] Connected to peer {}:{} over uTP", addr.ip, addr.port);
+                    return Ok(conn);
+                }
+                Err(error) => {
+                    debug!(
+                        "[BT] uTP connection to {}:{} failed, trying TCP: {}",
+                        addr.ip, addr.port, error
+                    );
+                }
+            }
+        }
+
         if connection_options.crypto.require_mse {
             // Try MSE encrypted connection
             BtPeerConn::connect_mse_with_options(

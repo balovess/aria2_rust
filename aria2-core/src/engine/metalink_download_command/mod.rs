@@ -58,6 +58,8 @@ pub struct MetalinkDownloadCommand {
     pub(crate) bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>>,
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) lpd_manager: Option<Arc<crate::engine::lpd_manager::LpdManager>>,
 }
 
 impl MetalinkDownloadCommand {
@@ -162,6 +164,8 @@ impl MetalinkDownloadCommand {
             bt_registry: None,
             #[cfg(feature = "bittorrent")]
             bt_listener: None,
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: None,
         })
     }
 
@@ -304,6 +308,8 @@ impl MetalinkDownloadCommand {
                     bt_registry: None,
                     #[cfg(feature = "bittorrent")]
                     bt_listener: None,
+                    #[cfg(feature = "bittorrent")]
+                    lpd_manager: None,
                 },
                 file_index: i,
             });
@@ -414,6 +420,8 @@ impl MetalinkDownloadCommand {
                 bt_registry: None,
                 #[cfg(feature = "bittorrent")]
                 bt_listener: None,
+                #[cfg(feature = "bittorrent")]
+                lpd_manager: None,
             },
             file_index: 0,
         }])
@@ -531,6 +539,8 @@ impl MetalinkDownloadCommand {
             bt_registry: None,
             #[cfg(feature = "bittorrent")]
             bt_listener: None,
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: None,
         })
     }
 
@@ -596,6 +606,8 @@ impl MetalinkDownloadCommand {
             bt_registry: None,
             #[cfg(feature = "bittorrent")]
             bt_listener: None,
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: None,
         })
     }
 
@@ -634,6 +646,11 @@ impl MetalinkDownloadCommand {
         listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
     ) {
         self.bt_listener = Some(listener);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_lpd_manager(&mut self, manager: Arc<crate::engine::lpd_manager::LpdManager>) {
+        self.lpd_manager = Some(manager);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {

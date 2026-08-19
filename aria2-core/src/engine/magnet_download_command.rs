@@ -29,6 +29,8 @@ pub struct MagnetDownloadCommand {
     bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     #[cfg(feature = "bittorrent")]
     bt_registry: Option<Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>>,
+    #[cfg(feature = "bittorrent")]
+    lpd_manager: Option<Arc<crate::engine::lpd_manager::LpdManager>>,
 }
 
 impl MagnetDownloadCommand {
@@ -113,6 +115,8 @@ impl MagnetDownloadCommand {
             bt_listener: None,
             #[cfg(feature = "bittorrent")]
             bt_registry: None,
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: None,
         })
     }
 
@@ -138,6 +142,11 @@ impl MagnetDownloadCommand {
         registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
     ) {
         self.bt_registry = Some(registry);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_lpd_manager(&mut self, manager: Arc<crate::engine::lpd_manager::LpdManager>) {
+        self.lpd_manager = Some(manager);
     }
 
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
@@ -406,6 +415,9 @@ impl Command for MagnetDownloadCommand {
         }
         if let Some(registry) = self.bt_registry.clone() {
             bt_cmd.set_bt_registry(registry);
+        }
+        if let Some(manager) = self.lpd_manager.clone() {
+            bt_cmd.set_lpd_manager(manager);
         }
 
         bt_cmd.execute().await?;

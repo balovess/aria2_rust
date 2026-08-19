@@ -126,6 +126,10 @@ pub struct EngineLoopContext {
     /// Process-level BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
     pub bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+
+    /// Process-level Local Peer Discovery manager and receive loop.
+    #[cfg(feature = "bittorrent")]
+    pub lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.
@@ -410,6 +414,8 @@ fn promote_reserved_groups(
                 bt_registry: Arc::clone(&ctx.bt_registry),
                 #[cfg(feature = "bittorrent")]
                 bt_listener: Arc::clone(&ctx.bt_listener),
+                #[cfg(feature = "bittorrent")]
+                lpd_manager: Arc::clone(&ctx.lpd_manager),
             },
             generation,
             completion_tx.clone(),
@@ -1229,6 +1235,12 @@ async fn on_end_of_run(
         );
     }
 
+    #[cfg(feature = "bittorrent")]
+    {
+        ctx.lpd_manager.stop_background_announce();
+        ctx.lpd_manager.stop_receive_loop().await;
+    }
+
     // Final control-file and session saves.
     if let Some(ref auto_save) = ctx.auto_save {
         let mut save = auto_save.lock().await;
@@ -1265,6 +1277,8 @@ mod tests {
             )),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
         }
     }
 
@@ -1463,6 +1477,8 @@ mod tests {
             )),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
         };
 
         // Send an AddDownload command through the engine-command channel.

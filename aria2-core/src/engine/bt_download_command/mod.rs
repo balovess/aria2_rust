@@ -163,6 +163,8 @@ pub struct BtDownloadCommand {
     pub(crate) progress_save_interval: Duration,
     /// LPD LAN peer discovery manager
     pub(crate) lpd_manager: Option<Arc<LpdManager>>,
+    /// Info-hash registered in the shared LPD manager for this command.
+    pub(crate) lpd_registered_info_hash: Option<String>,
     /// Post-download handler manager
     pub(crate) hook_manager: Option<Arc<crate::engine::hook_manager::HookManager>>,
 
@@ -246,6 +248,8 @@ pub struct BtDownloadCommand {
     /// Receiver for incoming peers routed by the engine-owned listener.
     pub(crate) incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
+    /// Shared uTP socket for outbound peers in this download task.
+    pub(crate) utp_socket: Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     /// Process-level listener shared by all BitTorrent downloads.
     pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     /// RAII registration for this torrent's info-hash route.
@@ -274,6 +278,11 @@ impl BtDownloadCommand {
     /// command lifecycle should await this method before aborting or dropping
     /// the task so tracker stopped announcements are not lost.
     pub async fn shutdown(&mut self) {
+        if let (Some(manager), Some(info_hash)) =
+            (&self.lpd_manager, self.lpd_registered_info_hash.take())
+        {
+            manager.unregister_torrent(&info_hash).await;
+        }
         if let Ok(meta) =
             aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
             && let Some(ref mut announcer) = self.tracker_announcer

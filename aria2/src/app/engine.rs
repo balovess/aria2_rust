@@ -55,6 +55,43 @@ impl App {
                 sources,
                 update_interval,
             });
+
+            let lpd_port = config
+                .get_global_i64("lpd-listen-port")
+                .await
+                .and_then(|port| u16::try_from(port).ok())
+                .unwrap_or(aria2_core::constants::LPD_PORT);
+            let lpd_interface = config
+                .get_global_option("bt-lpd-interface")
+                .await
+                .and_then(|value| match value {
+                    aria2_core::config::OptionValue::Str(value) if !value.trim().is_empty() => {
+                        match value.parse::<std::net::Ipv4Addr>() {
+                            Ok(interface) => Some(Some(interface)),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    value = %value,
+                                    "Ignoring invalid bt-lpd-interface"
+                                );
+                                Some(None)
+                            }
+                        }
+                    }
+                    _ => Some(None),
+                })
+                .flatten();
+            match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
+                aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
+                lpd_interface,
+                lpd_port,
+            ) {
+                Ok(manager) => engine.set_lpd_manager(Arc::new(manager)),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "Using default LPD manager because configured LPD setup failed"
+                ),
+            }
         }
 
         let save_session_path = self

@@ -60,15 +60,16 @@ impl ConfigParser {
     }
 
     pub fn set(&mut self, name: impl Into<String>, value: OptionValue) {
-        let key = name.into();
-        if let Some(def) = self.registry.get(key.as_str()) {
+        let original_key = name.into();
+        let key = OptionRegistry::canonical_name(&original_key).to_string();
+        if let Some(def) = self.registry.get(&key) {
             match def.parse_value(&value.to_string()) {
                 Ok(v) => {
                     self.options.insert(key, v);
                 }
                 Err(e) => self.errors.push(ConfigError {
                     source: ConfigSource::CommandLine,
-                    option: key.clone(),
+                    option: original_key,
                     message: e,
                 }),
             }
@@ -87,9 +88,10 @@ impl ConfigParser {
         value: impl Into<String>,
         source: ConfigSource,
     ) {
-        let key = name.into();
+        let original_key = name.into();
+        let key = OptionRegistry::canonical_name(&original_key).to_string();
         let val_str = value.into();
-        if let Some(def) = self.registry.get(key.as_str()) {
+        if let Some(def) = self.registry.get(&key) {
             // Check if this option supports cumulative (appending) values
             if def.cumulative_delimiter.is_some() && self.options.contains_key(&key) {
                 match def.parse_value(&val_str) {
@@ -119,7 +121,7 @@ impl ConfigParser {
                     }
                     Err(e) => self.errors.push(ConfigError {
                         source: source.clone(),
-                        option: key.clone(),
+                        option: original_key.clone(),
                         message: e,
                     }),
                 }
@@ -127,33 +129,33 @@ impl ConfigParser {
                 match def.parse_value(&val_str) {
                     Ok(v) => {
                         self.options.insert(key, v);
-                    }
-                    Err(e) => self.errors.push(ConfigError {
-                        source: source.clone(),
-                        option: key.clone(),
-                        message: e,
-                    }),
+                }
+                Err(e) => self.errors.push(ConfigError {
+                    source: source.clone(),
+                    option: original_key.clone(),
+                    message: e,
+                }),
                 }
             }
         } else {
-            self.options.insert(key, OptionValue::Str(val_str));
+            self.options.insert(original_key, OptionValue::Str(val_str));
         }
     }
 
     pub fn get(&self, name: &str) -> Option<&OptionValue> {
-        self.options.get(name)
+        self.options.get(OptionRegistry::canonical_name(name))
     }
     pub fn get_str(&self, name: &str) -> Option<&str> {
-        self.options.get(name).and_then(|v| v.as_str())
+        self.get(name).and_then(|v| v.as_str())
     }
     pub fn get_i64(&self, name: &str) -> Option<i64> {
-        self.options.get(name).and_then(|v| v.as_i64())
+        self.get(name).and_then(|v| v.as_i64())
     }
     pub fn get_bool(&self, name: &str) -> Option<bool> {
-        self.options.get(name).and_then(|v| v.as_bool())
+        self.get(name).and_then(|v| v.as_bool())
     }
     pub fn contains(&self, name: &str) -> bool {
-        self.options.contains_key(name)
+        self.options.contains_key(OptionRegistry::canonical_name(name))
     }
 
     pub fn parse_cli_args(&mut self, args: &[&str]) {

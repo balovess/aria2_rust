@@ -52,8 +52,8 @@ impl crate::config::OptionRegistry {
             opt_type: OptionType::Integer,
             short_name: Some('j'),
             default_value: OptionValue::Int(5),
-            min: Some(1),
-            description: "Max concurrent downloads".into(),
+            min: Some(0),
+            description: "Max concurrent downloads (0=unlimited)".into(),
             category: OptionCategory::Advanced,
             ..Default::default()
         });

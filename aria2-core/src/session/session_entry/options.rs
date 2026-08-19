@@ -21,6 +21,9 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(v) = opts.split {
         map.insert("split".to_string(), v.to_string());
     }
+    if opts.force_sequential {
+        map.insert("force-sequential".to_string(), "true".to_string());
+    }
     if let Some(v) = opts.max_connection_per_server {
         map.insert("max-connection-per-server".to_string(), v.to_string());
     }

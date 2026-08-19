@@ -15,6 +15,7 @@ pub(crate) struct ClientTlsConfig {
     ca_certificate: Option<String>,
     certificate: Option<String>,
     private_key: Option<String>,
+    min_tls_version: Option<String>,
 }
 
 impl Default for ClientTlsConfig {
@@ -24,6 +25,7 @@ impl Default for ClientTlsConfig {
             ca_certificate: None,
             certificate: None,
             private_key: None,
+            min_tls_version: None,
         }
     }
 }
@@ -35,6 +37,7 @@ impl ClientTlsConfig {
             ca_certificate: options.ca_certificate.clone(),
             certificate: options.certificate.clone(),
             private_key: options.private_key.clone(),
+            min_tls_version: options.min_tls_version.clone(),
         }
     }
 
@@ -43,6 +46,21 @@ impl ClientTlsConfig {
             || self.ca_certificate.is_some()
             || self.certificate.is_some()
             || self.private_key.is_some()
+            || self.min_tls_version.is_some()
+    }
+
+    fn minimum_version(&self) -> Result<Option<reqwest::tls::Version>> {
+        self.min_tls_version
+            .as_deref()
+            .map(|version| match version {
+                "TLSv1.1" => Ok(reqwest::tls::Version::TLS_1_1),
+                "TLSv1.2" => Ok(reqwest::tls::Version::TLS_1_2),
+                "TLSv1.3" => Ok(reqwest::tls::Version::TLS_1_3),
+                _ => Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                    format!("Unsupported minimum TLS version '{version}'"),
+                ))),
+            })
+            .transpose()
     }
 }
 
@@ -55,6 +73,11 @@ pub(crate) fn apply(
     builder: reqwest::ClientBuilder,
     config: &ClientTlsConfig,
 ) -> Result<reqwest::ClientBuilder> {
+    let builder = if let Some(version) = config.minimum_version()? {
+        builder.tls_version_min(version)
+    } else {
+        builder
+    };
     let builder = if config.check_certificate {
         builder
     } else {
@@ -501,6 +524,7 @@ mod tests {
     const TEST_ROOT_PEM: &str = include_str!("testdata/rustls_root.pem");
     const TEST_CHAIN_PEM: &str = include_str!("testdata/rustls_chain.pem");
     const TEST_PRIVATE_KEY_PEM: &str = include_str!("testdata/rustls_end.key");
+    const TLS12_ONLY: &[&rustls::SupportedProtocolVersion] = &[&rustls::version::TLS12];
 
     struct HttpsFixture {
         address: SocketAddr,
@@ -531,7 +555,10 @@ mod tests {
             .expect("test private key should exist")
     }
 
-    fn test_server_config(require_client_auth: bool) -> rustls::ServerConfig {
+    fn test_server_config_with_versions(
+        require_client_auth: bool,
+        versions: &'static [&'static rustls::SupportedProtocolVersion],
+    ) -> rustls::ServerConfig {
         let certificates = pem_certificates(TEST_CHAIN_PEM);
         let private_key = pem_private_key(TEST_PRIVATE_KEY_PEM);
 
@@ -546,12 +573,12 @@ mod tests {
                 .build()
                 .expect("test client verifier should build");
 
-            rustls::ServerConfig::builder()
+            rustls::ServerConfig::builder_with_protocol_versions(versions)
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(certificates, private_key)
                 .expect("test server certificate should match its key")
         } else {
-            rustls::ServerConfig::builder()
+            rustls::ServerConfig::builder_with_protocol_versions(versions)
                 .with_no_client_auth()
                 .with_single_cert(certificates, private_key)
                 .expect("test server certificate should match its key")
@@ -559,6 +586,13 @@ mod tests {
     }
 
     async fn start_https_fixture(require_client_auth: bool) -> HttpsFixture {
+        start_https_fixture_with_versions(require_client_auth, rustls::ALL_VERSIONS).await
+    }
+
+    async fn start_https_fixture_with_versions(
+        require_client_auth: bool,
+        versions: &'static [&'static rustls::SupportedProtocolVersion],
+    ) -> HttpsFixture {
         crate::http::client_pool::ensure_rustls_provider();
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -566,7 +600,10 @@ mod tests {
         let address = listener
             .local_addr()
             .expect("test listener should have an address");
-        let acceptor = TlsAcceptor::from(Arc::new(test_server_config(require_client_auth)));
+        let acceptor = TlsAcceptor::from(Arc::new(test_server_config_with_versions(
+            require_client_auth,
+            versions,
+        )));
 
         let task = tokio::spawn(async move {
             let Ok((stream, _)) = listener.accept().await else {
@@ -618,6 +655,26 @@ mod tests {
             }
             .requires_custom_client()
         );
+        assert!(
+            ClientTlsConfig {
+                min_tls_version: Some("TLSv1.3".into()),
+                ..ClientTlsConfig::default()
+            }
+            .requires_custom_client()
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_minimum_tls_version() {
+        let error = apply(
+            reqwest::Client::builder(),
+            &ClientTlsConfig {
+                min_tls_version: Some("TLSv9".into()),
+                ..ClientTlsConfig::default()
+            },
+        )
+        .expect_err("unknown minimum TLS versions must be rejected");
+        assert!(error.to_string().contains("Unsupported minimum TLS version"));
     }
 
     #[test]
@@ -850,6 +907,27 @@ mod tests {
             response.bytes().await.expect("read HTTPS response"),
             Bytes::from_static(b"tls-ok")
         );
+    }
+
+    #[tokio::test]
+    async fn minimum_tls_version_rejects_an_older_live_server_protocol() {
+        let fixture =
+            start_https_fixture_with_versions(false, TLS12_ONLY).await;
+        let config = ClientTlsConfig {
+            min_tls_version: Some("TLSv1.3".into()),
+            ..ClientTlsConfig::default()
+        };
+        let client = apply(test_client_builder(fixture.address), &config)
+            .expect("minimum TLS version should configure the client")
+            .build()
+            .expect("minimum TLS version client should build");
+
+        let error = client
+            .get(fixture.url())
+            .send()
+            .await
+            .expect_err("TLS 1.3 minimum must reject a TLS 1.2-only server");
+        let _ = error;
     }
 
     #[tokio::test]

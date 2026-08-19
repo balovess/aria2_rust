@@ -1,4 +1,4 @@
-use crate::config::OptionValue;
+use crate::config::{OptionRegistry, OptionValue};
 use url::Url;
 
 /// How a metadata file should be handled after it is downloaded.
@@ -72,6 +72,9 @@ fn parse_list_option(
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub split: Option<u16>,
+    /// Force the HTTP downloader to use one sequential request even when the
+    /// server supports ranges and `split` is greater than one.
+    pub force_sequential: bool,
     pub max_connection_per_server: Option<u16>,
     pub max_download_limit: Option<u64>,
     pub max_upload_limit: Option<u64>,
@@ -269,6 +272,8 @@ pub struct DownloadOptions {
     /// UDP port for uTP connections. 0 = auto-assign.
     /// Experimental feature not in original aria2.
     pub utp_listen_port: Option<u16>,
+    /// UDP multicast port used by Local Peer Discovery.
+    pub lpd_listen_port: Option<u16>,
 
     // ------------------------------------------------------------------
     // HTTP headers (C++ aria2 `--header` / RPC `header` option)
@@ -505,6 +510,7 @@ impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
             split: None,
+            force_sequential: false,
             max_connection_per_server: None,
             max_download_limit: None,
             max_upload_limit: None,
@@ -599,6 +605,7 @@ impl Default for DownloadOptions {
             bt_detach_seed_only: false,
             enable_utp: false,
             utp_listen_port: None,
+            lpd_listen_port: None,
             header: Vec::new(),
             user_agent: None,
             referer: None,
@@ -764,7 +771,7 @@ impl DownloadOptions {
                 .map_err(|error| format!("Option '{}': {}", key, error))?;
             let value = option_value_to_string(value)
                 .ok_or_else(|| format!("Option '{}' must be a string", key))?;
-            string_options.insert(key.clone(), value);
+            string_options.insert(OptionRegistry::canonical_name(key).to_string(), value);
         }
         Ok(Self::from_option_strings(&string_options))
     }
@@ -777,6 +784,15 @@ impl DownloadOptions {
     /// values fall back to the type's default, while validation of user-facing
     /// configuration remains the responsibility of `ConfigManager`.
     pub fn from_option_strings(options: &std::collections::HashMap<String, String>) -> Self {
+        let mut canonical_options = std::collections::HashMap::with_capacity(options.len());
+        for (key, value) in options {
+            let canonical_key = OptionRegistry::canonical_name(key).to_string();
+            if key == &canonical_key || !canonical_options.contains_key(&canonical_key) {
+                canonical_options.insert(canonical_key, value.clone());
+            }
+        }
+        let options = &canonical_options;
+
         let positive_u16 = |key: &str| {
             options
                 .get(key)
@@ -798,6 +814,10 @@ impl DownloadOptions {
 
         Self {
             split: positive_u16("split"),
+            force_sequential: options
+                .get("force-sequential")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             max_connection_per_server: positive_u16("max-connection-per-server"),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
@@ -1027,8 +1047,7 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
             max_retries: options
-                .get("max-retries")
-                .or_else(|| options.get("max-tries"))
+                .get("max-tries")
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
             retry_wait: options
@@ -1071,6 +1090,7 @@ impl DownloadOptions {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             utp_listen_port: positive_u16("utp-listen-port"),
+            lpd_listen_port: positive_u16("lpd-listen-port"),
             header: parse_list_option(options, "header").unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),

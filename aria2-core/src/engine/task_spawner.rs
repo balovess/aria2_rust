@@ -30,6 +30,8 @@ pub(crate) struct CommandDependencies {
     pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    #[cfg(feature = "bittorrent")]
+    pub(crate) lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
 }
 
 /// Spawns a download command as a tokio task and wires up the completion
@@ -92,6 +94,9 @@ pub(crate) fn spawn_download_task(
                         // execute future here would bypass writer flushing and
                         // protocol-specific checkpoints.
                         let result = cmd.execute().await;
+                        if result.is_err() {
+                            cmd.shutdown().await;
+                        }
                         (result, cmd.connection_context())
                     }
                     Err(error) => (Err(error), None),
@@ -192,6 +197,7 @@ async fn create_command_for_group(
         {
             command.set_bt_registry(Arc::clone(&dependencies.bt_registry));
             command.set_bt_listener(Arc::clone(&dependencies.bt_listener));
+            command.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
         }
         return Ok(Box::new(command));
     }
@@ -257,6 +263,7 @@ async fn create_command_for_uri(
         )?;
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
+        cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
@@ -274,6 +281,7 @@ async fn create_command_for_uri(
             )?;
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
+        cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }

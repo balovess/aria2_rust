@@ -164,10 +164,7 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert!(options.enable_dht6);
     assert_eq!(options.dht_listen_addr.as_deref(), Some("127.0.0.1"));
     assert_eq!(options.dht_listen_addr6.as_deref(), Some("::1"));
-    assert_eq!(
-        options.dht_entry_point_host.as_deref(),
-        Some("127.0.0.1")
-    );
+    assert_eq!(options.dht_entry_point_host.as_deref(), Some("127.0.0.1"));
     assert_eq!(options.dht_entry_point_port, Some(6881));
     assert_eq!(options.dht_entry_point6.as_deref(), Some("[::1]:6882"));
     assert_eq!(options.dht_entry_point_host6.as_deref(), Some("::1"));
@@ -209,11 +206,9 @@ fn every_registered_option_has_one_cli_argument() {
 fn cli_contract_value(definition: &aria2_core::config::OptionDef) -> String {
     match definition.opt_type() {
         OptionType::Boolean => "true".to_string(),
-        OptionType::Integer | OptionType::IntegerRange => definition
-            .min
-            .unwrap_or(1)
-            .max(0)
-            .to_string(),
+        OptionType::Integer | OptionType::IntegerRange => {
+            definition.min.unwrap_or(1).max(0).to_string()
+        }
         OptionType::Float => "1.5".to_string(),
         OptionType::List => "first,second".to_string(),
         OptionType::Enum => definition
@@ -231,11 +226,7 @@ fn cli_contract_value(definition: &aria2_core::config::OptionDef) -> String {
                 "contract-consumer-value".to_string()
             }
         }
-        OptionType::Size => definition
-            .min
-            .unwrap_or(1)
-            .max(1)
-            .to_string(),
+        OptionType::Size => definition.min.unwrap_or(1).max(1).to_string(),
     }
 }
 
@@ -246,6 +237,30 @@ async fn every_registered_option_reaches_config_manager_from_cli() {
 
     for definition in registry.all().values() {
         if process_only.contains(&definition.name()) {
+            continue;
+        }
+
+        if !definition.is_supported() {
+            let raw = cli_contract_value(definition);
+            let argument = format!("--{}={raw}", definition.name());
+            let cli = CliArgs::try_parse_from(["aria2", argument.as_str()]).unwrap_or_else(|error| {
+                panic!(
+                    "registered option '{}' must remain addressable through the real CLI: {}",
+                    definition.name(),
+                    error
+                )
+            });
+            let mut app = App::new();
+            let error = app
+                .load_cli_args(cli)
+                .await
+                .expect_err("unsupported options must be rejected by the CLI adapter");
+            assert!(
+                error.contains(definition.name()),
+                "unsupported option '{}' error must identify the option: {}",
+                definition.name(),
+                error
+            );
             continue;
         }
 
@@ -279,7 +294,9 @@ async fn every_registered_option_reaches_config_manager_from_cli() {
             .await
             .get_global_option(definition.name())
             .await;
-        let expected = definition.parse_value(&raw).expect("validated contract value");
+        let expected = definition
+            .parse_value(&raw)
+            .expect("validated contract value");
         assert_eq!(
             actual,
             Some(expected),

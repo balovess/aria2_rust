@@ -33,6 +33,8 @@ pub struct BtPeerConnectionOptions {
     pub peer_timeout: Duration,
     pub local_peer_id: [u8; 20],
     pub peer_agent: String,
+    pub enable_utp: bool,
+    pub utp_listen_port: Option<u16>,
 }
 
 impl BtPeerConnectionOptions {
@@ -49,6 +51,8 @@ impl BtPeerConnectionOptions {
             peer_timeout: Duration::from_secs(options.bt_timeout),
             local_peer_id,
             peer_agent: options.peer_agent.clone(),
+            enable_utp: options.enable_utp,
+            utp_listen_port: options.utp_listen_port,
         }
     }
 }

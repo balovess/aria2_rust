@@ -167,7 +167,7 @@ impl RequestGroupMan {
             group.recover().mark_in_memory_download();
         }
         if !self.register_group(Arc::clone(&group)) {
-            warn!(gid = gid.value(), "Ignoring duplicate request group");
+            debug!(gid = gid.value(), "Request group is already registered");
             return;
         }
         self.next_gid

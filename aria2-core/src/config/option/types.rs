@@ -117,6 +117,27 @@ pub enum OptionCategory {
     Advanced,
 }
 
+/// Production component that owns an option's behavior.
+///
+/// The registry is the only source of this metadata.  An option may be
+/// accepted by several adapters, but its behavior is owned by exactly one
+/// component so adapters cannot grow independent shadow state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OptionOwner {
+    /// Internal construction state used only while a definition is being
+    /// assembled.  Built-in registration replaces this value before storing
+    /// the definition.
+    Unassigned,
+    /// Per-download typed options and protocol execution.
+    DownloadTask,
+    /// Process-wide engine, scheduler, persistence, or network setup.
+    ProcessEngine,
+    /// RPC listener and RPC-specific behavior.
+    RpcServer,
+    /// CLI input, session, logging, and terminal/UI behavior.
+    Application,
+}
+
 impl fmt::Display for OptionCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -310,6 +331,15 @@ pub struct OptionDef {
     pub default_value: OptionValue,
     pub description: String,
     pub category: OptionCategory,
+    /// Whether this option has a real runtime consumer in this build.
+    ///
+    /// Unsupported compatibility names stay in the registry so adapters can
+    /// report a precise error, but they must never be silently stored or have
+    /// a default injected into runtime state.
+    pub supported: bool,
+    /// Unique production owner. Built-in definitions receive this value from
+    /// the registry's explicit canonical-name mapping.
+    pub owner: OptionOwner,
     pub min: Option<i64>,
     pub max: Option<u64>,
     /// Exact wire values accepted for `OptionType::Enum`.
@@ -347,6 +377,8 @@ impl Default for OptionDef {
             default_value: OptionValue::None,
             description: String::new(),
             category: OptionCategory::General,
+            supported: true,
+            owner: OptionOwner::Unassigned,
             min: None,
             max: None,
             allowed_values: &[],
@@ -383,6 +415,14 @@ impl OptionDef {
     pub fn get_category(&self) -> OptionCategory {
         self.category
     }
+
+    pub fn is_supported(&self) -> bool {
+        self.supported
+    }
+
+    pub fn owner(&self) -> OptionOwner {
+        self.owner
+    }
     pub fn is_deprecated(&self) -> bool {
         self.deprecated
     }
@@ -406,7 +446,8 @@ impl OptionDef {
     /// parsing. Defaults are injected by the configuration loader as a
     /// separate phase, matching aria2's `parseDefaultValues` behavior.
     pub fn parse_default_value(&self) -> Option<OptionValue> {
-        (!matches!(self.default_value, OptionValue::None)).then(|| self.default_value.clone())
+        (self.supported && !matches!(self.default_value, OptionValue::None))
+            .then(|| self.default_value.clone())
     }
 
     /// Parse one explicitly supplied wire value.
@@ -414,6 +455,13 @@ impl OptionDef {
     /// An empty string is still a value. It must not be confused with a
     /// missing value or with the option's configured default.
     pub fn parse_value(&self, s: &str) -> Result<OptionValue, String> {
+        if !self.supported {
+            return Err(format!(
+                "option '{}' is not supported by this runtime",
+                self.name
+            ));
+        }
+
         match self.opt_type {
             OptionType::String | OptionType::Path => {
                 if !self.allow_empty && s.is_empty() {

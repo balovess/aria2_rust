@@ -49,6 +49,8 @@ impl DownloadEngine {
             bt_registry: Arc::clone(&self.bt_registry),
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::clone(&self.bt_listener),
+            #[cfg(feature = "bittorrent")]
+            lpd_manager: Arc::clone(&self.lpd_manager),
         };
 
         #[cfg(feature = "bittorrent")]

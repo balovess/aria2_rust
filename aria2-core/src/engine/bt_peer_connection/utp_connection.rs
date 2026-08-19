@@ -50,12 +50,46 @@ impl UtpPeerConnection {
         }
     }
 
-    /// Connect to a remote peer via uTP.
+    /// Connect to a remote peer via uTP using an automatically selected port.
     pub async fn connect(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
-        let socket = aria2_protocol::bittorrent::utp::UtpSocket::bind_any()
+        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
+        Self::connect_with_options(
+            addr,
+            info_hash,
+            &local_peer_id,
+            std::time::Duration::from_secs(20),
+            None,
+        )
+        .await
+    }
+
+    /// Connect and complete the BitTorrent handshake over uTP.
+    pub async fn connect_with_options(
+        addr: std::net::SocketAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+    ) -> Result<Self> {
+        let socket = match listen_port {
+            Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+            None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
+        }
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
 
         let socket = Arc::new(Mutex::new(socket));
+
+        Self::connect_with_shared_socket(socket, addr, info_hash, local_peer_id, timeout).await
+    }
+
+    /// Connect on a socket shared by all uTP peers in one download task.
+    pub async fn connect_with_shared_socket(
+        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
+        addr: std::net::SocketAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
 
         let conn_id = {
             let mut sock = socket.lock().await;
@@ -63,7 +97,7 @@ impl UtpPeerConnection {
                 .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?
         };
 
-        Ok(Self {
+        let mut connection = Self {
             socket,
             conn_id,
             info_hash: *info_hash,
@@ -71,7 +105,17 @@ impl UtpPeerConnection {
             remote_peer_id: None,
             remote_endpoint: Some(addr),
             recv_buffer: BytesMut::new(),
-        })
+        };
+
+        connection.wait_until_established(timeout).await?;
+        tokio::time::timeout(timeout, connection.perform_handshake(local_peer_id))
+            .await
+            .map_err(|_| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: "uTP BitTorrent handshake timed out".to_string(),
+                })
+            })??;
+        Ok(connection)
     }
 
     /// Return the remote peer ID learned during the handshake.
@@ -91,6 +135,67 @@ impl UtpPeerConnection {
     /// Check if connection is established.
     pub fn is_connected(&self) -> bool {
         self.handshake_complete
+    }
+
+    async fn wait_until_established(&self, timeout: std::time::Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let readiness = {
+                let mut socket = self.socket.lock().await;
+                let mut scratch = [];
+                let _ = socket.recv(self.conn_id, &mut scratch).map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e.to_string(),
+                    })
+                })?;
+                match socket.connection_state(self.conn_id) {
+                    Ok(ConnectionState::Established) => return Ok(()),
+                    Ok(ConnectionState::Closed
+                    | ConnectionState::Closing
+                    | ConnectionState::FinWait
+                    | ConnectionState::TimeWait) => {
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: "uTP connection closed during setup".to_string(),
+                            },
+                        ));
+                    }
+                    Ok(_) => socket.readiness_socket().map_err(|e| {
+                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            message: e.to_string(),
+                        })
+                    })?,
+                    Err(e) => {
+                        return Err(Aria2Error::Recoverable(
+                            RecoverableError::TemporaryNetworkFailure {
+                                message: e.to_string(),
+                            },
+                        ));
+                    }
+                }
+            };
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: "uTP connection setup timed out".to_string(),
+                    },
+                ));
+            }
+            tokio::time::timeout(remaining, readiness.readable())
+                .await
+                .map_err(|_| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: "uTP connection setup timed out".to_string(),
+                    })
+                })?
+                .map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e.to_string(),
+                    })
+                })?;
+        }
     }
 
     /// Receive one available uTP payload without holding the socket lock
@@ -142,12 +247,10 @@ impl UtpPeerConnection {
     }
 
     /// Perform BitTorrent handshake over uTP.
-    pub async fn perform_handshake(&mut self) -> Result<()> {
+    pub async fn perform_handshake(&mut self, local_peer_id: &[u8; 20]) -> Result<()> {
         use aria2_protocol::bittorrent::message::handshake::Handshake;
-        use aria2_protocol::bittorrent::peer::id::generate_peer_id;
 
-        let peer_id = generate_peer_id();
-        let handshake = Handshake::new(&self.info_hash, &peer_id);
+        let handshake = Handshake::new(&self.info_hash, local_peer_id);
         let handshake_bytes = handshake.to_bytes();
 
         {
@@ -159,23 +262,20 @@ impl UtpPeerConnection {
             })?;
         }
 
-        let mut response_buf = vec![0u8; 68];
-        let len = self
-            .recv_available(&mut response_buf)
-            .await?
-            .ok_or_else(|| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "uTP connection closed during handshake".to_string(),
-                })
-            })?;
-
-        if len < 68 {
-            return Err(Aria2Error::Fatal(FatalError::Config(
-                "Handshake response too short".to_string(),
-            )));
+        while self.recv_buffer.len() < 68 {
+            let mut response_buf = vec![0u8; constants::BT_RECEIVE_BUFFER_SIZE];
+            let len = self
+                .recv_available(&mut response_buf)
+                .await?
+                .ok_or_else(|| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: "uTP connection closed during handshake".to_string(),
+                    })
+                })?;
+            self.recv_buffer.extend_from_slice(&response_buf[..len]);
         }
 
-        let response = Handshake::parse(&response_buf[..len])
+        let response = Handshake::parse(&self.recv_buffer.split_to(68))
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))?;
 
         if response.info_hash != self.info_hash {
@@ -302,5 +402,63 @@ mod tests {
             .expect("receiver task should not panic")
             .expect("receiver should succeed");
         assert_eq!(result, Some(vec![0, 0, 0, 1, 0]));
+    }
+
+    #[tokio::test]
+    async fn connect_completes_real_bittorrent_handshake_over_utp() {
+        use aria2_protocol::bittorrent::message::handshake::Handshake;
+
+        let info_hash = [7u8; 20];
+        let local_peer_id = [8u8; 20];
+        let remote_peer_id = [9u8; 20];
+        let client_socket = Arc::new(Mutex::new(
+            UtpSocket::bind("127.0.0.1:0").expect("client uTP socket should bind"),
+        ));
+        let mut server = UtpSocket::bind("127.0.0.1:0").expect("server uTP socket should bind");
+        let server_addr = server.local_addr();
+
+        let server_task = tokio::spawn(async move {
+            let mut request_buffer = Vec::new();
+            loop {
+                let packets = server.poll_recv().expect("server poll should succeed");
+                for (conn_id, data) in packets {
+                    request_buffer.extend_from_slice(&data);
+                    if request_buffer.len() < 68 {
+                        continue;
+                    }
+                    let request = Handshake::parse(&request_buffer)
+                        .expect("client handshake should parse");
+                    assert_eq!(request.info_hash, info_hash);
+                    assert_eq!(request.peer_id, local_peer_id);
+                    assert_eq!(
+                        server.connection_state(conn_id).unwrap(),
+                        ConnectionState::Established
+                    );
+                    let response = Handshake::new(&info_hash, &remote_peer_id).to_bytes();
+                    server
+                        .send(conn_id, &response)
+                        .expect("server should send BitTorrent handshake");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let connection = UtpPeerConnection::connect_with_shared_socket(
+            client_socket,
+            server_addr,
+            &info_hash,
+            &local_peer_id,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("uTP connection should complete the BitTorrent handshake");
+
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server should receive the BitTorrent handshake")
+            .expect("server task should not panic");
+        assert!(connection.is_connected());
+        assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
     }
 }

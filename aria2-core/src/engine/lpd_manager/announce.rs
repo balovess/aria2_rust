@@ -66,6 +66,19 @@ impl LpdAnnouncer {
         announce_interval_secs: u64,
         interface: Option<Ipv4Addr>,
     ) -> Result<Self, String> {
+        Self::with_interface_and_port(announce_interval_secs, interface, constants::LPD_PORT)
+    }
+
+    /// Create an announcer with an explicit BEP 14 multicast port.
+    pub fn with_interface_and_port(
+        announce_interval_secs: u64,
+        interface: Option<Ipv4Addr>,
+        listen_port: u16,
+    ) -> Result<Self, String> {
+        if listen_port == 0 {
+            return Err("LPD listen port must be greater than zero".to_string());
+        }
+
         // Bind to ephemeral port on all interfaces
         let socket = UdpSocket::bind("0.0.0.0:0")
             .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
@@ -94,8 +107,7 @@ impl LpdAnnouncer {
         // Parse multicast address
         let multicast_addr: SocketAddr = format!(
             "{}:{}",
-            constants::LPD_MULTICAST_ADDRESS,
-            constants::LPD_PORT
+            constants::LPD_MULTICAST_ADDRESS, listen_port
         )
         .parse()
         .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
@@ -199,7 +211,7 @@ impl LpdAnnouncer {
         let msg = format!(
             "BT-SEARCH * HTTP/1.1\r\nHost: {}:{}\r\nPort: {}\r\nInfohash: {}\r\n\r\n\r\n",
             constants::LPD_MULTICAST_ADDRESS,
-            constants::LPD_PORT,
+            self.multicast_addr.port(),
             port,
             info_hash
         );

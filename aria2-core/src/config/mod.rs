@@ -13,7 +13,8 @@ pub use aria2_protocol::bittorrent::tracker::public_list::TrackerCatalogConfig;
 pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
     ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
-    OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator, PiecePriorityRule,
+    OptionOwner, OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator,
+    PiecePriorityRule,
     RangeValidator, RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
     parse_piece_priority,
 };
@@ -156,7 +157,11 @@ impl ConfigManager {
 
     /// Get a global option value by name.
     pub async fn get_global_option(&self, name: &str) -> Option<OptionValue> {
-        self.global_opts.read().await.get(name).cloned()
+        self.global_opts
+            .read()
+            .await
+            .get(OptionRegistry::canonical_name(name))
+            .cloned()
     }
 
     /// Convenience: get a global option as a `String`.
@@ -166,7 +171,7 @@ impl ConfigManager {
         self.global_opts
             .read()
             .await
-            .get(name)
+            .get(OptionRegistry::canonical_name(name))
             .and_then(|v| match v {
                 OptionValue::Str(s) => Some(s.clone()),
                 _ => None,
@@ -180,7 +185,7 @@ impl ConfigManager {
         self.global_opts
             .read()
             .await
-            .get(name)
+            .get(OptionRegistry::canonical_name(name))
             .and_then(|v| match v {
                 OptionValue::Int(n) => Some(*n),
                 _ => None,
@@ -194,7 +199,7 @@ impl ConfigManager {
         self.global_opts
             .read()
             .await
-            .get(name)
+            .get(OptionRegistry::canonical_name(name))
             .and_then(|v| match v {
                 OptionValue::Bool(b) => Some(*b),
                 _ => None,
@@ -214,16 +219,17 @@ impl ConfigManager {
         if !self.registry.contains(name) {
             return Err(format!("unknown option '{}'", name));
         }
-        let def = self.registry.get(name).unwrap();
+        let canonical_name = OptionRegistry::canonical_name(name).to_string();
+        let def = self.registry.get(&canonical_name).unwrap();
         let parsed = def.parse_value(&value.to_string())?;
-        let old = self.global_opts.read().await.get(name).cloned();
+        let old = self.global_opts.read().await.get(&canonical_name).cloned();
         {
             let mut opts = self.global_opts.write().await;
-            opts.insert(name.to_string(), parsed.clone());
+            opts.insert(canonical_name.clone(), parsed.clone());
         }
-        self.parser.set(name, value);
+        self.parser.set(canonical_name.clone(), value);
         let _ = self.change_tx.send(ConfigChangeEvent {
-            key: name.to_string(),
+            key: canonical_name,
             old_value: old.unwrap_or(OptionValue::None),
             new_value: parsed,
         });
@@ -261,13 +267,18 @@ impl ConfigManager {
     }
 
     pub async fn get_task_default(&self, gid: &str, name: &str) -> Option<OptionValue> {
+        let canonical_name = OptionRegistry::canonical_name(name);
         let tasks = self.task_defaults.read().await;
-        let task_val = tasks.get(gid).and_then(|m| m.get(name)).cloned();
+        let task_val = tasks.get(gid).and_then(|m| m.get(canonical_name)).cloned();
         if task_val.is_some() {
             return task_val;
         }
         drop(tasks);
-        self.global_opts.read().await.get(name).cloned()
+        self.global_opts
+            .read()
+            .await
+            .get(canonical_name)
+            .cloned()
     }
 
     pub async fn set_task_option(
@@ -279,11 +290,12 @@ impl ConfigManager {
         if !self.registry.contains(name) {
             return Err(format!("unknown option '{}'", name));
         }
-        let def = self.registry.get(name).unwrap();
+        let canonical_name = OptionRegistry::canonical_name(name).to_string();
+        let def = self.registry.get(&canonical_name).unwrap();
         let parsed = def.parse_value(&value.to_string())?;
         let mut tasks = self.task_defaults.write().await;
         let entry = tasks.entry(gid.to_string()).or_insert_with(HashMap::new);
-        entry.insert(name.to_string(), parsed);
+        entry.insert(canonical_name, parsed);
         Ok(())
     }
 
@@ -429,6 +441,18 @@ mod tests {
             .set_global_option("nonexistent-option", OptionValue::Str("value".into()))
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_unsupported_http_pipeline_limit_fails() {
+        let mut mgr = ConfigManager::new();
+        let result = mgr
+            .set_global_option("max-http-pipelining", OptionValue::Int(2))
+            .await;
+
+        let error = result.expect_err("unsupported pipeline limits must be rejected");
+        assert!(error.contains("max-http-pipelining"), "unexpected error: {error}");
+        assert_eq!(mgr.get_global_i64("max-http-pipelining").await, None);
     }
 
     #[tokio::test]

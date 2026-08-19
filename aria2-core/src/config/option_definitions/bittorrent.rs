@@ -104,14 +104,6 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
-            name: "enable-lpd".into(),
-            opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
-            description: "Enable Local Peer Discovery (alias for bt-enable-lpd)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
             name: "lpd-listen-port".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(6771),
@@ -159,13 +151,6 @@ impl crate::config::OptionRegistry {
             name: "dht-file-path".into(),
             opt_type: OptionType::Path,
             description: "Path to DHT routing table file for persistence".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-message-path".into(),
-            opt_type: OptionType::Path,
-            description: "DHT message cache path (deprecated, use dht-file-path instead)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

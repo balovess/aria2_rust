@@ -304,8 +304,7 @@ impl App {
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);
         set_bool_true!("bt-force-encryption", b.bt_force_encryption);
         set_str!("bt-min-crypto-level", b.bt_min_crypto_level);
-        set_bool_true!("bt-enable-lpd", b.bt_enable_lpd);
-        set_bool_true!("enable-lpd", b.enable_lpd);
+        set_bool_true!("bt-enable-lpd", b.bt_enable_lpd.or(b.enable_lpd));
         set_u64!("lpd-listen-port", b.lpd_listen_port);
         set_bool_true!("bt-enable-web-seed", b.bt_enable_web_seed);
         if b.no_enable_dht.unwrap_or(false) {
@@ -318,8 +317,7 @@ impl App {
         set_str!("dht-entry-point", b.dht_entry_point);
         set_str!("dht-entry-point-host", b.dht_entry_point_host);
         set_u16!("dht-entry-point-port", b.dht_entry_point_port);
-        set_path!("dht-file-path", b.dht_file_path);
-        set_path!("dht-message-path", b.dht_message_path);
+        set_path!("dht-file-path", b.dht_file_path.or(b.dht_message_path));
         set_bool_true!("enable-peer-exchange", b.enable_peer_exchange);
         set_str!("follow-torrent", b.follow_torrent);
         set_str!("on-bt-download-complete", b.on_bt_download_complete);
