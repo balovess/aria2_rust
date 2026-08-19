@@ -95,6 +95,13 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           7z a ../../../${{ matrix.artifact }}.zip aria2c${{ matrix.extension }}
+      - name: Generate artifact checksum (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $artifact = "${{ matrix.artifact }}.zip"
+          $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
