@@ -92,7 +92,10 @@ fn test_ftp_uri_parsing_bracketed_ipv6() {
         None,
     )
     .unwrap();
-    assert!(command.timeout().is_some());
+    assert!(
+        command.timeout().is_none(),
+        "default FTP I/O timeout is disabled; configure timeout explicitly"
+    );
 }
 
 #[tokio::test]

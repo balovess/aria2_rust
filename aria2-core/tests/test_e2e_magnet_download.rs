@@ -128,19 +128,19 @@ fn test_metadata_collector_single_piece() {
 async fn test_e2e_magnet_download_command_creation() {
     let dir = tmp_dir();
     let magnet_uri = "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&dn=test_file";
+    let options = DownloadOptions {
+        timeout: Some(30),
+        ..DownloadOptions::default()
+    };
 
-    let cmd = MagnetDownloadCommand::new(
-        GroupId::new(99),
-        magnet_uri,
-        &DownloadOptions::default(),
-        dir.path().to_str(),
-    );
+    let cmd =
+        MagnetDownloadCommand::new(GroupId::new(99), magnet_uri, &options, dir.path().to_str());
 
     assert!(cmd.is_ok());
     let cmd = cmd.unwrap();
 
     assert!(matches!(cmd.status(), CommandStatus::Pending));
-    assert!(cmd.timeout().is_some());
+    assert_eq!(cmd.timeout(), Some(std::time::Duration::from_secs(30)));
 }
 
 #[tokio::test]
