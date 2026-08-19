@@ -9,15 +9,19 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "interface".into(),
             opt_type: OptionType::String,
+            default_value: OptionValue::None,
             description: "Network interface to bind to".into(),
             category: OptionCategory::General,
+            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "multiple-interface".into(),
             opt_type: OptionType::String,
+            default_value: OptionValue::None,
             description: "Comma-separated list of interfaces for multi-homed setups".into(),
             category: OptionCategory::General,
+            supported: false,
             ..Default::default()
         });
 
@@ -33,19 +37,22 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "async-dns-server".into(),
             opt_type: OptionType::String,
+            default_value: OptionValue::None,
             description: "DNS server address for async resolver".into(),
             category: OptionCategory::General,
+            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "dns-timeout".into(),
             opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(30),
+            default_value: OptionValue::None,
             min: Some(1),
             max: Some(60),
             description: "DNS resolution timeout in seconds".into(),
             category: OptionCategory::General,
             hidden: true,
+            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -57,6 +64,7 @@ impl crate::config::OptionRegistry {
             description: "Enable IPv6 async DNS resolution (deprecated)".into(),
             category: OptionCategory::General,
             deprecated: true,
+            supported: false,
             ..Default::default()
         });
 
@@ -64,10 +72,11 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "event-poll".into(),
             opt_type: OptionType::Enum,
-            default_value: OptionValue::Str("select".into()),
+            default_value: OptionValue::None,
             allowed_values: &["epoll", "kqueue", "port", "libuv", "poll", "select"],
             description: "Event poll method (epoll/kqueue/port/poll/select)".into(),
             category: OptionCategory::General,
+            supported: false,
             ..Default::default()
         });
 

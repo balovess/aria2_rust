@@ -264,7 +264,7 @@ impl crate::config::OptionRegistry {
         });
         self.register(OptionDef {
             name: "bt-lpd-interface".into(),
-            opt_type: OptionType::String,
+            opt_type: OptionType::Ipv4Address,
             description: "Network interface for Local Peer Discovery".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

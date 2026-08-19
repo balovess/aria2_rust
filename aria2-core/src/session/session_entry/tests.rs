@@ -531,7 +531,6 @@ fn test_download_options_to_map_all_fields() {
         disable_ipv6: true,
         listen_port: Some("6881-6999".to_string()),
         bt_enable_lpd: true,
-        bt_lpd_interface: Some("eth0".to_string()),
         enable_rpc: false,
         pause: false,
         // Follow options
@@ -639,7 +638,10 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("bt-stop-timeout").unwrap(), "120");
     assert_eq!(map.get("disable-ipv6").unwrap(), "true");
     assert_eq!(map.get("bt-enable-lpd").unwrap(), "true");
-    assert_eq!(map.get("bt-lpd-interface").unwrap(), "eth0");
+    assert!(
+        !map.contains_key("bt-lpd-interface"),
+        "process-level LPD interface must not be serialized into a task session"
+    );
     assert_eq!(map.get("http-auth-challenge").unwrap(), "true");
     assert_eq!(map.get("http-user").unwrap(), "http-user");
     assert_eq!(map.get("http-passwd").unwrap(), "http-pass");

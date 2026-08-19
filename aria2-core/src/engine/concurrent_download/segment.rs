@@ -96,8 +96,12 @@ pub async fn execute(
     let cookie_hdr = dl.cookie_helper.build_cookie_header(uri);
 
     let use_mmap = dl.file_allocation == "mmap" && total_length >= dl.mmap_threshold;
-    let mut writer =
-        CachedDiskWriter::new_with_mmap(&dl.output_path, Some(total_length), None, use_mmap);
+    let mut writer = CachedDiskWriter::new_with_mmap_bytes(
+        &dl.output_path,
+        Some(total_length),
+        options.disk_cache_size_bytes(),
+        use_mmap,
+    );
 
     let limiter = options
         .max_download_limit

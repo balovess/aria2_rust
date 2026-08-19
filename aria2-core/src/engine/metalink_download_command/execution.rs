@@ -490,6 +490,8 @@ impl MetalinkDownloadCommand {
                 bt_registry: self.bt_registry.clone(),
                 #[cfg(feature = "bittorrent")]
                 bt_listener: self.bt_listener.clone(),
+                #[cfg(feature = "bittorrent")]
+                lpd_manager: self.lpd_manager.clone(),
             };
             match command.execute_file(false, false).await {
                 Ok(()) => {

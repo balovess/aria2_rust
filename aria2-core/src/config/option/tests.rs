@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::registry::OptionRegistry;
-use super::types::{OptionCategory, OptionDef, OptionType, OptionValue};
+use super::types::{OptionCategory, OptionDef, OptionOwner, OptionType, OptionValue};
 use super::validator::{
     ChoiceValidator, DependencyChecker, OptionDefinition, OptionError, OptionValidator,
     RangeValidator, RegexValidator, UrlValidator,
@@ -410,8 +410,14 @@ fn test_registry_creation() {
 #[should_panic(expected = "duplicate configuration option 'duplicate'")]
 fn test_registry_rejects_duplicate_definitions() {
     let mut reg = OptionRegistry::new();
-    reg.register(OptionDef::new("duplicate", OptionType::String));
-    reg.register(OptionDef::new("duplicate", OptionType::Boolean));
+    reg.register(OptionDef {
+        owner: OptionOwner::Application,
+        ..OptionDef::new("duplicate", OptionType::String)
+    });
+    reg.register(OptionDef {
+        owner: OptionOwner::Application,
+        ..OptionDef::new("duplicate", OptionType::Boolean)
+    });
 }
 
 #[test]
@@ -421,11 +427,13 @@ fn test_registry_rejects_duplicate_short_options() {
     reg.register(OptionDef {
         name: "first-short-option".into(),
         short_name: Some('s'),
+        owner: OptionOwner::Application,
         ..OptionDef::new("first-short-option", OptionType::String)
     });
     reg.register(OptionDef {
         name: "second-short-option".into(),
         short_name: Some('s'),
+        owner: OptionOwner::Application,
         ..OptionDef::new("second-short-option", OptionType::String)
     });
 }
@@ -471,13 +479,21 @@ fn test_registry_defaults_are_valid() {
     let reg = OptionRegistry::new();
     for def in reg.all().values() {
         if !matches!(def.default_value(), OptionValue::None) {
-            let parsed = def.parse_value(&def.default_value().to_string());
-            assert!(
-                parsed.is_ok(),
-                "Default value for '{}' failed to re-parse: {:?}",
-                def.name(),
-                parsed.err()
-            );
+            if def.is_supported() {
+                let parsed = def.parse_value(&def.default_value().to_string());
+                assert!(
+                    parsed.is_ok(),
+                    "Default value for '{}' failed to re-parse: {:?}",
+                    def.name(),
+                    parsed.err()
+                );
+            } else {
+                assert!(
+                    def.parse_default_value().is_none(),
+                    "unsupported option '{}' must not expose a runtime default",
+                    def.name()
+                );
+            }
         }
     }
 }
@@ -541,29 +557,18 @@ fn test_seed_time_has_no_default_but_preserves_explicit_zero() {
 }
 
 #[test]
-fn test_optimize_concurrent_download_coefficients_match_original_wire_names() {
+fn unsupported_concurrency_optimization_options_are_explicitly_rejected() {
     let registry = OptionRegistry::new();
-    let coeff_a = registry
-        .get("optimize-concurrent-downloads-coeffA")
-        .expect("original coefficient A option must be registered");
-    let coeff_b = registry
-        .get("optimize-concurrent-downloads-coeffB")
-        .expect("original coefficient B option must be registered");
-
-    assert_eq!(coeff_a.default_value().as_f64(), Some(5.0));
-    assert_eq!(coeff_b.default_value().as_f64(), Some(25.0));
-    assert_eq!(coeff_a.parse_value("7.5").unwrap().as_f64(), Some(7.5));
-    assert_eq!(coeff_b.parse_value("30").unwrap().as_f64(), Some(30.0));
-    assert!(
-        registry
-            .get("optimize-concurrent-downloads-coeffa")
-            .is_none()
-    );
-    assert!(
-        registry
-            .get("optimize-concurrent-downloads-coeffb")
-            .is_none()
-    );
+    for name in [
+        "optimize-concurrent-downloads",
+        "optimize-concurrent-downloads-coeffA",
+        "optimize-concurrent-downloads-coeffB",
+    ] {
+        let definition = registry.get(name).expect("option must remain discoverable");
+        assert!(!definition.is_supported());
+        assert!(definition.parse_default_value().is_none());
+        assert!(definition.parse_value("1").is_err());
+    }
 }
 
 #[cfg(feature = "bittorrent")]

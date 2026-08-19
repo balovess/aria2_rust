@@ -35,6 +35,14 @@ pub struct DownloadEngine {
     pub(crate) save_session_path: Option<PathBuf>,
     pub(crate) save_session_interval: Option<Duration>,
     pub(crate) auto_save_interval: Option<Duration>,
+    /// Maximum age of server statistics. `None` disables stale cleanup.
+    pub(crate) server_stat_max_age: Option<Duration>,
+    /// Optional input file loaded before the engine loop starts.
+    pub(crate) server_stat_input_path: Option<PathBuf>,
+    /// Optional output file written on configured intervals and shutdown.
+    pub(crate) server_stat_output_path: Option<PathBuf>,
+    /// Periodic server-stat save interval. `None` disables periodic saves.
+    pub(crate) server_stat_save_interval: Option<Duration>,
     pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
     pub(crate) auto_save: Option<Arc<Mutex<AutoSaveCoordinator>>>,
     pub(crate) auto_save_dirty_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -78,6 +86,34 @@ impl DownloadEngine {
     }
 
     pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
+        #[cfg(feature = "bittorrent")]
+        {
+            Self::with_retry_policy_and_lpd_manager(
+                tick_interval_ms,
+                policy,
+                Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+            )
+        }
+
+        #[cfg(not(feature = "bittorrent"))]
+        Self::with_retry_policy_and_lpd_manager(tick_interval_ms, policy)
+    }
+
+    /// Construct an engine with the process-wide LPD manager supplied by the
+    /// application layer.
+    #[cfg(feature = "bittorrent")]
+    pub fn with_lpd_manager(
+        tick_interval_ms: u64,
+        lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+    ) -> Self {
+        Self::with_retry_policy_and_lpd_manager(tick_interval_ms, RetryPolicy::default(), lpd_manager)
+    }
+
+    fn with_retry_policy_and_lpd_manager(
+        tick_interval_ms: u64,
+        policy: RetryPolicy,
+        #[cfg(feature = "bittorrent")] lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+    ) -> Self {
         let (engine_cmd_tx, engine_cmd_rx) = channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -95,6 +131,10 @@ impl DownloadEngine {
             save_session_path: None,
             save_session_interval: None,
             auto_save_interval: None,
+            server_stat_max_age: Some(Duration::from_secs(24 * 60 * 60)),
+            server_stat_input_path: None,
+            server_stat_output_path: None,
+            server_stat_save_interval: None,
             request_group_man: None,
             auto_save: None,
             auto_save_dirty_signal: None,
@@ -110,7 +150,7 @@ impl DownloadEngine {
             #[cfg(feature = "bittorrent")]
             bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
             #[cfg(feature = "bittorrent")]
-            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+            lpd_manager,
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
         };
 
@@ -171,6 +211,39 @@ impl DownloadEngine {
         if let Some(man) = self.request_group_man.clone() {
             self.refresh_auto_save(man);
         }
+    }
+
+    /// Configure the server-stat freshness window. Zero means unlimited.
+    pub fn set_server_stat_timeout(&mut self, seconds: u64) {
+        self.server_stat_max_age = (seconds > 0).then_some(Duration::from_secs(seconds));
+    }
+
+    /// Configure server-stat input/output persistence owned by this engine.
+    pub fn set_server_stat_persistence(
+        &mut self,
+        input_path: Option<PathBuf>,
+        output_path: Option<PathBuf>,
+        interval: Option<Duration>,
+    ) {
+        self.server_stat_input_path = input_path;
+        self.server_stat_output_path = output_path;
+        self.server_stat_save_interval = interval.filter(|value| !value.is_zero());
+    }
+
+    pub fn server_stat_max_age(&self) -> Option<Duration> {
+        self.server_stat_max_age
+    }
+
+    pub fn server_stat_input_path(&self) -> Option<&PathBuf> {
+        self.server_stat_input_path.as_ref()
+    }
+
+    pub fn server_stat_output_path(&self) -> Option<&PathBuf> {
+        self.server_stat_output_path.as_ref()
+    }
+
+    pub fn server_stat_save_interval(&self) -> Option<Duration> {
+        self.server_stat_save_interval
     }
 
     fn refresh_auto_save(&mut self, man: Arc<RequestGroupMan>) {

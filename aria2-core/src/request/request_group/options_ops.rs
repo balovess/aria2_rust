@@ -127,7 +127,6 @@ fn apply_rpc_option(
         | "always-resume"
         | "auto-file-renaming"
         | "async-dns"
-        | "enable-async-dns6"
         | "enable-mmap"
         | "parameterized-uri"
         | "reuse-uri"
@@ -157,7 +156,6 @@ fn apply_rpc_option(
                 "always-resume" => opts.always_resume = value,
                 "auto-file-renaming" => opts.auto_file_renaming = value,
                 "async-dns" => opts.async_dns = value,
-                "enable-async-dns6" => opts.enable_async_dns6 = value,
                 "enable-mmap" => opts.enable_mmap = value,
                 "parameterized-uri" => opts.parameterized_uri = value,
                 "reuse-uri" => opts.reuse_uri = value,
@@ -396,13 +394,9 @@ fn apply_rpc_option(
             opts.enable_utp = rpc_option_bool(value, key)?;
             Ok(true)
         }
-        "utp-listen-port" | "lpd-listen-port" => {
+        "utp-listen-port" => {
             let value = rpc_option_u16(value, key)?;
-            match key {
-                "utp-listen-port" => opts.utp_listen_port = Some(value),
-                "lpd-listen-port" => opts.lpd_listen_port = Some(value),
-                _ => unreachable!("UDP listen port option handled above"),
-            }
+            opts.utp_listen_port = Some(value);
             Ok(true)
         }
         "check-integrity"
@@ -468,6 +462,7 @@ fn apply_rpc_option(
         "lowest-speed-limit"
         | "piece-length"
         | "min-split-size"
+        | "disk-cache"
         | "max-mmap-limit"
         | "no-file-allocation-limit" => {
             let value = rpc_option_size(value, key)?;
@@ -475,6 +470,7 @@ fn apply_rpc_option(
                 "lowest-speed-limit" => opts.lowest_speed_limit = Some(value),
                 "piece-length" => opts.piece_length = Some(value),
                 "min-split-size" => opts.min_split_size = Some(value),
+                "disk-cache" => opts.disk_cache = Some(value),
                 "max-mmap-limit" => opts.max_mmap_limit = Some(value),
                 "no-file-allocation-limit" => opts.no_file_allocation_limit = Some(value),
                 _ => unreachable!("size option handled above"),
@@ -490,7 +486,6 @@ fn apply_rpc_option(
         | "select-file"
         | "index-out"
         | "listen-port"
-        | "bt-lpd-interface"
         | "http-user"
         | "http-passwd"
         | "ftp-user"
@@ -513,7 +508,6 @@ fn apply_rpc_option(
                 "select-file" => opts.select_file = Some(value),
                 "index-out" => opts.index_out = Some(value),
                 "listen-port" => opts.listen_port = Some(value),
-                "bt-lpd-interface" => opts.bt_lpd_interface = Some(value),
                 "http-user" => opts.http_user = Some(value),
                 "http-passwd" => opts.http_passwd = Some(value),
                 "ftp-user" => opts.ftp_user = Some(value),

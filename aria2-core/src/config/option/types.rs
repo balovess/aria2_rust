@@ -18,6 +18,8 @@ pub enum OptionType {
     Boolean,
     List,
     Enum,
+    /// An IPv4 address serialized as the original string wire value.
+    Ipv4Address,
     IndexOut,
     /// aria2's `head[=SIZE],tail[=SIZE]` BitTorrent piece-priority syntax.
     PiecePriority,
@@ -35,6 +37,7 @@ impl fmt::Display for OptionType {
             Self::Boolean => write!(f, "boolean"),
             Self::List => write!(f, "list"),
             Self::Enum => write!(f, "enum"),
+            Self::Ipv4Address => write!(f, "ipv4-address"),
             Self::IndexOut => write!(f, "index-out"),
             Self::PiecePriority => write!(f, "piece-priority"),
             Self::Path => write!(f, "path"),
@@ -469,6 +472,10 @@ impl OptionDef {
                 }
                 Ok(OptionValue::Str(s.to_string()))
             }
+            OptionType::Ipv4Address => s
+                .parse::<std::net::Ipv4Addr>()
+                .map(|_| OptionValue::Str(s.to_string()))
+                .map_err(|error| format!("invalid IPv4 address '{}': {}", s, error)),
             OptionType::IntegerRange => {
                 let max = self
                     .max

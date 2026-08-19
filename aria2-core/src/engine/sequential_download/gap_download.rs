@@ -61,7 +61,13 @@ impl SequentialDownloader {
         let mut completed_bytes = completed_ranges.iter().map(|(_, len)| len).sum::<u64>();
         self.progress_updater.reset(completed_bytes);
 
-        let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
+        let disk_cache = self.group.recover().options().disk_cache_size_bytes();
+        let mut writer = CachedDiskWriter::new_with_mmap_bytes(
+            &self.output_path,
+            Some(total_length),
+            disk_cache,
+            false,
+        );
 
         let rate_limit = { self.group.recover().options().max_download_limit };
         let limiter = rate_limit

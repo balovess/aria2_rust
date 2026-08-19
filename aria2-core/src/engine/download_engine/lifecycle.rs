@@ -21,6 +21,33 @@ impl DownloadEngine {
             .take()
             .ok_or_else(|| Aria2Error::DownloadFailed("engine_cmd_rx already taken".to_string()))?;
 
+        let server_stat_man =
+            super::super::super::selector::server_stat_man::ServerStatMan::shared().clone();
+        if let Some(path) = &self.server_stat_input_path {
+            match server_stat_man.load_from_file_async(path).await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            count,
+                            path = %path.display(),
+                            "Loaded server statistics"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        path = %path.display(),
+                        "Failed to load server statistics"
+                    );
+                }
+            }
+        }
+
+        let server_stat_next_save = self
+            .server_stat_save_interval
+            .map(|interval| std::time::Instant::now() + interval);
+
         let ctx = super::super::engine_loop::EngineLoopContext {
             group_man,
             ftp_pool: Arc::clone(&self.ftp_pool),
@@ -32,9 +59,11 @@ impl DownloadEngine {
             // Use the process-wide file allocation manager owned by the engine layer.
             file_alloc_man: super::super::super::filesystem::file_allocation_man::shared(),
             keep_alive: self.keep_alive,
-            server_stat_man: super::super::super::selector::server_stat_man::ServerStatMan::shared(
-            )
-            .clone(),
+            server_stat_man,
+            server_stat_max_age: self.server_stat_max_age,
+            server_stat_save_path: self.server_stat_output_path.clone(),
+            server_stat_save_interval: self.server_stat_save_interval,
+            server_stat_next_save,
             // Keep a shared limiter even when no limit was configured. This
             // gives runtime RPC changes a stable handle that is already
             // present in every spawned command.

@@ -90,8 +90,13 @@ pub async fn execute_with_coordinator(
         );
 
     let use_mmap = dl.file_allocation == "mmap" && total_length >= dl.mmap_threshold;
-    let mut writer =
-        CachedDiskWriter::new_with_mmap(&dl.output_path, Some(total_length), None, use_mmap);
+    let disk_cache = dl.group.recover().options().disk_cache_size_bytes();
+    let mut writer = CachedDiskWriter::new_with_mmap_bytes(
+        &dl.output_path,
+        Some(total_length),
+        disk_cache,
+        use_mmap,
+    );
 
     let num_pieces = coordinator.num_segments().max(1);
     let ctrl_path = ControlFile::control_path_for(&dl.output_path);

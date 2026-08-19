@@ -34,6 +34,22 @@ impl OptionRegistry {
                 name, canonical_name
             );
         }
+        if self.options.contains_key(&name) {
+            panic!("duplicate configuration option '{}'", name);
+        }
+        if let Some(short_name) = def.short_name()
+            && let Some(existing) = self
+                .options
+                .values()
+                .find(|existing| existing.short_name() == Some(short_name))
+        {
+            panic!(
+                "duplicate short option '-{}' for '{}' and '{}'",
+                short_name,
+                existing.name(),
+                name
+            );
+        }
         if let Some(expected_owner) = Self::owner_for_name(&name) {
             if def.owner() != OptionOwner::Unassigned && def.owner() != expected_owner {
                 panic!(
@@ -47,19 +63,6 @@ impl OptionRegistry {
         } else if def.owner() == OptionOwner::Unassigned {
             panic!(
                 "configuration option '{}' has no explicit production owner",
-                name
-            );
-        }
-        if let Some(short_name) = def.short_name()
-            && let Some(existing) = self
-                .options
-                .values()
-                .find(|existing| existing.short_name() == Some(short_name))
-        {
-            panic!(
-                "duplicate short option '-{}' for '{}' and '{}'",
-                short_name,
-                existing.name(),
                 name
             );
         }
@@ -190,6 +193,8 @@ impl OptionRegistry {
             "max-retries" => "max-tries",
             "enable-lpd" => "bt-enable-lpd",
             "dht-message-path" => "dht-file-path",
+            "server-stat-file" => "server-stat-of",
+            "max-downloads" => "max-concurrent-downloads",
             _ => name,
         }
     }
@@ -307,7 +312,6 @@ impl OptionRegistry {
             | "bt-min-crypto-level"
             | "bt-detach-seed-only"
             | "bt-enable-lpd"
-            | "lpd-listen-port"
             | "bt-enable-web-seed"
             | "enable-dht"
             | "dht-listen-port"
@@ -323,7 +327,6 @@ impl OptionRegistry {
             | "bt-external-ip"
             | "bt-hash-check-seed"
             | "bt-load-saved-metadata"
-            | "bt-lpd-interface"
             | "bt-metadata-only"
             | "bt-remove-unselected-file"
             | "bt-require-crypto"
@@ -361,10 +364,8 @@ impl OptionRegistry {
 
             // Process-wide scheduler, resolver, socket, persistence, and
             // statistics settings.
-            "async-dns"
-            | "async-dns-server"
+            "async-dns-server"
             | "dns-timeout"
-            | "enable-async-dns6"
             | "event-poll"
             | "interface"
             | "multiple-interface"
@@ -376,20 +377,23 @@ impl OptionRegistry {
             | "max-overall-upload-limit"
             | "stop"
             | "force-save"
-            | "server-stat-file"
             | "save-server-stat-interval"
             | "socket-recv-buffer-size"
             | "dscp"
-            | "max-downloads"
             | "optimize-concurrent-downloads"
             | "optimize-concurrent-downloads-coeffA"
             | "optimize-concurrent-downloads-coeffB"
             | "rlimit-nofile"
             | "select-least-used-host"
-            | "startup-idle-time"
             | "stop-with-process"
             | "log-max-size"
-            | "log-max-files" => Some(OptionOwner::ProcessEngine),
+            | "log-max-files"
+            | "lpd-listen-port"
+            | "bt-lpd-interface" => Some(OptionOwner::ProcessEngine),
+
+            "async-dns" | "enable-async-dns6" | "startup-idle-time" => {
+                Some(OptionOwner::DownloadTask)
+            }
 
             // CLI, session, terminal, and process lifecycle settings.
             "conf-path"
@@ -476,6 +480,8 @@ mod tests {
             ("max-retries", "max-tries"),
             ("enable-lpd", "bt-enable-lpd"),
             ("dht-message-path", "dht-file-path"),
+            ("server-stat-file", "server-stat-of"),
+            ("max-downloads", "max-concurrent-downloads"),
         ];
 
         for (alias, canonical) in aliases {
@@ -503,6 +509,32 @@ mod tests {
                 name
             );
             assert_ne!(definition.owner(), OptionOwner::Unassigned);
+        }
+    }
+
+    #[test]
+    fn shared_runtime_options_have_one_execution_owner() {
+        let cases = [
+            ("async-dns", OptionOwner::DownloadTask),
+            ("enable-async-dns6", OptionOwner::DownloadTask),
+            ("startup-idle-time", OptionOwner::DownloadTask),
+            ("async-dns-server", OptionOwner::ProcessEngine),
+            ("dns-timeout", OptionOwner::ProcessEngine),
+        ];
+
+        for (name, expected_owner) in cases {
+            assert_eq!(
+                OptionRegistry::owner_for_name(name),
+                Some(expected_owner),
+                "option '{}' must have the owner of its real execution seam",
+                name
+            );
+            assert_eq!(
+                OptionRegistry::new().get(name).map(|definition| definition.owner()),
+                Some(expected_owner),
+                "registered option '{}' must preserve its execution owner",
+                name
+            );
         }
     }
 

@@ -10,6 +10,7 @@
 //! 6. Check exit condition
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -37,7 +38,6 @@ use crate::util::rwlock_ext::RwLockRecover;
 /// Maximum number of stopped results to keep before pruning.
 /// Mirrors C++ `MAX_DOWNLOAD_RESULT` (default 1000).
 const MAX_STOPPED_RESULTS: usize = 1000;
-const SERVER_STAT_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
 
 fn should_mark_failed_connection(error: &Aria2Error) -> bool {
@@ -54,8 +54,9 @@ async fn mark_failed_connection(
     dns_cache: &tokio::sync::Mutex<DnsCache>,
     error: &Aria2Error,
     context: &ConnectionContext,
+    use_async_dns: bool,
 ) {
-    if !should_mark_failed_connection(error) {
+    if !use_async_dns || !should_mark_failed_connection(error) {
         return;
     }
 
@@ -107,6 +108,14 @@ pub struct EngineLoopContext {
 
     /// Shared server statistics used by URI selectors and housekeeping.
     pub server_stat_man: Arc<ServerStatMan>,
+
+    /// Maximum age for server-stat cleanup. `None` means unlimited.
+    pub server_stat_max_age: Option<Duration>,
+
+    /// Optional server-stat output and its deadline-driven save state.
+    pub server_stat_save_path: Option<PathBuf>,
+    pub server_stat_save_interval: Option<Duration>,
+    pub server_stat_next_save: Option<Instant>,
 
     /// Process-wide rate limiter shared across all downloads.
     /// When `Some`, passed to each spawned `DownloadCommand` so that
@@ -354,7 +363,7 @@ pub(crate) async fn run_engine_loop_with_receiver(
                 }
             }
             _ = &mut maintenance_wait => {
-                run_deadline_maintenance(&ctx, &mut running_downloads).await;
+                run_deadline_maintenance(&mut ctx, &mut running_downloads).await;
             }
             Ok(_) = &mut shutdown_rx, if !shutdown_received => {
                 shutdown_received = true;
@@ -863,7 +872,14 @@ async fn process_task_completions<R: CompletionQueue>(
                     error,
                     connection_context,
                 } => {
-                    mark_failed_connection(&ctx.dns_cache, &error, &connection_context).await;
+                    let use_async_dns = group.recover().options().async_dns;
+                    mark_failed_connection(
+                        &ctx.dns_cache,
+                        &error,
+                        &connection_context,
+                        use_async_dns,
+                    )
+                    .await;
                     ProcessedTaskResult::Failed(error)
                 }
                 TaskResult::Success => ProcessedTaskResult::Success,
@@ -1050,6 +1066,7 @@ async fn next_maintenance_deadline(
     [timeout_deadline, save_deadline]
         .into_iter()
         .flatten()
+        .chain(ctx.server_stat_next_save)
         .min()
 }
 
@@ -1068,7 +1085,7 @@ async fn wait_for_deadline(deadline: Option<Instant>) {
 /// deadlines. There is deliberately no fixed-rate scan here: after the work
 /// is handled, the next loop iteration recomputes the next actual deadline.
 async fn run_deadline_maintenance(
-    ctx: &EngineLoopContext,
+    ctx: &mut EngineLoopContext,
     running_downloads: &mut [(GroupId, RunningDownload)],
 ) {
     // ── Timeout enforcement ──────────────────────────────────────────────
@@ -1112,7 +1129,9 @@ async fn run_deadline_maintenance(
                     let protocol = parsed.scheme().to_ascii_lowercase();
                     ctx.server_stat_man
                         .mark_failure_with_protocol(host, &protocol, 408);
-                    if let Some(context) = request_context {
+                    if let Some(context) = request_context
+                        && group.recover().options().async_dns
+                    {
                         let mut dns = ctx.dns_cache.lock().await;
                         dns.mark_bad_context(&context);
                         if !dns.has_good_address(&context.endpoint) {
@@ -1141,6 +1160,19 @@ async fn run_deadline_maintenance(
         let mut save = auto_save.lock().await;
         save.run_due(has_pending_downloads).await;
     }
+
+    if let (Some(path), Some(interval), Some(deadline)) = (
+        ctx.server_stat_save_path.as_ref(),
+        ctx.server_stat_save_interval,
+        ctx.server_stat_next_save,
+    ) && now >= deadline
+    {
+        ctx.server_stat_next_save = Some(now + interval);
+        match ctx.server_stat_man.save_to_file_async(path).await {
+            Ok(count) => debug!(count, path = %path.display(), "Saved server statistics"),
+            Err(error) => warn!(%error, path = %path.display(), "Failed to save server statistics"),
+        }
+    }
 }
 
 /// Perform cleanup that is caused by a completed download event.
@@ -1156,7 +1188,10 @@ async fn run_event_cleanup(ctx: &EngineLoopContext) {
 
     // aria2_original removes statistics older than the configured freshness
     // window from the long-lived ServerStatMan.
-    let stale_stats = ctx.server_stat_man.remove_stale(SERVER_STAT_MAX_AGE);
+    let stale_stats = ctx
+        .server_stat_max_age
+        .map(|max_age| ctx.server_stat_man.remove_stale(max_age))
+        .unwrap_or(0);
     if stale_stats > 0 {
         debug!("Removed {} stale server statistics", stale_stats);
     }
@@ -1246,6 +1281,13 @@ async fn on_end_of_run(
         let mut save = auto_save.lock().await;
         save.force_save().await;
     }
+
+    if let Some(path) = &ctx.server_stat_save_path {
+        match ctx.server_stat_man.save_to_file_async(path).await {
+            Ok(count) => debug!(count, path = %path.display(), "Saved server statistics on shutdown"),
+            Err(error) => warn!(%error, path = %path.display(), "Failed to save server statistics on shutdown"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1266,6 +1308,10 @@ mod tests {
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive,
             server_stat_man: ServerStatMan::shared().clone(),
+            server_stat_max_age: Some(Duration::from_secs(24 * 60 * 60)),
+            server_stat_save_path: None,
+            server_stat_save_interval: None,
+            server_stat_next_save: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: Arc::new(
@@ -1432,6 +1478,74 @@ mod tests {
         run_until_exit(test_ctx(false), rx, sd_rx, Duration::from_secs(5)).await;
     }
 
+    #[tokio::test]
+    async fn server_stat_interval_persists_through_engine_maintenance() {
+        let dir = tempfile::tempdir().expect("server-stat output directory");
+        let path = dir.path().join("server-stat.json");
+        let mut ctx = test_ctx(false);
+        ctx.server_stat_man = Arc::new(ServerStatMan::new());
+        ctx.server_stat_man
+            .update_with_protocol("interval.example", "http", 1024, false);
+        ctx.server_stat_save_path = Some(path.clone());
+        ctx.server_stat_save_interval = Some(Duration::from_secs(60));
+        ctx.server_stat_next_save = Some(Instant::now() - Duration::from_secs(1));
+
+        run_deadline_maintenance(&mut ctx, &mut []).await;
+
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .expect("server-stat interval must write its configured output");
+        assert!(content.contains("interval.example"));
+        assert!(
+            ctx.server_stat_next_save
+                .is_some_and(|deadline| deadline > Instant::now()),
+            "server-stat interval must schedule its next save"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_stat_timeout_controls_stale_cleanup() {
+        let dir = tempfile::tempdir().expect("server-stat input directory");
+        let path = dir.path().join("stale-server-stat.json");
+        let file = crate::selector::server_stat_man::ServerStatFile {
+            version: "1.0".to_string(),
+            saved_at: 1,
+            servers: vec![crate::selector::server_stat::ServerStatSnapshot {
+                host: "stale.example".to_string(),
+                protocol: "http".to_string(),
+                download_speed: 1,
+                single_connection_avg_speed: 1,
+                multi_connection_avg_speed: 0,
+                last_updated: 1,
+                status: 0,
+                counter: 1,
+                last_error_time: None,
+                last_error_code: 0,
+                consecutive_failures: 0,
+            }],
+        };
+        tokio::fs::write(&path, serde_json::to_vec(&file).unwrap())
+            .await
+            .expect("write stale server-stat fixture");
+
+        let mut ctx = test_ctx(false);
+        ctx.server_stat_man = Arc::new(ServerStatMan::new());
+        ctx.server_stat_man
+            .load_from_file_async(&path)
+            .await
+            .expect("load stale server-stat fixture");
+        ctx.server_stat_max_age = Some(Duration::from_secs(1));
+        assert_eq!(ctx.server_stat_man.count(), 1);
+
+        run_event_cleanup(&ctx).await;
+
+        assert_eq!(
+            ctx.server_stat_man.count(),
+            0,
+            "configured server-stat timeout must remove stale entries"
+        );
+    }
+
     /// Regression for the periodic auto-save being dead: `mark_session_dirty`
     /// had no callers, so the dirty flag stayed `false` and `save_if_dirty`
     /// never wrote the session file. This test drives a state-changing
@@ -1466,6 +1580,10 @@ mod tests {
             file_alloc_man: Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new())),
             keep_alive: false,
             server_stat_man: Arc::new(ServerStatMan::new()),
+            server_stat_max_age: Some(Duration::from_secs(24 * 60 * 60)),
+            server_stat_save_path: None,
+            server_stat_save_interval: None,
+            server_stat_next_save: None,
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: Arc::new(
@@ -1720,6 +1838,61 @@ mod tests {
                 "the peer that actually failed must not remain a good candidate"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn async_dns_disabled_does_not_modify_shared_dns_cache_on_failure() {
+        let ctx = test_ctx(false);
+        let gid = ctx
+            .group_man
+            .add_group(
+                vec!["http://localhost/dns-peer-disabled.bin".to_string()],
+                DownloadOptions {
+                    async_dns: false,
+                    ..DownloadOptions::default()
+                },
+            )
+            .unwrap();
+        let group = ctx.group_man.find_group(gid).unwrap();
+        group.recover().inc_commands();
+
+        let cached = ctx
+            .dns_cache
+            .lock()
+            .await
+            .resolve("localhost", 80)
+            .await
+            .expect("localhost should resolve for the DNS cache fixture");
+        let observed = cached[0];
+        group
+            .recover()
+            .set_connection_context(ConnectionContext::new("localhost", 80, observed));
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send((
+            gid,
+            1,
+            TaskResult::FailedWithContext {
+                error: Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: "connection reset".into(),
+                }),
+                connection_context: ConnectionContext::new("localhost", 80, observed),
+            },
+        ))
+        .unwrap();
+
+        process_task_completions(&ctx, &mut rx, &mut Vec::new(), &mut HashSet::new()).await;
+
+        let remaining = ctx
+            .dns_cache
+            .lock()
+            .await
+            .resolve_no_network("localhost", 80)
+            .expect("async-dns=false must leave the cached address available");
+        assert!(
+            remaining.contains(&observed),
+            "async-dns=false must not mark a failed connection bad in the shared cache"
+        );
     }
 
     #[tokio::test]

@@ -217,6 +217,7 @@ fn cli_contract_value(definition: &aria2_core::config::OptionDef) -> String {
             .copied()
             .unwrap_or("contract-value")
             .to_string(),
+        OptionType::Ipv4Address => "127.0.0.1".to_string(),
         OptionType::IndexOut => "1=contract-output.bin".to_string(),
         OptionType::PiecePriority => "head=1K".to_string(),
         OptionType::Path | OptionType::String => {
@@ -337,6 +338,69 @@ async fn test_load_cli_args_rejects_invalid_file_allocation() {
     );
 }
 
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_load_cli_args_rejects_invalid_lpd_interface() {
+    let cli = CliArgs::try_parse_from(["aria2", "--bt-lpd-interface=Ethernet"])
+        .expect("clap should parse the interface before registry validation");
+    let mut app = App::new();
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("LPD must reject an interface value that cannot be used as an IPv4 address");
+
+    assert!(
+        error.contains("--bt-lpd-interface"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_server_stat_configuration_reaches_engine_owner() {
+    let temp_dir = tempfile::tempdir().expect("server-stat test directory");
+    let input = temp_dir.path().join("server-stat-in.json");
+    let output = temp_dir.path().join("server-stat-out.json");
+    let app = App::new();
+
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option(
+                "server-stat-if",
+                OptionValue::Str(input.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("server-stat input path should validate");
+        config
+            .set_global_option(
+                "server-stat-file",
+                OptionValue::Str(output.to_string_lossy().into_owned()),
+            )
+            .await
+            .expect("server-stat-file alias should validate");
+        config
+            .set_global_option("server-stat-timeout", OptionValue::Int(0))
+            .await
+            .expect("zero server-stat timeout should mean unlimited");
+        config
+            .set_global_option("save-server-stat-interval", OptionValue::Int(17))
+            .await
+            .expect("server-stat save interval should validate");
+    }
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine.as_ref().expect("engine should be initialized");
+    assert_eq!(engine.server_stat_input_path(), Some(&input));
+    assert_eq!(engine.server_stat_output_path(), Some(&output));
+    assert_eq!(engine.server_stat_max_age(), None);
+    assert_eq!(
+        engine.server_stat_save_interval(),
+        Some(std::time::Duration::from_secs(17))
+    );
+}
+
 #[tokio::test]
 async fn test_load_cli_args_accepts_original_piece_priority_syntax() {
     let cli = CliArgs::try_parse_from(["aria2", "--bt-prioritize-piece=head=512K,tail"])
@@ -420,7 +484,6 @@ async fn test_original_cli_options_reach_config_registry() {
     let cli = CliArgs::try_parse_from([
         "aria2",
         "--async-dns=false",
-        "--event-poll=select",
         "--certificate=client.pem",
         "--private-key=client.key",
         "--min-tls-version=TLSv1.2",
@@ -428,10 +491,7 @@ async fn test_original_cli_options_reach_config_registry() {
         "--metalink-enable-unique-protocol=false",
         "--pause-metadata",
         "--show-console-readout=false",
-        "--dscp=46",
-        "--socket-recv-buffer-size=1M",
         "--max-resume-failure-tries=3",
-        "--optimize-concurrent-downloads",
     ])
     .expect("new original CLI options should parse");
 
@@ -441,10 +501,6 @@ async fn test_original_cli_options_reach_config_registry() {
         .expect("new original CLI options should use registry validation");
 
     assert_eq!(app.get_opt_bool("async-dns").await, Some(false));
-    assert_eq!(
-        app.get_opt_str("event-poll").await.as_deref(),
-        Some("select")
-    );
     assert_eq!(
         app.get_opt_str("certificate").await.as_deref(),
         Some("client.pem")
@@ -458,16 +514,7 @@ async fn test_original_cli_options_reach_config_registry() {
         Some(false)
     );
     assert_eq!(app.get_opt_bool("pause-metadata").await, Some(true));
-    assert_eq!(app.get_opt_i64("dscp").await, Some(46));
-    assert_eq!(
-        app.get_opt_i64("socket-recv-buffer-size").await,
-        Some(1024 * 1024)
-    );
     assert_eq!(app.get_opt_i64("max-resume-failure-tries").await, Some(3));
-    assert_eq!(
-        app.get_opt_bool("optimize-concurrent-downloads").await,
-        Some(true)
-    );
 }
 
 #[tokio::test]

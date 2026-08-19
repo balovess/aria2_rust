@@ -22,8 +22,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "conditional-get",
     "continue",
     "dir",
+    "disk-cache",
     "download-result",
-    "enable-async-dns6",
     "enable-mmap",
     "file-allocation",
     "force-save",
@@ -41,7 +41,6 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "max-resume-failure-tries",
     "min-split-size",
     "no-file-allocation-limit",
-    "optimize-concurrent-downloads",
     "parameterized-uri",
     "pause-metadata",
     "realtime-chunk-checksum",
@@ -187,8 +186,8 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "content-disposition-default-utf8",
     "continue",
     "dir",
+    "disk-cache",
     "dry-run",
-    "enable-async-dns6",
     "enable-http-keep-alive",
     "enable-http-pipelining",
     "enable-mmap",
@@ -341,7 +340,6 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "conditional-get",
     "continue",
     "dir",
-    "enable-async-dns6",
     "enable-mmap",
     "file-allocation",
     "force-save",
@@ -512,9 +510,9 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 107);
-        #[cfg(not(feature = "bittorrent"))]
         assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 106);
+        #[cfg(not(feature = "bittorrent"))]
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 105);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate

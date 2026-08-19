@@ -23,10 +23,8 @@ use tracing::info;
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
-        let mut engine = DownloadEngine::new(crate::constants::DEFAULT_TICK_INTERVAL_MS);
-
         #[cfg(feature = "bittorrent")]
-        {
+        let mut engine = {
             let config = self.config.read().await;
             let sources = match config.get_global_option("bt-tracker-source").await {
                 Some(aria2_core::config::OptionValue::List(values)) => values,
@@ -50,12 +48,6 @@ impl App {
                 .get_global_bool("enable-public-trackers")
                 .await
                 .unwrap_or(true);
-            engine.set_public_tracker_config(TrackerCatalogConfig {
-                enabled,
-                sources,
-                update_interval,
-            });
-
             let lpd_port = config
                 .get_global_i64("lpd-listen-port")
                 .await
@@ -81,18 +73,61 @@ impl App {
                     _ => Some(None),
                 })
                 .flatten();
-            match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
+            let lpd_manager = match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
                 aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
                 lpd_interface,
                 lpd_port,
             ) {
-                Ok(manager) => engine.set_lpd_manager(Arc::new(manager)),
-                Err(error) => tracing::warn!(
-                    %error,
-                    "Using default LPD manager because configured LPD setup failed"
-                ),
-            }
-        }
+                Ok(manager) => Arc::new(manager),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Using default LPD manager because configured LPD setup failed"
+                    );
+                    Arc::new(aria2_core::engine::lpd_manager::LpdManager::new())
+                }
+            };
+
+            let mut engine = DownloadEngine::with_lpd_manager(
+                crate::constants::DEFAULT_TICK_INTERVAL_MS,
+                lpd_manager,
+            );
+            engine.set_public_tracker_config(TrackerCatalogConfig {
+                enabled,
+                sources,
+                update_interval,
+            });
+            engine
+        };
+
+        #[cfg(not(feature = "bittorrent"))]
+        let mut engine = DownloadEngine::new(crate::constants::DEFAULT_TICK_INTERVAL_MS);
+
+        let server_stat_timeout = self
+            .get_opt_i64("server-stat-timeout")
+            .await
+            .filter(|value| *value >= 0)
+            .map(|value| value as u64)
+            .unwrap_or(24 * 60 * 60);
+        let server_stat_input = self
+            .get_opt_str("server-stat-if")
+            .await
+            .map(std::path::PathBuf::from);
+        let server_stat_output = self
+            .get_opt_str("server-stat-of")
+            .await
+            .map(std::path::PathBuf::from);
+        let server_stat_interval = self
+            .get_opt_i64("save-server-stat-interval")
+            .await
+            .filter(|value| *value > 0)
+            .map(|value| std::time::Duration::from_secs(value as u64));
+        engine.set_server_stat_timeout(server_stat_timeout);
+        engine.set_server_stat_persistence(
+            server_stat_input,
+            server_stat_output,
+            server_stat_interval,
+        );
 
         let save_session_path = self
             .get_opt_str("save-session")

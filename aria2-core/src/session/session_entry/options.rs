@@ -39,6 +39,11 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.out {
         map.insert("out".to_string(), v.clone());
     }
+    if let Some(v) = opts.disk_cache
+        && v != crate::request::request_group::DEFAULT_DISK_CACHE_BYTES
+    {
+        map.insert("disk-cache".to_string(), v.to_string());
+    }
     if opts.continue_download {
         map.insert("continue".to_string(), "true".to_string());
     }
@@ -77,11 +82,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
         map.insert("allow-piece-length-change".to_string(), "true".to_string());
     }
     map.insert("async-dns".to_string(), opts.async_dns.to_string());
-    if opts.enable_async_dns6 {
-        map.insert("enable-async-dns6".to_string(), "true".to_string());
-    } else {
-        map.insert("enable-async-dns6".to_string(), "false".to_string());
-    }
     if let Some(v) = opts.mmap_threshold {
         map.insert("mmap-threshold".to_string(), v.to_string());
     }
@@ -516,9 +516,6 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     }
     if opts.bt_enable_lpd {
         map.insert("bt-enable-lpd".to_string(), "true".to_string());
-    }
-    if let Some(ref v) = opts.bt_lpd_interface {
-        map.insert("bt-lpd-interface".to_string(), v.clone());
     }
 
     // --- Task lifecycle / HTTP response policy ---

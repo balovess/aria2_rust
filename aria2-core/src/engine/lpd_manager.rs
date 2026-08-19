@@ -262,12 +262,25 @@ impl LpdManager {
         info_hash: &str,
         private_torrent: bool,
     ) -> Result<(), String> {
-        self.register_torrent_with_port(info_hash, private_torrent, 0)
+        self.register_torrent_internal(info_hash, private_torrent, 0)
             .await
     }
 
     /// Register a torrent and remember the TCP port used by its announces.
     pub async fn register_torrent_with_port(
+        &self,
+        info_hash: &str,
+        private_torrent: bool,
+        port: u16,
+    ) -> Result<(), String> {
+        if port == 0 {
+            return Err("LPD registration requires a non-zero BitTorrent listen port".to_string());
+        }
+        self.register_torrent_internal(info_hash, private_torrent, port)
+            .await
+    }
+
+    async fn register_torrent_internal(
         &self,
         info_hash: &str,
         private_torrent: bool,
@@ -307,6 +320,14 @@ impl LpdManager {
         info!(info_hash = %&info_hash[..8], "Torrent unregistered from LPD");
     }
 
+    /// Return the TCP port that will be advertised for a registered torrent.
+    ///
+    /// This is the manager's process-level source of truth for periodic LPD
+    /// announcements. A missing value means the torrent is not registered.
+    pub async fn announce_port_for(&self, info_hash: &str) -> Option<u16> {
+        self.announce_ports.read().await.get(info_hash).copied()
+    }
+
     /// Manual announce for a specific torrent
     pub async fn announce_torrent(&self, info_hash: &str, port: u16) -> Result<(), String> {
         self.announcer.announce(info_hash, port)?;
@@ -341,7 +362,10 @@ impl LpdManager {
     /// # Returns
     ///
     /// JoinHandle that can be used to cancel the task
-    pub fn start_background_announce(&self, _port: u16) -> Option<tokio::task::JoinHandle<()>> {
+    pub fn start_background_announce(
+        &self,
+        fallback_port: u16,
+    ) -> Option<tokio::task::JoinHandle<()>> {
         if !self.announcer.is_enabled() {
             debug!("LPD is disabled, not starting background announce");
             return None;
@@ -379,7 +403,11 @@ impl LpdManager {
                         .map(|info_hash| {
                             (
                                 info_hash.clone(),
-                                ports.get(info_hash).copied().unwrap_or_default(),
+                                ports
+                                    .get(info_hash)
+                                    .copied()
+                                    .filter(|port| *port != 0)
+                                    .unwrap_or(fallback_port),
                             )
                         })
                         .collect()
@@ -421,6 +449,16 @@ impl LpdManager {
             handle.abort();
             info!("LPD background announce task stopped");
         }
+    }
+
+    /// Whether the process-level periodic announce task is currently owned by
+    /// this manager.
+    pub fn is_background_announce_running(&self) -> bool {
+        self.announce_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
     }
 
     /// Start the process-level receive and announce tasks once.

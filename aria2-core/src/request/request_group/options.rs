@@ -69,6 +69,8 @@ fn parse_list_option(
     (!entries.is_empty()).then_some(entries)
 }
 
+pub const DEFAULT_DISK_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub split: Option<u16>,
@@ -80,6 +82,8 @@ pub struct DownloadOptions {
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,
     pub out: Option<String>,
+    /// Write-back disk cache capacity. Zero disables the cache.
+    pub disk_cache: Option<u64>,
     /// File allocation strategy: "none", "prealloc", "falloc", "trunc", or "mmap".
     /// When "mmap", `MmapDiskWriter` is used for files above `mmap_threshold`.
     pub file_allocation: Option<String>,
@@ -87,8 +91,6 @@ pub struct DownloadOptions {
     pub allow_piece_length_change: bool,
     /// Enable the asynchronous DNS cache for this task.
     pub async_dns: bool,
-    /// Allow IPv6 addresses returned by the asynchronous DNS resolver.
-    pub enable_async_dns6: bool,
     /// Resume an existing output file when no control file is available.
     /// This is the C++ `--continue` option and defaults to `false`.
     pub continue_download: bool,
@@ -272,8 +274,6 @@ pub struct DownloadOptions {
     /// UDP port for uTP connections. 0 = auto-assign.
     /// Experimental feature not in original aria2.
     pub utp_listen_port: Option<u16>,
-    /// UDP multicast port used by Local Peer Discovery.
-    pub lpd_listen_port: Option<u16>,
 
     // ------------------------------------------------------------------
     // HTTP headers (C++ aria2 `--header` / RPC `header` option)
@@ -408,9 +408,6 @@ pub struct DownloadOptions {
     /// Enable Local Peer Discovery (LPD) for BitTorrent. Default: `false`.
     /// Maps to C++ `PREF_BT_ENABLE_LPD`.
     pub bt_enable_lpd: bool,
-    /// Network interface for LPD announcements. Default: none (auto-detect).
-    /// Maps to C++ `PREF_BT_LPD_INTERFACE`.
-    pub bt_lpd_interface: Option<String>,
     /// Enable JSON-RPC/XML-RPC server. Default: `false`.
     /// Maps to C++ `PREF_ENABLE_RPC`.
     pub enable_rpc: bool,
@@ -516,10 +513,10 @@ impl Default for DownloadOptions {
             max_upload_limit: None,
             dir: None,
             out: None,
+            disk_cache: Some(DEFAULT_DISK_CACHE_BYTES),
             file_allocation: None,
             allow_piece_length_change: false,
             async_dns: true,
-            enable_async_dns6: true,
             continue_download: false,
             allow_overwrite: false,
             auto_file_renaming: true,
@@ -605,7 +602,6 @@ impl Default for DownloadOptions {
             bt_detach_seed_only: false,
             enable_utp: false,
             utp_listen_port: None,
-            lpd_listen_port: None,
             header: Vec::new(),
             user_agent: None,
             referer: None,
@@ -653,7 +649,6 @@ impl Default for DownloadOptions {
             disable_ipv6: false,
             listen_port: None,
             bt_enable_lpd: false,
-            bt_lpd_interface: None,
             enable_rpc: false,
             pause: false,
             pause_metadata: false,
@@ -823,6 +818,10 @@ impl DownloadOptions {
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
+            disk_cache: options
+                .get("disk-cache")
+                .and_then(|value| OptionValue::parse_size_str_checked(value).ok())
+                .or(Some(DEFAULT_DISK_CACHE_BYTES)),
             file_allocation: options.get("file-allocation").cloned(),
             allow_piece_length_change: options
                 .get("allow-piece-length-change")
@@ -830,10 +829,6 @@ impl DownloadOptions {
                 .unwrap_or(false),
             async_dns: options
                 .get("async-dns")
-                .map(|v| v != "false")
-                .unwrap_or(true),
-            enable_async_dns6: options
-                .get("enable-async-dns6")
                 .map(|v| v != "false")
                 .unwrap_or(true),
             continue_download: options
@@ -1090,7 +1085,6 @@ impl DownloadOptions {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             utp_listen_port: positive_u16("utp-listen-port"),
-            lpd_listen_port: positive_u16("lpd-listen-port"),
             header: parse_list_option(options, "header").unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
@@ -1200,7 +1194,6 @@ impl DownloadOptions {
                 .get("bt-enable-lpd")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            bt_lpd_interface: options.get("bt-lpd-interface").cloned(),
             enable_rpc: options
                 .get("enable-rpc")
                 .map(|v| v == "true")
@@ -1265,6 +1258,11 @@ impl DownloadOptions {
             on_download_stop: options.get("on-download-stop").cloned(),
             on_bt_download_complete: options.get("on-bt-download-complete").cloned(),
         }
+    }
+
+    /// Return the configured write-back capacity, or `None` when disabled.
+    pub fn disk_cache_size_bytes(&self) -> Option<u64> {
+        self.disk_cache.filter(|size| *size > 0)
     }
 
     /// Parse the raw `header` list into `(name, value)` pairs, splitting each

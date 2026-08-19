@@ -194,6 +194,9 @@ impl LpdAnnouncer {
     ///
     /// Returns error if UDP send fails.
     pub fn announce(&self, info_hash: &str, port: u16) -> Result<(), String> {
+        if port == 0 {
+            return Err("LPD announce requires a non-zero BitTorrent listen port".to_string());
+        }
         if !self.enabled {
             return Ok(()); // Silently succeed when disabled
         }

@@ -541,12 +541,13 @@ impl BtDownloadCommand {
         // pieces did not arrive in index order. The write-back cache also
         // coalesces adjacent pieces before flushing (C++ WrDiskCache usage).
         // Multi-file torrents go through the coalesced per-file writer below.
-        let cache_mb: Option<usize> = Some(16);
+        let cache_size_bytes = self.group.recover().options().disk_cache_size_bytes();
         let raw_writer: Box<dyn SeekableDiskWriter> = if self.multi_file_layout.is_none() {
-            Box::new(CachedDiskWriter::new(
+            Box::new(CachedDiskWriter::new_with_mmap_bytes(
                 &self.output_path,
                 Some(total_size),
-                cache_mb,
+                cache_size_bytes,
+                false,
             ))
         } else {
             Box::new(

@@ -281,17 +281,26 @@ impl BtDownloadCommand {
         {
             let info_hash_hex = hex::encode(*info_hash_raw);
             if self.lpd_registered_info_hash.as_deref() != Some(info_hash_hex.as_str()) {
-                lpd.register_torrent_with_port(&info_hash_hex, false, self.listen_port)
-                    .await
-                    .map_err(|error| {
-                        Aria2Error::Fatal(FatalError::Config(format!(
-                            "LPD torrent registration failed: {error}"
-                        )))
-                    })?;
+                let registration = if self.listen_port > 0 {
+                    lpd.register_torrent_with_port(&info_hash_hex, false, self.listen_port)
+                        .await
+                } else {
+                    // Tests and callers that do not own a real BT listener can
+                    // still receive LPD discoveries, but must not advertise an
+                    // unusable TCP port.
+                    lpd.register_torrent(&info_hash_hex, false).await
+                };
+                registration.map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!(
+                        "LPD torrent registration failed: {error}"
+                    )))
+                })?;
                 self.lpd_registered_info_hash = Some(info_hash_hex.clone());
             }
             lpd.ensure_runtime_started().await;
-            if let Err(error) = lpd.announce_torrent(&info_hash_hex, self.listen_port).await {
+            if self.listen_port > 0
+                && let Err(error) = lpd.announce_torrent(&info_hash_hex, self.listen_port).await
+            {
                 warn!(%error, "Initial LPD announce failed");
             }
 

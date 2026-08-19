@@ -12,6 +12,7 @@ use super::{ConfigParser, OptionDef, OptionRegistry, OptionType, OptionValue};
 fn sample_value(definition: &OptionDef) -> String {
     match definition.opt_type() {
         OptionType::String | OptionType::Path => "contract-value".to_string(),
+        OptionType::Ipv4Address => "127.0.0.1".to_string(),
         OptionType::Boolean => "true".to_string(),
         OptionType::Integer => {
             let lower = definition.min.unwrap_or(1).max(0) as u64;
@@ -57,6 +58,7 @@ fn non_default_sample(definition: &OptionDef) -> String {
                 vec!["contract-consumer-value".to_string()]
             }
         }
+        OptionType::Ipv4Address => vec!["192.0.2.1".to_string(), "127.0.0.1".to_string()],
         OptionType::Integer | OptionType::IntegerRange | OptionType::Size => {
             ["1", "2", "7", "1024", "2048", "65535", "1048576"]
                 .into_iter()
@@ -218,6 +220,83 @@ fn every_registered_option_uses_one_parser_contract() {
         assert!(
             registry.parse_rpc_value(&name, &value).is_ok(),
             "RPC sample for '{}' must use the same registry parser",
+            name
+        );
+    }
+}
+
+#[tokio::test]
+async fn unsupported_options_are_rejected_at_every_configuration_entry_point() {
+    let registry = OptionRegistry::new();
+    let unsupported = registry
+        .all()
+        .values()
+        .filter(|definition| !definition.is_supported())
+        .map(|definition| definition.name().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        !unsupported.is_empty(),
+        "the unsupported-option contract must exercise at least one compatibility key"
+    );
+
+    let config_content = unsupported
+        .iter()
+        .map(|name| format!("{name}=unsupported-contract-value\n"))
+        .collect::<String>();
+    let temp_dir = tempfile::tempdir().expect("unsupported-option contract directory");
+    let config_path = temp_dir.path().join("unsupported-options.conf");
+    std::fs::write(&config_path, config_content).expect("write unsupported config fixture");
+
+    let mut file_parser = ConfigParser::new();
+    file_parser.parse_file(config_path.to_str().expect("UTF-8 temp path"));
+    assert_eq!(file_parser.errors().len(), unsupported.len());
+    assert!(file_parser.options().is_empty());
+
+    let cli_args = unsupported
+        .iter()
+        .map(|name| format!("--{name}=unsupported-contract-value"))
+        .collect::<Vec<_>>();
+    let cli_refs = cli_args.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut cli_parser = ConfigParser::new();
+    cli_parser.parse_cli_args(&cli_refs);
+    assert_eq!(cli_parser.errors().len(), unsupported.len());
+    assert!(cli_parser.options().is_empty());
+
+    let mut manager = super::ConfigManager::new();
+    for name in &unsupported {
+        assert!(
+            registry
+                .parse_rpc_value(name, &serde_json::json!("unsupported-contract-value"))
+                .is_err(),
+            "RPC registry input for unsupported option '{}' must be rejected",
+            name
+        );
+        assert!(
+            crate::request::request_group::DownloadOptions::try_from_rpc_options(
+                &std::collections::HashMap::from([(
+                    name.clone(),
+                    serde_json::json!("unsupported-contract-value"),
+                )])
+            )
+            .is_err(),
+            "unsupported option '{}' must not enter DownloadOptions",
+            name
+        );
+        assert!(
+            manager
+                .set_global_option(
+                    name,
+                    OptionValue::Str("unsupported-contract-value".to_string())
+                )
+                .await
+                .is_err(),
+            "ConfigManager must reject unsupported option '{}'",
+            name
+        );
+        assert_eq!(
+            manager.get_global_option(name).await,
+            None,
+            "unsupported option '{}' must not enter ConfigManager state",
             name
         );
     }
@@ -493,6 +572,95 @@ fn every_task_runtime_policy_has_a_real_download_option_consumer() {
             name
         );
     }
+}
+
+#[tokio::test]
+async fn disk_cache_contract_reaches_session_and_real_writer_io() {
+    use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
+    use crate::request::request_group::DownloadOptions;
+    use crate::session::session_entry::download_options_to_map;
+
+    let temp_dir = tempfile::tempdir().expect("disk-cache contract directory");
+    let config_path = temp_dir.path().join("disk-cache.conf");
+    std::fs::write(&config_path, "disk-cache=0\n")
+        .expect("write disk-cache config fixture");
+
+    let mut file_parser = ConfigParser::new();
+    file_parser.parse_file(config_path.to_str().expect("UTF-8 temp path"));
+    assert!(!file_parser.has_errors(), "config errors: {:?}", file_parser.errors());
+    let file_options = DownloadOptions::from_option_values(file_parser.options());
+
+    let mut cli_parser = ConfigParser::new();
+    cli_parser.parse_cli_args(&["--disk-cache=0"]);
+    assert!(!cli_parser.has_errors(), "CLI errors: {:?}", cli_parser.errors());
+    let cli_options = DownloadOptions::from_option_values(cli_parser.options());
+
+    let rpc_options = DownloadOptions::try_from_rpc_options(&std::collections::HashMap::from([
+        ("disk-cache".to_string(), serde_json::json!(0)),
+    ]))
+    .expect("RPC disk-cache value must use the shared parser");
+
+    for (source, options) in [
+        ("config-file", &file_options),
+        ("CLI", &cli_options),
+        ("RPC", &rpc_options),
+    ] {
+        assert_eq!(
+            options.disk_cache,
+            Some(0),
+            "{} must preserve an explicit zero disk-cache value",
+            source
+        );
+        assert_eq!(
+            options.disk_cache_size_bytes(),
+            None,
+            "{} zero disk-cache must disable the write-back cache",
+            source
+        );
+    }
+
+    let session = download_options_to_map(&rpc_options);
+    assert_eq!(session.get("disk-cache").map(String::as_str), Some("0"));
+    let restored = DownloadOptions::from_option_strings(&session);
+    assert_eq!(restored.disk_cache, Some(0));
+
+    let direct_path = temp_dir.path().join("direct.bin");
+    let mut direct_writer = CachedDiskWriter::new_with_mmap_bytes(
+        &direct_path,
+        Some(64),
+        file_options.disk_cache_size_bytes(),
+        false,
+    );
+    direct_writer.open().await.unwrap();
+    direct_writer.write_at(0, b"direct").await.unwrap();
+    assert_eq!(
+        &tokio::fs::read(&direct_path).await.unwrap()[..6],
+        b"direct",
+        "disk-cache=0 must make a small write visible before flush"
+    );
+    direct_writer.close().await.unwrap();
+
+    let cached_path = temp_dir.path().join("cached.bin");
+    let mut cached_writer = CachedDiskWriter::new_with_mmap_bytes(
+        &cached_path,
+        Some(64),
+        Some(4096),
+        false,
+    );
+    cached_writer.open().await.unwrap();
+    cached_writer.write_at(0, b"cached").await.unwrap();
+    assert_eq!(
+        &tokio::fs::read(&cached_path).await.unwrap()[..6],
+        &[0; 6],
+        "a non-zero disk-cache must buffer small writes until flush"
+    );
+    cached_writer.flush().await.unwrap();
+    assert_eq!(
+        &tokio::fs::read(&cached_path).await.unwrap()[..6],
+        b"cached",
+        "cached bytes must reach the file at the writer flush boundary"
+    );
+    cached_writer.close().await.unwrap();
 }
 
 #[test]
