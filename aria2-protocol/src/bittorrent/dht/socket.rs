@@ -10,8 +10,15 @@ pub struct DhtSocket {
 
 impl DhtSocket {
     pub async fn bind(port: u16) -> Result<Self, String> {
-        let addr = format!("0.0.0.0:{}", port);
-        let socket = UdpSocket::bind(&addr)
+        Self::bind_on(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port,
+        ))
+        .await
+    }
+
+    pub async fn bind_on(addr: std::net::SocketAddr) -> Result<Self, String> {
+        let socket = UdpSocket::bind(addr)
             .await
             .map_err(|e| format!("DHT UDP bind failed ({}): {}", addr, e))?;
         let local_addr = socket

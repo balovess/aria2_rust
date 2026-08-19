@@ -105,8 +105,27 @@ impl SequentialDownloader {
 
     pub(crate) async fn wait_for_cancellation(&self) -> Result<()> {
         loop {
+            let notifier = self.group.recover().lifecycle_notifier();
+            let notified = notifier.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             self.check_cancelled()?;
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            notified.as_mut().await;
+        }
+    }
+
+    /// Wait between retry attempts without delaying RequestGroup controls.
+    /// A plain sleep would make pause, remove, and halt wait for the full
+    /// configured retry interval.
+    pub(crate) async fn wait_for_retry(&self, wait: std::time::Duration) -> Result<()> {
+        let notifier = self.group.recover().lifecycle_notifier();
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        self.check_cancelled()?;
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => self.check_cancelled(),
+            _ = &mut notified => self.check_cancelled(),
         }
     }
 
@@ -196,7 +215,7 @@ impl SequentialDownloader {
                     wait,
                     accumulated_completed.len()
                 );
-                tokio::time::sleep(wait).await;
+                self.wait_for_retry(wait).await?;
             }
 
             let result = self
@@ -249,7 +268,7 @@ impl SequentialDownloader {
                     attempt,
                     wait
                 );
-                tokio::time::sleep(wait).await;
+                self.wait_for_retry(wait).await?;
             }
 
             match self.execute(uri, resume_state, total_length).await {
@@ -323,7 +342,87 @@ impl SequentialDownloader {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use crate::engine::download_cookie::CookieHelper;
+    use crate::engine::download_progress::ProgressUpdater;
+    use crate::http::HttpRequestPolicy;
+    use crate::http::cookie_storage::CookieStorage;
+    use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
+    use crate::util::perf_monitor::AtomicMetrics;
+
     use super::SequentialDownloader;
+
+    fn test_downloader(group: Arc<std::sync::RwLock<RequestGroup>>) -> SequentialDownloader {
+        let progress = Arc::new(AtomicProgress::new());
+        SequentialDownloader::new(
+            crate::http::client_pool::get_global_client(),
+            std::env::temp_dir().join("aria2-sequential-retry-test.bin"),
+            HttpRequestPolicy::default(),
+            CookieHelper::new(Arc::new(CookieStorage::new()), None),
+            ProgressUpdater::new(
+                None,
+                None,
+                Arc::clone(&progress),
+                Arc::new(AtomicMetrics::new()),
+                None,
+            ),
+            group,
+            progress,
+            None,
+        )
+    }
+
+    #[tokio::test]
+    async fn retry_wait_is_interruptible_when_removed() {
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(900),
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+        group.write().unwrap().mark_removed();
+        let downloader = test_downloader(group);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(100),
+            downloader.wait_for_retry(Duration::from_secs(5)),
+        )
+        .await
+        .expect("removed retry wait should stop promptly");
+
+        assert!(matches!(
+            result,
+            Err(crate::error::Aria2Error::DownloadFailed(message))
+                if message == "Download cancelled by user"
+        ));
+    }
+
+    #[tokio::test]
+    async fn retry_wait_wakes_when_removed_after_wait_starts() {
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(901),
+            vec!["http://example.com/file.bin".to_string()],
+            DownloadOptions::default(),
+        )));
+        let group_for_wait = Arc::clone(&group);
+        let downloader = test_downloader(group);
+        let wait_task =
+            tokio::spawn(async move { downloader.wait_for_retry(Duration::from_secs(5)).await });
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        group_for_wait.write().unwrap().mark_removed();
+
+        let result = tokio::time::timeout(Duration::from_millis(100), wait_task)
+            .await
+            .expect("lifecycle notification should wake retry wait")
+            .expect("retry wait task should not panic");
+        assert!(matches!(
+            result,
+            Err(crate::error::Aria2Error::DownloadFailed(message))
+                if message == "Download cancelled by user"
+        ));
+    }
 
     #[test]
     fn test_merge_ranges_empty() {

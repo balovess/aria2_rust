@@ -13,6 +13,7 @@
 
 mod endgame;
 mod normal;
+mod pipelined;
 
 /// BT Message Handler for block-level operations (legacy, stateless).
 ///

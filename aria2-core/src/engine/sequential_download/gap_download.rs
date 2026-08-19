@@ -16,7 +16,9 @@ fn classify_gap_http_status(status_code: u16, range_header: &str) -> Aria2Error 
         416 => Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable {
             range: range_header.to_string(),
         }),
-        500.. => Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code }),
+        code if code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&code) => {
+            Aria2Error::Recoverable(RecoverableError::ServerError { code })
+        }
         _ => Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
             message: format!("HTTP error: {status_code}"),
         }),
@@ -59,7 +61,13 @@ impl SequentialDownloader {
         let mut completed_bytes = completed_ranges.iter().map(|(_, len)| len).sum::<u64>();
         self.progress_updater.reset(completed_bytes);
 
-        let mut writer = CachedDiskWriter::new(&self.output_path, Some(total_length), None);
+        let disk_cache = self.group.recover().options().disk_cache_size_bytes();
+        let mut writer = CachedDiskWriter::new_with_mmap_bytes(
+            &self.output_path,
+            Some(total_length),
+            disk_cache,
+            false,
+        );
 
         let rate_limit = { self.group.recover().options().max_download_limit };
         let limiter = rate_limit
@@ -125,6 +133,9 @@ impl SequentialDownloader {
                 }
             };
 
+            // Keep timeout and DNS candidate attribution consistent with the
+            // normal sequential response path.
+            self.publish_connection_context(uri, response.remote_addr());
             self.cookie_helper.extract_and_store_cookies(uri, &response);
 
             let status = response.status();
@@ -193,6 +204,10 @@ impl SequentialDownloader {
                         };
                     }
                 };
+
+                if !data.is_empty() {
+                    self.progress.record_network_activity();
+                }
 
                 if let Some(ref lim) = limiter {
                     lim.acquire_download(data.len() as u64).await;
@@ -330,6 +345,17 @@ impl SequentialDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::engine::download_cookie::CookieHelper;
+    use crate::engine::download_progress::ProgressUpdater;
+    use crate::http::HttpRequestPolicy;
+    use crate::http::cookie_storage::CookieStorage;
+    use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
+    use crate::util::perf_monitor::AtomicMetrics;
+    use crate::util::rwlock_ext::RwLockRecover;
 
     #[test]
     fn classifies_416_as_range_failure() {
@@ -349,11 +375,94 @@ mod tests {
     }
 
     #[test]
+    fn classifies_configured_4xx_transients_as_server_failures() {
+        for status_code in [408, 429] {
+            assert!(matches!(
+                classify_gap_http_status(status_code, "bytes=10-20"),
+                Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                    if code == status_code
+            ));
+        }
+    }
+
+    #[test]
     fn classifies_other_http_statuses_as_protocol_failures() {
         assert!(matches!(
             classify_gap_http_status(404, "bytes=10-20"),
             Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message })
                 if message == "HTTP error: 404"
         ));
+    }
+
+    #[tokio::test]
+    async fn gap_download_records_the_selected_peer_address() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind test HTTP listener");
+        let server_addr = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept range request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).await.expect("read range request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 0-2/3\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\nabc",
+                )
+                .await
+                .expect("write range response");
+        });
+
+        let dir = tempfile::tempdir().expect("create temporary download directory");
+        let uri = format!("http://{server_addr}/payload.bin");
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(9_901),
+            vec![uri.clone()],
+            DownloadOptions::default(),
+        )));
+        group.recover_mut().start().expect("start request group");
+        let progress = Arc::new(AtomicProgress::new());
+        crate::http::client_pool::ensure_rustls_provider();
+        let mut downloader = SequentialDownloader::new(
+            Arc::new(
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .expect("build test HTTP client"),
+            ),
+            dir.path().join("payload.bin"),
+            HttpRequestPolicy::default(),
+            CookieHelper::new(Arc::new(CookieStorage::new()), None),
+            ProgressUpdater::new(
+                None,
+                None,
+                Arc::clone(&progress),
+                Arc::new(AtomicMetrics::new()),
+                None,
+            ),
+            Arc::clone(&group),
+            progress,
+            None,
+        );
+
+        let result = downloader.execute_with_gaps(&uri, 3, &[]).await;
+        server.await.expect("test HTTP server should finish");
+
+        assert!(
+            result.error.is_none(),
+            "gap download failed: {:?}",
+            result.error
+        );
+        assert_eq!(
+            tokio::fs::read(dir.path().join("payload.bin"))
+                .await
+                .unwrap(),
+            b"abc"
+        );
+        let contexts = group.recover().connection_contexts();
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[0].endpoint.hostname(), "127.0.0.1");
+        assert_eq!(contexts[0].endpoint.port(), server_addr.port());
+        assert_eq!(contexts[0].peer_addr, server_addr);
     }
 }

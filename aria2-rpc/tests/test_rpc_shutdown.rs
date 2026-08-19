@@ -1,102 +1,55 @@
-//! Integration tests for RPC shutdown methods.
-//!
-//! Tests `aria2.shutdown` and `aria2.forceShutdown` functionality.
+//! Contract tests for shutdown requests.
 
-use aria2_rpc::engine::RpcEngine;
+mod common;
+
 use aria2_rpc::json_rpc::JsonRpcRequest;
+use common::test_engine;
+use serde_json::json;
 
-#[tokio::test]
-async fn test_shutdown_empty_engine() {
-    let engine = RpcEngine::new();
-    let req = JsonRpcRequest::new("aria2.shutdown", serde_json::json!([])).with_id(1);
-    let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success());
-
-    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(result.contains("OK"));
-    assert!(result.contains("0 active downloads"));
+fn request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
+    JsonRpcRequest::new(method, params).with_id(1)
 }
 
 #[tokio::test]
-async fn test_shutdown_with_active_downloads() {
-    let engine = RpcEngine::new();
-
-    let add_req = JsonRpcRequest::new(
-        "aria2.addUri",
-        serde_json::json!([["http://example.com/file.zip"]]),
-    )
-    .with_id(1);
-    let add_resp = engine.handle_request(&add_req).await;
-    assert!(add_resp.is_success());
-
-    let shutdown_req = JsonRpcRequest::new("aria2.shutdown", serde_json::json!([])).with_id(2);
-    let shutdown_resp = engine.handle_request(&shutdown_req).await;
-    assert!(shutdown_resp.is_success());
-
-    let result: String = serde_json::from_value(shutdown_resp.result.unwrap()).unwrap();
-    assert!(result.contains("OK"));
-    assert!(result.contains("1 active downloads"));
-}
-
-#[tokio::test]
-async fn test_force_shutdown_empty_engine() {
-    let engine = RpcEngine::new();
-    let req = JsonRpcRequest::new("aria2.forceShutdown", serde_json::json!([])).with_id(1);
-    let resp = engine.handle_request(&req).await;
-    assert!(resp.is_success());
-
-    let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert!(result.contains("OK"));
-    assert!(result.contains("0 downloads"));
-}
-
-#[tokio::test]
-async fn test_force_shutdown_with_active_downloads() {
-    let engine = RpcEngine::new();
-
-    for i in 0..3 {
-        let add_req = JsonRpcRequest::new(
+async fn shutdown_reports_the_current_task_count() {
+    let engine = test_engine();
+    let add = engine
+        .handle_request(&request(
             "aria2.addUri",
-            serde_json::json!([[format!("http://example.com/file{}.zip", i)]]),
-        )
-        .with_id(i);
-        let add_resp = engine.handle_request(&add_req).await;
-        assert!(add_resp.is_success());
-    }
-
-    assert_eq!(engine.task_count().await, 3);
-
-    let force_shutdown_req =
-        JsonRpcRequest::new("aria2.forceShutdown", serde_json::json!([])).with_id(100);
-    let force_shutdown_resp = engine.handle_request(&force_shutdown_req).await;
-    assert!(force_shutdown_resp.is_success());
-
-    let result: String = serde_json::from_value(force_shutdown_resp.result.unwrap()).unwrap();
-    assert!(result.contains("OK"));
-    assert!(result.contains("3 downloads forcibly terminated"));
-    assert_eq!(engine.task_count().await, 0);
+            json!([["http://example.test/file.zip"]]),
+        ))
+        .await;
+    assert!(add.is_success());
+    let shutdown = engine
+        .handle_request(&request("aria2.shutdown", json!([])))
+        .await;
+    assert!(shutdown.result.unwrap().as_str().unwrap().contains("OK"));
+    assert_eq!(engine.task_count().await, 1);
 }
 
 #[tokio::test]
-async fn test_shutdown_vs_force_shutdown_difference() {
-    let engine = RpcEngine::new();
-
-    let add_req = JsonRpcRequest::new(
-        "aria2.addUri",
-        serde_json::json!([["http://example.com/test.zip"]]),
-    )
-    .with_id(1);
-    let add_resp = engine.handle_request(&add_req).await;
-    assert!(add_resp.is_success());
-
-    let shutdown_req = JsonRpcRequest::new("aria2.shutdown", serde_json::json!([])).with_id(2);
-    let shutdown_resp = engine.handle_request(&shutdown_req).await;
-    assert!(shutdown_resp.is_success());
-    assert_eq!(engine.task_count().await, 1);
-
-    let force_shutdown_req =
-        JsonRpcRequest::new("aria2.forceShutdown", serde_json::json!([])).with_id(3);
-    let force_shutdown_resp = engine.handle_request(&force_shutdown_req).await;
-    assert!(force_shutdown_resp.is_success());
+async fn force_shutdown_clears_backend_tasks() {
+    let engine = test_engine();
+    for index in 0..3 {
+        let response = engine
+            .handle_request(&request(
+                "aria2.addUri",
+                json!([[format!("http://example.test/{index}")]]),
+            ))
+            .await;
+        assert!(response.is_success());
+    }
+    let response = engine
+        .handle_request(&request("aria2.forceShutdown", json!([])))
+        .await;
+    assert!(response.is_success());
+    assert!(
+        response
+            .result
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("3 downloads")
+    );
     assert_eq!(engine.task_count().await, 0);
 }

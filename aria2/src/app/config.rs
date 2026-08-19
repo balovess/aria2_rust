@@ -135,6 +135,7 @@ impl App {
         set_path!("dir", g.dir);
         set_str!("out", g.out);
         set_path!("log", g.log);
+        set_u64!("log-backup-count", g.log_backup_count);
         set_str!("log-level", g.log_level);
         set_str!("console-log-level", g.console_log_level);
         set_u64!("summary-interval", g.summary_interval);
@@ -178,6 +179,7 @@ impl App {
         set_bool_true!("stderr", g.stderr);
         set_u64!("max-download-result", g.max_download_result);
         set_str!("lowest-speed-limit", g.lowest_speed_limit);
+        set_u64!("max-downloads", g.max_downloads);
         set_u64!("max-file-not-found", g.max_file_not_found);
         set_str!("no-file-allocation-limit", g.no_file_allocation_limit);
         set_u64!("stop-with-process", g.stop_with_process);
@@ -187,6 +189,7 @@ impl App {
         set_str!("multiple-interface", g.multiple_interface);
         set_str!("gid", g.gid);
         set_bool_true!("async-dns", g.async_dns);
+        set_u64!("dns-timeout", g.dns_timeout);
         set_str!("async-dns-server", g.async_dns_server);
         set_bool_true!("enable-async-dns6", g.enable_async_dns6);
         set_str!("event-poll", g.event_poll);
@@ -198,6 +201,8 @@ impl App {
         set_path!("torrent-file", g.torrent_file);
         set_path!("metalink-file", g.metalink_file);
         set_str!("checksum", g.checksum);
+        set_bool_true!("select-least-used-host", g.select_least_used_host);
+        set_u64!("startup-idle-time", g.startup_idle_time);
         set_bool_true!("enable-mmap", g.enable_mmap);
         set_str!("max-mmap-limit", g.max_mmap_limit);
         set_bool_true!(
@@ -245,6 +250,7 @@ impl App {
         set_u64!("split", h.split);
         set_str!("min-split-size", h.min_split_size);
         set_u64!("max-connection-per-server", h.max_connection_per_server);
+        set_u64!("max-http-pipelining", h.max_http_pipelining);
         // Negation: --no-check-certificate takes precedence over --check-certificate
         if h.no_check_certificate.unwrap_or(false) {
             set_bool_false!("check-certificate", Some(true));
@@ -289,12 +295,16 @@ impl App {
         set_u64!("bt-max-peers", b.bt_max_peers);
         set_str!("bt-request-peer-speed-limit", b.bt_request_peer_speed_limit);
         set_u64!("bt-max-open-files", b.bt_max_open_files);
+        set_path!("bt-peer-blocklist", b.bt_peer_blocklist);
+        set_u64!("bt-keep-alive-interval", b.bt_keep_alive_interval);
+        set_u64!("bt-timeout", b.bt_timeout);
+        set_u64!("bt-request-timeout", b.bt_request_timeout);
+        set_u64!("peer-connection-timeout", b.peer_connection_timeout);
         set_bool_true!("bt-seed-unverified", b.bt_seed_unverified);
         set_bool_true!("bt-save-metadata", b.bt_save_metadata);
         set_bool_true!("bt-force-encryption", b.bt_force_encryption);
         set_str!("bt-min-crypto-level", b.bt_min_crypto_level);
-        set_bool_true!("bt-enable-lpd", b.bt_enable_lpd);
-        set_bool_true!("enable-lpd", b.enable_lpd);
+        set_bool_true!("bt-enable-lpd", b.bt_enable_lpd.or(b.enable_lpd));
         set_u64!("lpd-listen-port", b.lpd_listen_port);
         set_bool_true!("bt-enable-web-seed", b.bt_enable_web_seed);
         if b.no_enable_dht.unwrap_or(false) {
@@ -303,9 +313,11 @@ impl App {
             set_bool_true!("enable-dht", b.enable_dht);
         }
         set_str!("dht-listen-port", b.dht_listen_port);
+        set_str!("dht-listen-addr", b.dht_listen_addr);
         set_str!("dht-entry-point", b.dht_entry_point);
-        set_path!("dht-file-path", b.dht_file_path);
-        set_path!("dht-message-path", b.dht_message_path);
+        set_str!("dht-entry-point-host", b.dht_entry_point_host);
+        set_u16!("dht-entry-point-port", b.dht_entry_point_port);
+        set_path!("dht-file-path", b.dht_file_path.or(b.dht_message_path));
         set_bool_true!("enable-peer-exchange", b.enable_peer_exchange);
         set_str!("follow-torrent", b.follow_torrent);
         set_str!("on-bt-download-complete", b.on_bt_download_complete);
@@ -339,6 +351,8 @@ impl App {
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
         set_str!("dht-entry-point6", b.dht_entry_point6);
+        set_str!("dht-entry-point-host6", b.dht_entry_point_host6);
+        set_u16!("dht-entry-point-port6", b.dht_entry_point_port6);
         set_path!("dht-file-path6", b.dht_file_path6);
         set_str!("peer-id-prefix", b.peer_id_prefix);
         set_str!("peer-agent", b.peer_agent);
@@ -384,9 +398,19 @@ impl App {
         set_u64!("dscp", a.dscp);
         set_str!("socket-recv-buffer-size", a.socket_recv_buffer_size);
         set_u64!("max-resume-failure-tries", a.max_resume_failure_tries);
+        set_str!("log-max-size", a.log_max_size);
+        set_u64!("log-max-files", a.log_max_files);
         set_bool_true!(
             "optimize-concurrent-downloads",
             a.optimize_concurrent_downloads
+        );
+        set_f64!(
+            "optimize-concurrent-downloads-coeffA",
+            a.optimize_concurrent_downloads_coeff_a
+        );
+        set_f64!(
+            "optimize-concurrent-downloads-coeffB",
+            a.optimize_concurrent_downloads_coeff_b
         );
 
         drop(conf);

@@ -60,15 +60,43 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
             // default allocate-and-zero-fill behavior. length is cast to
             // off_t which is i64 on 64-bit Linux; u64 fits in i64 for
             // practical file sizes (< 2^63 bytes).
-            let ret = unsafe { libc::fallocate(fd, 0 as libc::c_int, 0, length as libc::off_t) };
-            if ret == 0 {
+            use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+            // Keep the descriptor alive if the allocation future is cancelled
+            // while the blocking syscall is still running.
+            let duplicated_fd = unsafe { libc::dup(fd) };
+            if duplicated_fd < 0 {
+                return Err(Aria2Error::Io(std::io::Error::last_os_error().to_string()));
+            }
+            // SAFETY: `duplicated_fd` is the successful result of `dup` and is
+            // owned exclusively by this `OwnedFd`.
+            let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated_fd) };
+            let syscall_result = tokio::task::spawn_blocking(move || {
+                // `fallocate` may wait for filesystem metadata, block
+                // allocation, or CoW extent work. Keep it off the reactor.
+                let ret = unsafe {
+                    libc::fallocate(
+                        owned_fd.as_raw_fd(),
+                        0 as libc::c_int,
+                        0,
+                        length as libc::off_t,
+                    )
+                };
+                if ret == 0 {
+                    Ok(())
+                } else {
+                    // SAFETY: errno is read immediately after fallocate on
+                    // the same blocking worker thread.
+                    Err(unsafe { *libc::__errno_location() })
+                }
+            })
+            .await
+            .map_err(|error| Aria2Error::Io(format!("fallocate task failed: {error}")))?;
+            if syscall_result.is_ok() {
                 // Success: kernel allocates zeroed blocks; secure is a no-op.
                 return Ok(());
             }
-            // SAFETY: __errno_location() returns a pointer to the
-            // thread-local errno variable. Dereferencing is safe in a
-            // single-threaded context immediately after the fallocate call.
-            let errno = unsafe { *libc::__errno_location() };
+            let errno = syscall_result.expect_err("failed fallocate must carry errno");
             if errno == libc::EOPNOTSUPP {
                 tracing::warn!(
                     length,
@@ -111,25 +139,47 @@ pub(crate) async fn fallocate<D: DiskAdaptor>(
                     // is rejected by the filesystem.
                     let existing_length = adaptor.size().await?.min(length);
                     adaptor.truncate(length).await?;
-                    // F_ALLOCATEALL allocates all requested space;
-                    // F_PEOFPOSMODE measures offset from physical end of file.
-                    let fstore = libc::fstore_t {
-                        fst_flags: libc::F_ALLOCATEALL as libc::c_uint,
-                        fst_posmode: libc::F_PEOFPOSMODE,
-                        fst_offset: 0,
-                        fst_length: length as libc::off_t,
-                        fst_bytesalloc: 0,
-                    };
-                    // SAFETY: fd is a valid open file descriptor.
-                    // F_PREALLOCATE is a valid fcntl command on macOS.
-                    // &fstore is a valid pointer to a fstore_t struct
-                    // on the stack that outlives this call.
-                    let ret = unsafe { libc::fcntl(fd, libc::F_PREALLOCATE, &fstore) };
-                    if ret != 0 {
+                    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+                    // Keep the descriptor alive if the allocation future is
+                    // cancelled while F_PREALLOCATE is still running.
+                    let duplicated_fd = unsafe { libc::dup(fd) };
+                    if duplicated_fd < 0 {
+                        return Err(Aria2Error::Io(std::io::Error::last_os_error().to_string()));
+                    }
+                    // SAFETY: `duplicated_fd` is the successful result of
+                    // `dup` and is owned exclusively by this `OwnedFd`.
+                    let owned_fd = unsafe { OwnedFd::from_raw_fd(duplicated_fd) };
+                    let fcntl_result = tokio::task::spawn_blocking(move || {
+                        // `F_PREALLOCATE` may synchronously allocate extents.
+                        let fstore = libc::fstore_t {
+                            fst_flags: libc::F_ALLOCATEALL as libc::c_uint,
+                            fst_posmode: libc::F_PEOFPOSMODE,
+                            fst_offset: 0,
+                            fst_length: length as libc::off_t,
+                            fst_bytesalloc: 0,
+                        };
+                        // SAFETY: fd is a valid file descriptor and fstore
+                        // remains live for the duration of the syscall.
+                        let ret = unsafe {
+                            libc::fcntl(owned_fd.as_raw_fd(), libc::F_PREALLOCATE, &fstore)
+                        };
+                        if ret == 0 {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    })
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::Io(format!("F_PREALLOCATE task failed: {error}"))
+                    })?;
+                    if let Err(error) = fcntl_result {
                         // Filesystem may not support F_PREALLOCATE; the file is
                         // already sized above, so it remains sparse but correct.
                         tracing::warn!(
                             length,
+                            error = %error,
                             "F_PREALLOCATE failed on macOS, file remains sparse"
                         );
                         return Ok(());

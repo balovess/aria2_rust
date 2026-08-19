@@ -1,8 +1,7 @@
 //! Session Save/Load Persistence - Phase 15 H4
 //!
 //! Provides complete session state persistence using the ResumeData JSON format
-//! (.aria2 files). This module bridges the ActiveSessionManager with the
-//! ResumeData serialization system for cross-restart download resumption.
+//! (.aria2 files) for cross-restart download resumption.
 //!
 //! # Architecture
 //!
@@ -15,7 +14,6 @@
 //!
 //! Dependencies:
 //!   resume_data.rs - ResumeData, UriState, ChecksumInfo structs
-//!   active_session.rs - ActiveSessionManager for session file I/O
 //! ```
 
 mod dht;
@@ -25,4 +23,4 @@ mod persistence;
 mod tests;
 
 pub use dht::{DhtNodeInfo, DhtStateSnapshot};
-pub use persistence::{DEFAULT_AUTO_SAVE_INTERVAL_SECS, SessionPersistence};
+pub use persistence::SessionPersistence;

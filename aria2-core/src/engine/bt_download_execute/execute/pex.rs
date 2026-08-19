@@ -26,7 +26,7 @@ use tracing::{debug, info, trace, warn};
 use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::engine::bt_peer_interaction::{BtPeerCryptoPolicy, BtPeerInteraction};
+use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
 use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -54,8 +54,8 @@ impl BtDownloadCommand {
         remote_peer_addr: &PeerAddr,
         remote_ut_pex_id: u8,
     ) -> Option<Vec<u8>> {
-        // BEP 0027 (Private Torrent): PEX must never be sent.
-        if self.is_private {
+        // BEP 0027 and the user-facing switch both prohibit PEX.
+        if !self.peer_exchange_enabled() {
             return None;
         }
 
@@ -94,9 +94,9 @@ impl BtDownloadCommand {
         pex_data: &[u8],
         local_addr: &PeerAddr,
     ) -> Result<(Vec<PeerAddr>, Vec<PeerAddr>)> {
-        // BEP 0027 (Private Torrent): ignore any incoming PEX message.
-        if self.is_private {
-            debug!("[PEX] Ignoring incoming PEX for private torrent (BEP 0027)");
+        // BEP 0027 and the user-facing switch both prohibit PEX.
+        if !self.peer_exchange_enabled() {
+            debug!("[PEX] Ignoring incoming PEX because peer exchange is disabled");
             return Ok((Vec::new(), Vec::new()));
         }
 
@@ -134,8 +134,8 @@ impl BtDownloadCommand {
         update: &ExtensionUpdate,
         _local_addr: &PeerAddr,
     ) -> Vec<PeerAddr> {
-        // BEP 0027: never process PEX for private torrents.
-        if self.is_private {
+        // BEP 0027 and the user-facing switch both prohibit PEX.
+        if !self.peer_exchange_enabled() {
             return Vec::new();
         }
 
@@ -219,8 +219,11 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
     ) -> Vec<BtPeerConn> {
-        // BEP 0027: never connect to PEX-discovered peers for private torrents.
-        if self.is_private || new_peers.is_empty() {
+        // This is the shared connection path for PEX, tracker, DHT, and
+        // incoming peers. PEX-specific gating happens before this function
+        // is called; tracker and DHT peers must remain connectable when PEX is
+        // disabled.
+        if new_peers.is_empty() {
             return Vec::new();
         }
 
@@ -244,18 +247,9 @@ impl BtDownloadCommand {
             "[PEX] Attempting to connect to {} new peers discovered via PEX",
             peers_to_connect.len()
         );
-        let crypto_policy = {
+        let connection_options = {
             let group = self.group.recover();
-            BtPeerCryptoPolicy {
-                require_mse: group.options().bt_require_crypto || group.options().bt_force_encrypt,
-                force_encryption: group.options().bt_force_encrypt,
-                prefer_encryption: group.effective_option_snapshot().is_some_and(|snapshot| {
-                    snapshot
-                        .get("bt-min-crypto-level")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|level| level.eq_ignore_ascii_case("arc4"))
-                }) || group.options().bt_force_encrypt,
-            }
+            BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id)
         };
 
         // Attempt connections sequentially. Individual errors are logged without
@@ -265,15 +259,17 @@ impl BtDownloadCommand {
             match BtPeerInteraction::connect_peer_ready(
                 peer,
                 info_hash_raw,
-                crypto_policy,
+                &connection_options,
                 num_pieces,
                 piece_length,
                 total_size,
+                self.utp_socket.clone(),
             )
             .await
             {
-                Ok(conn) => {
+                Ok(mut conn) => {
                     debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
+                    self.apply_peer_exchange_policy(&mut conn);
                     connected.push(conn);
                 }
                 Err(e) => {
@@ -327,6 +323,10 @@ pub(super) async fn send_periodic_pex(
             .iter_mut()
             .find(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port) == Some(peer_key))
         {
+            if !conn.is_pex_enabled() {
+                continue;
+            }
+
             // Get the remote peer's address to exclude it from the added list.
             let remote_addr = PeerAddr::new(&conn.ip_addr, conn.port);
 
@@ -407,4 +407,68 @@ pub(super) fn process_incoming_pex_update(
     local_addr: &PeerAddr,
 ) -> Vec<PeerAddr> {
     cmd.process_pex_extension_update(update, local_addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::bt_download_command_tests::build_test_torrent;
+    use crate::request::request_group::GroupId;
+    use crate::util::rwlock_ext::RwLockRecover;
+    use aria2_protocol::bittorrent::message::extension::CompactPeerV4;
+
+    fn pex_update() -> ExtensionUpdate {
+        ExtensionUpdate::PeerExchange {
+            added_v4: vec![CompactPeerV4([127, 0, 0, 1, 0x1a, 0xe1])],
+            added_v6: Vec::new(),
+            dropped_v4: Vec::new(),
+            dropped_v6: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn disabling_peer_exchange_blocks_receive_cache_and_send() {
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(7),
+            &build_test_torrent(),
+            &crate::request::request_group::DownloadOptions::default(),
+            None,
+        )
+        .expect("test command should be constructible");
+        command
+            .group_handle()
+            .recover_mut()
+            .set_option_snapshot(std::collections::HashMap::from([(
+                "enable-peer-exchange".to_string(),
+                serde_json::Value::Bool(false),
+            )]));
+
+        let local = PeerAddr::new("127.0.0.2", 6882);
+        assert!(
+            command
+                .process_pex_extension_update(&pex_update(), &local)
+                .is_empty()
+        );
+        assert!(command.get_pex_known_peers().is_empty());
+
+        command.set_pex_known_peers(vec![PeerAddr::new("127.0.0.1", 6881)]);
+        assert!(command.build_pex_extended_message(&local, 1).is_none());
+    }
+
+    #[test]
+    fn enabled_peer_exchange_accepts_and_advertises_discovered_peers() {
+        let mut command = BtDownloadCommand::new(
+            GroupId::new(8),
+            &build_test_torrent(),
+            &crate::request::request_group::DownloadOptions::default(),
+            None,
+        )
+        .expect("test command should be constructible");
+        let local = PeerAddr::new("127.0.0.2", 6882);
+
+        let discovered = command.process_pex_extension_update(&pex_update(), &local);
+        assert_eq!(discovered, vec![PeerAddr::new("127.0.0.1", 6881)]);
+        assert_eq!(command.get_pex_known_peers(), discovered.as_slice());
+        assert!(command.build_pex_extended_message(&local, 1).is_some());
+    }
 }

@@ -163,6 +163,8 @@ pub struct BtDownloadCommand {
     pub(crate) progress_save_interval: Duration,
     /// LPD LAN peer discovery manager
     pub(crate) lpd_manager: Option<Arc<LpdManager>>,
+    /// Info-hash registered in the shared LPD manager for this command.
+    pub(crate) lpd_registered_info_hash: Option<String>,
     /// Post-download handler manager
     pub(crate) hook_manager: Option<Arc<crate::engine::hook_manager::HookManager>>,
 
@@ -204,7 +206,8 @@ pub struct BtDownloadCommand {
     /// C++: DHTGetPeersCommand runs as a per-torrent command that
     /// triggers DHT lookups at adaptive intervals (15min normal,
     /// 5min low peers, 1min zero peers, 5s retry).
-    /// Periodic lookup state is polled from the BT piece loop.
+    /// Periodic lookup completion is consumed at BT piece-loop scheduling
+    /// boundaries after the background task publishes an event.
     pub(crate) dht_periodic_lookup: super::bt_download_execute::execute::DhtPeriodicLookup,
 
     // File lock (J6): prevents concurrent aria2 instances from writing to same output dir
@@ -245,12 +248,19 @@ pub struct BtDownloadCommand {
     /// Receiver for incoming peers routed by the engine-owned listener.
     pub(crate) incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
+    /// Shared uTP socket for outbound peers in this download task.
+    pub(crate) utp_socket:
+        Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     /// Process-level listener shared by all BitTorrent downloads.
     pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     /// RAII registration for this torrent's info-hash route.
     pub(crate) bt_peer_route: Option<crate::engine::bt_peer_listener::BtPeerRouteHandle>,
     /// Rust-owned A2CF checkpoint for verified torrent pieces.
     pub(crate) checkpoint: Option<crate::engine::bt_checkpoint::BtCheckpoint>,
+    /// Bytes verified since the last durable torrent checkpoint.
+    pub(crate) checkpoint_bytes_since_save: u64,
+    /// Time at which the last durable torrent checkpoint completed.
+    pub(crate) checkpoint_last_save: Instant,
 }
 
 impl BtDownloadCommand {
@@ -269,6 +279,11 @@ impl BtDownloadCommand {
     /// command lifecycle should await this method before aborting or dropping
     /// the task so tracker stopped announcements are not lost.
     pub async fn shutdown(&mut self) {
+        if let (Some(manager), Some(info_hash)) =
+            (&self.lpd_manager, self.lpd_registered_info_hash.take())
+        {
+            manager.unregister_torrent(&info_hash).await;
+        }
         if let Ok(meta) =
             aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
             && let Some(ref mut announcer) = self.tracker_announcer
@@ -337,6 +352,23 @@ impl BtDownloadCommand {
             piece_idx,
             piece_data,
             piece_length,
+        )
+        .await
+    }
+
+    pub async fn write_piece_to_multi_files_coalesced_with_limit(
+        layout: &MultiFileLayout,
+        piece_idx: u32,
+        piece_data: &bytes::Bytes,
+        piece_length: u32,
+        max_open_files: usize,
+    ) -> crate::error::Result<()> {
+        crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit(
+            layout,
+            piece_idx,
+            piece_data,
+            piece_length,
+            max_open_files,
         )
         .await
     }
@@ -426,5 +458,53 @@ mod tests {
             Some(std::time::Duration::from_secs(60)),
             "seed-time is expressed in fractional minutes"
         );
+    }
+
+    #[test]
+    fn command_uses_configured_peer_id_prefix() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions {
+            peer_id_prefix: "TEST-PREFIX-".to_string(),
+            ..Default::default()
+        };
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(12),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        assert!(command.local_peer_id.starts_with(b"TEST-PREFIX-"));
+    }
+
+    #[test]
+    fn command_loads_configured_peer_blocklist_into_peer_storage() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let path = std::env::temp_dir().join(format!(
+            "aria2-rust-command-blocklist-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&path, "10.0.0.0/8\n").expect("blocklist fixture should be writable");
+        let options = crate::request::request_group::DownloadOptions {
+            bt_peer_blocklist: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+
+        let command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(13),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        let blocked = crate::engine::bt_peer_storage::PeerEntry::new("10.0.0.1".into(), 6881);
+        let allowed = crate::engine::bt_peer_storage::PeerEntry::new("192.0.2.1".into(), 6881);
+        let mut storage = command.peer_storage.lock().unwrap();
+        assert!(!storage.add_peer(blocked));
+        assert!(storage.add_peer(allowed));
+        drop(storage);
+        let _ = std::fs::remove_file(path);
     }
 }

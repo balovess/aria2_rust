@@ -946,7 +946,7 @@ fn test_lpd_real_world_announcement_parsing() {
 /// Test LpdManager receive loop start/stop lifecycle
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_lifecycle() {
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
 
     // Initially not running
     assert!(
@@ -975,7 +975,7 @@ async fn test_lpd_manager_receive_loop_lifecycle() {
 /// Test LpdManager receive loop cancellation token
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_cancellation_token() {
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
     let result = manager.start_receive_loop().await;
 
     if result.is_ok() {
@@ -1004,7 +1004,7 @@ async fn test_lpd_manager_receive_loop_cancellation_token() {
 /// Test that receive loop with registered torrents works
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_with_registered_torrents() {
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
 
     // Register a torrent before starting the receive loop
     manager
@@ -1032,7 +1032,7 @@ async fn test_lpd_manager_receive_loop_disabled() {
     // Create a manager that fails to start the receive loop
     // (in most environments, the manager is still available but
     // the multicast socket bind may fail)
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
     let _ = manager.start_receive_loop().await;
     // Should not panic regardless of the result
 }
@@ -1040,7 +1040,7 @@ async fn test_lpd_manager_receive_loop_disabled() {
 /// Test multiple start/stop cycles
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_multiple_cycles() {
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
 
     for _ in 0..3 {
         let result = manager.start_receive_loop().await;
@@ -1058,7 +1058,7 @@ async fn test_lpd_manager_receive_loop_multiple_cycles() {
 /// Test that receive loop stop is idempotent
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_stop_idempotent() {
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
     let result = manager.start_receive_loop().await;
 
     if result.is_ok() {
@@ -1072,7 +1072,7 @@ async fn test_lpd_manager_receive_loop_stop_idempotent() {
 /// Test that the receive loop doesn't interfere with peer management
 #[tokio::test]
 async fn test_lpd_manager_receive_loop_peer_management_independent() {
-    let mut manager = LpdManager::default();
+    let manager = LpdManager::default();
     manager
         .register_torrent(test_info_hash(), false)
         .await

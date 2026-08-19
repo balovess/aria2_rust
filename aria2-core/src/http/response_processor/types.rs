@@ -65,8 +65,19 @@ pub enum ResponseProcessResult {
     /// 401/407 authentication challenge -- delegate to skip_response handler.
     AuthChallenge(crate::http::skip_response::HttpAuthChallenge),
 
-    /// 4xx/5xx error (non-redirect, non-auth).
+    /// 4xx/5xx error that is not retryable.
     Error {
+        /// HTTP status code.
+        status_code: u16,
+        /// Human-readable error description.
+        message: String,
+    },
+
+    /// 4xx/5xx response that the caller may retry.
+    ///
+    /// The processor only classifies the response. Retry timing and attempt
+    /// accounting remain the responsibility of the download command.
+    RetryableError {
         /// HTTP status code.
         status_code: u16,
         /// Human-readable error description.

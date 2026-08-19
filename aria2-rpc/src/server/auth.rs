@@ -1,7 +1,6 @@
 //! RPC authentication: token + basic-auth configuration and middleware.
 
 use crate::json_rpc::JsonRpcError;
-use aria2_core::error::Aria2Error;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use rand::RngCore;
@@ -80,11 +79,11 @@ impl AuthConfig {
     }
 }
 
-fn base64_decode(s: &str) -> Result<String, Aria2Error> {
+fn base64_decode(s: &str) -> Result<String, String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(s)
-        .map_err(Aria2Error::from)?;
-    String::from_utf8(bytes).map_err(Aria2Error::from)
+        .map_err(|error| error.to_string())?;
+    String::from_utf8(bytes).map_err(|error| error.to_string())
 }
 
 /// Constant-time string equality check (mitigates timing side-channels).

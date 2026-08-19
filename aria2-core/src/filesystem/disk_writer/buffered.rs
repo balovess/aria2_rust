@@ -57,12 +57,30 @@ impl CachedDiskWriter {
         cache_size_mb: Option<usize>,
         use_mmap: bool,
     ) -> Self {
+        Self::new_with_mmap_bytes(
+            path,
+            total_size,
+            cache_size_mb.map(|mb| mb as u64 * 1024 * 1024),
+            use_mmap,
+        )
+    }
+
+    /// Create a writer with an exact write-back cache capacity in bytes.
+    pub fn new_with_mmap_bytes(
+        path: &Path,
+        total_size: Option<u64>,
+        cache_size_bytes: Option<u64>,
+        use_mmap: bool,
+    ) -> Self {
         let writer: Box<dyn SeekableDiskWriter> = if use_mmap {
             Box::new(MmapDiskWriter::new(path, total_size))
         } else {
             Box::new(PositionedDiskWriter::new(path, total_size))
         };
-        let cache = cache_size_mb.map(|mb| Arc::new(WrDiskCache::new(mb)));
+        let cache = cache_size_bytes
+            .filter(|size| *size > 0)
+            .and_then(|size| usize::try_from(size).ok())
+            .map(|size| Arc::new(WrDiskCache::with_max_size_bytes(size)));
         Self {
             writer,
             cache,

@@ -42,6 +42,7 @@ pub mod cli;
 use cli::CliArgs;
 mod config;
 mod engine;
+pub mod rpc_backend;
 // Public so integration tests can exercise the core → RPC notification bridge
 // (`rpc::CoreEventBridge`) without spinning up a real RPC server.
 pub mod rpc;
@@ -57,10 +58,17 @@ pub struct App {
     detected_inputs: Vec<DetectedInput>,
 }
 
+fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
+    show_console_readout && !quiet
+}
+
 impl App {
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
-        let config = Arc::new(RwLock::new(ConfigManager::new()));
+        let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
+            crate::identity::DEFAULT_USER_AGENT,
+            crate::identity::DEFAULT_PEER_AGENT,
+        )));
         let request_man = Arc::new(RequestGroupMan::new());
 
         Self {
@@ -253,13 +261,20 @@ impl App {
         self.print_banner();
 
         // Apply engine-level options from config (CLI/file/env) BEFORE tasks
-        // are added. max-concurrent-downloads drives the engine's slot limit;
-        // the RequestGroupMan default is 5 (matching aria2).
+        // are added. Zero is the explicit unlimited value, so it must also
+        // override the manager's default of five.
         if let Some(max) = self.get_opt_i64("max-concurrent-downloads").await
-            && max > 0
+            && let Ok(max) = u32::try_from(max)
         {
-            self.request_man.set_max_concurrent(max as u32);
-            info!("Max concurrent downloads set to {} (from config)", max);
+            self.request_man.set_max_concurrent(max);
+            info!(
+                "Max concurrent downloads set to {} (from config)",
+                if max == 0 {
+                    "unlimited".to_string()
+                } else {
+                    max.to_string()
+                }
+            );
         }
 
         // Initialize engine (must be before session restore)
@@ -341,8 +356,15 @@ impl App {
             None
         };
 
-        // Step 7: Run engine (always show console progress when stdout is interactive)
-        let show_progress = std::io::stdout().is_terminal();
+        // Step 7: Run engine with the configured console readout. Redirected
+        // stdout is still a valid consumer of plain progress lines, as with
+        // aria2_original and Scoop's PowerShell pipeline.
+        let show_progress = console_progress_enabled(
+            self.get_opt_bool("show-console-readout")
+                .await
+                .unwrap_or(true),
+            self.get_opt_bool("quiet").await.unwrap_or(false),
+        );
         let run_result = self.run_engine(rpc_enabled, show_progress).await;
 
         // Step 8: Shutdown RPC server

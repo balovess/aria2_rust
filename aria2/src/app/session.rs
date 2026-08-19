@@ -17,7 +17,6 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 use std::path::PathBuf;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 impl App {
@@ -52,10 +51,7 @@ impl App {
 
         info!("Restoring download tasks from session file: {}", input_file);
 
-        let mgr = ActiveSessionManager::new(
-            session_path.clone(),
-            Duration::from_secs(60), // Default interval, not used during restore
-        );
+        let mgr = ActiveSessionManager::new(session_path.clone());
 
         let entries = match mgr.load_session().await {
             Ok(entries) => entries,
@@ -247,6 +243,18 @@ impl App {
         payload.recover_mut().set_option_snapshot(option_snapshot);
         payload.recover().set_output_name(output_name);
         payload.recover().set_metadata_info(metadata_info.clone());
+        if let Some(bitfield) = entry.bitfield.clone() {
+            payload.recover().set_bt_bitfield(Some(bitfield));
+        }
+        if let (Some(num_pieces), Some(piece_length), Some(info_hash_hex)) = (
+            entry.num_pieces,
+            entry.piece_length,
+            entry.info_hash_hex.clone(),
+        ) {
+            payload
+                .recover()
+                .set_bt_metadata(num_pieces, piece_length, info_hash_hex);
+        }
         let dependency = if memory_source {
             BtDependency::new_memory_with_fallback(
                 metadata_gid,
@@ -312,20 +320,18 @@ impl App {
         info!("Saving session to: {}", save_path);
 
         let session_path = PathBuf::from(&save_path);
-        let interval = self
-            .get_opt_i64("save-session-interval")
-            .await
-            .unwrap_or(crate::constants::DEFAULT_SAVE_SESSION_INTERVAL_SECS as i64)
-            .max(crate::constants::MIN_SESSION_INTERVAL_SECS as i64); // At least 1 second
-
-        let mgr = ActiveSessionManager::new(session_path, Duration::from_secs(interval as u64));
+        let mgr = ActiveSessionManager::new(session_path);
 
         // Snapshot group handles before the asynchronous file write. The
         // manager lock must not be held while session serialization performs
         // filesystem I/O, otherwise RPC mutations can be blocked at shutdown.
         let groups = self.request_man.list_groups();
+        let stopped_results = self.request_man.get_stopped_results(0, usize::MAX);
 
-        match mgr.save_session(&groups).await {
+        match mgr
+            .save_session_with_results(&groups, &stopped_results)
+            .await
+        {
             Ok(n) => {
                 info!("Successfully saved {} entries to {}", n, save_path);
                 Ok(Some(n))

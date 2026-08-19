@@ -60,6 +60,12 @@ impl PieceManager {
         hash.as_slice() == self.piece_hashes[index as usize]
     }
 
+    /// Return the expected hash by value so a caller can verify on another
+    /// thread without borrowing the piece manager across an await point.
+    pub fn expected_piece_hash(&self, index: u32) -> Option<[u8; 20]> {
+        self.piece_hashes.get(index as usize).copied()
+    }
+
     pub fn completed_pieces(&self) -> u32 {
         self.completed.count_set() as u32
     }

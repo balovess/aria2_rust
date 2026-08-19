@@ -7,7 +7,9 @@ pub const RPC_SERVER_NAME: &str = "aria2-rust";
 /// Matches C++ PREF_RPC_MAX_REQUEST_SIZE default.
 pub const DEFAULT_RPC_MAX_REQUEST_SIZE: usize = 2 * 1024 * 1024;
 
-// CORS defaults (CORS_ALLOW_METHODS, CORS_ALLOW_HEADERS, CORS_MAX_AGE are in aria2-core)
+pub const CORS_ALLOW_METHODS: &str = "GET, POST, OPTIONS";
+pub const CORS_ALLOW_HEADERS: &str = "Content-Type, Authorization";
+pub const CORS_MAX_AGE: u64 = 1728000;
 pub const CORS_DEFAULT_ORIGIN: &str = "*";
 
 // WebSocket defaults

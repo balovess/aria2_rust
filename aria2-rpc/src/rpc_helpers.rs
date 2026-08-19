@@ -14,8 +14,6 @@
 //! Based on original aria2 C++ structure:
 //! - `src/RpcMethodImpl.cc` - Shared utility functions
 
-use aria2_core::request::request_group::option_value_to_string;
-
 /// Decode the permissive Base64 stream used by aria2_original's wire
 /// adapters. The original decoder skips bytes outside the Base64 alphabet and
 /// returns an empty result for malformed padding or incomplete groups.
@@ -62,6 +60,37 @@ pub(crate) fn decode_aria2_base64(input: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
+/// Percent-decode the small legacy GET query grammar without pulling the
+/// transport parser into a domain crate.
+pub(crate) fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_digit(bytes[index + 1]), hex_digit(bytes[index + 2]))
+        {
+            output.push((high << 4) | low);
+            index += 3;
+            continue;
+        }
+        output.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8_lossy(&output).into_owned()
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Normalize a map of RPC options to the string-valued map returned by aria2.
 pub fn normalize_rpc_options(
     options: &std::collections::HashMap<String, serde_json::Value>,
@@ -73,6 +102,20 @@ pub fn normalize_rpc_options(
                 .map(|value| (key.clone(), serde_json::Value::String(value)))
         })
         .collect()
+}
+
+fn option_value_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(option_value_to_string)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| values.join("\n")),
+        serde_json::Value::Null | serde_json::Value::Object(_) => None,
+    }
 }
 
 // Preserve the existing helper path while keeping session identity creation
@@ -180,6 +223,36 @@ pub fn split_auth_token(params: &serde_json::Value) -> (Option<String>, Option<s
                 .map(str::to_string),
             None,
         ),
+    }
+}
+
+/// Consume a parameter value while removing a leading `token:` entry.
+///
+/// Server-side parsers already own their request DOM. This variant preserves
+/// the borrowed helper's wire semantics without cloning the whole positional
+/// parameter array before dispatch.
+pub(crate) fn split_auth_token_owned(
+    params: serde_json::Value,
+) -> (Option<String>, serde_json::Value) {
+    match params {
+        serde_json::Value::Array(mut arr) => {
+            let token = arr
+                .first()
+                .and_then(|value| value.as_str())
+                .and_then(|value| value.strip_prefix("token:"))
+                .map(str::to_owned);
+            if token.is_some() {
+                arr.remove(0);
+            }
+            (token, serde_json::Value::Array(arr))
+        }
+        params => {
+            let token = params
+                .get("token")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
+            (token, params)
+        }
     }
 }
 

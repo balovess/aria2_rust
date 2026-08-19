@@ -23,7 +23,9 @@ use tracing::info;
 
 use crate::engine::metalink_download_command::MetalinkDownloadCommand;
 use crate::engine::metalink_to_request_group::MetalinkToRequestGroup;
-use crate::engine::post_download_handler::{CompletedDownloadInfo, PostDownloadHandler};
+use crate::engine::post_download_handler::{
+    CompletedDownloadInfo, PostDownloadHandler, path_has_extension,
+};
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -98,6 +100,15 @@ impl MetalinkPostDownloadHandler {
         }
 
         false
+    }
+
+    fn can_handle_with_source_uri(
+        content_type: Option<&str>,
+        file_path: Option<&str>,
+        source_uri: Option<&str>,
+    ) -> bool {
+        Self::can_handle_static(content_type, file_path)
+            || source_uri.is_some_and(|uri| path_has_extension(uri, METALINK_EXTENSIONS))
     }
 
     /// Parse the downloaded Metalink file and generate download commands
@@ -201,7 +212,11 @@ impl Default for MetalinkPostDownloadHandler {
 
 impl PostDownloadHandler for MetalinkPostDownloadHandler {
     fn can_handle(&self, info: &CompletedDownloadInfo) -> bool {
-        Self::can_handle_static(info.content_type.as_deref(), info.file_path.as_deref())
+        Self::can_handle_with_source_uri(
+            info.content_type.as_deref(),
+            info.file_path.as_deref(),
+            info.base_uri.as_deref(),
+        )
     }
 
     fn create_child_groups(
@@ -269,7 +284,7 @@ impl PostDownloadHandler for MetalinkPostDownloadHandler {
             // If pause requested (PREF_PAUSE_METADATA), mark the child group.
             // C++: `rg->setPauseRequested(true)` when keepRunning && pause_metadata
             if self.pause_requested {
-                group.recover().control_flags.request_pause();
+                group.recover().request_pause();
             }
         }
 
@@ -351,6 +366,20 @@ mod tests {
         assert!(MetalinkPostDownloadHandler::can_handle_static(
             Some("application/octet-stream"),
             Some("download.meta4")
+        ));
+    }
+
+    #[test]
+    fn test_can_handle_source_uri_extension() {
+        assert!(MetalinkPostDownloadHandler::can_handle_with_source_uri(
+            Some("application/octet-stream"),
+            None,
+            Some("https://example.test/source.meta4?download=1"),
+        ));
+        assert!(!MetalinkPostDownloadHandler::can_handle_with_source_uri(
+            Some("application/octet-stream"),
+            None,
+            Some("https://example.test/source.xml"),
         ));
     }
 

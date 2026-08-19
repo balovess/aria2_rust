@@ -93,6 +93,18 @@ impl DhtQueryHandler {
                 }
             });
 
+        // aria2_original drops queries from its own local node before
+        // dispatching them. Do the same here so a loopback packet cannot
+        // create a response or reinsert the local ID into the routing table.
+        if sender_id == Some(self.self_id) {
+            debug!(from = %from, "Ignoring DHT query from local node");
+            return HandleResult {
+                response: None,
+                mark_good: false,
+                sender_id: None,
+            };
+        }
+
         trace!(
             method = %method,
             from = %from,
@@ -371,6 +383,21 @@ mod tests {
         let resp = result.response.unwrap();
         assert!(resp.is_response());
         assert_eq!(result.sender_id, Some([0xBBu8; 20]));
+    }
+
+    #[test]
+    fn test_ignores_query_from_local_node() {
+        let handler = make_handler();
+        let rt = make_routing_table();
+        let tt = TokenTracker::new();
+        let ps = DhtPeerStorage::new();
+
+        let query = DhtMessageBuilder::ping(1234, &[0xAAu8; 20]);
+        let result = handler.handle_query(&query, "127.0.0.1:6881".parse().unwrap(), &rt, &tt, &ps);
+
+        assert!(result.response.is_none());
+        assert!(!result.mark_good);
+        assert!(result.sender_id.is_none());
     }
 
     #[test]

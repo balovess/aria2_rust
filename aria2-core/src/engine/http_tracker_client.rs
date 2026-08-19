@@ -226,9 +226,19 @@ pub(crate) fn build_tracker_client_with_tls(
     timeout_secs: u64,
     tls: &ClientTlsConfig,
 ) -> Result<reqwest::Client, String> {
+    build_tracker_client_with_tls_and_timeouts(timeout_secs, timeout_secs, tls)
+}
+
+/// Build a tracker client with independent request and TCP connection deadlines.
+pub(crate) fn build_tracker_client_with_tls_and_timeouts(
+    request_timeout_secs: u64,
+    connect_timeout_secs: u64,
+    tls: &ClientTlsConfig,
+) -> Result<reqwest::Client, String> {
     crate::http::client_pool::ensure_rustls_provider();
     let builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
+        .timeout(Duration::from_secs(request_timeout_secs))
+        .connect_timeout(Duration::from_secs(connect_timeout_secs))
         // aria2 does not advertise compressed tracker responses by default.
         // Keep this independent client aligned with the download clients.
         .gzip(false);

@@ -20,14 +20,18 @@ describe.skipIf(skipIfNoBinary())('HTTP Download E2E', () => {
   });
 
   it('addUri and check status', async () => {
-    const gid = await client.addUri([`${fileServer.url}/testfile.bin`]);
+    const gid = await client.addUri([`${fileServer.url}/testfile.bin`], {
+      out: 'status-check.bin',
+    });
     expect(gid).toBeTruthy();
     const status = await client.tellStatus(gid);
     expect(status.gid).toBe(gid);
   });
 
   it('tellStatus progress', async () => {
-    const gid = await client.addUri([`${fileServer.url}/testfile.bin`]);
+    const gid = await client.addUri([`${fileServer.url}/testfile.bin`], {
+      out: 'progress.bin',
+    });
     const status = await client.tellStatus(gid, [
       'gid',
       'status',
@@ -39,7 +43,9 @@ describe.skipIf(skipIfNoBinary())('HTTP Download E2E', () => {
   });
 
   it('download complete status', async () => {
-    const gid = await client.addUri([`${fileServer.url}/testfile.bin`]);
+    const gid = await client.addUri([`${fileServer.url}/testfile.bin`], {
+      out: 'complete.bin',
+    });
     await new Promise((r) => setTimeout(r, 2000));
     const status = await client.tellStatus(gid);
     expect(['complete', 'active', 'waiting']).toContain(status.status);

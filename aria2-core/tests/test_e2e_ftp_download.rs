@@ -5,7 +5,9 @@ use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
 use aria2_core::error::{Aria2Error, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
-use aria2_core::request::request_group::{DownloadOptions, FollowMode, GroupId};
+use aria2_core::request::request_group::{
+    DownloadOptions, DownloadResultCode, FollowMode, GroupId, HaltReason,
+};
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -337,6 +339,170 @@ async fn test_e2e_ftp_protocol_failure_does_not_retry() {
         accepted.load(Ordering::Relaxed),
         1,
         "FTP protocol failures must not be retried"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_max_tries_limits_total_connection_attempts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicU32::new(0));
+    let accepted_by_server = Arc::clone(&accepted);
+    let server_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_by_server.fetch_add(1, Ordering::Relaxed);
+            drop(stream);
+        }
+    });
+
+    let dir = tmp_dir();
+    let options = DownloadOptions {
+        max_retries: 2,
+        retry_wait: 0,
+        ..DownloadOptions::default()
+    };
+    let url = format!("ftp://{}/max-tries.bin", addr);
+    let mut command =
+        FtpDownloadCommand::new(GroupId::new(107), &url, &options, dir.path().to_str(), None)
+            .expect("FTP max-tries command should construct");
+
+    let result = tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("FTP max-tries test should not hang");
+    assert!(
+        result.is_err(),
+        "persistent FTP connection failure must fail"
+    );
+    assert_eq!(
+        accepted.load(Ordering::Relaxed),
+        2,
+        "FTP max-tries must count total control connection attempts"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_retry_wait_is_interruptible_when_paused() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicU32::new(0));
+    let accepted_by_server = Arc::clone(&accepted);
+    let server_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_by_server.fetch_add(1, Ordering::Relaxed);
+            drop(stream);
+        }
+    });
+
+    let dir = tmp_dir();
+    let options = DownloadOptions {
+        max_retries: 2,
+        retry_wait: 5,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("ftp://{}/retry-wait.bin", addr);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(105),
+        vec![uri],
+        options,
+    )));
+    let mut command = FtpDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        dir.path().to_str(),
+        Some("retry-wait.bin"),
+    )
+    .expect("FTP retry-wait command should construct");
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while accepted.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("FTP command should reach the transient control failure");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    group.write().unwrap().pause().unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), command_task)
+        .await
+        .expect("pause should interrupt FTP retry-wait promptly")
+        .expect("FTP retry-wait task should not panic");
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download paused"
+    ));
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn test_e2e_ftp_retry_wait_is_interruptible_when_removed() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepted = Arc::new(AtomicU32::new(0));
+    let accepted_by_server = Arc::clone(&accepted);
+    let server_task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                break;
+            };
+            accepted_by_server.fetch_add(1, Ordering::Relaxed);
+            drop(stream);
+        }
+    });
+
+    let dir = tmp_dir();
+    let options = DownloadOptions {
+        max_retries: 2,
+        retry_wait: 5,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("ftp://{}/retry-wait-remove.bin", addr);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(106),
+        vec![uri],
+        options,
+    )));
+    let mut command = FtpDownloadCommand::new_with_group(
+        Arc::clone(&group),
+        dir.path().to_str(),
+        Some("retry-wait-remove.bin"),
+    )
+    .expect("FTP retry-wait remove command should construct");
+
+    let command_task = tokio::spawn(async move { command.execute().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while accepted.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("FTP command should reach the transient control failure");
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    group.recover_mut().mark_removed();
+    let result = tokio::time::timeout(Duration::from_secs(1), command_task)
+        .await
+        .expect("remove should interrupt FTP retry-wait promptly")
+        .expect("FTP retry-wait remove task should not panic");
+    assert!(matches!(
+        result,
+        Err(Aria2Error::DownloadFailed(message)) if message == "Download cancelled by user"
+    ));
+    assert_eq!(
+        accepted.load(Ordering::Relaxed),
+        1,
+        "remove during retry-wait must prevent the next FTP attempt"
     );
 
     server_task.abort();
@@ -773,6 +939,55 @@ async fn test_engine_ftp_pause_unpause_preserves_control_file() {
 }
 
 #[tokio::test]
+async fn test_e2e_ftp_pause_interrupts_stalled_data_read() {
+    let server = MockFtpServer::start_with_transfer_delay(Duration::from_secs(3)).await;
+    let dir = tmp_dir();
+    let output_name = "stalled.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let mut command = FtpDownloadCommand::new(
+        GroupId::new(410),
+        &url,
+        &options,
+        Some(dir.path().to_str().unwrap()),
+        Some(output_name),
+    )
+    .expect("FTP command should construct");
+    let group = command
+        .request_group()
+        .expect("FTP command should expose its request group");
+    let task = tokio::spawn(async move { command.execute().await });
+
+    wait_for_ftp_progress(&group).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    group
+        .recover_mut()
+        .pause()
+        .expect("FTP pause should be accepted");
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("paused FTP command remained in the stalled data read")
+        .expect("paused FTP task panicked");
+
+    assert!(result.is_err(), "pause should stop the current FTP command");
+    assert_eq!(group.recover().status(), DownloadStatus::Paused);
+    assert!(output_path.exists(), "pause should preserve FTP output");
+    assert!(
+        control_path.exists(),
+        "pause should preserve FTP checkpoint"
+    );
+}
+
+#[tokio::test]
 async fn test_engine_ftp_remove_preserves_partial_control_file() {
     let server = MockFtpServer::start_slow().await;
     let dir = tmp_dir();
@@ -820,6 +1035,186 @@ async fn test_engine_ftp_remove_preserves_partial_control_file() {
     assert!(
         control_path.exists(),
         "remove must retain the FTP control file"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_ftp_force_remove_preserves_partial_control_file() {
+    let server = MockFtpServer::start_slow().await;
+    let dir = tmp_dir();
+    let output_name = "force-removed.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(413);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_ftp_group_status(&group, DownloadStatus::Active).await;
+    wait_for_ftp_control_file(&control_path).await;
+    wait_for_ftp_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::ForceRemoveDownload { gid })
+        .expect("force-remove command should be accepted");
+    wait_for_ftp_engine(
+        engine_task,
+        "force-removed FTP download did not stop promptly",
+    )
+    .await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Removed);
+    assert!(
+        output_path.exists(),
+        "force-remove must retain partial FTP output"
+    );
+    assert!(
+        control_path.exists(),
+        "force-remove must retain the FTP control file"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_ftp_shutdown_halt_preserves_resume_state() {
+    let server = MockFtpServer::start_slow().await;
+    let dir = tmp_dir();
+    let output_name = "shutdown-halt-ftp.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(411);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("FTP engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_ftp_group_status(&group, DownloadStatus::Active).await;
+    wait_for_ftp_control_file(&control_path).await;
+    wait_for_ftp_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::HaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .expect("FTP shutdown halt command should be accepted");
+    wait_for_ftp_engine(engine_task, "FTP shutdown halt did not stop the engine").await;
+
+    let group_state = group.read().unwrap();
+    assert_eq!(group_state.get_halt_reason(), HaltReason::ShutdownSignal);
+    assert_ne!(
+        group_state.status(),
+        DownloadStatus::Removed,
+        "shutdown halt must remain resumable rather than becoming a user removal"
+    );
+    assert_eq!(
+        group_state.create_download_result().code,
+        DownloadResultCode::InProgress
+    );
+    drop(group_state);
+
+    assert!(output_path.exists(), "shutdown halt must retain FTP output");
+    assert!(
+        control_path.exists(),
+        "shutdown halt must retain the FTP control file"
+    );
+}
+
+#[tokio::test]
+async fn test_engine_ftp_force_halt_preserves_resume_state() {
+    let server = MockFtpServer::start_slow().await;
+    let dir = tmp_dir();
+    let output_name = "force-halt-ftp.bin";
+    let output_path = dir.path().join(output_name);
+    let control_path = ControlFile::control_path_for(&output_path);
+    let url = format!("ftp://127.0.0.1:{}/files/medium.bin", server.addr().port());
+    let options = DownloadOptions {
+        continue_download: true,
+        allow_overwrite: true,
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(412);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("FTP engine command channel should be open");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_ftp_group_status(&group, DownloadStatus::Active).await;
+    wait_for_ftp_control_file(&control_path).await;
+    wait_for_ftp_progress(&group).await;
+
+    command_tx
+        .send(EngineCommand::ForceHaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .expect("FTP force halt command should be accepted");
+    wait_for_ftp_engine(engine_task, "FTP force halt did not stop the engine").await;
+
+    {
+        let group_state = group.read().unwrap();
+        assert_eq!(group_state.get_halt_reason(), HaltReason::ShutdownSignal);
+        assert_ne!(
+            group_state.status(),
+            DownloadStatus::Removed,
+            "force shutdown must remain resumable rather than becoming a user removal"
+        );
+        assert_eq!(
+            group_state.create_download_result().code,
+            DownloadResultCode::InProgress
+        );
+    }
+
+    assert!(output_path.exists(), "force halt must retain FTP output");
+    assert!(
+        control_path.exists(),
+        "force halt must retain the FTP control file"
     );
 }
 

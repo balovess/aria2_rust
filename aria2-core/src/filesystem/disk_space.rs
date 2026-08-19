@@ -188,6 +188,21 @@ pub fn check_disk_space(path: &Path, required_bytes: u64) -> std::result::Result
     }
 }
 
+/// Async adapter for the platform disk-space query.
+///
+/// The synchronous function remains available to callers that are already on
+/// a blocking thread. Allocation and download control paths use this adapter
+/// so `statvfs`/`GetDiskFreeSpaceExW` cannot stall the async runtime.
+pub async fn check_disk_space_async(
+    path: &Path,
+    required_bytes: u64,
+) -> std::result::Result<(), String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || check_disk_space(&path, required_bytes))
+        .await
+        .map_err(|error| format!("disk space check task failed: {error}"))?
+}
+
 // =========================================================================
 // K5.4 — Tests for Disk Space Pre-check
 // =========================================================================

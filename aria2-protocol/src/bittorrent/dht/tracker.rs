@@ -7,8 +7,10 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
 use tracing::{debug, trace};
 
 use super::message::DhtMessage;
@@ -64,6 +66,7 @@ struct PendingTransaction {
 /// and never span `.await` points.
 pub struct TransactionTracker {
     inner: std::sync::Mutex<TransactionTrackerInner>,
+    change_notify: Arc<Notify>,
 }
 
 struct TransactionTrackerInner {
@@ -79,6 +82,7 @@ impl TransactionTracker {
                 transactions: HashMap::new(),
                 next_tx_id: 1,
             }),
+            change_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -117,6 +121,7 @@ impl TransactionTracker {
                 timeout,
             },
         );
+        self.change_notify.notify_waiters();
 
         (key, response_rx)
     }
@@ -213,6 +218,31 @@ impl TransactionTracker {
             .lock()
             .expect("TransactionTracker mutex poisoned");
         inner.transactions.len()
+    }
+
+    /// Return the time remaining until the next pending transaction expires.
+    ///
+    /// `None` means there are no transactions and therefore no timeout work
+    /// for a receive loop to schedule.
+    pub fn next_timeout(&self) -> Option<Duration> {
+        let inner = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned");
+        let now = Instant::now();
+        inner
+            .transactions
+            .values()
+            .map(|pending| {
+                let deadline = pending.created_at + pending.timeout;
+                deadline.saturating_duration_since(now)
+            })
+            .min()
+    }
+
+    /// Return the notification source for transaction-set changes.
+    pub fn change_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.change_notify)
     }
 
     /// Clean up expired transactions (older than `QUERY_TIMEOUT * 3`).

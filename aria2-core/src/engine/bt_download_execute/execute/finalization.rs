@@ -52,11 +52,17 @@ impl BtDownloadCommand {
             }
         }
 
-        if let Some(ref engine) = self.dht_engine {
-            if let Err(error) = engine.announce_peer(&meta.info_hash.bytes, 0).await {
+        if let Some(ref engine) = self.dht_engine
+            && let Some(port) = dht_announce_port(self.listen_port)
+        {
+            if let Err(error) = engine.announce_peer(&meta.info_hash.bytes, port).await {
                 warn!(%error, "BT DHT announce failed");
             } else {
-                info!("BT DHT announce_peer sent for {}", meta.info_hash.as_hex());
+                info!(
+                    port,
+                    "BT DHT announce_peer sent for {}",
+                    meta.info_hash.as_hex()
+                );
             }
         }
 
@@ -68,6 +74,12 @@ impl BtDownloadCommand {
 
         if let Some(checkpoint) = self.checkpoint.take() {
             checkpoint.remove().await?;
+        }
+
+        if let (Some(manager), Some(info_hash)) =
+            (&self.lpd_manager, self.lpd_registered_info_hash.take())
+        {
+            manager.unregister_torrent(&info_hash).await;
         }
 
         if let Some(ref hooks) = self.hook_manager {
@@ -92,6 +104,10 @@ impl BtDownloadCommand {
 
         Ok(())
     }
+}
+
+fn dht_announce_port(listen_port: u16) -> Option<u16> {
+    (listen_port != 0).then_some(listen_port)
 }
 
 fn should_remove_unselected_files(options: &DownloadOptions, context: &DownloadContext) -> bool {
@@ -211,5 +227,11 @@ mod tests {
         };
 
         assert!(!should_remove_unselected_files(&options, &context));
+    }
+
+    #[test]
+    fn dht_announce_uses_actual_peer_port() {
+        assert_eq!(dht_announce_port(45123), Some(45123));
+        assert_eq!(dht_announce_port(0), None);
     }
 }

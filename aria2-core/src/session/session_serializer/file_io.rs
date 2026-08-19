@@ -3,15 +3,22 @@
 //! Provides async functions for loading and saving session files
 //! using atomic write patterns for data integrity.
 
+use std::ffi::OsStr;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::RequestGroup;
 
 use super::SessionEntry;
 use super::deserialization::deserialize;
-use super::serialize::serialize_groups;
+use super::serialize::serialize_groups_with_results;
+use crate::request::request_group::DownloadResult;
 
 /// Loads and deserializes session entries from a file
 ///
@@ -45,13 +52,14 @@ use super::serialize::serialize_groups;
 /// }
 /// ```
 pub async fn load_from_file(path: &Path) -> Result<Vec<SessionEntry>> {
-    let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+    let bytes = tokio::fs::read(path).await.map_err(|e| {
         Aria2Error::Io(format!(
             "Failed to read session file {}: {}",
             path.display(),
             e
         ))
     })?;
+    let content = decode_session_content(path, &bytes)?;
 
     deserialize(&content)
 }
@@ -102,7 +110,19 @@ pub async fn save_to_file(
     path: &Path,
     groups: &[Arc<std::sync::RwLock<RequestGroup>>],
 ) -> Result<()> {
-    let content = serialize_groups(groups)?;
+    save_to_file_with_results(path, groups, &[]).await
+}
+
+/// Saves groups and eligible stopped results to a session file.
+///
+/// Stopped results are filtered by the serializer's aria2-compatible save
+/// policy (`force-save`, `save-not-found`, and resumable in-progress results).
+pub async fn save_to_file_with_results(
+    path: &Path,
+    groups: &[Arc<std::sync::RwLock<RequestGroup>>],
+    results: &[DownloadResult],
+) -> Result<()> {
+    let content = encode_session_content(path, &serialize_groups_with_results(groups, results)?)?;
     let tmp_path = path.with_extension("sess.tmp");
 
     tokio::fs::write(&tmp_path, &content).await.map_err(|e| {
@@ -163,11 +183,12 @@ pub async fn save_to_file(
 /// }
 /// ```
 pub async fn save_to_file_with_entries(path: &Path, entries: &[SessionEntry]) -> Result<()> {
-    let mut content = String::new();
+    let mut text = String::new();
     for entry in entries {
-        content.push_str(&entry.serialize());
-        content.push('\n');
+        text.push_str(&entry.serialize());
+        text.push('\n');
     }
+    let content = encode_session_content(path, &text)?;
 
     let tmp_path = path.with_extension("sess.tmp");
 
@@ -182,6 +203,55 @@ pub async fn save_to_file_with_entries(path: &Path, entries: &[SessionEntry]) ->
     tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
         Aria2Error::Io(format!(
             "Failed to rename session file {}: {}",
+            path.display(),
+            e
+        ))
+    })
+}
+
+fn is_gzip_path(path: &Path) -> bool {
+    path.extension() == Some(OsStr::new("gz"))
+}
+
+fn decode_session_content(path: &Path, bytes: &[u8]) -> Result<String> {
+    if !is_gzip_path(path) {
+        return String::from_utf8(bytes.to_vec()).map_err(|e| {
+            Aria2Error::Io(format!(
+                "Failed to decode session file {}: {}",
+                path.display(),
+                e
+            ))
+        });
+    }
+
+    let mut decoder = GzDecoder::new(bytes);
+    let mut content = String::new();
+    decoder.read_to_string(&mut content).map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to decompress session file {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    Ok(content)
+}
+
+fn encode_session_content(path: &Path, text: &str) -> Result<Vec<u8>> {
+    if !is_gzip_path(path) {
+        return Ok(text.as_bytes().to_vec());
+    }
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(text.as_bytes()).map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to compress session file {}: {}",
+            path.display(),
+            e
+        ))
+    })?;
+    encoder.finish().map_err(|e| {
+        Aria2Error::Io(format!(
+            "Failed to finish compressed session file {}: {}",
             path.display(),
             e
         ))

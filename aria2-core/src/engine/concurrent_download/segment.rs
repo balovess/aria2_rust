@@ -5,18 +5,18 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::mpsc;
 
 use crate::constants;
-use crate::engine::command::{PROGRESS_CHANNEL_CAPACITY, ProgressUpdate, WRITE_CHANNEL_CAPACITY};
+use crate::engine::command::WRITE_CHANNEL_CAPACITY;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
 use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
-use crate::engine::http_segment_downloader::WriteChunk;
+use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTracker, WriteChunk};
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
 };
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -49,6 +49,10 @@ pub async fn execute(
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
         .clamp(1, 16) as usize;
+    let retry_policy = RetryPolicy::new(
+        max_retries_per_segment,
+        options.retry_wait.saturating_mul(1000),
+    );
     let authority_key = authority_key(uri).unwrap_or_else(|| uri.to_string());
     let mut adaptive = HttpAdaptiveConcurrency::new(max_conn, options.retry_wait);
     let seg_size = total_length.div_ceil(split as u64).max(1);
@@ -92,8 +96,12 @@ pub async fn execute(
     let cookie_hdr = dl.cookie_helper.build_cookie_header(uri);
 
     let use_mmap = dl.file_allocation == "mmap" && total_length >= dl.mmap_threshold;
-    let mut writer =
-        CachedDiskWriter::new_with_mmap(&dl.output_path, Some(total_length), None, use_mmap);
+    let mut writer = CachedDiskWriter::new_with_mmap_bytes(
+        &dl.output_path,
+        Some(total_length),
+        options.disk_cache_size_bytes(),
+        use_mmap,
+    );
 
     let limiter = options
         .max_download_limit
@@ -140,16 +148,13 @@ pub async fn execute(
     let mut ctrl_bytes_since_save: u64 = 0;
 
     let mut active_segs: HashMap<u32, u64> = HashMap::new();
-    let mut progress_handles: HashMap<u32, tokio::task::JoinHandle<()>> = HashMap::new();
-    // Per-segment tracker: stores the number of bytes the listener has
-    // added to total_inflight_bytes so we can roll back on failure.
-    let mut seg_reported: HashMap<u32, Arc<AtomicU64>> = HashMap::new();
     let initial_completed = if resume_state.should_resume {
         resume_state.start_offset
     } else {
         0
     };
-    let total_inflight_bytes = Arc::new(AtomicU64::new(initial_completed));
+    let progress_tracker = SegmentProgressTracker::new(initial_completed, Arc::clone(&dl.progress));
+    let mut segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();
     let mut completed_bytes = initial_completed;
     super::flush_requested_control_file(dl, &mut writer, &mut ctrl_file, completed_bytes).await?;
 
@@ -167,12 +172,15 @@ pub async fn execute(
         max_conn,
     );
 
-    // Pause/remove check interval — allows the download loop to detect
-    // aria2.pause / aria2.remove within ~200ms even when segment
-    // futures are blocked on slow network reads.
-    let mut cancel_tick = tokio::time::interval(std::time::Duration::from_millis(200));
+    // Lifecycle changes wake the scheduler even when all segment requests are
+    // blocked on slow network reads.
+    let lifecycle_notify = dl.group.recover().lifecycle_notifier();
 
     loop {
+        let lifecycle_changed = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_changed);
+        lifecycle_changed.as_mut().enable();
+
         // Check whether the task was removed. This is the primary
         // cancellation signal: aria2.remove / aria2.forceRemove sets
         // the RequestGroup status to Removed, which is_removed()
@@ -188,7 +196,6 @@ pub async fn execute(
                 dl.global_limiter.as_ref(),
                 &mut ctrl_file,
                 completed_bytes,
-                &mut progress_handles,
             )
             .await?;
             return Err(e);
@@ -197,49 +204,8 @@ pub async fn execute(
         while adaptive.can_start(executor.in_flight_for(&authority_key)) {
             match manager.next_pending_segment_for_mirror(0) {
                 Some((seg_idx, offset, length)) => {
-                    // Create per-segment progress channel for real-time updates
-                    let (seg_progress_tx, mut seg_progress_rx) =
-                        mpsc::channel::<ProgressUpdate>(PROGRESS_CHANNEL_CAPACITY);
-                    let progress_for_listener = Arc::clone(&dl.progress);
-                    let total_inflight = Arc::clone(&total_inflight_bytes);
-                    let seg_offset = offset;
-                    let seg_reported_arc = Arc::new(AtomicU64::new(0));
-
-                    let seg_reported_clone = Arc::clone(&seg_reported_arc);
-                    let speed_interval =
-                        std::time::Duration::from_millis(constants::HTTP_SPEED_UPDATE_INTERVAL_MS);
-                    let ph = tokio::spawn(async move {
-                        let mut last_reported = 0u64;
-                        let mut speed_sample_start = std::time::Instant::now();
-                        let mut speed_sample_bytes = 0u64;
-                        while let Some(update) = seg_progress_rx.recv().await {
-                            // Compute delta for this segment
-                            let downloaded = update.completed_bytes.saturating_sub(seg_offset);
-                            let delta = downloaded.saturating_sub(last_reported);
-                            if delta > 0 {
-                                last_reported = downloaded;
-                                seg_reported_clone.store(last_reported, Ordering::Relaxed);
-                                let total =
-                                    total_inflight.fetch_add(delta, Ordering::Relaxed) + delta;
-
-                                // Lock-free progress update — no RwLock acquisition needed.
-                                progress_for_listener.set_completed_length(total);
-
-                                // Update download speed at regular intervals
-                                speed_sample_bytes += delta;
-                                let elapsed = speed_sample_start.elapsed();
-                                if elapsed >= speed_interval && elapsed.as_secs_f64() > 0.0 {
-                                    let speed =
-                                        (speed_sample_bytes as f64 / elapsed.as_secs_f64()) as u64;
-                                    progress_for_listener.set_download_speed(speed);
-                                    speed_sample_start = std::time::Instant::now();
-                                    speed_sample_bytes = 0;
-                                }
-                            }
-                        }
-                    });
-                    progress_handles.insert(seg_idx, ph);
-                    seg_reported.insert(seg_idx, seg_reported_arc);
+                    let progress = progress_tracker.new_segment();
+                    segment_progress.insert(seg_idx, Arc::clone(&progress));
                     active_segs.insert(seg_idx, offset);
 
                     let submitted = executor.try_submit(HttpSegmentRequest {
@@ -250,16 +216,13 @@ pub async fn execute(
                         offset,
                         length,
                         cookie_header: cookie_hdr.clone(),
-                        progress_tx: seg_progress_tx,
+                        progress,
                         write_tx: write_tx.clone(),
                         expected_entity_length: total_length,
                     });
                     if !submitted {
                         active_segs.remove(&seg_idx);
-                        if let Some(ph) = progress_handles.remove(&seg_idx) {
-                            ph.abort();
-                        }
-                        seg_reported.remove(&seg_idx);
+                        segment_progress.remove(&seg_idx);
                         manager.requeue_segment(seg_idx);
                         break;
                     }
@@ -305,7 +268,7 @@ pub async fn execute(
                 );
             }
             if let Some(wait) = adaptive.cooldown_remaining() {
-                tokio::time::sleep(wait).await;
+                dl.wait_for_retry(wait).await?;
                 continue;
             }
             if manager.has_failed_segments() && !manager.has_pending_segments() {
@@ -381,11 +344,10 @@ pub async fn execute(
 
                 let _offset = active_segs.remove(&seg_idx).unwrap_or(0);
 
-                // Await the per-segment progress listener so all in-flight
-                // updates have been flushed before we reconcile the total.
-                if let Some(ph) = progress_handles.remove(&seg_idx) {
-                    let _ = ph.await;
-                }
+                // The request has emitted its completion only after all
+                // progress writes, so the atomic segment handle is already
+                // fully reconciled here.
+                let segment_progress_for_result = segment_progress.remove(&seg_idx);
 
                 match result {
                     Ok(total_written) => {
@@ -406,21 +368,10 @@ pub async fn execute(
                                 ctrl_bytes_since_save = 0;
                             }
                         }
-                        // The listener's progress is now committed; remove the
-                        // per-segment tracker so it does not accumulate stale
-                        // entries if the same seg_idx is reused on retry.
-                        seg_reported.remove(&seg_idx);
-
-                        // Note: we do NOT reset total_inflight_bytes here
-                        // because other segments may have in-flight progress
-                        // already accumulated via their listeners.  The atomic
-                        // tracks "bytes received" (for real-time display) while
-                        // completed_bytes tracks "bytes committed to disk".
-
                         // Use the atomic total for progress updates so that
                         // in-flight progress from concurrent segments is not
                         // overwritten by the committed-only value.
-                        let display_total = total_inflight_bytes.load(Ordering::Relaxed);
+                        let display_total = progress_tracker.total();
 
                         dl.progress_updater
                             .update_progress(
@@ -438,6 +389,9 @@ pub async fn execute(
                         .await?;
                     }
                     Err(e) => {
+                        if let Some(progress) = segment_progress_for_result {
+                            progress.rollback();
+                        }
                         let e = if matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::ResourceNotFound)
@@ -467,7 +421,6 @@ pub async fn execute(
                                 dl.global_limiter.as_ref(),
                                 &mut ctrl_file,
                                 completed_bytes,
-                                &mut progress_handles,
                             )
                             .await?;
                             return Err(e);
@@ -512,13 +465,25 @@ pub async fn execute(
                         } else {
                             consecutive_416_count = 0;
                         }
-                        // Roll back in-flight progress reported by this
-                        // segment's listener so the atomic does not overcount.
-                        if let Some(reported) = seg_reported.remove(&seg_idx) {
-                            let rollback = reported.load(Ordering::Relaxed);
-                            if rollback > 0 {
-                                total_inflight_bytes.fetch_sub(rollback, Ordering::Relaxed);
-                            }
+                        let retry_count = manager.segment_retry_count(seg_idx);
+                        let retry_allowed = super::should_retry_segment(
+                            &retry_policy,
+                            retry_count,
+                            &e,
+                            file_not_found_retry_allowed,
+                        );
+                        if !retry_allowed {
+                            cancel_and_persist(
+                                executor,
+                                &mut write_rx,
+                                &mut writer,
+                                limiter.as_ref(),
+                                dl.global_limiter.as_ref(),
+                                &mut ctrl_file,
+                                completed_bytes,
+                            )
+                            .await?;
+                            return Err(e);
                         }
                         if is_capacity_limited && adaptive.preserve_retry_budget() {
                             manager.requeue_segment(seg_idx);
@@ -551,10 +516,9 @@ pub async fn execute(
                 )
                 .await?;
             }
-            // Periodic pause/remove check — ensures the download loop
-            // detects aria2.pause / aria2.remove within ~200ms even
-            // when segment futures are blocked on slow network reads.
-            _ = cancel_tick.tick() => {
+            // Lifecycle changes wake the loop immediately, even when segment
+            // futures are blocked on slow network reads.
+            _ = &mut lifecycle_changed => {
                 super::flush_requested_control_file(
                     dl,
                     &mut writer,
@@ -571,7 +535,6 @@ pub async fn execute(
                         dl.global_limiter.as_ref(),
                         &mut ctrl_file,
                         completed_bytes,
-                        &mut progress_handles,
                     )
                     .await?;
                     return Err(e);
@@ -653,6 +616,13 @@ pub async fn execute(
         dl.output_path.display(),
         completed_bytes
     );
+    let progress_stats = progress_tracker.stats();
+    tracing::debug!(
+        segments = progress_stats.segments,
+        progress_updates = progress_stats.updates,
+        progress_rollbacks = progress_stats.rollbacks,
+        "HTTP segment progress aggregation summary"
+    );
     // ADR-0001: Delete control file on successful completion.
     // The download is done; the .aria2 file is no longer needed.
     drop(ctrl_file);
@@ -674,14 +644,8 @@ pub(super) async fn cancel_and_persist(
     global_limiter: Option<&RateLimiter>,
     ctrl_file: &mut Option<ControlFile>,
     completed_bytes: u64,
-    progress_handles: &mut HashMap<u32, tokio::task::JoinHandle<()>>,
 ) -> Result<()> {
     executor.cancel().await;
-
-    for (_, handle) in progress_handles.drain() {
-        handle.abort();
-        let _ = handle.await;
-    }
 
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
         if let Some(limiter) = limiter {

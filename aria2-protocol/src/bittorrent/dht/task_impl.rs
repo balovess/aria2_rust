@@ -207,6 +207,7 @@ impl DhtTask for BucketRefreshTask {
                 &rt,
                 &self.ctx.socket,
                 &self.ctx.tracker,
+                self.ctx.query_timeout,
             )
             .await;
 
@@ -264,6 +265,7 @@ impl DhtTask for NodeLookupTask {
             &rt,
             &self.ctx.socket,
             &self.ctx.tracker,
+            self.ctx.query_timeout,
         )
         .await;
 

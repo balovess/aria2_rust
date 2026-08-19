@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version = "0.3.1"
+version = "0.3.2"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -80,6 +80,10 @@ rustls-pemfile = { workspace = true }
 # Pure-Rust PKCS#12 parsing for aria2-compatible single-file client identities.
 # The transport still presents the result through rustls.
 p12_q3 = { workspace = true }
+# p12_q3 does not decrypt PBES2 AES-128/AES-192 archives. Keep this adapter
+# focused on the PBES2 algorithms required by the existing client contract.
+pkcs5 = { version = "0.7.1", default-features = false, features = ["alloc", "pbes2", "sha1-insecure"] }
+yasna = { version = "0.5", features = ["std"] }
 # Bundled Mozilla root certificates for FTPS TLS verification when no custom
 # CA file is specified. webpki-roots 0.26 is compatible with rustls 0.23.
 webpki-roots = "0.26"
@@ -177,3 +181,9 @@ harness = false
 [[bench]]
 name = "disk_cache_lookup_bench"
 harness = false
+
+# F5: PieceStatMan and BitfieldMan full-piece scans and temporary bitfield queries.
+[[bench]]
+name = "segment_scan_bench"
+harness = false
+required-features = ["bittorrent"]

@@ -7,11 +7,10 @@
 //!
 //! # Concurrency model
 //!
-//! The underlying file handle is wrapped in a [`std::sync::Mutex`] held ONLY
-//! for the brief duration of each synchronous `pwrite`/`seek_write` syscall.
-//! This is fundamentally different from the legacy
-//! `Arc<tokio::sync::Mutex<DirectDiskAdaptor>>` design which held the lock
-//! across async await points and serialized all writes.
+//! The underlying file handle is shared through `Arc`, while each potentially
+//! blocking `pwrite`/`seek_write` call runs on Tokio's blocking pool. This is
+//! fundamentally different from the legacy `Arc<tokio::sync::Mutex<...>>`
+//! design which held the lock across async await points and serialized writes.
 //!
 //! Here the lock is held only for the synchronous syscall (microseconds),
 //! never across `.await` points. When multiple [`PositionedDiskWriter`]

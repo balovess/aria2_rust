@@ -15,9 +15,10 @@ impl BtDownloadCommand {
     ///
     /// Enable BT download progress persistence for resume support.
     ///
-    /// When enabled, the engine periodically saves piece completion bitfield,
-    /// peer list, and download statistics to a .aria2 file in INI format.
-    /// On restart, the progress is loaded to skip already-completed pieces.
+    /// When enabled, the engine periodically saves the piece completion
+    /// bitfield and transfer statistics to a C++-compatible binary `.aria2`
+    /// file. On restart, a compatible file is used as a fallback to skip
+    /// already-completed pieces when no newer Rust-owned checkpoint exists.
     pub fn set_progress_manager(&mut self, manager: BtProgressManager) {
         info!("BT progress manager enabled");
         self.progress_manager = Some(manager);

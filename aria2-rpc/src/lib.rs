@@ -55,6 +55,7 @@
 //! The implemented catalog follows the original aria2 RPC specification at
 //! <https://aria2.github.io/manual/en/html/aria2c.html#rpc-interface>.
 
+pub mod backend;
 pub mod constants;
 pub mod engine;
 pub mod handlers;
@@ -66,6 +67,10 @@ pub mod websocket;
 mod wire;
 pub mod xml_rpc;
 
+pub use backend::{
+    BackendError, BackendEvent, BackendMetadata, BackendReadSnapshot, BackendRequest,
+    BackendResponse, BackendResult, PositionMode, RpcBackend,
+};
 pub use engine::RpcEngine;
 pub use json_rpc::{JSONRPC_VERSION, JsonRpcError, JsonRpcRequest, JsonRpcResponse, parse_request};
 pub use server::{

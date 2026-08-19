@@ -17,6 +17,7 @@ use dashmap::mapref::entry::Entry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
 use reserved::{PositionMode, ReservedQueue};
@@ -25,7 +26,9 @@ use stopped::StoppedResults;
 pub use reserved::PositionMode as ChangePositionMode;
 
 use super::global_net_stat::GlobalNetStat;
-use super::request_group::{DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup};
+use super::request_group::{
+    ActivitySignal, DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
+};
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use crate::engine::metalink_request_graph;
 use crate::error::Result;
@@ -79,6 +82,12 @@ pub struct RequestGroupMan {
 
     /// Session transfer counters shared by all registered groups.
     global_net_stat: Arc<GlobalNetStat>,
+
+    /// Wakes consumers waiting for the manager to become empty or non-empty.
+    download_finished_notify: Arc<Notify>,
+
+    /// Wakes snapshot observers when a group or its progress changes.
+    activity_signal: Arc<ActivitySignal>,
 }
 
 impl RequestGroupMan {
@@ -98,6 +107,8 @@ impl RequestGroupMan {
             global_download_limit: std::sync::RwLock::new(None),
             global_upload_limit: std::sync::RwLock::new(None),
             global_net_stat: Arc::new(GlobalNetStat::default()),
+            download_finished_notify: Arc::new(Notify::new()),
+            activity_signal: Arc::new(ActivitySignal::new()),
         }
     }
 
@@ -152,8 +163,11 @@ impl RequestGroupMan {
             warn!(gid = gid.value(), "Ignoring stale terminal request group");
             return;
         }
+        if group.recover().options().uses_memory_download() {
+            group.recover().mark_in_memory_download();
+        }
         if !self.register_group(Arc::clone(&group)) {
-            warn!(gid = gid.value(), "Ignoring duplicate request group");
+            debug!(gid = gid.value(), "Request group is already registered");
             return;
         }
         self.next_gid
@@ -327,13 +341,16 @@ impl RequestGroupMan {
                 "position must not be negative for absolute modes".to_string(),
             ));
         }
-        self.reserved
+        let position = self
+            .reserved
             .change_position(gid, pos, mode)
             .ok_or_else(|| {
                 crate::error::Aria2Error::InvalidArgument(
                     "group is not in the reserved queue".to_string(),
                 )
-            })
+            })?;
+        self.activity_signal.notify();
+        Ok(position)
     }
 
     // ── Group Removal ───────────────────────────────────────────────────
@@ -369,10 +386,18 @@ impl RequestGroupMan {
 
     /// Remove a reserved group while the lifecycle transition lock is held.
     fn remove_reserved_group(&self, gid: GroupId) -> Result<()> {
-        if self.reserved.find_by_gid(gid).is_none() {
+        let group_lock = self.reserved.find_by_gid(gid).ok_or_else(|| {
+            crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
+        })?;
+
+        // Match aria2_original's removeDownload() contract: a reserved group
+        // whose dependency is unresolved cannot be removed independently. The
+        // prerequisite graph must first reach a terminal state so the manager
+        // can resolve or fail the dependent payload coherently.
+        if !group_lock.recover().is_dependency_resolved() {
             return Err(crate::error::Aria2Error::InvalidArgument(format!(
-                "GID {} not found",
-                gid.value()
+                "GID#{} cannot be removed now",
+                gid.to_hex_string()
             )));
         }
 
@@ -475,6 +500,57 @@ impl RequestGroupMan {
         true
     }
 
+    /// Return both sides of a standard Metalink metadata/payload graph.
+    ///
+    /// Session restore materializes the metadata prerequisite and payload as
+    /// separate Rust groups, while the persisted task identity is the
+    /// metadata GID. Keep lifecycle operations on that identity coherent
+    /// without treating arbitrary `belongs_to` follow children as one task.
+    fn metalink_graph_groups(&self, gid: GroupId) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
+        let Some(target) = self.find_group(gid) else {
+            return Vec::new();
+        };
+
+        let (metadata_gid, payload_gid) =
+            if let Some(metadata_info) = target.recover().metadata_info() {
+                let Some(metadata_gid) = metadata_info.gid() else {
+                    return vec![Arc::clone(&target)];
+                };
+                let Some(metadata) = self.find_group(metadata_gid) else {
+                    return vec![Arc::clone(&target)];
+                };
+                if metadata.recover().belongs_to_gid() != Some(gid) {
+                    return vec![Arc::clone(&target)];
+                }
+                (metadata_gid, gid)
+            } else if let Some(payload_gid) = target.recover().belongs_to_gid() {
+                let Some(payload) = self.find_group(payload_gid) else {
+                    return vec![Arc::clone(&target)];
+                };
+                let Some(metadata_gid) = payload
+                    .recover()
+                    .metadata_info()
+                    .and_then(|info| info.gid())
+                else {
+                    return vec![Arc::clone(&target)];
+                };
+                if metadata_gid != gid {
+                    return vec![Arc::clone(&target)];
+                }
+                (gid, payload_gid)
+            } else {
+                return vec![Arc::clone(&target)];
+            };
+
+        let Some(metadata) = self.find_group(metadata_gid) else {
+            return vec![Arc::clone(&target)];
+        };
+        let Some(payload) = self.find_group(payload_gid) else {
+            return vec![Arc::clone(&target)];
+        };
+        vec![metadata, payload]
+    }
+
     // ── Pause/Unpause ───────────────────────────────────────────────────
 
     pub fn pause_group(&self, gid: GroupId) -> Result<()> {
@@ -482,7 +558,7 @@ impl RequestGroupMan {
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
-        let mut group = group_lock.recover_mut();
+        let group = group_lock.recover();
         if !matches!(
             group.status(),
             DownloadStatus::Active | DownloadStatus::Waiting
@@ -492,7 +568,10 @@ impl RequestGroupMan {
                 gid.to_hex_string()
             )));
         }
-        group.pause()?;
+        drop(group);
+        for group_lock in self.metalink_graph_groups(gid) {
+            group_lock.recover_mut().pause()?;
+        }
         info!("Pausing download task #{}", gid.value());
         Ok(())
     }
@@ -502,14 +581,17 @@ impl RequestGroupMan {
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
-        let mut group = group_lock.recover_mut();
+        let group = group_lock.recover();
         if !group.status().is_paused() {
             return Err(crate::error::Aria2Error::InvalidArgument(format!(
                 "GID#{} cannot be unpaused now",
                 gid.to_hex_string()
             )));
         }
-        group.resume()?;
+        drop(group);
+        for group_lock in self.metalink_graph_groups(gid) {
+            group_lock.recover_mut().resume()?;
+        }
         info!("Resuming download task #{}", gid.value());
         Ok(())
     }
@@ -519,7 +601,7 @@ impl RequestGroupMan {
         let group_lock = self.find_group(gid).ok_or_else(|| {
             crate::error::Aria2Error::InvalidArgument(format!("GID {} not found", gid.value()))
         })?;
-        let mut group = group_lock.recover_mut();
+        let group = group_lock.recover();
         if !matches!(
             group.status(),
             DownloadStatus::Active | DownloadStatus::Waiting
@@ -529,7 +611,10 @@ impl RequestGroupMan {
                 gid.to_hex_string()
             )));
         }
-        group.force_pause()?;
+        drop(group);
+        for group_lock in self.metalink_graph_groups(gid) {
+            group_lock.recover_mut().force_pause()?;
+        }
         Ok(())
     }
 
@@ -660,7 +745,29 @@ impl RequestGroupMan {
     /// those stores. The set also prevents duplicates if a reader observes
     /// the two stores during the same transfer window.
     fn groups_snapshot(&self) -> Vec<(GroupId, Arc<std::sync::RwLock<RequestGroup>>)> {
-        let mut snapshot = Vec::with_capacity(self.groups.len());
+        let reserved = self.reserved.iter_snapshot();
+        let canonical_len = self.groups.len();
+        let active_len = self.active.len();
+
+        // Lifecycle transitions remove a group from one scheduling store
+        // before inserting it into the next. In the steady state the two
+        // stores are complete, so avoid rescanning the canonical index and
+        // allocating a deduplication set for every status query.
+        if active_len + reserved.len() == canonical_len {
+            let mut snapshot = Vec::with_capacity(canonical_len);
+            snapshot.extend(
+                self.active
+                    .iter()
+                    .map(|entry| (*entry.key(), entry.value().clone())),
+            );
+            snapshot.extend(reserved.into_iter().map(|group| {
+                let gid = group.recover().gid();
+                (gid, group)
+            }));
+            return snapshot;
+        }
+
+        let mut snapshot = Vec::with_capacity(canonical_len);
         let mut seen = HashSet::with_capacity(self.groups.len());
 
         for entry in self.active.iter() {
@@ -725,26 +832,53 @@ impl RequestGroupMan {
     }
 
     pub fn get_active_groups(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
+        let groups = self
+            .active
+            .iter()
+            .filter_map(|entry| {
+                let group = entry.value().clone();
+                let is_active = matches!(group.recover().status(), DownloadStatus::Active);
+                is_active.then_some(group)
+            })
+            .collect::<Vec<_>>();
+        if self.active.len() + self.reserved.len() == self.groups.len() {
+            return groups;
+        }
+
         self.groups_snapshot()
             .into_iter()
-            .filter(|entry| {
-                let g = entry.1.recover();
-                matches!(g.status(), DownloadStatus::Active)
+            .filter_map(|(_, group)| {
+                let is_active = matches!(group.recover().status(), DownloadStatus::Active);
+                is_active.then_some(group)
             })
-            .map(|(_, group)| group)
             .collect()
     }
 
     pub fn get_waiting_groups(&self) -> Vec<Arc<std::sync::RwLock<RequestGroup>>> {
-        self.groups_snapshot()
+        let groups = self
+            .reserved
+            .iter_snapshot()
             .into_iter()
-            .filter(|g| {
+            .filter(|group| {
                 matches!(
-                    g.1.recover().status(),
+                    group.recover().status(),
                     DownloadStatus::Waiting | DownloadStatus::Paused
                 )
             })
-            .map(|(_, group)| group)
+            .collect::<Vec<_>>();
+        if self.active.len() + self.reserved.len() == self.groups.len() {
+            return groups;
+        }
+
+        self.groups_snapshot()
+            .into_iter()
+            .filter_map(|(_, group)| {
+                let is_waiting = matches!(
+                    group.recover().status(),
+                    DownloadStatus::Waiting | DownloadStatus::Paused
+                );
+                is_waiting.then_some(group)
+            })
             .collect()
     }
 
@@ -904,10 +1038,14 @@ impl RequestGroupMan {
         let gid = group.recover().gid();
         match self.groups.entry(gid) {
             Entry::Vacant(entry) => {
-                group
-                    .recover_mut()
-                    .set_global_net_stat(Arc::clone(&self.global_net_stat));
+                {
+                    let mut group = group.recover_mut();
+                    group.set_global_net_stat(Arc::clone(&self.global_net_stat));
+                    group.attach_activity_signal(Arc::clone(&self.activity_signal));
+                }
                 entry.insert(group);
+                self.download_finished_notify.notify_waiters();
+                self.activity_signal.notify();
                 true
             }
             Entry::Occupied(_) => false,
@@ -917,6 +1055,22 @@ impl RequestGroupMan {
     /// Remove a group from the canonical index after it has left the manager.
     fn unregister_group(&self, gid: GroupId) {
         self.groups.remove(&gid);
+        self.download_finished_notify.notify_waiters();
+        self.activity_signal.notify();
+    }
+
+    /// Return the event signal for live group and progress snapshots.
+    pub fn activity_signal(&self) -> Arc<ActivitySignal> {
+        Arc::clone(&self.activity_signal)
+    }
+
+    /// Return the notification source for changes to the manager's group set.
+    ///
+    /// Callers must still read [`download_finished`](Self::download_finished)
+    /// after every wake; the notification is only a wake-up mechanism and is
+    /// not the source of truth.
+    pub fn download_finished_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.download_finished_notify)
     }
 
     /// Check whether all downloads are finished (no active, no reserved).
@@ -987,6 +1141,28 @@ mod tests {
         assert!(man.find_group(gid).is_none());
         assert_eq!(man.reserved.len(), 0);
         assert_eq!(man.stopped_count(), 1);
+    }
+
+    #[test]
+    fn add_group_arc_marks_memory_download_from_options() {
+        let man = RequestGroupMan::new();
+        let options = DownloadOptions {
+            follow_metalink: Some(crate::request::request_group::FollowMode::Memory),
+            ..DownloadOptions::default()
+        };
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            GroupId::new(73),
+            vec!["http://example.com/index.meta4".to_string()],
+            options,
+        )));
+
+        assert!(!group.recover().is_in_memory_download());
+        man.add_group_arc(Arc::clone(&group));
+
+        assert!(
+            group.recover().is_in_memory_download(),
+            "pre-constructed groups must honor memory-backed metadata options"
+        );
     }
 
     #[test]
@@ -1063,6 +1239,41 @@ mod tests {
         stats.update_download(7);
 
         assert_eq!(stats.session_download_length_for_test(), 7);
+    }
+
+    #[tokio::test]
+    async fn activity_signal_wakes_for_registration_and_progress_changes() {
+        let man = RequestGroupMan::new();
+        let activity = man.activity_signal();
+        let mut observed = activity.generation();
+
+        let gid = man
+            .add_group(
+                vec!["http://example.com/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            activity.wait_for_change(&mut observed),
+        )
+        .await
+        .expect("group registration must wake activity observers");
+        assert!(man.find_group(gid).is_some());
+
+        let group = man.find_group(gid).expect("registered group");
+        let previous_generation = observed;
+        group.recover().update_progress(1);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            activity.wait_for_change(&mut observed),
+        )
+        .await
+        .expect("progress changes must wake activity observers");
+        assert!(observed > previous_generation);
+        assert_eq!(group.recover().get_completed_length(), 1);
     }
 
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -1292,6 +1503,41 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn test_remove_rejects_dependency_blocked_metalink_payload() {
+        let man = RequestGroupMan::new();
+        let metadata_gid = GroupId::new(50);
+        let payload_gid = GroupId::new(51);
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            metadata_gid,
+            payload_gid,
+        )
+        .unwrap();
+        man.add_metalink_graph(graph).unwrap();
+
+        let error = man
+            .remove_group(payload_gid)
+            .expect_err("an unresolved dependency cannot be removed yet");
+        assert!(
+            error.to_string().contains("cannot be removed now"),
+            "unexpected remove error: {error}"
+        );
+        let force_error = man
+            .force_remove_group(payload_gid)
+            .expect_err("force-remove must also respect an unresolved dependency");
+        assert!(
+            force_error.to_string().contains("cannot be removed now"),
+            "unexpected force-remove error: {force_error}"
+        );
+        assert!(man.find_group(metadata_gid).is_some());
+        assert!(man.find_group(payload_gid).is_some());
+        assert_eq!(man.stopped_count(), 0);
+    }
+
     #[test]
     fn test_add_group_with_gid_accepts_zero_gid() {
         let man = RequestGroupMan::new();
@@ -1377,6 +1623,43 @@ mod tests {
         assert_eq!(man.max_concurrent(), 10);
         man.set_max_concurrent(0); // unlimited
         assert_eq!(man.max_concurrent(), 0);
+    }
+
+    #[test]
+    fn blocked_reserved_group_does_not_starve_later_runnable_group() {
+        let man = RequestGroupMan::new();
+        man.set_max_concurrent(1);
+
+        let blocked = man
+            .add_group(
+                vec!["http://example.com/blocked.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        man.find_group(blocked)
+            .expect("blocked group should be registered")
+            .recover_mut()
+            .pause()
+            .unwrap();
+
+        let runnable = man
+            .add_group(
+                vec!["http://example.com/runnable.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        let promoted = man.fill_from_reserver();
+        assert_eq!(promoted.len(), 1);
+        assert_eq!(promoted[0].recover().gid(), runnable);
+        assert!(
+            man.find_group(blocked)
+                .unwrap()
+                .recover()
+                .status()
+                .is_paused()
+        );
+        assert_eq!(man.reserved.len(), 1);
     }
 
     /// Test find_group searches both active and reserved.
