@@ -17,7 +17,6 @@ use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
 #[cfg(feature = "metalink")]
 use aria2_protocol::metalink::parser::MetalinkDocument;
-use std::io::IsTerminal;
 use std::sync::Arc;
 use tracing::info;
 
