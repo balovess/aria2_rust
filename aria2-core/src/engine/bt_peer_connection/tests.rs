@@ -304,8 +304,7 @@ async fn test_bt_peer_conn_sends_configured_peer_agent_on_wire() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let (server, endpoint) = listener.accept().await.unwrap();
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-        server,
-        [0u8; 20],
+        server, [0u8; 20],
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
 
@@ -352,14 +351,12 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let (server, endpoint) = listener.accept().await.unwrap();
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-        server,
-        [0u8; 20],
+        server, [0u8; 20],
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
     connection.allocate_session_resource(16 * 1024, 16 * 1024);
 
-    let mut handshake =
-        aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new();
+    let mut handshake = aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new();
     handshake.with_ut_metadata(7).with_ut_pex(9);
     let frame = aria2_protocol::bittorrent::message::serializer::serialize(
         &aria2_protocol::bittorrent::message::types::BtMessage::Extended {

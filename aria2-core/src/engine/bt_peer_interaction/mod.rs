@@ -141,13 +141,8 @@ impl BtPeerInteraction {
         total_length: u64,
         utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     ) -> Result<BtPeerConn> {
-        let mut conn = Self::connect_single_peer(
-            addr,
-            info_hash_raw,
-            connection_options,
-            utp_socket,
-        )
-        .await?;
+        let mut conn =
+            Self::connect_single_peer(addr, info_hash_raw, connection_options, utp_socket).await?;
         conn.set_timeouts(
             connection_options.keep_alive_interval,
             connection_options.peer_timeout,

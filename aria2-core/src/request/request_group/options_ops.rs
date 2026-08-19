@@ -499,7 +499,7 @@ fn apply_rpc_option(
         | "proxy-method" => {
             let value = rpc_option_string(value, key)?;
             match key {
-        "metalink-version" => opts.metalink_version = Some(value),
+                "metalink-version" => opts.metalink_version = Some(value),
                 "metalink-language" => opts.metalink_language = Some(value),
                 "metalink-os" => opts.metalink_os = Some(value),
                 "metalink-location" => opts.metalink_location = Some(value),

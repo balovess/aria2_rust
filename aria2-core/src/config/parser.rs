@@ -129,12 +129,12 @@ impl ConfigParser {
                 match def.parse_value(&val_str) {
                     Ok(v) => {
                         self.options.insert(key, v);
-                }
-                Err(e) => self.errors.push(ConfigError {
-                    source: source.clone(),
-                    option: original_key.clone(),
-                    message: e,
-                }),
+                    }
+                    Err(e) => self.errors.push(ConfigError {
+                        source: source.clone(),
+                        option: original_key.clone(),
+                        message: e,
+                    }),
                 }
             }
         } else {
@@ -155,7 +155,8 @@ impl ConfigParser {
         self.get(name).and_then(|v| v.as_bool())
     }
     pub fn contains(&self, name: &str) -> bool {
-        self.options.contains_key(OptionRegistry::canonical_name(name))
+        self.options
+            .contains_key(OptionRegistry::canonical_name(name))
     }
 
     pub fn parse_cli_args(&mut self, args: &[&str]) {

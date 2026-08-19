@@ -75,7 +75,7 @@ impl UtpPeerConnection {
             Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
             None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
         }
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
+        .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
 
         let socket = Arc::new(Mutex::new(socket));
 
@@ -90,7 +90,6 @@ impl UtpPeerConnection {
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
     ) -> Result<Self> {
-
         let conn_id = {
             let mut sock = socket.lock().await;
             sock.connect(addr)
@@ -150,10 +149,12 @@ impl UtpPeerConnection {
                 })?;
                 match socket.connection_state(self.conn_id) {
                     Ok(ConnectionState::Established) => return Ok(()),
-                    Ok(ConnectionState::Closed
-                    | ConnectionState::Closing
-                    | ConnectionState::FinWait
-                    | ConnectionState::TimeWait) => {
+                    Ok(
+                        ConnectionState::Closed
+                        | ConnectionState::Closing
+                        | ConnectionState::FinWait
+                        | ConnectionState::TimeWait,
+                    ) => {
                         return Err(Aria2Error::Recoverable(
                             RecoverableError::TemporaryNetworkFailure {
                                 message: "uTP connection closed during setup".to_string(),
@@ -426,8 +427,8 @@ mod tests {
                     if request_buffer.len() < 68 {
                         continue;
                     }
-                    let request = Handshake::parse(&request_buffer)
-                        .expect("client handshake should parse");
+                    let request =
+                        Handshake::parse(&request_buffer).expect("client handshake should parse");
                     assert_eq!(request.info_hash, info_hash);
                     assert_eq!(request.peer_id, local_peer_id);
                     assert_eq!(

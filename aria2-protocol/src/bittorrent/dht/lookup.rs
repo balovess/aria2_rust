@@ -380,10 +380,7 @@ async fn recv_response(
     query_timeout: Duration,
 ) -> Option<(DhtMessage, SocketAddr)> {
     let mut buf = [0u8; 4096];
-    match socket
-        .recv_with_timeout(&mut buf, query_timeout)
-        .await
-    {
+    match socket.recv_with_timeout(&mut buf, query_timeout).await {
         Ok((len, from)) if len > 0 => match DhtMessage::decode(&buf[..len]) {
             Ok(msg) => Some((msg, from)),
             Err(_) => None,

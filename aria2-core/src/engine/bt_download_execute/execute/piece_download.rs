@@ -969,8 +969,8 @@ impl BtDownloadCommand {
             // lookup, or the next protocol/stop-timeout deadline.
             if active_connections.is_empty() && web_seed_manager.is_none() {
                 debug!("[BT] No peers available, waiting for peer discovery...");
-                let deadline = self
-                    .next_peer_event_deadline(active_connections, stop_timeout.deadline());
+                let deadline =
+                    self.next_peer_event_deadline(active_connections, stop_timeout.deadline());
                 let event = self.wait_for_peer_event(active_connections, deadline).await;
                 let incoming = Self::apply_peer_wait_event(
                     event,
@@ -1003,10 +1003,8 @@ impl BtDownloadCommand {
                 Some(idx) => idx,
                 None => {
                     tracing::debug!("[BT] No piece available, waiting...");
-                    let deadline = self.next_peer_event_deadline(
-                        active_connections,
-                        stop_timeout.deadline(),
-                    );
+                    let deadline =
+                        self.next_peer_event_deadline(active_connections, stop_timeout.deadline());
                     let event = self.wait_for_peer_event(active_connections, deadline).await;
                     let incoming = Self::apply_peer_wait_event(
                         event,

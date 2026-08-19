@@ -210,12 +210,7 @@ impl PeerConnection {
         timeout: std::time::Duration,
     ) -> Result<Handshake, String> {
         let mut response = [0u8; 68];
-        match tokio::time::timeout(
-            timeout,
-            stream.read_exact(&mut response),
-        )
-        .await
-        {
+        match tokio::time::timeout(timeout, stream.read_exact(&mut response)).await {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(format!("Failed to read handshake response: {}", e)),
             Err(_) => return Err("Handshake response timeout".to_string()),

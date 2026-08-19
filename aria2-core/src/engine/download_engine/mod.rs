@@ -106,7 +106,11 @@ impl DownloadEngine {
         tick_interval_ms: u64,
         lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
     ) -> Self {
-        Self::with_retry_policy_and_lpd_manager(tick_interval_ms, RetryPolicy::default(), lpd_manager)
+        Self::with_retry_policy_and_lpd_manager(
+            tick_interval_ms,
+            RetryPolicy::default(),
+            lpd_manager,
+        )
     }
 
     fn with_retry_policy_and_lpd_manager(

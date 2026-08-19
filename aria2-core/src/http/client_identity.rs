@@ -674,7 +674,11 @@ mod tests {
             },
         )
         .expect_err("unknown minimum TLS versions must be rejected");
-        assert!(error.to_string().contains("Unsupported minimum TLS version"));
+        assert!(
+            error
+                .to_string()
+                .contains("Unsupported minimum TLS version")
+        );
     }
 
     #[test]
@@ -911,8 +915,7 @@ mod tests {
 
     #[tokio::test]
     async fn minimum_tls_version_rejects_an_older_live_server_protocol() {
-        let fixture =
-            start_https_fixture_with_versions(false, TLS12_ONLY).await;
+        let fixture = start_https_fixture_with_versions(false, TLS12_ONLY).await;
         let config = ClientTlsConfig {
             min_tls_version: Some("TLSv1.3".into()),
             ..ClientTlsConfig::default()

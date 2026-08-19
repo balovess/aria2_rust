@@ -457,9 +457,9 @@ impl BtDownloadCommand {
             let mut storage = crate::engine::bt_peer_storage::DefaultPeerStorage::new();
             if let Some(path) = options.bt_peer_blocklist.as_deref() {
                 let mut blocklist = crate::engine::bt_peer_blocklist::BtPeerBlocklist::new();
-                blocklist.load_from_file(std::path::Path::new(path)).map_err(|error| {
-                    Aria2Error::Fatal(FatalError::Config(error))
-                })?;
+                blocklist
+                    .load_from_file(std::path::Path::new(path))
+                    .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
                 storage.set_peer_blocklist(Arc::new(blocklist));
             }
             Arc::new(std::sync::Mutex::new(storage))

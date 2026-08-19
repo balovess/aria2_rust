@@ -105,13 +105,8 @@ impl LpdReceiveLoop {
         peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
         active_hashes: Arc<RwLock<HashSet<String>>>,
     ) -> Result<(), String> {
-        self.start_with_config(
-            peers,
-            active_hashes,
-            constants::LPD_PORT,
-            None,
-        )
-        .await
+        self.start_with_config(peers, active_hashes, constants::LPD_PORT, None)
+            .await
     }
 
     /// Start the loop on a configured BEP 14 port and multicast interface.

@@ -24,9 +24,9 @@ impl BtPeerConn {
 
     /// Send the BEP 10 extension handshake using the task's peer-agent value.
     pub async fn send_extension_handshake(&mut self, peer_agent: &str) -> Result<()> {
+        use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
         use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
-        use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
 
         let mut handshake = ExtensionHandshake::new();
         handshake.with_version(peer_agent);
@@ -268,8 +268,7 @@ impl BtPeerConn {
                     let msg_bytes = c.recv_message().await?;
                     if let Some(bytes) = msg_bytes {
                         use aria2_protocol::bittorrent::message::factory::parse_message;
-                        parse_message(&bytes)
-                            .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
+                        parse_message(&bytes).map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))
                     } else {
                         Ok(None)
                     }
@@ -297,12 +296,10 @@ impl BtPeerConn {
                 })?;
             }
 
-            if let Some(
-                aria2_protocol::bittorrent::message::types::BtMessage::Extended {
-                    ext_id: 0,
-                    payload,
-                },
-            ) = message.as_ref()
+            if let Some(aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+                ext_id: 0,
+                payload,
+            }) = message.as_ref()
                 && let Ok(handshake) =
                     aria2_protocol::bittorrent::message::extension::ExtensionHandshake::from_bytes(
                         payload,

@@ -41,9 +41,7 @@ pub use group::RequestGroup;
 pub use group_id::GroupId;
 pub use halt_reason::{DownloadControlFlags, HaltReason};
 pub use metadata_info::MetadataInfo;
-pub use options::{
-    DEFAULT_DISK_CACHE_BYTES, DownloadOptions, FollowMode, option_value_to_string,
-};
+pub use options::{DEFAULT_DISK_CACHE_BYTES, DownloadOptions, FollowMode, option_value_to_string};
 pub use progress::AtomicProgress;
 pub use result_code::DownloadResultCode;
 pub use status::DownloadStatus;

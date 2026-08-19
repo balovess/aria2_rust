@@ -1303,7 +1303,10 @@ async fn test_e2e_bt_disabled_web_seed_does_not_request_url_list() {
         .await
         .expect("disabled web-seed command timed out");
 
-    assert!(result.is_err(), "without peers the disabled web-seed task must stop");
+    assert!(
+        result.is_err(),
+        "without peers the disabled web-seed task must stop"
+    );
     assert!(
         web_seed.take_request_log().is_empty(),
         "bt-enable-web-seed=false must prevent url-list requests"

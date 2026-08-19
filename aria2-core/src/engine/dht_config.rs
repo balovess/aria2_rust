@@ -49,10 +49,7 @@ pub(crate) async fn build_dht_engine_config(
     })
 }
 
-fn selected_listen_addr(
-    options: &DownloadOptions,
-    use_ipv6: bool,
-) -> Result<Option<IpAddr>> {
+fn selected_listen_addr(options: &DownloadOptions, use_ipv6: bool) -> Result<Option<IpAddr>> {
     let raw = if use_ipv6 {
         options.dht_listen_addr6.as_deref()
     } else {
@@ -85,10 +82,7 @@ fn selected_file_path(options: &DownloadOptions, use_ipv6: bool) -> Option<&str>
     }
 }
 
-fn selected_bootstrap_specs(
-    options: &DownloadOptions,
-    use_ipv6: bool,
-) -> Result<Vec<String>> {
+fn selected_bootstrap_specs(options: &DownloadOptions, use_ipv6: bool) -> Result<Vec<String>> {
     let mut specs = if use_ipv6 {
         options
             .dht_entry_point6
@@ -130,9 +124,11 @@ fn selected_bootstrap_specs(
 async fn resolve_bootstrap_nodes(specs: &[String], use_ipv6: bool) -> Result<Vec<SocketAddr>> {
     let mut nodes = Vec::with_capacity(specs.len());
     for spec in specs {
-        let mut addresses = tokio::net::lookup_host(spec.as_str()).await.map_err(|error| {
-            config_error(format!("cannot resolve DHT bootstrap '{spec}': {error}"))
-        })?;
+        let mut addresses = tokio::net::lookup_host(spec.as_str())
+            .await
+            .map_err(|error| {
+                config_error(format!("cannot resolve DHT bootstrap '{spec}': {error}"))
+            })?;
         let address = addresses
             .find(|address| address.is_ipv6() == use_ipv6)
             .ok_or_else(|| {
@@ -177,7 +173,10 @@ mod tests {
             config.bootstrap_nodes,
             vec!["[::1]:49003".parse::<SocketAddr>().unwrap()]
         );
-        assert_eq!(config.dht_file_path.as_deref(), Some(std::path::Path::new("dht6.dat")));
+        assert_eq!(
+            config.dht_file_path.as_deref(),
+            Some(std::path::Path::new("dht6.dat"))
+        );
         assert_eq!(config.query_timeout, Duration::from_secs(7));
     }
 

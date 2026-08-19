@@ -149,7 +149,10 @@ fn max_http_pipelining_is_explicitly_rejected_without_runtime_support() {
         .parse_rpc_value("max-http-pipelining", &serde_json::json!(2))
         .expect_err("unsupported HTTP pipeline limits must not be silently stored");
 
-    assert!(error.contains("max-http-pipelining"), "unexpected error: {error}");
+    assert!(
+        error.contains("max-http-pipelining"),
+        "unexpected error: {error}"
+    );
 }
 
 #[cfg(feature = "bittorrent")]

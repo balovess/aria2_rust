@@ -105,12 +105,10 @@ impl LpdAnnouncer {
         }
 
         // Parse multicast address
-        let multicast_addr: SocketAddr = format!(
-            "{}:{}",
-            constants::LPD_MULTICAST_ADDRESS, listen_port
-        )
-        .parse()
-        .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
+        let multicast_addr: SocketAddr =
+            format!("{}:{}", constants::LPD_MULTICAST_ADDRESS, listen_port)
+                .parse()
+                .map_err(|e| format!("Invalid LPD multicast address: {}", e))?;
 
         // Join multicast group
         let multicast_ip: Ipv4Addr = constants::LPD_MULTICAST_ADDRESS

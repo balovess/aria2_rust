@@ -1284,8 +1284,12 @@ async fn on_end_of_run(
 
     if let Some(path) = &ctx.server_stat_save_path {
         match ctx.server_stat_man.save_to_file_async(path).await {
-            Ok(count) => debug!(count, path = %path.display(), "Saved server statistics on shutdown"),
-            Err(error) => warn!(%error, path = %path.display(), "Failed to save server statistics on shutdown"),
+            Ok(count) => {
+                debug!(count, path = %path.display(), "Saved server statistics on shutdown")
+            }
+            Err(error) => {
+                warn!(%error, path = %path.display(), "Failed to save server statistics on shutdown")
+            }
         }
     }
 }

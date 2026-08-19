@@ -249,10 +249,7 @@ impl BtDownloadCommand {
         );
         let connection_options = {
             let group = self.group.recover();
-            BtPeerConnectionOptions::from_download_options(
-                group.options(),
-                self.local_peer_id,
-            )
+            BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id)
         };
 
         // Attempt connections sequentially. Individual errors are logged without

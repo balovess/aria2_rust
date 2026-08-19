@@ -311,7 +311,11 @@ async fn compatibility_aliases_use_one_canonical_storage_key() {
         "--dht-message-path=legacy-dht.dat",
         "--max-retries=7",
     ]);
-    assert!(!parser.has_errors(), "alias parse errors: {:?}", parser.errors());
+    assert!(
+        !parser.has_errors(),
+        "alias parse errors: {:?}",
+        parser.errors()
+    );
     assert_eq!(parser.get_bool("bt-enable-lpd"), Some(true));
     assert_eq!(parser.get_bool("enable-lpd"), Some(true));
     assert_eq!(parser.get_str("dht-file-path"), Some("legacy-dht.dat"));
@@ -326,7 +330,10 @@ async fn compatibility_aliases_use_one_canonical_storage_key() {
         .await
         .expect("LPD alias must validate");
     manager
-        .set_global_option("dht-message-path", OptionValue::Str("manager-dht.dat".into()))
+        .set_global_option(
+            "dht-message-path",
+            OptionValue::Str("manager-dht.dat".into()),
+        )
         .await
         .expect("DHT path alias must validate");
     manager
@@ -582,22 +589,30 @@ async fn disk_cache_contract_reaches_session_and_real_writer_io() {
 
     let temp_dir = tempfile::tempdir().expect("disk-cache contract directory");
     let config_path = temp_dir.path().join("disk-cache.conf");
-    std::fs::write(&config_path, "disk-cache=0\n")
-        .expect("write disk-cache config fixture");
+    std::fs::write(&config_path, "disk-cache=0\n").expect("write disk-cache config fixture");
 
     let mut file_parser = ConfigParser::new();
     file_parser.parse_file(config_path.to_str().expect("UTF-8 temp path"));
-    assert!(!file_parser.has_errors(), "config errors: {:?}", file_parser.errors());
+    assert!(
+        !file_parser.has_errors(),
+        "config errors: {:?}",
+        file_parser.errors()
+    );
     let file_options = DownloadOptions::from_option_values(file_parser.options());
 
     let mut cli_parser = ConfigParser::new();
     cli_parser.parse_cli_args(&["--disk-cache=0"]);
-    assert!(!cli_parser.has_errors(), "CLI errors: {:?}", cli_parser.errors());
+    assert!(
+        !cli_parser.has_errors(),
+        "CLI errors: {:?}",
+        cli_parser.errors()
+    );
     let cli_options = DownloadOptions::from_option_values(cli_parser.options());
 
-    let rpc_options = DownloadOptions::try_from_rpc_options(&std::collections::HashMap::from([
-        ("disk-cache".to_string(), serde_json::json!(0)),
-    ]))
+    let rpc_options = DownloadOptions::try_from_rpc_options(&std::collections::HashMap::from([(
+        "disk-cache".to_string(),
+        serde_json::json!(0),
+    )]))
     .expect("RPC disk-cache value must use the shared parser");
 
     for (source, options) in [
@@ -641,12 +656,8 @@ async fn disk_cache_contract_reaches_session_and_real_writer_io() {
     direct_writer.close().await.unwrap();
 
     let cached_path = temp_dir.path().join("cached.bin");
-    let mut cached_writer = CachedDiskWriter::new_with_mmap_bytes(
-        &cached_path,
-        Some(64),
-        Some(4096),
-        false,
-    );
+    let mut cached_writer =
+        CachedDiskWriter::new_with_mmap_bytes(&cached_path, Some(64), Some(4096), false);
     cached_writer.open().await.unwrap();
     cached_writer.write_at(0, b"cached").await.unwrap();
     assert_eq!(
@@ -682,7 +693,10 @@ fn every_registered_option_has_one_explicit_production_owner() {
             .push(name.clone());
     }
 
-    assert!(!owners.is_empty(), "the registry must contain owned options");
+    assert!(
+        !owners.is_empty(),
+        "the registry must contain owned options"
+    );
     assert!(
         owners
             .values()

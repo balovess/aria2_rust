@@ -530,7 +530,9 @@ mod tests {
                 name
             );
             assert_eq!(
-                OptionRegistry::new().get(name).map(|definition| definition.owner()),
+                OptionRegistry::new()
+                    .get(name)
+                    .map(|definition| definition.owner()),
                 Some(expected_owner),
                 "registered option '{}' must preserve its execution owner",
                 name

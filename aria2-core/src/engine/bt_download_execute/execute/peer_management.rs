@@ -342,8 +342,7 @@ impl BtDownloadCommand {
         }
         if enable_dht && self.dht_engine.is_none() {
             let options = { self.group.recover().options().clone() };
-            let dht_config =
-                crate::engine::dht_config::build_dht_engine_config(&options).await?;
+            let dht_config = crate::engine::dht_config::build_dht_engine_config(&options).await?;
 
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
@@ -440,10 +439,7 @@ impl BtDownloadCommand {
     ) -> Result<Vec<BtPeerConn>> {
         let connection_options = {
             let group = self.group.recover();
-            BtPeerConnectionOptions::from_download_options(
-                group.options(),
-                self.local_peer_id,
-            )
+            BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id)
         };
 
         // Generate our local peer ID for this session. This is used for

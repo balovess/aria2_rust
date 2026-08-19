@@ -249,7 +249,8 @@ pub struct BtDownloadCommand {
     pub(crate) incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
     /// Shared uTP socket for outbound peers in this download task.
-    pub(crate) utp_socket: Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    pub(crate) utp_socket:
+        Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     /// Process-level listener shared by all BitTorrent downloads.
     pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     /// RAII registration for this torrent's info-hash route.

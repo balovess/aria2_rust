@@ -355,9 +355,7 @@ mod tests {
     use super::*;
     use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 
-    fn dependencies(
-        dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
-    ) -> CommandDependencies {
+    fn dependencies(dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) -> CommandDependencies {
         CommandDependencies {
             dns_cache,
             global_limiter: None,
@@ -419,14 +417,10 @@ mod tests {
                 options.clone(),
             )));
 
-            let _command = create_command_for_uri(
-                &uri,
-                group,
-                &options,
-                dependencies(Arc::clone(&cache)),
-            )
-            .await
-            .expect("command construction should resolve localhost");
+            let _command =
+                create_command_for_uri(&uri, group, &options, dependencies(Arc::clone(&cache)))
+                    .await
+                    .expect("command construction should resolve localhost");
 
             assert_eq!(
                 cache.lock().await.len(),

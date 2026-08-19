@@ -234,9 +234,9 @@ impl DhtEngine {
             config.self_id
         };
 
-        let listen_addr = config.listen_addr.unwrap_or(IpAddr::V4(
-            std::net::Ipv4Addr::UNSPECIFIED,
-        ));
+        let listen_addr = config
+            .listen_addr
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
 
         info!(
             id = %hex::encode(self_id),

@@ -186,8 +186,9 @@ impl LpdManager {
             // If we can't create real socket, create a dummy one for testing
             // In production this would be an error
             warn!("Could not create LPD announcer, LPD will be disabled");
-            let announcer = LpdAnnouncer::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
-                .unwrap_or_else(|_| panic!("Fatal: cannot create LPD announcer"));
+            let announcer =
+                LpdAnnouncer::with_config(constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS)
+                    .unwrap_or_else(|_| panic!("Fatal: cannot create LPD announcer"));
             Self {
                 announcer: Arc::new(announcer),
                 peers: Arc::new(RwLock::new(HashMap::new())),
@@ -214,11 +215,8 @@ impl LpdManager {
             return Err("LPD listen port must be greater than zero".to_string());
         }
 
-        let announcer = LpdAnnouncer::with_interface_and_port(
-            announce_interval_secs,
-            interface,
-            listen_port,
-        )?;
+        let announcer =
+            LpdAnnouncer::with_interface_and_port(announce_interval_secs, interface, listen_port)?;
 
         Ok(Self {
             announcer: Arc::new(announcer),

@@ -676,11 +676,13 @@ async fn test_lpd_registration_rejects_zero_tcp_port() {
         .expect_err("LPD must not register a torrent without a BT TCP port");
 
     assert!(error.contains("non-zero"));
-    assert!(!manager
-        .active_hashes
-        .read()
-        .await
-        .contains(test_info_hash()));
+    assert!(
+        !manager
+            .active_hashes
+            .read()
+            .await
+            .contains(test_info_hash())
+    );
     assert_eq!(manager.announce_port_for(test_info_hash()).await, None);
 }
 

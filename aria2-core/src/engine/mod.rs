@@ -5,6 +5,8 @@ pub mod concurrent_download;
 #[cfg(feature = "metalink")]
 pub mod concurrent_download_command;
 pub mod concurrent_segment_manager;
+#[cfg(feature = "bittorrent")]
+pub(crate) mod dht_config;
 pub mod download_command;
 pub mod download_cookie;
 pub mod download_engine;
@@ -13,8 +15,6 @@ pub mod download_progress;
 pub mod engine_command;
 pub mod engine_loop;
 pub mod halt_watchers;
-#[cfg(feature = "bittorrent")]
-pub(crate) mod dht_config;
 pub mod http_adaptive_concurrency;
 pub mod http_segment_downloader;
 pub mod http_segment_request_executor;

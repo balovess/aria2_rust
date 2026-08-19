@@ -14,9 +14,8 @@ pub use netrc::{NetRcEntry, NetRcError, NetRcFile};
 pub use option::{
     ChoiceValidator, DependencyChecker, OptionCategory, OptionDef, OptionDefinition, OptionError,
     OptionOwner, OptionRegistry, OptionType, OptionValidator, OptionValue, PathValidator,
-    PiecePriorityRule,
-    RangeValidator, RegexValidator, UrlValidator, parse_index_out, parse_integer_segments,
-    parse_piece_priority,
+    PiecePriorityRule, RangeValidator, RegexValidator, UrlValidator, parse_index_out,
+    parse_integer_segments, parse_piece_priority,
 };
 pub use parser::{ConfigError, ConfigParser, ConfigSource};
 pub use runtime::{
@@ -274,11 +273,7 @@ impl ConfigManager {
             return task_val;
         }
         drop(tasks);
-        self.global_opts
-            .read()
-            .await
-            .get(canonical_name)
-            .cloned()
+        self.global_opts.read().await.get(canonical_name).cloned()
     }
 
     pub async fn set_task_option(
@@ -451,7 +446,10 @@ mod tests {
             .await;
 
         let error = result.expect_err("unsupported pipeline limits must be rejected");
-        assert!(error.contains("max-http-pipelining"), "unexpected error: {error}");
+        assert!(
+            error.contains("max-http-pipelining"),
+            "unexpected error: {error}"
+        );
         assert_eq!(mgr.get_global_i64("max-http-pipelining").await, None);
     }
 

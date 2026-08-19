@@ -65,9 +65,9 @@ impl EncryptedConnection {
         debug!("MSE connecting to peer: {}", socket_addr);
 
         let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-        .await
-        .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
-        .map_err(|e| format!("Failed to connect to peer: {}", e))?;
+            .await
+            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
+            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
         // aria2's MSE path starts with DH. The 68-byte BitTorrent handshake
         // is exchanged only after MSE has selected the stream cipher.
@@ -107,13 +107,8 @@ impl EncryptedConnection {
         // PadB has no explicit length. The later VC marker synchronizes the
         // response, just as MSEHandshake::findInitiatorVCMarker does upstream.
         let mut step1_r_buf = vec![0u8; MSE_PUBLIC_KEY_LENGTH];
-        Self::read_exact_with_timeout(
-            &mut stream,
-            &mut step1_r_buf,
-            "MSE public key",
-            timeout,
-        )
-        .await?;
+        Self::read_exact_with_timeout(&mut stream, &mut step1_r_buf, "MSE public key", timeout)
+            .await?;
 
         initiator.receive_step1(&step1_r_buf)?;
 
@@ -132,11 +127,10 @@ impl EncryptedConnection {
         let mut read_ahead = Vec::new();
         let response_len = loop {
             let mut chunk = [0u8; 64];
-            let read_len =
-                tokio::time::timeout(timeout, stream.read(&mut chunk))
-                    .await
-                    .map_err(|_| "MSE response read timeout".to_string())?
-                    .map_err(|error| format!("MSE response read failed: {error}"))?;
+            let read_len = tokio::time::timeout(timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| "MSE response read timeout".to_string())?
+                .map_err(|error| format!("MSE response read failed: {error}"))?;
             if read_len == 0 {
                 return Err("MSE response: peer closed connection".to_string());
             }
@@ -208,10 +202,10 @@ impl EncryptedConnection {
         timeout: std::time::Duration,
     ) -> Result<(), String> {
         tokio::time::timeout(timeout, stream.read_exact(buffer))
-        .await
-        .map_err(|_| format!("{label} read timeout"))?
-        .map(|_| ())
-        .map_err(|error| format!("{label} read failed: {error}"))
+            .await
+            .map_err(|_| format!("{label} read timeout"))?
+            .map(|_| ())
+            .map_err(|error| format!("{label} read failed: {error}"))
     }
 
     async fn read_exact_with_pending(
