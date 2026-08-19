@@ -458,10 +458,7 @@ impl App {
             let (_reporter_stop_tx, reporter_handle) = if show_progress {
                 let group_man = self.request_man.clone();
                 let (mut reporter, stop_tx) =
-                    crate::ui::console_progress::ConsoleProgressReporter::new(
-                        group_man,
-                        std::io::stdout().is_terminal(),
-                    );
+                    crate::ui::console_progress::ConsoleProgressReporter::new(group_man);
                 let handle = tokio::spawn(async move {
                     reporter.run().await;
                 });
