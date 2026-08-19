@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 use crate::config::{parse_index_out, parse_integer_segments};
@@ -453,8 +453,35 @@ impl BtDownloadCommand {
             };
 
         let progress = group.progress.clone();
+        let peer_storage = {
+            let mut storage = crate::engine::bt_peer_storage::DefaultPeerStorage::new();
+            if let Some(path) = options.bt_peer_blocklist.as_deref() {
+                let mut blocklist = crate::engine::bt_peer_blocklist::BtPeerBlocklist::new();
+                blocklist
+                    .load_from_file(std::path::Path::new(path))
+                    .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+                storage.set_peer_blocklist(Arc::new(blocklist));
+            }
+            Arc::new(std::sync::Mutex::new(storage))
+        };
+        let utp_socket = if options.enable_utp {
+            let socket = match options.utp_listen_port {
+                Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+                None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
+            }
+            .map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "Failed to bind uTP socket: {error}"
+                )))
+            })?;
+            Some(Arc::new(tokio::sync::Mutex::new(socket)))
+        } else {
+            None
+        };
         let mut command = Self {
-            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id(),
+            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
+                &options.peer_id_prefix,
+            ),
             group: Arc::new(std::sync::RwLock::new(group)),
             progress,
             output_path: effective_output_path,
@@ -499,7 +526,10 @@ impl BtDownloadCommand {
             // P1/P2 integration field defaults (all None, backward compatible)
             progress_manager: None,
             progress_save_interval: Duration::from_secs(60),
+            // LPD is process-wide. The engine/task spawner injects its one
+            // shared manager after construction.
             lpd_manager: None,
+            lpd_registered_info_hash: None,
             hook_manager: None,
 
             // PEX integration fields default values
@@ -542,10 +572,9 @@ impl BtDownloadCommand {
             global_limiter: None,
 
             peer_rejection: crate::engine::bt_peer_storage::PeerRejectionState::shared(),
-            peer_storage: std::sync::Arc::new(std::sync::Mutex::new(
-                crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
-            )),
+            peer_storage,
             incoming_peers: None,
+            utp_socket,
             // Direct command users do not pass through DownloadEngine's
             // dependency injector. Give that public construction path a
             // listener manager; the engine replaces it with its shared
@@ -555,6 +584,8 @@ impl BtDownloadCommand {
             )),
             bt_peer_route: None,
             checkpoint: None,
+            checkpoint_bytes_since_save: 0,
+            checkpoint_last_save: Instant::now(),
         };
         command.apply_context_paths()?;
         Ok(command)

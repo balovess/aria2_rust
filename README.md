@@ -9,6 +9,7 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#usage">Usage</a> •
   <a href="#architecture">Architecture</a> •
+  <a href="#performance">Performance</a> •
   <a href="#building">Building</a> •
   <a href="#license">License</a>
 </p>
@@ -214,15 +215,15 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-14): the current focused evidence includes
+Verification snapshot (2026-08-18): the current focused evidence includes
 the CLI, RPC, protocol, BitTorrent, Metalink, FTP/SFTP, Node.js, and Python
 regression/E2E suites recorded in
 [docs/compatibility-status.md](docs/compatibility-status.md). The workspace
 command `cargo test --workspace --all-targets --no-run` also compiles all Rust
 test and benchmark targets. Node.js reports 123 passed and Python reports 137
-passed on this host. Under the current `0.2.9`, the version entry point,
+passed on this host. Under the current `0.3.2`, the version entry point,
 application tests, Clippy, and the targeted parser/RPC regressions pass;
-`aria2c --version` reports `aria2-rust 0.2.9`, and all Rust members and SDK
+`aria2c --version` reports `aria2-rust 0.3.2`, and all Rust members and SDK
 metadata resolve to that product version. Existing `check-certificate`,
 `ca-certificate`, `certificate`, and `private-key` configuration values are
 handled by the Rust HTTP transport across primary HTTP/HTTPS downloads,
@@ -245,6 +246,7 @@ aria2-rust/
 │   └── examples/          #   Usage examples
 ├── aria2-core/             # Core library (~7,000 lines)
 │   ├── src/engine/        #   Download engine (12 command implementations)
+│   │   ├── process_wait.rs # Native process-exit events with fallback watcher
 │   │   ├── download_engine.rs # Event loop with command queue
 │   │   ├── download_command.rs # HTTP/HTTPS downloader
 │   │   ├── ftp_download_command.rs # FTP/SFTP downloader
@@ -260,7 +262,8 @@ aria2-rust/
 │   │   └── mod.rs        #     ConfigManager unified runtime manager
 │   ├── src/request/       #   Request management
 │   │   ├── request_group_man.rs # Global task manager
-│   │   └── request_group.rs    # Per-task state machine
+│   │   └── request_group/      # Per-task state machine and activity signals
+│   │       └── activity.rs     # Notify + generation wake-up signal
 │   ├── src/filesystem/     #   Disk I/O
 │   │   ├── disk_writer.rs # Disk writer trait
 │   │   ├── disk_cache.rs # Cached writer (256KB direct write)
@@ -273,6 +276,7 @@ aria2-rust/
 │   │   └── ns_cookie_parser.rs # Netscape format parser
 │   ├── src/session/       #   Session persistence
 │   │   ├── session_serializer.rs # Serialization
+│   │   ├── auto_save_coordinator.rs # Unified persistence deadlines
 │   │   ├── auto_save_session.rs # Auto-save
 │   │   └── save_session_command.rs # Save on exit
 │   ├── src/rate_limiter.rs # Token bucket rate limiting
@@ -300,6 +304,64 @@ aria2-rust/
     ├── python/            #   Python SDK (~600 lines)
     └── nodejs/            #   Node.js SDK (~627 lines TS)
 └── Cargo.toml              # Workspace configuration
+```
+
+## Performance
+
+The implementation-oriented comparison with `aria2_original` is maintained in
+[Performance Differentiators](docs/performance-differentiators.md). The current
+Rust-specific differences are:
+
+| Area | Current implementation |
+| --- | --- |
+| Disk I/O | Positioned offset writes, write-back range cache, threshold batching, and coalesced multi-file writes. Blocking syscalls run on Tokio's blocking pool; Linux `io_uring` is an opt-in backend. |
+| Data path | `bytes::Bytes` is transferred through the cache, Piece writer, and multi-file slices to reduce copies and temporary allocations. This is a reduced-copy path, not an end-to-end zero-copy guarantee. |
+| Hash verification | Bounded background hash workers, chunked integrity dispatch, cooperative yields, and RequestGroup-aware cancellation. |
+| BitTorrent/DHT | Hash-based peer lifecycle, incremental piece-frequency tracking, shared HAVE frame encoding with bounded concurrent sends, bucket-tree/top-K routing, and bounded UDP workers. |
+| File allocation | Platform-aware Linux `fallocate`, Windows `SetFileValidData`, macOS `F_PREALLOCATE`, and cooperative fallbacks that keep long allocation work off the reactor. |
+| RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
+
+The same document records compatibility impact, source entry points, focused test
+evidence, and known boundaries such as the not-yet-complete DHT task-queue
+wiring and the lack of a comparable `aria2_original` C++ benchmark.
+
+Existing event-driven hot paths include:
+
+- uTP receive waits on Tokio UDP readiness and retains fragmented frames in a
+  persistent buffer instead of retrying `recv` after a fixed sleep.
+- BitTorrent piece downloads use a bounded event-driven block pipeline;
+  endgame peers are consumed concurrently and TCP/MSE readers preserve partial
+  frames across cancellation.
+- Dynamic rate-limit changes wake blocked token acquisitions immediately.
+- Piece-stat and missing-piece queries scan bitfields bytewise; unrestricted
+  rarest-first selection advances a sorted cursor instead of rescanning pieces.
+- The engine idle path waits on commands, task completions, the earliest
+  maintenance deadline, and shutdown instead of scanning on a fixed idle tick.
+
+Implementation seams: [engine idle wait](aria2-core/src/engine/engine_loop.rs),
+[activity signal](aria2-core/src/request/request_group/activity.rs),
+[save deadlines](aria2-core/src/session/auto_save_coordinator.rs), and
+[platform process wait](aria2-core/src/engine/process_wait.rs).
+
+Rust-only Criterion measurements on Windows release builds (`50,000` pieces,
+same-worktree before/after medians) show the following algorithm-level changes:
+
+| Benchmark | Before | After |
+| --- | ---: | ---: |
+| Bitfield all-missing query | 63.4 us | 4.3 us |
+| Bitfield sparse selection | 194.9 us | 75.0 us |
+| Rarest selection | 54.96 us | 2.13 us |
+
+These are microbenchmark results, not a whole-download throughput claim or a
+comparison with `aria2_original`. Details and validation commands are recorded
+in [docs/MIGRATION.md](docs/MIGRATION.md) and
+[docs/engine-loop-performance.md](docs/engine-loop-performance.md).
+
+To reproduce the focused benchmarks:
+
+```bash
+cargo bench -p aria2-core --bench segment_scan_bench -- --noplot
+cargo bench -p aria2-protocol --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
 ```
 
 ## Library Usage

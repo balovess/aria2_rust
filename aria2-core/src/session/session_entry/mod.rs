@@ -40,6 +40,6 @@ mod struct_def;
 mod tests;
 mod uri_utils;
 
-pub use options::download_options_to_map;
+pub use options::{download_options_to_map, download_options_to_map_with_snapshot};
 pub use struct_def::SessionEntry;
 pub use uri_utils::{decode_hex, escape_uri, unescape_uri};

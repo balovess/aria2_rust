@@ -104,14 +104,6 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
-            name: "enable-lpd".into(),
-            opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
-            description: "Enable Local Peer Discovery (alias for bt-enable-lpd)".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
             name: "lpd-listen-port".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(6771),
@@ -150,6 +142,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "dht-entry-point".into(),
             opt_type: OptionType::List,
+            cumulative_delimiter: Some("\n"),
             description: "DHT bootstrap nodes (host:port format, comma-separated)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -158,13 +151,6 @@ impl crate::config::OptionRegistry {
             name: "dht-file-path".into(),
             opt_type: OptionType::Path,
             description: "Path to DHT routing table file for persistence".into(),
-            category: OptionCategory::BitTorrent,
-            ..Default::default()
-        });
-        self.register(OptionDef {
-            name: "dht-message-path".into(),
-            opt_type: OptionType::Path,
-            description: "DHT message cache path (deprecated, use dht-file-path instead)".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });
@@ -248,6 +234,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-exclude-tracker".into(),
             opt_type: OptionType::List,
+            cumulative_delimiter: Some("\n"),
             description: "Comma-separated list of tracker announce URIs to exclude".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -277,7 +264,7 @@ impl crate::config::OptionRegistry {
         });
         self.register(OptionDef {
             name: "bt-lpd-interface".into(),
-            opt_type: OptionType::String,
+            opt_type: OptionType::Ipv4Address,
             description: "Network interface for Local Peer Discovery".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

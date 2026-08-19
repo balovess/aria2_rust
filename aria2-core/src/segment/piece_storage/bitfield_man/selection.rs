@@ -18,7 +18,7 @@
 //! selection" — we search for CLEAR bits in it.
 
 use super::core::BitfieldMan;
-use crate::segment::bitfield_util::{set_bit, test_bit};
+use crate::segment::bitfield_util::{byte_at, test_bit, valid_bits_mask};
 
 impl BitfieldMan {
     /// Returns the first missing piece index.
@@ -250,16 +250,18 @@ impl BitfieldMan {
         let num_bytes = self.num_pieces.div_ceil(8);
         let mut combined = vec![0u8; num_bytes];
 
-        for i in 0..self.num_pieces {
-            let ignored = test_bit(ignore_bitfield, self.num_pieces, i);
-            let completed = test_bit(&self.bitfield, self.num_pieces, i);
-            let in_use = test_bit(&self.use_bitfield, self.num_pieces, i);
-            let filter_excluded =
-                self.filter_enabled && !test_bit(&self.filter_bitfield, self.num_pieces, i);
-
-            if ignored || completed || filter_excluded || in_use {
-                set_bit(&mut combined, self.num_pieces, i);
+        let last_mask = valid_bits_mask(self.num_pieces);
+        for (byte_index, output) in combined.iter_mut().enumerate() {
+            let mut unavailable = byte_at(ignore_bitfield, byte_index)
+                | self.bitfield[byte_index]
+                | self.use_bitfield[byte_index];
+            if self.filter_enabled {
+                unavailable |= !self.filter_bitfield[byte_index];
             }
+            if byte_index + 1 == num_bytes {
+                unavailable |= !last_mask;
+            }
+            *output = unavailable;
         }
         combined
     }

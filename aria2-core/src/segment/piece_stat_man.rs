@@ -27,7 +27,7 @@ use std::sync::RwLock;
 use rand::seq::SliceRandom;
 use tracing::trace;
 
-use super::bitfield_util::test_bit;
+use super::bitfield_util::{byte_at, for_each_set_bit, for_each_set_byte};
 
 // ---------------------------------------------------------------------------
 // PieceStatMan
@@ -95,11 +95,9 @@ impl PieceStatMan {
     pub fn add_piece_stats_bitfield(&self, bitfield: &[u8]) {
         let mut counts = self.counts.write().unwrap();
         let nbits = counts.len();
-        for i in 0..nbits {
-            if test_bit(bitfield, nbits, i) {
-                counts[i] = counts[i].saturating_add(1);
-            }
-        }
+        for_each_set_bit(bitfield, nbits, |index| {
+            counts[index] = counts[index].saturating_add(1);
+        });
         trace!(nbits, "add_piece_stats_bitfield completed");
     }
 
@@ -109,11 +107,9 @@ impl PieceStatMan {
     pub fn subtract_piece_stats(&self, bitfield: &[u8]) {
         let mut counts = self.counts.write().unwrap();
         let nbits = counts.len();
-        for i in 0..nbits {
-            if test_bit(bitfield, nbits, i) {
-                counts[i] = counts[i].saturating_sub(1);
-            }
-        }
+        for_each_set_bit(bitfield, nbits, |index| {
+            counts[index] = counts[index].saturating_sub(1);
+        });
         trace!(nbits, "subtract_piece_stats completed");
     }
 
@@ -129,14 +125,15 @@ impl PieceStatMan {
     pub fn update_piece_stats(&self, new_bitfield: &[u8], old_bitfield: &[u8]) {
         let mut counts = self.counts.write().unwrap();
         let nbits = counts.len();
-        for i in 0..nbits {
-            let in_new = test_bit(new_bitfield, nbits, i);
-            let in_old = test_bit(old_bitfield, nbits, i);
-            if in_new && !in_old {
-                counts[i] = counts[i].saturating_add(1);
-            } else if !in_new && in_old {
-                counts[i] = counts[i].saturating_sub(1);
-            }
+        for byte_index in 0..nbits.div_ceil(8) {
+            let added = byte_at(new_bitfield, byte_index) & !byte_at(old_bitfield, byte_index);
+            for_each_set_byte(added, byte_index, nbits, &mut |index| {
+                counts[index] = counts[index].saturating_add(1);
+            });
+            let removed = byte_at(old_bitfield, byte_index) & !byte_at(new_bitfield, byte_index);
+            for_each_set_byte(removed, byte_index, nbits, &mut |index| {
+                counts[index] = counts[index].saturating_sub(1);
+            });
         }
         trace!(nbits, "update_piece_stats completed");
     }

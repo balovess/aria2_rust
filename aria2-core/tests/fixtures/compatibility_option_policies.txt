@@ -35,8 +35,8 @@ connect-timeout
 content-disposition-default-utf8
 continue
 dir
+disk-cache
 dry-run
-enable-async-dns6
 enable-http-keep-alive
 enable-http-pipelining
 enable-mmap
@@ -150,9 +150,9 @@ connect-timeout
 content-disposition-default-utf8
 continue
 dir
+disk-cache
 download-result
 dry-run
-enable-async-dns6
 enable-http-keep-alive
 enable-http-pipelining
 enable-mmap
@@ -209,7 +209,6 @@ no-file-allocation-limit
 no-netrc
 no-proxy
 no-want-digest-header
-optimize-concurrent-downloads
 parameterized-uri
 pause-metadata
 piece-length
@@ -272,7 +271,6 @@ connect-timeout
 content-disposition-default-utf8
 continue
 dir
-enable-async-dns6
 enable-http-keep-alive
 enable-http-pipelining
 enable-mmap

@@ -22,8 +22,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "conditional-get",
     "continue",
     "dir",
+    "disk-cache",
     "download-result",
-    "enable-async-dns6",
     "enable-mmap",
     "file-allocation",
     "force-save",
@@ -41,7 +41,6 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "max-resume-failure-tries",
     "min-split-size",
     "no-file-allocation-limit",
-    "optimize-concurrent-downloads",
     "parameterized-uri",
     "pause-metadata",
     "realtime-chunk-checksum",
@@ -187,8 +186,8 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "content-disposition-default-utf8",
     "continue",
     "dir",
+    "disk-cache",
     "dry-run",
-    "enable-async-dns6",
     "enable-http-keep-alive",
     "enable-http-pipelining",
     "enable-mmap",
@@ -266,6 +265,16 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "user-agent",
 ];
 
+/// Initial options whose typed execution representation must not replace the
+/// original wire spelling when a session entry is written.
+pub const INITIAL_SNAPSHOT_WIRE_OPTIONS: &[&str] = &["min-split-size"];
+
+/// Initial options consumed by task creation rather than download behavior.
+///
+/// `gid` is an identity allocator input and must never be serialized as a
+/// normal per-download behavior option.
+pub const INITIAL_IDENTITY_OPTIONS: &[&str] = &["gid"];
+
 /// Returns whether an option belongs to a request-group's initial state.
 pub fn is_initial_option(option_name: &str) -> bool {
     INITIAL_REQUEST_OPTIONS.contains(&option_name)
@@ -280,10 +289,17 @@ pub fn project_initial_options<I>(options: I) -> HashMap<String, serde_json::Val
 where
     I: IntoIterator<Item = (String, serde_json::Value)>,
 {
-    options
-        .into_iter()
-        .filter(|(name, _)| is_initial_option(name))
-        .collect()
+    let mut projected = HashMap::new();
+    for (name, value) in options {
+        let canonical_name = crate::config::OptionRegistry::canonical_name(&name).to_string();
+        if !is_initial_option(&canonical_name) {
+            continue;
+        }
+        if name == canonical_name || !projected.contains_key(&canonical_name) {
+            projected.insert(canonical_name, value);
+        }
+    }
+    projected
 }
 
 /// Returns whether a name is accepted by `changeGlobalOption`.
@@ -324,7 +340,6 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "conditional-get",
     "continue",
     "dir",
-    "enable-async-dns6",
     "enable-mmap",
     "file-allocation",
     "force-save",
@@ -495,9 +510,9 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 107);
-        #[cfg(not(feature = "bittorrent"))]
         assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 106);
+        #[cfg(not(feature = "bittorrent"))]
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 105);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate

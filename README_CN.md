@@ -9,6 +9,7 @@
   <a href="#快速开始">快速开始</a> •
   <a href="#使用方法">使用方法</a> •
   <a href="#项目架构">项目架构</a> •
+  <a href="#性能">性能</a> •
   <a href="#构建说明">构建说明</a> •
   <a href="#许可证">许可证</a>
 </p>
@@ -139,6 +140,7 @@ aria2-rust/
 │   └── examples/          #   使用示例
 ├── aria2-core/             # 核心库（~7,000 行）
 │   ├── src/engine/        #   下载引擎（12 个命令实现）
+│   │   ├── process_wait.rs # 原生进程退出事件与兼容 fallback
 │   │   ├── download_engine.rs # 带命令队列的事件循环
 │   │   ├── download_command.rs # HTTP/HTTPS 下载器
 │   │   ├── ftp_download_command.rs # FTP/SFTP 下载器
@@ -154,7 +156,8 @@ aria2-rust/
 │   │   └── mod.rs        #     ConfigManager 统一运行时管理器
 │   ├── src/request/       #   请求管理
 │   │   ├── request_group_man.rs # 全局任务管理器
-│   │   └── request_group.rs    # 每个任务的状态机
+│   │   └── request_group/      # 每个任务的状态机和活动信号
+│   │       └── activity.rs     # Notify + generation 唤醒信号
 │   ├── src/filesystem/     #   磁盘 I/O
 │   │   ├── disk_writer.rs # 磁盘写入接口
 │   │   ├── disk_cache.rs # 缓存写入器（256KB 直写）
@@ -167,6 +170,7 @@ aria2-rust/
 │   │   └── ns_cookie_parser.rs # Netscape 格式解析器
 │   ├── src/session/       #   会话持久化
 │   │   ├── session_serializer.rs # 序列化
+│   │   ├── auto_save_coordinator.rs # 统一持久化 deadline 调度
 │   │   ├── auto_save_session.rs # 自动保存
 │   │   └── save_session_command.rs # 退出时保存
 │   ├── src/rate_limiter.rs # 令牌桶速率限制
@@ -194,6 +198,59 @@ aria2-rust/
     ├── python/            #   Python SDK（~600 行）
     └── nodejs/            #   Node.js SDK（~627 行 TS）
 └── Cargo.toml              # Workspace 配置
+```
+
+## 性能
+
+相对 `aria2_original` 的差异化性能实现统一整理在
+[性能差异化台账](docs/performance-differentiators.md)，包括原版基线、Rust 实现、
+兼容性边界、代码入口和验证状态。当前主要差异如下：
+
+| 领域 | 当前 Rust 实现 |
+| --- | --- |
+| 磁盘 I/O | Positioned offset write、写回 range cache、阈值批处理和多文件 coalescing；阻塞 syscall 放入 Tokio blocking pool，Linux `io_uring` 为 opt-in backend。 |
+| 数据路径 | 通过 `bytes::Bytes` 在 cache、Piece writer 和多文件切片之间传递，减少复制和临时分配；这是 reduced-copy path，不是端到端 zero-copy 保证。 |
+| Hash 校验 | 有界后台 hash worker、分块完整性 dispatcher、协作式让出和 RequestGroup 生命周期取消。 |
+| BT/DHT | Hash-based peer 生命周期、增量 Piece 频率、共享 HAVE frame 的有界并发发送、bucket tree/top-K 路由和有界 UDP worker。 |
+| 文件预分配 | Linux `fallocate`、Windows `SetFileValidData`、macOS `F_PREALLOCATE` 的平台适配，以及不会阻塞 reactor 的 fallback。 |
+| RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
+
+台账同时记录已知边界：DHT 周期任务尚未全部切换到统一 task queue，跨平台真实
+运行时证据仍需补充，也尚未建立可与 `aria2_original` C++ binary 对比的同条件基线。
+
+已有事件驱动热路径包括：
+
+- uTP 接收使用 Tokio UDP readiness 和持久分片缓冲，避免固定 `sleep` 后重复 `recv`。
+- BitTorrent piece 使用有界 event-driven block pipeline；endgame 并发消费 peer 响应，
+  TCP/MSE 取消后保留未完成帧。
+- 动态修改限速会立即唤醒阻塞中的 token 获取；PieceStat、missing-piece 和
+  rarest-first 查询减少重复线性扫描。
+- 引擎空闲路径只等待命令、任务完成、最早维护 deadline 和 shutdown，不再按固定
+  idle tick 扫描。
+
+实现入口：[引擎空闲等待](aria2-core/src/engine/engine_loop.rs)、[活动信号](aria2-core/src/request/request_group/activity.rs)、
+[保存 deadline](aria2-core/src/session/auto_save_coordinator.rs) 和
+[平台进程等待](aria2-core/src/engine/process_wait.rs)。
+
+Windows release 构建中的 Rust-only Criterion 基准（`50,000` pieces，同一
+工作树前后中位数）如下：
+
+| 基准 | 优化前 | 优化后 |
+| --- | ---: | ---: |
+| Bitfield 全 missing 查询 | 63.4 us | 4.3 us |
+| Bitfield sparse selection | 194.9 us | 75.0 us |
+| Rarest selection | 54.96 us | 2.13 us |
+
+这些是算法级微基准，不代表完整下载吞吐提升，也不是与
+`aria2_original` 的对比结果。详细说明、测试证据和边界条件见
+[docs/MIGRATION.md](docs/MIGRATION.md) 及
+[docs/engine-loop-performance.md](docs/engine-loop-performance.md)。
+
+运行专项基准：
+
+```bash
+cargo bench -p aria2-core --bench segment_scan_bench -- --noplot
+cargo bench -p aria2-protocol --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
 ```
 
 ## 库使用

@@ -23,14 +23,8 @@ use tracing::info;
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
-        let tick_ms = self
-            .get_opt_i64("bt-request-peer-timeout")
-            .await
-            .unwrap_or(100) as u64;
-        let mut engine = DownloadEngine::new(tick_ms);
-
         #[cfg(feature = "bittorrent")]
-        {
+        let mut engine = {
             let config = self.config.read().await;
             let sources = match config.get_global_option("bt-tracker-source").await {
                 Some(aria2_core::config::OptionValue::List(values)) => values,
@@ -54,12 +48,82 @@ impl App {
                 .get_global_bool("enable-public-trackers")
                 .await
                 .unwrap_or(true);
+            let lpd_port = config
+                .get_global_i64("lpd-listen-port")
+                .await
+                .and_then(|port| u16::try_from(port).ok())
+                .unwrap_or(aria2_core::constants::LPD_PORT);
+            let lpd_interface = match config.get_global_option("bt-lpd-interface").await {
+                Some(aria2_core::config::OptionValue::Str(value)) if !value.trim().is_empty() => {
+                    match value.parse::<std::net::Ipv4Addr>() {
+                        Ok(interface) => Some(interface),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                value = %value,
+                                "Ignoring invalid bt-lpd-interface"
+                            );
+                            None
+                        }
+                    }
+                }
+                _ => None,
+            };
+            let lpd_manager = match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
+                aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
+                lpd_interface,
+                lpd_port,
+            ) {
+                Ok(manager) => Arc::new(manager),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "Using default LPD manager because configured LPD setup failed"
+                    );
+                    Arc::new(aria2_core::engine::lpd_manager::LpdManager::new())
+                }
+            };
+
+            let mut engine = DownloadEngine::with_lpd_manager(
+                crate::constants::DEFAULT_TICK_INTERVAL_MS,
+                lpd_manager,
+            );
             engine.set_public_tracker_config(TrackerCatalogConfig {
                 enabled,
                 sources,
                 update_interval,
             });
-        }
+            engine
+        };
+
+        #[cfg(not(feature = "bittorrent"))]
+        let mut engine = DownloadEngine::new(crate::constants::DEFAULT_TICK_INTERVAL_MS);
+
+        let server_stat_timeout = self
+            .get_opt_i64("server-stat-timeout")
+            .await
+            .filter(|value| *value >= 0)
+            .map(|value| value as u64)
+            .unwrap_or(24 * 60 * 60);
+        let server_stat_input = self
+            .get_opt_str("server-stat-if")
+            .await
+            .map(std::path::PathBuf::from);
+        let server_stat_output = self
+            .get_opt_str("server-stat-of")
+            .await
+            .map(std::path::PathBuf::from);
+        let server_stat_interval = self
+            .get_opt_i64("save-server-stat-interval")
+            .await
+            .filter(|value| *value > 0)
+            .map(|value| std::time::Duration::from_secs(value as u64));
+        engine.set_server_stat_timeout(server_stat_timeout);
+        engine.set_server_stat_persistence(
+            server_stat_input,
+            server_stat_output,
+            server_stat_interval,
+        );
 
         let save_session_path = self
             .get_opt_str("save-session")
@@ -75,12 +139,16 @@ impl App {
                     None
                 }
             });
+        let auto_save_interval = self
+            .get_opt_i64("auto-save-interval")
+            .await
+            .and_then(|v| (v > 0).then_some(std::time::Duration::from_secs(v as u64)));
 
+        engine.set_auto_save_interval(auto_save_interval);
+        engine.set_request_group_man(self.request_man.clone());
         if let Some(path) = save_session_path {
             engine.set_save_session(path, save_session_interval, self.request_man.clone());
         }
-
-        engine.set_request_group_man(self.request_man.clone());
         *self.engine.lock().await = Some(engine);
         info!("Engine initialization complete");
     }
@@ -92,6 +160,14 @@ impl App {
         }
 
         let (options, option_snapshot) = self.download_options_with_snapshot().await;
+        let explicit_gid = self
+            .get_opt_str("gid")
+            .await
+            .map(|value| {
+                GroupId::from_hex_string(&value)
+                    .ok_or_else(|| format!("Invalid GID '{}': expected a hexadecimal u64", value))
+            })
+            .transpose()?;
         let global_dl = self
             .get_opt_i64("max-overall-download-limit")
             .await
@@ -241,7 +317,11 @@ impl App {
                 return Err("Metalink inputs must be submitted as a complete set".to_string());
             }
 
-            let gid = GroupId::new(i as u64 + 1);
+            let gid = if i == 0 {
+                explicit_gid.unwrap_or_else(|| self.request_man.next_available_gid())
+            } else {
+                self.request_man.next_available_gid()
+            };
             let mut initial_uri = input.raw.clone();
             #[cfg(feature = "bittorrent")]
             if matches!(input.input_type, InputType::TorrentFile) {
@@ -316,8 +396,8 @@ impl App {
     ///
     /// * `keep_alive` - If true, the engine stays alive with no pending commands
     ///   (used for RPC listen mode).
-    /// * `show_progress` - If true, periodically poll and render download
-    ///   progress to stdout via the [`ConsoleProgressReporter`].
+    /// * `show_progress` - If true, render progress to stdout. TTY output is
+    ///   rendered in place; redirected output uses plain flushed lines.
     pub async fn run_engine(
         &self,
         keep_alive: bool,

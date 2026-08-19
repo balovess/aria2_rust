@@ -1,6 +1,9 @@
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
-use std::collections::HashMap;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
+use std::collections::{HashMap, hash_map::Entry};
+use std::ops::Range;
 
 // ======================================================================
 // Multi-File Writer
@@ -21,6 +24,35 @@ struct CoalescedWrite {
 /// be coalesced into a single write operation.  Gaps are zero-filled so that
 /// the resulting sparse region is correct on disk.
 const COALESCE_GAP: u64 = 4096;
+
+fn coalesced_file_batches(file_indices: &[usize], max_open_files: usize) -> Vec<Range<usize>> {
+    let max_open_files = max_open_files.max(1);
+    let mut batches = Vec::new();
+    let mut start = 0;
+
+    while start < file_indices.len() {
+        let mut end = start;
+        let mut unique_files = 0usize;
+        let mut previous_file = None;
+
+        while end < file_indices.len() {
+            let file_idx = file_indices[end];
+            if previous_file != Some(file_idx) {
+                if unique_files == max_open_files {
+                    break;
+                }
+                unique_files += 1;
+                previous_file = Some(file_idx);
+            }
+            end += 1;
+        }
+
+        batches.push(start..end);
+        start = end;
+    }
+
+    batches
+}
 
 /// Writes a completed piece's data across multiple files in a multi-file torrent.
 ///
@@ -155,8 +187,25 @@ pub async fn write_piece_to_multi_files_coalesced(
     piece_data: &bytes::Bytes,
     _piece_length: u32,
 ) -> Result<()> {
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+    write_piece_to_multi_files_coalesced_with_limit(
+        layout,
+        piece_idx,
+        piece_data,
+        _piece_length,
+        usize::MAX,
+    )
+    .await
+}
 
+/// Same as [`write_piece_to_multi_files_coalesced`] but limits the number of
+/// simultaneously open torrent files.
+pub async fn write_piece_to_multi_files_coalesced_with_limit(
+    layout: &MultiFileLayout,
+    piece_idx: u32,
+    piece_data: &bytes::Bytes,
+    _piece_length: u32,
+    max_open_files: usize,
+) -> Result<()> {
     // ------------------------------------------------------------------
     // Phase 1: Collect all raw write operations
     // ------------------------------------------------------------------
@@ -228,51 +277,66 @@ pub async fn write_piece_to_multi_files_coalesced(
     }
 
     // ------------------------------------------------------------------
-    // Phase 4: Execute coalesced writes (one open per unique file)
+    // Phase 4: Execute coalesced writes (one open per unique file).
+    //
+    // A positioned writer removes the seek + write pair from every operation
+    // and forwards the Bytes slice directly to pwrite/seek_write. This keeps
+    // cross-file writes on the same non-blocking disk path as single-file BT
+    // downloads.
     // ------------------------------------------------------------------
-    let mut file_writers: HashMap<usize, tokio::fs::File> = HashMap::new();
+    let file_indices: Vec<_> = coalesced.iter().map(|write| write.file_idx).collect();
+    for batch in coalesced_file_batches(&file_indices, max_open_files) {
+        let mut file_writers: HashMap<usize, PositionedDiskWriter> = HashMap::new();
 
-    for cw in &coalesced {
-        let file_path = layout
-            .file_absolute_path(cw.file_idx)
-            .ok_or_else(|| Aria2Error::Fatal(FatalError::Config("invalid file index".to_string())))?
-            .to_path_buf();
+        for cw in &coalesced[batch] {
+            let file_path = layout
+                .file_absolute_path(cw.file_idx)
+                .ok_or_else(|| {
+                    Aria2Error::Fatal(FatalError::Config("invalid file index".to_string()))
+                })?
+                .to_path_buf();
 
-        let writer = match file_writers.entry(cw.file_idx) {
-            std::collections::hash_map::Entry::Vacant(e) => {
-                // NOTE: Do NOT use .truncate(true) — it would destroy existing
-                // file content from previously completed pieces.  We seek +
-                // write at the correct offset for random-access writing.
-                let f = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .write(true)
-                    .read(true)
-                    .open(&file_path)
-                    .await
-                    .map_err(|e| {
-                        Aria2Error::Fatal(FatalError::Config(format!("open failed: {}", e)))
+            let writer = match file_writers.entry(cw.file_idx) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let mut writer = PositionedDiskWriter::new(&file_path, None);
+                    writer.open().await.map_err(|error| {
+                        Aria2Error::Fatal(FatalError::Config(format!("open failed: {error}")))
                     })?;
-                e.insert(f)
-            }
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-        };
+                    entry.insert(writer)
+                }
+            };
+            writer
+                .write_bytes_at(cw.file_offset, cw.data.clone())
+                .await
+                .map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!("write failed: {error}")))
+                })?;
+        }
 
-        writer
-            .seek(std::io::SeekFrom::Start(cw.file_offset))
-            .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("seek failed: {}", e))))?;
-        writer
-            .write_all(&cw.data)
-            .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("write failed: {}", e))))?;
-    }
-
-    for (_, mut f) in file_writers {
-        f.flush()
-            .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("flush failed: {}", e))))?;
+        for (_, mut writer) in file_writers {
+            writer.flush().await.map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!("flush failed: {error}")))
+            })?;
+        }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::coalesced_file_batches;
+
+    #[test]
+    fn max_open_files_splits_coalesced_writes_by_unique_file() {
+        assert_eq!(
+            coalesced_file_batches(&[0, 0, 1, 2, 2, 3], 2),
+            vec![0..3, 3..6]
+        );
+        assert_eq!(
+            coalesced_file_batches(&[0, 0, 1, 2], 1),
+            vec![0..2, 2..3, 3..4]
+        );
+    }
 }

@@ -1,15 +1,88 @@
 //! Endgame-mode block request and download methods for BtMessageHandler.
 
+use futures::{StreamExt, stream::FuturesUnordered};
+use std::time::Duration;
+
 use crate::engine::bt_download_execute::EndgameState;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::request::request_group::AtomicProgress;
 use tracing::{debug, info, warn};
 
 use super::super::types::{
-    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
-    MAX_RETRIES, PeerDownloadBytes, PieceDownloadResult,
+    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_RETRIES, PeerDownloadBytes,
+    PieceDownloadResult,
 };
 use super::BtMessageHandler;
+
+async fn wait_for_piece_block_from_peer(
+    connection: &mut BtPeerConn,
+    conn_idx: usize,
+    expected_index: u32,
+    expected_begin: u32,
+    dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+) -> Result<(bytes::Bytes, usize)> {
+    loop {
+        match connection.read_message().await {
+            Ok(Some(msg)) => {
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+
+                match msg {
+                    BtMessage::Piece { index, begin, data } => {
+                        if index == expected_index && begin == expected_begin {
+                            return Ok((data, conn_idx));
+                        }
+                        debug!(
+                            "[BT] Endgame: Received unexpected PIECE (index={}, begin={}) from peer {}, waiting for ({}, {})",
+                            index, begin, conn_idx, expected_index, expected_begin
+                        );
+                    }
+                    BtMessage::AllowedFast { index } => {
+                        debug!("[BT] Received AllowedFast for piece {}", index);
+                        connection.add_allowed_fast(index);
+                    }
+                    BtMessage::Port { port } => {
+                        // BEP 5: add (peer_ip, port) as a DHT node.
+                        if port != 0 && !connection.ip_addr.is_empty() {
+                            let addr = format!("{}:{}", connection.ip_addr, port).parse();
+                            if let Ok(addr) = addr
+                                && let Some(engine) = dht_engine.clone()
+                            {
+                                tokio::spawn(async move {
+                                    engine.add_node(addr).await;
+                                });
+                            }
+                        }
+                    }
+                    BtMessage::Extended { ext_id, payload } => {
+                        if ext_id != 0 && connection.peer_extension_id("ut_pex") == Some(ext_id) {
+                            BtMessageHandler::try_process_pex_during_read(
+                                connection, ext_id, &payload,
+                            );
+                        }
+                    }
+                    other => {
+                        debug!(
+                            "[BT] Endgame: Received non-PIECE message while waiting: {:?}",
+                            other
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: format!(
+                            "BT peer {} closed while waiting for a piece block",
+                            conn_idx
+                        ),
+                    },
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
 
 impl BtMessageHandler {
     /// Download all blocks for a piece using endgame mode (duplicate request strategy).
@@ -38,6 +111,51 @@ impl BtMessageHandler {
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            None,
+        )
+        .await
+    }
+
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            network_activity,
+            Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
+    ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -49,6 +167,8 @@ impl BtMessageHandler {
             dht_engine,
             &mut peer_bytes,
             &mut failed_peers,
+            network_activity,
+            request_timeout,
         )
         .await?;
         Ok(PieceDownloadResult {
@@ -88,6 +208,8 @@ impl BtMessageHandler {
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         peer_bytes: &mut Vec<PeerDownloadBytes>,
         failed_peers: &mut Vec<std::net::SocketAddr>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
         for _retry in 0..MAX_RETRIES {
@@ -130,12 +252,18 @@ impl BtMessageHandler {
                     len,
                     endgame_state,
                     dht_engine.clone(),
+                    request_timeout,
                 )
                 .await
                 {
                     Ok(result) if result.success => {
                         failed_peers.extend(result.failed_peers);
                         if let Some(data) = result.data {
+                            if !data.is_empty()
+                                && let Some(progress) = network_activity
+                            {
+                                progress.record_network_activity();
+                            }
                             if let Some(peer_index) = result.peer_index
                                 && let Some(peer) = connections.get(peer_index)
                                 && let Ok(ip) = peer.ip_addr.parse()
@@ -226,6 +354,7 @@ impl BtMessageHandler {
         block_length: u32,
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        request_timeout: Duration,
     ) -> Result<BlockDownloadResult> {
         let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
             index: piece_index,
@@ -270,7 +399,7 @@ impl BtMessageHandler {
 
         // Now wait for the FIRST response from any peer (others will be cancelled later)
         match tokio::time::timeout(
-            std::time::Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS),
+            request_timeout,
             Self::wait_for_any_piece_block(
                 connections,
                 piece_index,
@@ -309,7 +438,7 @@ impl BtMessageHandler {
             Err(_) => {
                 warn!(
                     "[BT] Endgame: Block request timed out after {}s",
-                    BLOCK_REQUEST_TIMEOUT_SECS
+                    request_timeout.as_secs()
                 );
             }
         }
@@ -334,73 +463,37 @@ impl BtMessageHandler {
         expected_index: u32,
         expected_begin: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-    ) -> Result<(Vec<u8>, usize)> {
-        // Poll each connection in round-robin fashion
-        for _ in 0..MAX_BLOCK_READ_MESSAGES {
-            for (conn_idx, conn) in connections.iter_mut().enumerate() {
-                match conn.read_message().await {
-                    Ok(Some(msg)) => {
-                        use aria2_protocol::bittorrent::message::types::BtMessage;
+    ) -> Result<(bytes::Bytes, usize)> {
+        // Keep one read future per peer so a slow connection cannot block a
+        // responsive peer. Each future owns the connection borrow until it
+        // either produces the expected block or becomes unusable.
+        let mut readers = FuturesUnordered::new();
+        for (conn_idx, connection) in connections.iter_mut().enumerate() {
+            readers.push(wait_for_piece_block_from_peer(
+                connection,
+                conn_idx,
+                expected_index,
+                expected_begin,
+                dht_engine.clone(),
+            ));
+        }
 
-                        match msg {
-                            BtMessage::Piece {
-                                index,
-                                begin,
-                                ref data,
-                            } => {
-                                if index == expected_index && begin == expected_begin {
-                                    return Ok((data.clone(), conn_idx));
-                                }
-                                // Not the block we're waiting for, continue
-                                debug!(
-                                    "[BT] Endgame: Received unexpected PIECE (index={}, begin={}) from peer {}, waiting for ({}, {})",
-                                    index, begin, conn_idx, expected_index, expected_begin
-                                );
-                            }
-                            BtMessage::AllowedFast { index } => {
-                                debug!("[BT] Received AllowedFast for piece {}", index);
-                                conn.add_allowed_fast(index);
-                            }
-                            BtMessage::Port { port } => {
-                                // BEP 5: add (peer_ip, port) as a DHT node.
-                                if port != 0 && !conn.ip_addr.is_empty() {
-                                    let addr = format!("{}:{}", conn.ip_addr, port).parse();
-                                    if let Ok(addr) = addr
-                                        && let Some(eng) = dht_engine.clone()
-                                    {
-                                        tokio::spawn(async move {
-                                            eng.add_node(addr).await;
-                                        });
-                                    }
-                                }
-                            }
-                            other => {
-                                debug!(
-                                    "[BT] Endgame: Received non-PIECE message while waiting: {:?}",
-                                    other
-                                );
-                            }
-                        }
-                    }
-                    Ok(None) => {
-                        // Connection closed by this peer, try next
-                        debug!("[BT] Endgame: Peer {} connection closed", conn_idx);
-                    }
-                    Err(e) => {
-                        debug!("[BT] Endgame: Error reading from peer {}: {}", conn_idx, e);
-                    }
+        let mut last_error = None;
+        while let Some(result) = readers.next().await {
+            match result {
+                Ok(block) => return Ok(block),
+                Err(error) => {
+                    debug!("[BT] Endgame peer reader stopped: {}", error);
+                    last_error = Some(error);
                 }
             }
         }
 
-        Err(Aria2Error::Recoverable(
-            RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Exceeded max messages ({}) without receiving expected block from any peer",
-                    MAX_BLOCK_READ_MESSAGES
-                ),
-            },
-        ))
+        Err(last_error.unwrap_or_else(|| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: "No connected peer returned the expected block".to_string(),
+            })
+        }))
     }
 
     /// Cancel redundant requests for a completed block.

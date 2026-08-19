@@ -47,6 +47,7 @@ impl super::RequestGroup {
         }
 
         self.control_flags.request_save_control();
+        self.notify_lifecycle_changed();
         tracing::debug!(gid = self.gid.value(), "Requested control file save");
         true
     }

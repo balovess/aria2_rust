@@ -6,6 +6,7 @@
 pub mod app;
 pub mod constants;
 pub mod daemon;
+pub mod identity;
 pub mod ui;
 
 pub use daemon::{DaemonConfig, DaemonError, Daemonizer, PidFileManager};

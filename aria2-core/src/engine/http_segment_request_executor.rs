@@ -11,9 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use tokio::sync::mpsc;
 
-use crate::engine::command::ProgressUpdate;
 use crate::engine::download_cookie::CookieHelper;
-use crate::engine::http_segment_downloader::{HttpSegmentDownloader, WriteChunk};
+use crate::engine::http_segment_downloader::{HttpSegmentDownloader, SegmentProgress, WriteChunk};
 use crate::error::Result;
 use crate::http::{AuthResolveOptions, HttpRequestPolicy};
 
@@ -29,13 +28,17 @@ pub struct HttpSegmentRequest {
     pub offset: u64,
     pub length: u64,
     pub cookie_header: Option<String>,
-    pub progress_tx: mpsc::Sender<ProgressUpdate>,
+    pub(crate) progress: Arc<SegmentProgress>,
     pub write_tx: mpsc::Sender<WriteChunk>,
     pub expected_entity_length: u64,
 }
 
 /// Result returned after one Range request finishes.
 pub struct HttpSegmentRequestResult {
+    /// Internal identity used to reclaim the task handle when this completion
+    /// event is consumed. The result channel is the completion signal, so the
+    /// scheduler never needs to probe every handle for readiness.
+    task_id: u64,
     pub mirror_index: usize,
     pub segment_index: u32,
     pub authority_key: String,
@@ -70,6 +73,7 @@ impl Drop for AdmissionLease {
 }
 
 struct RunningTask {
+    id: u64,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -90,6 +94,7 @@ pub struct HttpSegmentRequestExecutor {
     state: Arc<ExecutorState>,
     total_limit: usize,
     tasks: Vec<RunningTask>,
+    next_task_id: u64,
 }
 
 impl HttpSegmentRequestExecutor {
@@ -119,12 +124,12 @@ impl HttpSegmentRequestExecutor {
             state,
             total_limit,
             tasks: Vec::new(),
+            next_task_id: 1,
         }
     }
 
     /// Admit and start a request if both total and authority targets have room.
     pub fn try_submit(&mut self, request: HttpSegmentRequest) -> bool {
-        self.reap_finished();
         let Some(authority) = self.state.authority(&request.authority_key) else {
             return false;
         };
@@ -139,6 +144,8 @@ impl HttpSegmentRequestExecutor {
         let netrc_path = self.netrc_path.clone();
         let result_tx = self.result_tx.clone();
         let authority_key = request.authority_key.clone();
+        let task_id = self.next_task_id;
+        self.next_task_id = self.next_task_id.wrapping_add(1).max(1);
 
         let handle = tokio::spawn(async move {
             let downloader = HttpSegmentDownloader::new_with_policy(&client, request_policy)
@@ -146,18 +153,19 @@ impl HttpSegmentRequestExecutor {
                 .with_auth_options(auth_options, netrc_path);
             downloader.clear_last_peer_addr();
             let result = downloader
-                .download_range_streaming(
+                .download_range_streaming_with_progress(
                     &request.url,
                     request.offset,
                     request.length,
                     request.cookie_header.as_deref(),
                     &[],
-                    Some(&request.progress_tx),
+                    Some(&request.progress),
                     &request.write_tx,
                     request.expected_entity_length,
                 )
                 .await;
             let request_result = HttpSegmentRequestResult {
+                task_id,
                 mirror_index: request.mirror_index,
                 segment_index: request.segment_index,
                 authority_key,
@@ -170,15 +178,11 @@ impl HttpSegmentRequestExecutor {
             // the lease and releases both admission counters.
             let _ = result_tx.send(request_result).await;
         });
-        self.tasks.push(RunningTask { handle });
+        self.tasks.push(RunningTask {
+            id: task_id,
+            handle,
+        });
         true
-    }
-
-    /// Drop completed join handles without affecting results already queued
-    /// for the scheduler. The result channel owns request completion; these
-    /// handles are only lifecycle guards for cancellation and shutdown.
-    fn reap_finished(&mut self) {
-        reap_finished_tasks(&mut self.tasks);
     }
 
     pub fn set_target(&self, authority_key: &str, target: usize) {
@@ -208,7 +212,22 @@ impl HttpSegmentRequestExecutor {
     }
 
     pub async fn next_result(&mut self) -> Option<HttpSegmentRequestResult> {
-        self.result_rx.recv().await
+        let result = self.result_rx.recv().await?;
+        self.reap_task(result.task_id).await;
+        Some(result)
+    }
+
+    /// Reclaim the task handle associated with a completion event.
+    ///
+    /// A request sends its result immediately before returning, so awaiting
+    /// this exact handle is short and deterministic. This keeps task storage
+    /// bounded by requests that have not yet emitted a completion event.
+    async fn reap_task(&mut self, task_id: u64) {
+        let Some(index) = self.tasks.iter().position(|task| task.id == task_id) else {
+            return;
+        };
+        let task = self.tasks.swap_remove(index);
+        let _ = task.handle.await;
     }
 
     /// Wait for all admitted requests after the scheduler has drained results.
@@ -315,10 +334,6 @@ fn reserve_authority(authority: &AuthorityState) -> bool {
     }
 }
 
-fn reap_finished_tasks(tasks: &mut Vec<RunningTask>) {
-    tasks.retain(|task| !task.handle.is_finished());
-}
-
 /// Return the authority used for per-server request accounting.
 pub fn authority_key(url: &str) -> Option<String> {
     let url = reqwest::Url::parse(url).ok()?;
@@ -384,14 +399,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn finished_request_tasks_are_reaped() {
-        let mut tasks = vec![RunningTask {
-            handle: tokio::spawn(async {}),
-        }];
+    async fn completion_event_reclaims_only_its_task() {
+        let (result_tx, result_rx) = mpsc::channel(1);
+        let mut executor = HttpSegmentRequestExecutor {
+            result_rx,
+            result_tx,
+            client: reqwest::Client::new(),
+            request_policy: HttpRequestPolicy::default(),
+            cookie_helper: CookieHelper::new(
+                Arc::new(crate::http::cookie_storage::CookieStorage::new()),
+                None,
+            ),
+            auth_options: AuthResolveOptions::default(),
+            netrc_path: None,
+            state: Arc::new(ExecutorState::new(&[], 1)),
+            total_limit: 1,
+            tasks: vec![
+                RunningTask {
+                    id: 1,
+                    handle: tokio::spawn(async {}),
+                },
+                RunningTask {
+                    id: 2,
+                    handle: tokio::spawn(async {}),
+                },
+            ],
+            next_task_id: 3,
+        };
 
-        tokio::task::yield_now().await;
-        reap_finished_tasks(&mut tasks);
+        executor.reap_task(2).await;
+        assert_eq!(executor.tasks.len(), 1);
+        assert_eq!(executor.tasks[0].id, 1);
 
-        assert!(tasks.is_empty());
+        executor.cancel().await;
     }
 }

@@ -683,7 +683,7 @@ fn test_retry_policy_recoverable_vs_fatal() {
     assert!(policy.should_retry(0, &Aria2Error::Recoverable(RecoverableError::Timeout)));
     assert!(policy.should_retry(
         0,
-        &Aria2Error::Recoverable(RecoverableError::ServerError { code: 500 })
+        &Aria2Error::Recoverable(RecoverableError::ServerError { code: 503 })
     ));
     assert!(policy.should_retry(
         0,

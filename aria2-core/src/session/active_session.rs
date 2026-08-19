@@ -1,20 +1,14 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use super::session_serializer::{self, SessionEntry};
-use crate::request::request_group::RequestGroup;
+use crate::request::request_group::{DownloadResult, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-/// Active session manager - responsible for session loading, saving, and auto-save
+/// Active session manager responsible for session loading and explicit saving.
 pub struct ActiveSessionManager {
     /// Session file path
     pub session_path: PathBuf,
-    /// Auto-save interval
-    pub auto_save_interval: Duration,
-    /// Dirty flag - indicates whether there are unsaved changes
-    dirty_flag: AtomicBool,
 }
 
 impl ActiveSessionManager {
@@ -22,27 +16,18 @@ impl ActiveSessionManager {
     ///
     /// # Arguments
     /// - `session_path`: Path where the session file is saved
-    /// - `auto_save_interval`: Time interval for auto-save
     ///
     /// # Example
     /// ```ignore
-    /// let manager = ActiveSessionManager::new(
-    ///     PathBuf::from("/tmp/session.txt"),
-    ///     Duration::from_secs(60),
-    /// );
+    /// let manager = ActiveSessionManager::new(PathBuf::from("/tmp/session.txt"));
     /// ```
-    pub fn new(session_path: PathBuf, auto_save_interval: Duration) -> Self {
+    pub fn new(session_path: PathBuf) -> Self {
         tracing::info!(
-            "Creating ActiveSessionManager: path={}, interval={:?}",
-            session_path.display(),
-            auto_save_interval
+            "Creating ActiveSessionManager: path={}",
+            session_path.display()
         );
 
-        ActiveSessionManager {
-            session_path,
-            auto_save_interval,
-            dirty_flag: AtomicBool::new(false),
-        }
+        ActiveSessionManager { session_path }
     }
 
     /// Load session data from file
@@ -94,6 +79,20 @@ impl ActiveSessionManager {
         &self,
         groups: &[Arc<std::sync::RwLock<RequestGroup>>],
     ) -> Result<usize, String> {
+        self.save_session_with_results(groups, &[]).await
+    }
+
+    /// Save active groups and eligible stopped results to the session file.
+    ///
+    /// Terminal results are included according to the session serializer's
+    /// `force-save`, `save-not-found`, and resumable-result policy. The
+    /// separate method keeps the existing active-group API intact while
+    /// allowing the application shutdown path to persist stopped tasks.
+    pub async fn save_session_with_results(
+        &self,
+        groups: &[Arc<std::sync::RwLock<RequestGroup>>],
+        results: &[DownloadResult],
+    ) -> Result<usize, String> {
         // Serialize all groups into a SessionEntry list
         let mut entries = Vec::new();
         for group_lock in groups {
@@ -103,15 +102,23 @@ impl ActiveSessionManager {
             }
         }
 
+        let result_count = results
+            .iter()
+            .filter(|result| session_serializer::should_save_download_result(result))
+            .filter_map(session_serializer::download_result_to_entry)
+            .count();
+
         // Save to file using atomic write strategy
-        match session_serializer::save_to_file_with_entries(&self.session_path, &entries).await {
+        match session_serializer::save_to_file_with_results(&self.session_path, groups, results)
+            .await
+        {
             Ok(_) => {
                 tracing::info!(
                     "Session file saved successfully: {}, entries: {}",
                     self.session_path.display(),
-                    entries.len()
+                    entries.len() + result_count
                 );
-                Ok(entries.len())
+                Ok(entries.len() + result_count)
             }
             Err(e) => {
                 let err_msg = format!("Failed to save session file: {}", e);
@@ -119,73 +126,6 @@ impl ActiveSessionManager {
                 Err(err_msg)
             }
         }
-    }
-
-    /// Mark the session as dirty (has unsaved changes)
-    pub fn mark_dirty(&self) {
-        self.dirty_flag.store(true, Ordering::Relaxed);
-        tracing::debug!("Marking session as dirty");
-    }
-
-    /// Check whether the session has unsaved changes
-    pub fn is_dirty(&self) -> bool {
-        self.dirty_flag.load(Ordering::Relaxed)
-    }
-
-    /// Start the auto-save background task
-    ///
-    /// Periodically checks the dirty flag in a background loop, and automatically
-    /// saves if there are unsaved changes. This method spawns a Tokio task in
-    /// the background and does not block the current thread.
-    ///
-    /// # Arguments
-    /// - `self`: Must be wrapped in Arc to be shared in the background task
-    /// - `groups`: Shared reference to all active download groups
-    ///
-    /// # Notes
-    /// - This method starts an infinite-loop background task
-    /// - Save operations are only performed when the dirty flag is true
-    /// - The dirty flag is cleared after a successful save
-    pub fn start_auto_save(
-        self: &Arc<Self>,
-        groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>>,
-    ) {
-        let mgr = Arc::clone(self);
-
-        tracing::info!(
-            "Starting auto-save task, interval: {:?}",
-            mgr.auto_save_interval
-        );
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(mgr.auto_save_interval);
-
-            loop {
-                interval.tick().await;
-
-                // If no changes, skip this save cycle
-                if !mgr.is_dirty() {
-                    tracing::debug!("Auto-save check: no changes, skipping");
-                    continue;
-                }
-
-                tracing::debug!("Auto-save check: changes detected, starting save");
-
-                // Acquire read lock on all groups
-                let groups_read = groups.read().await;
-                match mgr.save_session(&groups_read).await {
-                    Ok(n) => {
-                        tracing::debug!("Auto-save succeeded: saved {} entries", n);
-                        // Clear dirty flag after successful save
-                        mgr.dirty_flag.store(false, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Auto-save failed: {} (keeping dirty flag for retry)", e);
-                        // Keep dirty flag on failure, retry next cycle
-                    }
-                }
-            }
-        });
     }
 }
 
@@ -200,21 +140,12 @@ mod tests {
     fn test_new_manager() {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("session.txt");
-        let interval = Duration::from_secs(60);
 
-        let manager = ActiveSessionManager::new(session_path.clone(), interval);
+        let manager = ActiveSessionManager::new(session_path.clone());
 
         assert_eq!(
             manager.session_path, session_path,
             "Path should be set correctly"
-        );
-        assert_eq!(
-            manager.auto_save_interval, interval,
-            "Interval should be set correctly"
-        );
-        assert!(
-            !manager.is_dirty(),
-            "Newly created manager should not be dirty"
         );
     }
 
@@ -224,7 +155,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let nonexistent_path = temp_dir.path().join("nonexistent_session.txt");
 
-        let manager = ActiveSessionManager::new(nonexistent_path, Duration::from_secs(60));
+        let manager = ActiveSessionManager::new(nonexistent_path);
         let result = manager.load_session().await;
 
         assert!(result.is_ok(), "Non-existent file should not return error");
@@ -241,7 +172,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("roundtrip_session.txt");
 
-        let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
+        let manager = ActiveSessionManager::new(session_path.clone());
 
         // Create test RequestGroups
         let gid1 = GroupId::new(0xd270c8a2);
@@ -300,65 +231,13 @@ mod tests {
         );
     }
 
-    /// Test 4: mark_dirty and is_dirty functionality verification
-    #[test]
-    fn test_mark_dirty_and_check() {
-        let temp_dir = TempDir::new().expect("Failed to create temp directory");
-        let session_path = temp_dir.path().join("dirty_test.txt");
-
-        let manager = ActiveSessionManager::new(session_path, Duration::from_secs(30));
-
-        // Initial state should be clean
-        assert!(!manager.is_dirty(), "Initial state should be clean");
-
-        // Mark as dirty
-        manager.mark_dirty();
-        assert!(manager.is_dirty(), "Should be dirty after mark_dirty");
-
-        // Mark again (idempotent)
-        manager.mark_dirty();
-        assert!(
-            manager.is_dirty(),
-            "Repeated mark_dirty should keep dirty state"
-        );
-    }
-
-    /// Test 5: Auto-save skips saving when clean
-    ///
-    /// This test uses a short interval to verify: when dirty=false, no actual save operation is triggered
-    #[tokio::test]
-    async fn test_auto_save_skips_when_clean() {
-        let temp_dir = TempDir::new().expect("Failed to create temp directory");
-        let session_path = temp_dir.path().join("auto_skip_test.txt");
-
-        let manager = Arc::new(ActiveSessionManager::new(
-            session_path.clone(),
-            Duration::from_millis(50), // Short interval to speed up test
-        ));
-
-        let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> =
-            Arc::new(tokio::sync::RwLock::new(Vec::new()));
-
-        // Start auto-save (dirty=false at this point)
-        manager.start_auto_save(Arc::clone(&groups));
-
-        // Wait for a few tick cycles
-        tokio::time::sleep(Duration::from_millis(200)).await;
-
-        // Verify file was not created (because no dirty flag)
-        assert!(
-            !session_path.exists(),
-            "Should not create session file when dirty=false"
-        );
-    }
-
-    /// Test 6: File should exist at specified path after saving
+    /// Test 4: File should exist at specified path after saving
     #[tokio::test]
     async fn test_save_creates_file() {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("file_creation_test.txt");
 
-        let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
+        let manager = ActiveSessionManager::new(session_path.clone());
 
         // Verify file does not exist initially
         assert!(
@@ -395,13 +274,13 @@ mod tests {
         );
     }
 
-    /// Test 7: Multiple saves overwrite old file
+    /// Test 5: Multiple saves overwrite old file
     #[tokio::test]
     async fn test_multiple_saves_overwrite() {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("overwrite_test.txt");
 
-        let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
+        let manager = ActiveSessionManager::new(session_path.clone());
 
         // First save
         let gid1 = GroupId::new(1);
@@ -440,13 +319,13 @@ mod tests {
         );
     }
 
-    /// Test 8: File does not exist or is empty after saving empty group list
+    /// Test 6: File does not exist or is empty after saving empty group list
     #[tokio::test]
     async fn test_save_empty_groups() {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         let session_path = temp_dir.path().join("empty_groups_test.txt");
 
-        let manager = ActiveSessionManager::new(session_path.clone(), Duration::from_secs(60));
+        let manager = ActiveSessionManager::new(session_path.clone());
 
         let stale_group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             GroupId::new(123),
@@ -476,76 +355,5 @@ mod tests {
             content.is_empty(),
             "Empty group list should produce an empty session file"
         );
-    }
-
-    /// Test 9: Full flow when auto-save is triggered
-    #[tokio::test]
-    async fn test_auto_save_triggers_on_dirty() {
-        let temp_dir = TempDir::new().expect("Failed to create temp directory");
-        let session_path = temp_dir.path().join("auto_trigger_test.txt");
-
-        let manager = Arc::new(ActiveSessionManager::new(
-            session_path.clone(),
-            Duration::from_millis(50), // Short interval
-        ));
-
-        // Create test group
-        let gid = GroupId::new(99999);
-        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
-            gid,
-            vec!["http://auto-save-test.com/data.bin".to_string()],
-            DownloadOptions::default(),
-        )));
-
-        let groups: Arc<tokio::sync::RwLock<Vec<Arc<std::sync::RwLock<RequestGroup>>>>> =
-            Arc::new(tokio::sync::RwLock::new(vec![group]));
-
-        // Start auto-save
-        manager.start_auto_save(Arc::clone(&groups));
-
-        // Mark as dirty
-        manager.mark_dirty();
-
-        // Wait long enough for auto-save to execute
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
-        // Verify file has been created (because dirty=true triggered save)
-        // Note: Due to async task timing, a longer wait may be needed
-        // We allow a reasonable wait time
-        if session_path.exists() {
-            let content = tokio::fs::read_to_string(&session_path)
-                .await
-                .expect("Failed to read file");
-            assert!(
-                content.contains("http://auto-save-test.com/data.bin") || content.is_empty(),
-                "File should contain saved data or be empty (depending on timing)"
-            );
-        }
-        // It is also acceptable if the file has not been created yet (depends on async scheduling)
-    }
-
-    /// Test 10: Different auto_save_interval configurations
-    #[test]
-    fn test_different_intervals() {
-        let temp_dir = TempDir::new().expect("Failed to create temp directory");
-
-        // Test various interval configurations
-        let intervals = [
-            Duration::from_secs(1),
-            Duration::from_secs(30),
-            Duration::from_secs(60),
-            Duration::from_secs(300),
-            Duration::from_millis(500),
-        ];
-
-        for (i, interval) in intervals.iter().enumerate() {
-            let path = temp_dir.path().join(format!("interval_test_{}.txt", i));
-            let manager = ActiveSessionManager::new(path, *interval);
-            assert_eq!(
-                manager.auto_save_interval, *interval,
-                "Interval {} should be set correctly",
-                i
-            );
-        }
     }
 }

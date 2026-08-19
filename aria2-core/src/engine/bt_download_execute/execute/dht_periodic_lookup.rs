@@ -17,13 +17,14 @@
 //! [`DhtPeriodicLookup`], which tracks timing and peer counts.
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 use tracing::{debug, trace};
 
-type DhtLookupTask = tokio::task::JoinHandle<
-    std::io::Result<aria2_protocol::bittorrent::dht::engine::FindPeersResult>,
->;
+type DhtLookupResult = std::io::Result<aria2_protocol::bittorrent::dht::engine::FindPeersResult>;
+type DhtLookupTask = tokio::task::JoinHandle<()>;
 
 // ── Intervals (matching C++ DHTGetPeersCommand.cc) ─────────────────────
 
@@ -61,9 +62,14 @@ pub struct DhtPeriodicLookup {
     min_peers: usize,
     /// Maximum number of peers (0 = unlimited).
     max_peers: usize,
-    /// Background lookup task. The piece loop only polls its completion so a
-    /// slow DHT query never blocks piece selection or cancellation checks.
+    /// Background lookup task. Completion is published through
+    /// `lookup_result` and `lookup_notify` so a slow DHT query never causes
+    /// the piece loop to poll task state.
     lookup_task: Option<DhtLookupTask>,
+    /// Result slot filled by the background lookup task before notification.
+    lookup_result: Arc<Mutex<Option<DhtLookupResult>>>,
+    /// Wakes an event-driven consumer when the lookup result is available.
+    lookup_notify: Arc<Notify>,
     /// A completed result still needs to pass through PeerStorage admission
     /// before the retry counter can observe the final tracked-peer count.
     lookup_completion_pending: bool,
@@ -72,15 +78,7 @@ pub struct DhtPeriodicLookup {
 impl DhtPeriodicLookup {
     /// Create a new periodic lookup tracker with default settings.
     pub fn new() -> Self {
-        Self {
-            last_lookup_time: None,
-            num_retry: 0,
-            lookup_in_progress: false,
-            min_peers: 30, // C++ uses btRuntime->lessThanMinPeers()
-            max_peers: 55, // C++ uses btRuntime->getMaxPeers()
-            lookup_task: None,
-            lookup_completion_pending: false,
-        }
+        Self::with_peer_limits(30, 55)
     }
 
     /// Create a new periodic lookup tracker with custom peer limits.
@@ -92,6 +90,8 @@ impl DhtPeriodicLookup {
             min_peers,
             max_peers,
             lookup_task: None,
+            lookup_result: Arc::new(Mutex::new(None)),
+            lookup_notify: Arc::new(Notify::new()),
             lookup_completion_pending: false,
         }
     }
@@ -219,6 +219,21 @@ impl DhtPeriodicLookup {
         self.last_lookup_time.map(|t| t.elapsed())
     }
 
+    /// Return the time until the next lookup deadline for the current peer
+    /// count. An in-flight lookup has its completion notification as the wake
+    /// source, so it does not need a timer while it is running.
+    pub fn next_lookup_delay(&self, active_connection_count: usize) -> Option<Duration> {
+        if self.lookup_in_progress || self.lookup_completion_pending {
+            return None;
+        }
+
+        let interval = self.interval_for(active_connection_count);
+        Some(match self.last_lookup_time {
+            Some(last) => interval.saturating_sub(last.elapsed()),
+            None => Duration::ZERO,
+        })
+    }
+
     /// Start a lookup in the background when the adaptive interval allows it.
     ///
     /// The task owns its `Arc<DhtEngine>` and copied info-hash, so the command
@@ -244,34 +259,46 @@ impl DhtPeriodicLookup {
         );
         self.on_lookup_started();
         let engine = Arc::clone(engine);
-        self.lookup_task = Some(tokio::spawn(
-            async move { engine.find_peers(&info_hash).await },
-        ));
+        let result_slot = Arc::clone(&self.lookup_result);
+        let notify = Arc::clone(&self.lookup_notify);
+        self.lookup_task = Some(tokio::spawn(async move {
+            let result = engine.find_peers(&info_hash).await;
+            *result_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+            notify.notify_one();
+        }));
         true
     }
 
-    /// Poll a finished background lookup and append newly discovered peers.
+    /// Return the completion notification used by the download loop.
+    pub fn completion_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.lookup_notify)
+    }
+
+    /// Take a completed background lookup and append newly discovered peers.
     ///
-    /// Returns `true` only when a task completed. An unfinished lookup returns
-    /// immediately, preserving the download loop's cancellation and piece
-    /// scheduling cadence.
-    pub async fn poll_lookup(
+    /// Returns `true` only when the background task published a result. An
+    /// unfinished lookup has no result to take, so callers remain responsive
+    /// without inspecting `JoinHandle::is_finished()` on every loop turn.
+    pub fn take_completed_lookup(
         &mut self,
         new_peers: &mut Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     ) -> bool {
-        let Some(task) = self.lookup_task.as_ref() else {
+        let result = self
+            .lookup_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(result) = result else {
             return false;
         };
-        if !task.is_finished() {
-            return false;
-        }
 
-        let task = self
-            .lookup_task
-            .take()
-            .expect("lookup task exists after completion check");
-        match task.await {
-            Ok(Ok(result)) => {
+        // The task has already published its result. Dropping the completed
+        // handle releases the task allocation without another status probe.
+        self.lookup_task.take();
+        match result {
+            Ok(result) => {
                 let before = new_peers.len();
                 for addr in result.peers {
                     let peer = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
@@ -294,11 +321,8 @@ impl DhtPeriodicLookup {
                     );
                 }
             }
-            Ok(Err(error)) => {
-                debug!(error = %error, "Periodic DHT lookup failed");
-            }
             Err(error) => {
-                debug!(error = %error, "Periodic DHT lookup task cancelled");
+                debug!(error = %error, "Periodic DHT lookup failed");
             }
         }
         self.lookup_in_progress = false;
@@ -316,6 +340,10 @@ impl DhtPeriodicLookup {
             task.abort();
             let _ = task.await;
         }
+        self.lookup_result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         self.lookup_in_progress = false;
         self.lookup_completion_pending = false;
     }
@@ -355,7 +383,7 @@ pub async fn check_periodic_dht_lookup(
     active_connection_count: usize,
     new_peers: &mut Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
 ) -> bool {
-    let completed = dht_lookup.poll_lookup(new_peers).await;
+    let completed = dht_lookup.take_completed_lookup(new_peers);
     if completed {
         return true;
     }
@@ -479,7 +507,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn background_lookup_can_be_polled_without_public_bootstrap() {
+    async fn background_lookup_publishes_completion_without_status_polling() {
         let engine = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
             aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
         )
@@ -491,8 +519,15 @@ mod tests {
         assert!(lookup.start_lookup(Some(&engine), [0x42; 20], 0));
         assert!(lookup.is_lookup_in_progress());
 
-        tokio::task::yield_now().await;
-        assert!(lookup.poll_lookup(&mut peers).await);
+        let notify = lookup.completion_notifier();
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut notified)
+            .await
+            .expect("background lookup should publish completion");
+
+        assert!(lookup.take_completed_lookup(&mut peers));
         assert!(!lookup.is_lookup_in_progress());
         assert!(lookup.is_lookup_completion_pending());
         assert!(peers.is_empty());

@@ -38,7 +38,9 @@ impl Command for SaveSessionCommand {
 
         self.request_group_man.request_control_file_saves();
         let groups = self.request_group_man.list_groups();
-        session_serializer::save_to_file(&self.path, &groups).await?;
+        let stopped_results = self.request_group_man.get_stopped_results(0, usize::MAX);
+        session_serializer::save_to_file_with_results(&self.path, &groups, &stopped_results)
+            .await?;
 
         self.status = CommandStatus::Completed;
         info!("Session saved to {}", self.path.display());
@@ -58,6 +60,7 @@ impl Command for SaveSessionCommand {
 mod tests {
     use super::*;
     use crate::request::request_group::DownloadOptions;
+    use crate::util::rwlock_ext::RwLockRecover;
 
     #[tokio::test]
     async fn test_save_session_command_creation() {
@@ -92,6 +95,31 @@ mod tests {
         assert!(content.contains("split=4"));
 
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn test_save_session_command_requests_control_file_saves() {
+        let man = Arc::new(RequestGroupMan::new());
+        let gid = man
+            .add_group(
+                vec!["http://example.com/checkpoint.bin".into()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.txt");
+        let mut cmd = SaveSessionCommand::new(path, Arc::clone(&man));
+
+        cmd.execute().await.unwrap();
+
+        assert!(
+            man.find_group(gid)
+                .unwrap()
+                .recover()
+                .is_save_control_file_requested(),
+            "session save must request a protocol checkpoint"
+        );
     }
 
     #[tokio::test]

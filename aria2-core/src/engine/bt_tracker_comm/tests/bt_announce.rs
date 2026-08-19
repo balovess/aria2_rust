@@ -153,6 +153,18 @@ fn test_get_announce_url_with_existing_query() {
 }
 
 #[test]
+fn test_get_announce_url_includes_configured_external_ip() {
+    let mut bt = BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string()));
+    bt.set_external_ip(Some("203.0.113.7".to_string()));
+
+    let url = bt
+        .get_announce_url(&[0u8; 20], &[1u8; 20], 0, 0, 0, None)
+        .expect("tracker URL should be available");
+
+    assert!(url.contains("&ip=203.0.113.7"));
+}
+
+#[test]
 fn test_numwant_matches_runtime_peer_state() {
     let mut bt = BtAnnounce::new(&[], &Some("udp://tracker.test:6969".to_string()));
     assert_eq!(bt.numwant(), 50);
@@ -379,4 +391,18 @@ fn test_bt_announce_user_defined_interval() {
     // Override min_interval to 0
     bt.override_min_interval(Duration::ZERO);
     assert!(bt.is_default_announce_ready());
+}
+
+#[test]
+fn test_bt_announce_user_defined_interval_controls_next_announce() {
+    let mut bt = BtAnnounce::new(&[], &Some("http://tracker.test/announce".to_string()));
+    bt.prev_announce_time = Some(Instant::now() - Duration::from_secs(10));
+    bt.set_user_defined_interval(Duration::from_secs(42));
+
+    assert!(!bt.is_default_announce_ready());
+    let delay = bt
+        .next_default_announce_delay()
+        .expect("a tracker with one tier has a next announce");
+    assert!(delay <= Duration::from_secs(33));
+    assert!(delay >= Duration::from_secs(30));
 }

@@ -1,4 +1,4 @@
-use crate::config::OptionValue;
+use crate::config::{OptionRegistry, OptionValue};
 use url::Url;
 
 /// How a metadata file should be handled after it is downloaded.
@@ -55,17 +55,42 @@ impl FollowMode {
     }
 }
 
+fn parse_list_option(
+    options: &std::collections::HashMap<String, String>,
+    key: &str,
+) -> Option<Vec<String>> {
+    let entries = options
+        .get(key)?
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!entries.is_empty()).then_some(entries)
+}
+
+pub const DEFAULT_DISK_CACHE_BYTES: u64 = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct DownloadOptions {
     pub split: Option<u16>,
+    /// Force the HTTP downloader to use one sequential request even when the
+    /// server supports ranges and `split` is greater than one.
+    pub force_sequential: bool,
     pub max_connection_per_server: Option<u16>,
     pub max_download_limit: Option<u64>,
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,
     pub out: Option<String>,
+    /// Write-back disk cache capacity. Zero disables the cache.
+    pub disk_cache: Option<u64>,
     /// File allocation strategy: "none", "prealloc", "falloc", "trunc", or "mmap".
     /// When "mmap", `MmapDiskWriter` is used for files above `mmap_threshold`.
     pub file_allocation: Option<String>,
+    /// Allow a resumed metadata download to use a different piece length.
+    pub allow_piece_length_change: bool,
+    /// Enable the asynchronous DNS cache for this task.
+    pub async_dns: bool,
     /// Resume an existing output file when no control file is available.
     /// This is the C++ `--continue` option and defaults to `false`.
     pub continue_download: bool,
@@ -85,6 +110,13 @@ pub struct DownloadOptions {
     /// File size threshold (bytes) above which mmap writes are used when
     /// `file_allocation = "mmap"`. Default: 256 MiB.
     pub mmap_threshold: Option<u64>,
+    /// Enable mmap allocation when the selected allocation strategy is not
+    /// `none` and the file is within `max_mmap_limit`.
+    pub enable_mmap: bool,
+    /// Maximum file size for mmap allocation. Zero means unlimited.
+    pub max_mmap_limit: Option<u64>,
+    /// Skip explicit file allocation for files smaller than this threshold.
+    pub no_file_allocation_limit: Option<u64>,
     /// Zero-fill allocated blocks after fallocate on platforms that don't
     /// zero-fill (macOS `F_PREALLOCATE`, Windows `SetFileValidData`).
     /// Prevents exposure of residual disk data at a performance cost.
@@ -116,8 +148,60 @@ pub struct DownloadOptions {
     /// Maximum active BitTorrent peer connections (C++ `BtRuntime::maxPeers_`).
     /// The tracker demand threshold is derived as 80% of this value.
     pub bt_max_peers: usize,
+    /// Tracker URLs excluded from the torrent and user-supplied announce lists.
+    pub bt_exclude_tracker: Option<Vec<String>>,
+    /// Public IP address advertised in BitTorrent tracker announces.
+    pub bt_external_ip: Option<String>,
     pub bt_force_encrypt: bool,
     pub bt_require_crypto: bool,
+    /// Load a previously saved magnet metadata file before contacting peers.
+    pub bt_load_saved_metadata: bool,
+    /// Stop a magnet task after metadata is obtained without downloading payload.
+    pub bt_metadata_only: bool,
+    /// Minimum peer encryption level: `plain` or `arc4`.
+    pub bt_min_crypto_level: String,
+    /// Minimum peer speed used by peer admission/retention policy, in bytes/sec.
+    pub bt_request_peer_speed_limit: u64,
+    /// Persist magnet metadata as a `.torrent` file after exchange.
+    pub bt_save_metadata: bool,
+    /// Enable HTTP/FTP web-seed fallback for BitTorrent pieces.
+    pub bt_enable_web_seed: bool,
+    /// Maximum number of file descriptors kept open by BitTorrent writers.
+    pub bt_max_open_files: usize,
+    /// Optional BitTorrent peer blocklist path.
+    pub bt_peer_blocklist: Option<String>,
+    /// Keep-alive interval for BitTorrent peer connections, in seconds.
+    pub bt_keep_alive_interval: u64,
+    /// Overall BitTorrent peer inactivity timeout, in seconds.
+    pub bt_timeout: u64,
+    /// BitTorrent piece request timeout, in seconds.
+    pub bt_request_timeout: u64,
+    /// TCP connection and handshake timeout for BitTorrent peers, in seconds.
+    pub peer_connection_timeout: u64,
+    /// Peer ID prefix used in outgoing BitTorrent handshakes.
+    pub peer_id_prefix: String,
+    /// Client agent advertised in the BEP 10 extension handshake.
+    pub peer_agent: String,
+    /// DHT message timeout, in seconds.
+    pub dht_message_timeout: u64,
+    /// Enable IPv6 DHT transport.
+    pub enable_dht6: bool,
+    /// IPv6 DHT listen address.
+    pub dht_listen_addr6: Option<String>,
+    /// Explicit IPv4 DHT bootstrap hostname.
+    pub dht_entry_point_host: Option<String>,
+    /// Explicit IPv4 DHT bootstrap port.
+    pub dht_entry_point_port: Option<u16>,
+    /// Explicit IPv6 DHT bootstrap endpoint.
+    pub dht_entry_point6: Option<String>,
+    /// Explicit IPv6 DHT bootstrap hostname.
+    pub dht_entry_point_host6: Option<String>,
+    /// Explicit IPv6 DHT bootstrap port.
+    pub dht_entry_point_port6: Option<u16>,
+    /// IPv6 DHT routing-table persistence path.
+    pub dht_file_path6: Option<String>,
+    /// IPv4 DHT listen address.
+    pub dht_listen_addr: Option<String>,
     pub enable_dht: bool,
     pub dht_listen_port: Option<String>,
     /// Cumulative INDEX=PATH mappings for BitTorrent file outputs.
@@ -127,6 +211,14 @@ pub struct DownloadOptions {
     /// announce list (C++ `--bt-tracker`). Multiple URLs are comma or
     /// newline separated.
     pub bt_tracker: Option<Vec<String>>,
+    /// User-defined tracker announce interval in seconds; zero uses tracker data.
+    pub bt_tracker_interval: u64,
+    /// Tracker TCP connection timeout in seconds.
+    pub bt_tracker_connect_timeout: u64,
+    /// Tracker request timeout in seconds.
+    pub bt_tracker_timeout: u64,
+    /// Enable BEP 11 peer exchange for non-private torrents.
+    pub enable_peer_exchange: bool,
     pub enable_public_trackers: bool,
     pub bt_piece_selection_strategy: String,
     pub bt_endgame_threshold: u32,
@@ -235,6 +327,8 @@ pub struct DownloadOptions {
     /// Preferred protocol for metalink downloads: "http", "https", "ftp", or "none".
     /// Maps to C++ `PREF_METALINK_PREFERRED_PROTOCOL`.
     pub metalink_preferred_protocol: Option<String>,
+    /// Base URI used to resolve relative Metalink resources.
+    pub metalink_base_uri: Option<String>,
     /// Select specific files from a metalink by segment index (e.g. "1-3,5").
     /// Maps to C++ `PREF_SELECT_FILE`.
     pub select_file: Option<String>,
@@ -248,13 +342,23 @@ pub struct DownloadOptions {
     /// from a metalink file. Default: `true`.
     /// Maps to C++ `PREF_METALINK_ENABLE_UNIQUE_PROTOCOL`.
     pub metalink_enable_unique_protocol: bool,
+    /// Minimum range size used by segment and piece selection.
+    pub min_split_size: Option<u64>,
+    /// Whether parameterized URI expansion is enabled for this task.
+    pub parameterized_uri: bool,
+    /// Whether a spent URI may be reused after a failed mirror attempt.
+    pub reuse_uri: bool,
+    /// URI selection strategy: `feedback`, `inorder`, or `adaptive`.
+    pub uri_selector: String,
+    /// Stream piece selection strategy: `default`, `inorder`, `random`, or `geom`.
+    pub stream_piece_selector: String,
 
     // ------------------------------------------------------------------
     // FTP options (C++ PREF_* for FTP connections)
     // ------------------------------------------------------------------
-    /// Overall per-download timeout in seconds. Default: 0 (no limit).
-    /// Maps to C++ `PREF_TIMEOUT`. When set, the download is aborted if
-    /// it has not completed within this many seconds.
+    /// I/O inactivity timeout in seconds. Default: 0 (no limit).
+    /// Maps to C++ `PREF_TIMEOUT`. When set, the download is aborted after
+    /// this long without receiving payload bytes.
     pub timeout: Option<u64>,
     /// TCP connection timeout in seconds. Default: 60.
     /// Maps to C++ `PREF_CONNECT_TIMEOUT`.
@@ -269,6 +373,8 @@ pub struct DownloadOptions {
     /// Use passive mode for FTP. Default: `true`.
     /// Maps to C++ `PREF_FTP_PASV`.
     pub ftp_pasv: bool,
+    /// FTP transfer representation: `binary` or `ascii`.
+    pub ftp_type: String,
     /// Apply the remote file's timestamp to the local file. Default: `false`.
     /// Maps to C++ `PREF_REMOTE_TIME`.
     pub remote_time: bool,
@@ -302,15 +408,26 @@ pub struct DownloadOptions {
     /// Enable Local Peer Discovery (LPD) for BitTorrent. Default: `false`.
     /// Maps to C++ `PREF_BT_ENABLE_LPD`.
     pub bt_enable_lpd: bool,
-    /// Network interface for LPD announcements. Default: none (auto-detect).
-    /// Maps to C++ `PREF_BT_LPD_INTERFACE`.
-    pub bt_lpd_interface: Option<String>,
     /// Enable JSON-RPC/XML-RPC server. Default: `false`.
     /// Maps to C++ `PREF_ENABLE_RPC`.
     pub enable_rpc: bool,
     /// Start downloads in a paused state. Default: `false`.
     /// Maps to C++ `PREF_PAUSE`.
     pub pause: bool,
+    /// Pause children created by metadata post-processing.
+    pub pause_metadata: bool,
+    /// Whether stopped results are retained in the session when complete.
+    pub force_save: bool,
+    /// Whether not-found stopped results are retained in the session.
+    pub save_not_found: bool,
+    /// Whether uploaded RPC metadata should be persisted to a file.
+    pub rpc_save_upload_metadata: bool,
+    /// Whether Content-Disposition filenames use UTF-8 by default.
+    pub content_disposition_default_utf8: bool,
+    /// HTTP/FTP proxy method: `get` or `tunnel`.
+    pub proxy_method: String,
+    /// Maximum number of not-found responses allowed for this task.
+    pub max_file_not_found: u32,
 
     // ------------------------------------------------------------------
     // Follow options (C++ PREF_FOLLOW_TORRENT / PREF_FOLLOW_METALINK)
@@ -390,12 +507,16 @@ impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
             split: None,
+            force_sequential: false,
             max_connection_per_server: None,
             max_download_limit: None,
             max_upload_limit: None,
             dir: None,
             out: None,
+            disk_cache: Some(DEFAULT_DISK_CACHE_BYTES),
             file_allocation: None,
+            allow_piece_length_change: false,
+            async_dns: true,
             continue_download: false,
             allow_overwrite: false,
             auto_file_renaming: true,
@@ -403,6 +524,9 @@ impl Default for DownloadOptions {
             max_resume_failure_tries: 0,
             remove_control_file: false,
             mmap_threshold: None,
+            enable_mmap: false,
+            max_mmap_limit: None,
+            no_file_allocation_limit: Some(5 * 1024 * 1024),
             secure_falloc: false,
             check_integrity: false,
             hash_check_only: false,
@@ -414,13 +538,43 @@ impl Default for DownloadOptions {
             checksum: None,
             cookie_file: None,
             cookies: None,
+            bt_exclude_tracker: None,
+            bt_external_ip: None,
             bt_force_encrypt: false,
             bt_require_crypto: false,
+            bt_load_saved_metadata: false,
+            bt_metadata_only: false,
+            bt_min_crypto_level: "plain".to_string(),
+            bt_request_peer_speed_limit: 50 * 1024,
+            bt_save_metadata: false,
+            bt_enable_web_seed: true,
+            bt_max_open_files: 100,
+            bt_peer_blocklist: None,
+            bt_keep_alive_interval: 120,
+            bt_timeout: 180,
+            bt_request_timeout: 60,
+            peer_connection_timeout: 20,
+            peer_id_prefix: aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX.to_string(),
+            peer_agent: aria2_protocol::identity::DEFAULT_PEER_AGENT.to_string(),
+            dht_message_timeout: 10,
+            enable_dht6: false,
+            dht_listen_addr6: None,
+            dht_entry_point_host: None,
+            dht_entry_point_port: None,
+            dht_entry_point6: None,
+            dht_entry_point_host6: None,
+            dht_entry_point_port6: None,
+            dht_file_path6: None,
+            dht_listen_addr: None,
             enable_dht: true,
             dht_listen_port: None,
             index_out: None,
             dht_entry_point: None,
             bt_tracker: None,
+            bt_tracker_interval: 0,
+            bt_tracker_connect_timeout: 60,
+            bt_tracker_timeout: 60,
+            enable_peer_exchange: true,
             enable_public_trackers: true,
             bt_piece_selection_strategy: String::new(),
             bt_endgame_threshold: 0,
@@ -468,16 +622,23 @@ impl Default for DownloadOptions {
             metalink_os: None,
             metalink_location: None,
             metalink_preferred_protocol: None,
+            metalink_base_uri: None,
             select_file: None,
             bt_remove_unselected_file: false,
             piece_length: None,
             metalink_enable_unique_protocol: true,
+            min_split_size: Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE),
+            parameterized_uri: false,
+            reuse_uri: true,
+            uri_selector: "feedback".to_string(),
+            stream_piece_selector: "default".to_string(),
             // FTP
             timeout: None,
             connect_timeout: None,
             startup_idle_time: None,
             lowest_speed_limit: None,
             ftp_pasv: true,
+            ftp_type: "binary".to_string(),
             remote_time: false,
             dry_run: false,
             ftp_reuse_connection: true,
@@ -488,9 +649,15 @@ impl Default for DownloadOptions {
             disable_ipv6: false,
             listen_port: None,
             bt_enable_lpd: false,
-            bt_lpd_interface: None,
             enable_rpc: false,
             pause: false,
+            pause_metadata: false,
+            force_save: false,
+            save_not_found: true,
+            rpc_save_upload_metadata: true,
+            content_disposition_default_utf8: false,
+            proxy_method: "get".to_string(),
+            max_file_not_found: 0,
             // Follow options
             follow_torrent: None,
             follow_metalink: None,
@@ -599,7 +766,7 @@ impl DownloadOptions {
                 .map_err(|error| format!("Option '{}': {}", key, error))?;
             let value = option_value_to_string(value)
                 .ok_or_else(|| format!("Option '{}' must be a string", key))?;
-            string_options.insert(key.clone(), value);
+            string_options.insert(OptionRegistry::canonical_name(key).to_string(), value);
         }
         Ok(Self::from_option_strings(&string_options))
     }
@@ -612,6 +779,15 @@ impl DownloadOptions {
     /// values fall back to the type's default, while validation of user-facing
     /// configuration remains the responsibility of `ConfigManager`.
     pub fn from_option_strings(options: &std::collections::HashMap<String, String>) -> Self {
+        let mut canonical_options = std::collections::HashMap::with_capacity(options.len());
+        for (key, value) in options {
+            let canonical_key = OptionRegistry::canonical_name(key).to_string();
+            if key == &canonical_key || !canonical_options.contains_key(&canonical_key) {
+                canonical_options.insert(canonical_key, value.clone());
+            }
+        }
+        let options = &canonical_options;
+
         let positive_u16 = |key: &str| {
             options
                 .get(key)
@@ -633,12 +809,28 @@ impl DownloadOptions {
 
         Self {
             split: positive_u16("split"),
+            force_sequential: options
+                .get("force-sequential")
+                .map(|v| v == "true")
+                .unwrap_or(false),
             max_connection_per_server: positive_u16("max-connection-per-server"),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
             out: options.get("out").cloned(),
+            disk_cache: options
+                .get("disk-cache")
+                .and_then(|value| OptionValue::parse_size_str_checked(value).ok())
+                .or(Some(DEFAULT_DISK_CACHE_BYTES)),
             file_allocation: options.get("file-allocation").cloned(),
+            allow_piece_length_change: options
+                .get("allow-piece-length-change")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            async_dns: options
+                .get("async-dns")
+                .map(|v| v != "false")
+                .unwrap_or(true),
             continue_download: options
                 .get("continue")
                 .map(|v| v == "true")
@@ -664,6 +856,16 @@ impl DownloadOptions {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             mmap_threshold: positive_size_u64("mmap-threshold"),
+            enable_mmap: options
+                .get("enable-mmap")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            max_mmap_limit: options
+                .get("max-mmap-limit")
+                .map(|v| OptionValue::parse_size_str(v)),
+            no_file_allocation_limit: options
+                .get("no-file-allocation-limit")
+                .map(|v| OptionValue::parse_size_str(v)),
             secure_falloc: options
                 .get("secure-falloc")
                 .map(|v| v == "true")
@@ -695,7 +897,8 @@ impl DownloadOptions {
             seed_time: options.get("seed-time").and_then(|v| v.parse::<f64>().ok()),
             seed_ratio: options
                 .get("seed-ratio")
-                .and_then(|v| v.parse::<f64>().ok()),
+                .and_then(|v| v.parse::<f64>().ok())
+                .or(Some(1.0)),
             checksum: options.get("checksum").and_then(|v| {
                 v.split_once('=')
                     .map(|(algo, hash)| (algo.trim().to_string(), hash.trim().to_string()))
@@ -727,24 +930,105 @@ impl DownloadOptions {
                 .unwrap_or(true),
             dht_listen_port: options.get("dht-listen-port").cloned(),
             index_out: options.get("index-out").cloned(),
-            dht_entry_point: options.get("dht-entry-point").and_then(|v| {
-                let entries = v
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|entry| !entry.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>();
-                (!entries.is_empty()).then_some(entries)
-            }),
-            bt_tracker: options.get("bt-tracker").and_then(|v| {
-                let entries = v
-                    .split([',', '\n'])
-                    .map(str::trim)
-                    .filter(|entry| !entry.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>();
-                (!entries.is_empty()).then_some(entries)
-            }),
+            dht_entry_point: parse_list_option(options, "dht-entry-point"),
+            bt_tracker: parse_list_option(options, "bt-tracker"),
+            bt_exclude_tracker: parse_list_option(options, "bt-exclude-tracker"),
+            bt_external_ip: options.get("bt-external-ip").cloned(),
+            bt_load_saved_metadata: options
+                .get("bt-load-saved-metadata")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_metadata_only: options
+                .get("bt-metadata-only")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_min_crypto_level: options
+                .get("bt-min-crypto-level")
+                .cloned()
+                .unwrap_or_else(|| "plain".to_string()),
+            bt_request_peer_speed_limit: options
+                .get("bt-request-peer-speed-limit")
+                .map(|v| OptionValue::parse_size_str(v))
+                .unwrap_or(50 * 1024),
+            bt_save_metadata: options
+                .get("bt-save-metadata")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            bt_enable_web_seed: options
+                .get("bt-enable-web-seed")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            bt_max_open_files: options
+                .get("bt-max-open-files")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(100),
+            bt_peer_blocklist: options.get("bt-peer-blocklist").cloned(),
+            bt_keep_alive_interval: options
+                .get("bt-keep-alive-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(120),
+            bt_timeout: options
+                .get("bt-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(180),
+            bt_request_timeout: options
+                .get("bt-request-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(60),
+            peer_connection_timeout: options
+                .get("peer-connection-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(20),
+            peer_id_prefix: options
+                .get("peer-id-prefix")
+                .cloned()
+                .unwrap_or_else(|| aria2_protocol::identity::DEFAULT_PEER_ID_PREFIX.to_string()),
+            peer_agent: options
+                .get("peer-agent")
+                .cloned()
+                .unwrap_or_else(|| aria2_protocol::identity::DEFAULT_PEER_AGENT.to_string()),
+            dht_message_timeout: options
+                .get("dht-message-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(10),
+            enable_dht6: options
+                .get("enable-dht6")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            dht_listen_addr6: options.get("dht-listen-addr6").cloned(),
+            dht_entry_point_host: options.get("dht-entry-point-host").cloned(),
+            dht_entry_point_port: options
+                .get("dht-entry-point-port")
+                .and_then(|v| v.parse::<u16>().ok()),
+            dht_entry_point6: options.get("dht-entry-point6").cloned(),
+            dht_entry_point_host6: options.get("dht-entry-point-host6").cloned(),
+            dht_entry_point_port6: options
+                .get("dht-entry-point-port6")
+                .and_then(|v| v.parse::<u16>().ok()),
+            dht_file_path6: options.get("dht-file-path6").cloned(),
+            dht_listen_addr: options.get("dht-listen-addr").cloned(),
+            bt_tracker_interval: options
+                .get("bt-tracker-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0),
+            bt_tracker_connect_timeout: options
+                .get("bt-tracker-connect-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60),
+            bt_tracker_timeout: options
+                .get("bt-tracker-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(60),
+            enable_peer_exchange: options
+                .get("enable-peer-exchange")
+                .map(|v| v != "false")
+                .unwrap_or(true),
             enable_public_trackers: options
                 .get("enable-public-trackers")
                 .map(|v| v != "false")
@@ -758,8 +1042,7 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(crate::constants::DEFAULT_BT_ENDGAME_THRESHOLD as u32),
             max_retries: options
-                .get("max-retries")
-                .or_else(|| options.get("max-tries"))
+                .get("max-tries")
                 .and_then(|v| v.parse::<u32>().ok())
                 .unwrap_or(crate::constants::DEFAULT_MAX_RETRIES),
             retry_wait: options
@@ -802,16 +1085,7 @@ impl DownloadOptions {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             utp_listen_port: positive_u16("utp-listen-port"),
-            header: options
-                .get("header")
-                .map(|v| {
-                    v.split([',', '\n'])
-                        .map(str::trim)
-                        .filter(|entry| !entry.is_empty())
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            header: parse_list_option(options, "header").unwrap_or_default(),
             user_agent: options.get("user-agent").cloned(),
             referer: options.get("referer").cloned(),
             enable_http_keep_alive: options
@@ -851,6 +1125,7 @@ impl DownloadOptions {
             metalink_os: options.get("metalink-os").cloned(),
             metalink_location: options.get("metalink-location").cloned(),
             metalink_preferred_protocol: options.get("metalink-preferred-protocol").cloned(),
+            metalink_base_uri: options.get("metalink-base-uri").cloned(),
             select_file: options.get("select-file").cloned(),
             bt_remove_unselected_file: options
                 .get("bt-remove-unselected-file")
@@ -861,6 +1136,27 @@ impl DownloadOptions {
                 .get("metalink-enable-unique-protocol")
                 .map(|v| v != "false")
                 .unwrap_or(true),
+            min_split_size: options
+                .get("min-split-size")
+                .map(|v| OptionValue::parse_size_str(v))
+                .filter(|value| *value > 0)
+                .or(Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)),
+            parameterized_uri: options
+                .get("parameterized-uri")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            reuse_uri: options
+                .get("reuse-uri")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            uri_selector: options
+                .get("uri-selector")
+                .cloned()
+                .unwrap_or_else(|| "feedback".to_string()),
+            stream_piece_selector: options
+                .get("stream-piece-selector")
+                .cloned()
+                .unwrap_or_else(|| "default".to_string()),
             timeout: positive_u64("timeout"),
             connect_timeout: positive_u64("connect-timeout"),
             startup_idle_time: positive_u64("startup-idle-time"),
@@ -869,6 +1165,10 @@ impl DownloadOptions {
                 .get("ftp-pasv")
                 .map(|v| v != "false")
                 .unwrap_or(true),
+            ftp_type: options
+                .get("ftp-type")
+                .cloned()
+                .unwrap_or_else(|| "binary".to_string()),
             remote_time: options
                 .get("remote-time")
                 .map(|v| v == "true")
@@ -894,12 +1194,39 @@ impl DownloadOptions {
                 .get("bt-enable-lpd")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            bt_lpd_interface: options.get("bt-lpd-interface").cloned(),
             enable_rpc: options
                 .get("enable-rpc")
                 .map(|v| v == "true")
                 .unwrap_or(false),
             pause: options.get("pause").map(|v| v == "true").unwrap_or(false),
+            pause_metadata: options
+                .get("pause-metadata")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            force_save: options
+                .get("force-save")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            save_not_found: options
+                .get("save-not-found")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            rpc_save_upload_metadata: options
+                .get("rpc-save-upload-metadata")
+                .map(|v| v != "false")
+                .unwrap_or(true),
+            content_disposition_default_utf8: options
+                .get("content-disposition-default-utf8")
+                .map(|v| v == "true")
+                .unwrap_or(false),
+            proxy_method: options
+                .get("proxy-method")
+                .cloned()
+                .unwrap_or_else(|| "get".to_string()),
+            max_file_not_found: options
+                .get("max-file-not-found")
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0),
             follow_torrent: options
                 .get("follow-torrent")
                 .and_then(|v| FollowMode::parse(v)),
@@ -931,6 +1258,11 @@ impl DownloadOptions {
             on_download_stop: options.get("on-download-stop").cloned(),
             on_bt_download_complete: options.get("on-bt-download-complete").cloned(),
         }
+    }
+
+    /// Return the configured write-back capacity, or `None` when disabled.
+    pub fn disk_cache_size_bytes(&self) -> Option<u64> {
+        self.disk_cache.filter(|size| *size > 0)
     }
 
     /// Parse the raw `header` list into `(name, value)` pairs, splitting each

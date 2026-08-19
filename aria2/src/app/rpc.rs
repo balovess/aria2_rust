@@ -9,6 +9,7 @@
 //!   WebSocket notification publisher ([`CoreEventBridge`])
 
 use super::App;
+#[cfg(test)]
 use aria2_core::config::OptionValue;
 use aria2_core::engine::download_event_hooks::{
     DownloadEvent as CoreDownloadEvent, DownloadEventHooks, DownloadEventListener,
@@ -19,7 +20,6 @@ use aria2_rpc::server::{
     AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig,
 };
 use aria2_rpc::websocket::{DownloadEvent as RpcDownloadEvent, EventType};
-use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info};
 
@@ -234,42 +234,22 @@ impl App {
         let cert_path = self.get_opt_str("rpc-certificate").await;
         let key_path = self.get_opt_str("rpc-private-key").await;
 
-        // Build RPC engine with shared state (group_man + cmd_tx) so that
-        // aria2.addUri starts real downloads and tellStatus/getGlobalStat
-        // read live progress.
-        // Collect user-set global options from ConfigManager and merge them
-        // over the OptionRegistry defaults inside the RPC engine. User values
-        // take precedence; null values fall back to defaults.
-        let config_snapshot = self.config.read().await;
-        let user_opts = config_snapshot.get_all_global_options().await;
-        drop(config_snapshot);
-
-        // Convert HashMap<String, OptionValue> to HashMap<String, serde_json::Value>.
-        // Only `From<&OptionValue>` is implemented, so borrow each value during
-        // conversion instead of consuming it.
-        let user_opts_json: HashMap<String, serde_json::Value> = user_opts
-            .into_iter()
-            .map(|(k, v)| (k, <&OptionValue as Into<serde_json::Value>>::into(&v)))
-            .collect();
-
-        let rpc_engine = RpcEngine::new()
-            .with_auth_middleware(RpcAuthMiddleware::new(&secret))
-            .with_group_man(group_man)
-            .with_engine_cmd_tx(engine_cmd_tx)
-            .with_global_opts(user_opts_json);
-
-        // Pass the configured --save-session path through so the RPC
-        // `aria2.saveSession` method always uses PREF_SAVE_SESSION, matching
-        // C++ even when a request supplies an extra positional value.
-        let rpc_engine = if let Some(save_path) = self
+        let save_session_path = self
             .get_opt_str("save-session")
             .await
-            .map(std::path::PathBuf::from)
-        {
-            rpc_engine.with_save_session_path(save_path)
-        } else {
-            rpc_engine
-        };
+            .map(std::path::PathBuf::from);
+
+        // The binary owns the only adapter that knows both aria2-core and the
+        // protocol-independent RPC seam. The RPC crate remains transport-only.
+        let backend = Arc::new(super::rpc_backend::CoreRpcBackend::new(
+            group_man,
+            engine_cmd_tx.into(),
+            Arc::clone(&self.config),
+            save_session_path,
+            crate::identity::PRODUCT_VERSION,
+        ));
+        let rpc_engine =
+            RpcEngine::with_backend(backend).with_auth_middleware(RpcAuthMiddleware::new(&secret));
 
         // Build server config
         let max_request_size = self

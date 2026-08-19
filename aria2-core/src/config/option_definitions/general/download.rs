@@ -236,40 +236,34 @@ impl crate::config::OptionRegistry {
 
         // --- Concurrency & Optimization ---
         self.register(OptionDef {
-            name: "max-downloads".into(),
-            opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(0),
-            min: Some(0),
-            description: "Max number of downloads to start (0=unlimited)".into(),
-            category: OptionCategory::General,
-            ..Default::default()
-        });
-        self.register(OptionDef {
             name: "optimize-concurrent-downloads".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::None,
             description: "Optimize concurrent download count based on network conditions".into(),
             category: OptionCategory::General,
+            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "optimize-concurrent-downloads-coeffA".into(),
             opt_type: OptionType::Float,
-            default_value: OptionValue::Float(5.0),
+            default_value: OptionValue::None,
             description:
                 "Coefficient A for optimize-concurrent-downloads (linear increasing factor)".into(),
             category: OptionCategory::General,
             hidden: true,
+            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "optimize-concurrent-downloads-coeffB".into(),
             opt_type: OptionType::Float,
-            default_value: OptionValue::Float(25.0),
+            default_value: OptionValue::None,
             description:
                 "Coefficient B for optimize-concurrent-downloads (linear decreasing factor)".into(),
             category: OptionCategory::General,
             hidden: true,
+            supported: false,
             ..Default::default()
         });
 
@@ -306,10 +300,11 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "rlimit-nofile".into(),
             opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(1024),
+            default_value: OptionValue::None,
             min: Some(1),
             description: "Set soft limit of resource limit RLIMIT_NOFILE (open files)".into(),
             category: OptionCategory::General,
+            supported: false,
             ..Default::default()
         });
 
@@ -317,10 +312,11 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "select-least-used-host".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(true),
+            default_value: OptionValue::None,
             description: "Select least used host for URI selection".into(),
             category: OptionCategory::General,
             hidden: true,
+            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {

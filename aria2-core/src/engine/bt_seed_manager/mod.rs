@@ -15,13 +15,14 @@
 //!
 //! # Seeding Loop
 //!
-//! The loop runs on a ~2 s tick and performs:
+//! The loop waits on peer sockets, incoming peers, cancellation, or the next
+//! protocol deadline. Each event performs the smallest required state update:
 //! 1. Check cancellation / exit conditions
-//! 2. Handle incoming messages from each peer (with per-session timeout)
-//! 3. Sync upload-session state → PeerStats (peer_interested, uploaded_bytes)
-//! 4. Execute seeder-state choking algorithm
+//! 2. Admit incoming peers or process one ready peer message
+//! 3. Sync upload-session state -> PeerStats
+//! 4. Run the seeder-state choking algorithm when its deadline expires
 //! 5. Apply choke/unchoke decisions back to upload sessions
-//! 6. Remove dead sessions, report progress
+//! 6. Remove dead sessions and report progress
 //!
 //! # C++ Equivalence
 //!
@@ -39,6 +40,7 @@ pub use types::{BAD_DATA_THRESHOLD, SeedExitCondition, UploadSession};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -55,14 +57,17 @@ use crate::engine::peer_stats::PeerStats;
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Interval between seeding-loop ticks (seconds).
-const SEED_TICK_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Per-session timeout for reading incoming messages during one tick.
-const MSG_READ_TIMEOUT: Duration = Duration::from_millis(200);
-
 /// Interval between choke rounds (seconds). Matches C++ rotation interval.
 const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
+
+enum SeedWaitEvent {
+    Incoming(crate::engine::bt_peer_listener::IncomingPeer),
+    PeerMessage {
+        index: usize,
+        result: crate::error::Result<u64>,
+    },
+    Wake,
+}
 
 // ===========================================================================
 // BtSeedManager — top-level seeding phase manager
@@ -393,17 +398,9 @@ impl BtSeedManager {
 
     /// Run the main seeding loop until exit conditions are met or cancelled.
     ///
-    /// This is the primary entry point for the seeding phase. It loops:
-    /// 1. Check exit conditions (ratio/time)
-    /// 2. Process incoming piece requests from peers (with per-session timeout)
-    /// 3. Sync upload-session state → PeerStats
-    /// 4. Execute seeder-state choking algorithm (every ~10 s)
-    /// 5. Apply choke/unchoke decisions to upload sessions
-    /// 6. Remove dead sessions, report progress
-    /// 7. Yield to the tokio runtime
-    ///
-    /// Mirrors C++ `SeedCheckCommand::execute()` periodic loop combined
-    /// with upload session management.
+    /// Mirrors C++ `SeedCheckCommand::execute()` combined with upload session
+    /// management while waiting on actual peer, listener, cancellation, and
+    /// deadline events instead of scanning on a fixed interval.
     pub async fn run_seeding_loop(&mut self) -> crate::error::Result<()> {
         info!(
             info_hash = ?self.info_hash,
@@ -412,8 +409,6 @@ impl BtSeedManager {
             self.exit_condition.seed_time,
             self.upload_sessions.len()
         );
-
-        let mut tick = tokio::time::interval(SEED_TICK_INTERVAL);
 
         loop {
             // -- Cancellation check (non-blocking) ----------------------------
@@ -461,31 +456,39 @@ impl BtSeedManager {
             // instant the download finished.
             self.drain_incoming_peers();
 
-            // -- Handle incoming messages from peers --------------------------
-            self.handle_peer_messages().await;
-
-            // -- Remove dead sessions ----------------------------------------
+            // -- Process state changes observed since the last event ---------
             self.remove_dead_sessions();
-
-            // -- Sync upload-session state → PeerStats ------------------------
             self.sync_sessions_to_stats();
-
-            // -- Execute choking algorithm (every ~10 s) ----------------------
             if self.last_choke_time.elapsed().as_secs() >= CHOKE_ROUND_INTERVAL_SECS {
                 self.run_choke_round();
                 self.last_choke_time = Instant::now();
             }
-
-            // -- Apply choke decisions to upload sessions ---------------------
             self.apply_choke_decisions().await;
 
-            // -- Wait for next tick (or cancellation) -------------------------
-            tokio::select! {
-                _ = tick.tick() => {}
-                _ = self.cancel_token.cancelled() => {
-                    info!("Seeding loop cancelled during tick wait");
-                    break;
+            // Park until a socket message, an incoming peer, cancellation, or
+            // a protocol/seed deadline wakes the manager. There is no fixed
+            // interval scan when the swarm is idle.
+            match self
+                .wait_for_seed_event(self.next_seed_event_deadline())
+                .await
+            {
+                SeedWaitEvent::Incoming(incoming) => {
+                    if let Some(provider) = self.piece_provider.as_ref() {
+                        self.admit_incoming_peer(
+                            incoming,
+                            provider.num_pieces(),
+                            provider.piece_length(),
+                        );
+                    }
                 }
+                SeedWaitEvent::PeerMessage { index, result } => {
+                    if let Ok(bytes) = result {
+                        self.total_uploaded = self.total_uploaded.saturating_add(bytes);
+                    } else if let Some(session) = self.upload_sessions.get_mut(index) {
+                        session.is_dead = true;
+                    }
+                }
+                SeedWaitEvent::Wake => {}
             }
         }
 
@@ -513,53 +516,133 @@ impl BtSeedManager {
     // Internal loop helpers
     // -----------------------------------------------------------------------
 
+    fn next_seed_event_deadline(&self) -> Instant {
+        let now = Instant::now();
+        let mut deadline = now + Duration::from_secs(24 * 60 * 60);
+
+        if let Some(seed_time) = self.exit_condition.seed_time {
+            deadline = deadline.min(self.seeding_start_time + seed_time);
+        }
+        deadline =
+            deadline.min(self.last_choke_time + Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS));
+        if let Some(delay) = self
+            .announcer
+            .as_ref()
+            .and_then(|announcer| announcer.next_default_announce_delay())
+        {
+            deadline = deadline.min(now + delay);
+        }
+        deadline
+    }
+
+    async fn wait_for_seed_event(&mut self, deadline: Instant) -> SeedWaitEvent {
+        let cancel_token = self.cancel_token.clone();
+        let cancel_wait = cancel_token.cancelled();
+        let mut incoming_receiver = self.incoming_peers.take();
+        let deadline_wait = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+        tokio::pin!(deadline_wait);
+
+        let provider = self.piece_provider.clone();
+        let mut peer_reads = futures::stream::FuturesUnordered::new();
+        if let Some(provider) = provider {
+            for (index, session) in self
+                .upload_sessions
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, session)| !session.is_dead())
+            {
+                let provider = Arc::clone(&provider);
+                peer_reads.push(async move {
+                    (
+                        index,
+                        session.handle_incoming_messages(provider.as_ref()).await,
+                    )
+                });
+            }
+        }
+
+        let event = tokio::select! {
+            incoming = async {
+                match incoming_receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending::<Option<crate::engine::bt_peer_listener::IncomingPeer>>().await,
+                }
+            } => match incoming {
+                Some(incoming) => SeedWaitEvent::Incoming(incoming),
+                None => {
+                    incoming_receiver = None;
+                    SeedWaitEvent::Wake
+                }
+            },
+            peer = peer_reads.next(), if !peer_reads.is_empty() => {
+                peer.map_or(SeedWaitEvent::Wake, |(index, result)| {
+                    SeedWaitEvent::PeerMessage { index, result }
+                })
+            },
+            _ = cancel_wait => SeedWaitEvent::Wake,
+            _ = &mut deadline_wait => SeedWaitEvent::Wake,
+        };
+
+        drop(peer_reads);
+        self.incoming_peers = incoming_receiver;
+        event
+    }
+
     /// Admit handshaken peers that arrive while the torrent is seeding.
     fn drain_incoming_peers(&mut self) {
-        let incoming = self
-            .incoming_peers
-            .as_mut()
-            .map(|receiver| std::iter::from_fn(|| receiver.try_recv().ok()).collect::<Vec<_>>())
-            .unwrap_or_default();
         let Some(provider) = self.piece_provider.as_ref() else {
             return;
         };
         let num_pieces = provider.num_pieces();
         let piece_length = provider.piece_length();
 
-        for incoming in incoming {
-            let endpoint = incoming.endpoint;
-            let remote_peer_id = incoming.connection.remote_peer_id();
-            let duplicate = remote_peer_id.is_some_and(|peer_id| {
-                peer_id == self.peer_id
-                    || self
-                        .upload_sessions
-                        .iter()
-                        .any(|session| session.remote_peer_id() == Some(peer_id))
-            }) || self.upload_sessions.iter().any(|session| {
-                session.endpoint() == Some((endpoint.ip().to_string(), endpoint.port()))
-            });
-
-            if duplicate {
-                self.release_peer(endpoint);
-                debug!(%endpoint, "Rejected duplicate or self BitTorrent seed peer");
-                continue;
-            }
-
-            let transport = match incoming.connection {
-                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(
-                    connection,
-                ) => BtUploadConnection::Plain(connection),
-                aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
-                    connection,
-                ) => BtUploadConnection::Encrypted(connection),
-            };
-            let mut session = BtUploadSession::new_with_connection(transport, &self.config);
-            session.configure_message_validator(num_pieces, piece_length);
-            let peer_stats = PeerStats::new(remote_peer_id.unwrap_or([0u8; 20]), endpoint);
-            self.upload_sessions.push(session);
-            self.peer_stats.push(peer_stats);
-            info!(%endpoint, "Admitted incoming BitTorrent seed peer");
+        let Some(mut receiver) = self.incoming_peers.take() else {
+            return;
+        };
+        while let Ok(incoming) = receiver.try_recv() {
+            self.admit_incoming_peer(incoming, num_pieces, piece_length);
         }
+        self.incoming_peers = Some(receiver);
+    }
+
+    fn admit_incoming_peer(
+        &mut self,
+        incoming: crate::engine::bt_peer_listener::IncomingPeer,
+        num_pieces: u32,
+        piece_length: u32,
+    ) {
+        let endpoint = incoming.endpoint;
+        let remote_peer_id = incoming.connection.remote_peer_id();
+        let duplicate = remote_peer_id.is_some_and(|peer_id| {
+            peer_id == self.peer_id
+                || self
+                    .upload_sessions
+                    .iter()
+                    .any(|session| session.remote_peer_id() == Some(peer_id))
+        }) || self.upload_sessions.iter().any(|session| {
+            session.endpoint() == Some((endpoint.ip().to_string(), endpoint.port()))
+        });
+
+        if duplicate {
+            self.release_peer(endpoint);
+            debug!(%endpoint, "Rejected duplicate or self BitTorrent seed peer");
+            return;
+        }
+
+        let transport = match incoming.connection {
+            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Plain(connection) => {
+                BtUploadConnection::Plain(connection)
+            }
+            aria2_protocol::bittorrent::peer::incoming::IncomingConnection::Encrypted(
+                connection,
+            ) => BtUploadConnection::Encrypted(connection),
+        };
+        let mut session = BtUploadSession::new_with_connection(transport, &self.config);
+        session.configure_message_validator(num_pieces, piece_length);
+        let peer_stats = PeerStats::new(remote_peer_id.unwrap_or([0u8; 20]), endpoint);
+        self.upload_sessions.push(session);
+        self.peer_stats.push(peer_stats);
+        info!(%endpoint, "Admitted incoming BitTorrent seed peer");
     }
 
     fn release_peer(&self, endpoint: std::net::SocketAddr) {
@@ -569,45 +652,6 @@ impl BtSeedManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
         }
-    }
-
-    /// Handle incoming messages from all active upload sessions.
-    ///
-    /// Each session gets a bounded time window (`MSG_READ_TIMEOUT`) to
-    /// process incoming messages. This prevents a single slow peer from
-    /// blocking the entire seeding loop.
-    async fn handle_peer_messages(&mut self) {
-        let provider = match self.piece_provider.as_ref() {
-            Some(p) => Arc::clone(p),
-            None => return,
-        };
-
-        let mut uploaded = 0u64;
-        for session in &mut self.upload_sessions {
-            if session.is_dead() {
-                continue;
-            }
-            match tokio::time::timeout(
-                MSG_READ_TIMEOUT,
-                session.handle_incoming_messages(provider.as_ref()),
-            )
-            .await
-            {
-                Ok(Ok(bytes_uploaded)) => {
-                    if bytes_uploaded > 0 {
-                        debug!("Uploaded {} bytes to peer", bytes_uploaded);
-                        uploaded = uploaded.saturating_add(bytes_uploaded);
-                    }
-                }
-                Ok(Err(e)) => {
-                    warn!("Upload session error: {}", e);
-                }
-                Err(_) => {
-                    // Timeout is expected: we move on to the next session
-                }
-            }
-        }
-        self.total_uploaded = self.total_uploaded.saturating_add(uploaded);
     }
 
     /// Remove upload sessions whose connections have died.

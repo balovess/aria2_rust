@@ -2,8 +2,8 @@
 //!
 //! This module is organized into sub-files by logical responsibility:
 //!
-//! - `types` - SessionPersistence struct, constants, constructors, and accessors
-//! - `save_load` - Core save_state/load_state, restore_command, and auto-save
+//! - `types` - SessionPersistence struct, constructors, and accessors
+//! - `save_load` - Core save_state/load_state and restore_command
 //! - `options` - Global session options persistence and cleanup
 //! - `server_stats` - Server statistics save/load
 //! - `selective_save` - Selective save (active-only, completed-only)
@@ -16,4 +16,4 @@ mod selective_save;
 mod server_stats;
 mod types;
 
-pub use types::{DEFAULT_AUTO_SAVE_INTERVAL_SECS, SessionPersistence};
+pub use types::SessionPersistence;

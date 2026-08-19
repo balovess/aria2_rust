@@ -6,13 +6,13 @@
 
 use bytes::BytesMut;
 use futures::StreamExt;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::constants;
 use crate::engine::command::ProgressUpdate;
 use crate::engine::download_cookie::CookieHelper;
+use crate::engine::http_segment_downloader::progress::SegmentProgress;
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
 use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
@@ -75,12 +75,11 @@ fn classify_range_status(status: reqwest::StatusCode, range_header: &str) -> Opt
             message: format!("authentication failed: HTTP {status}"),
         })),
         404 => Some(Aria2Error::Recoverable(RecoverableError::ResourceNotFound)),
-        429 => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
-            code: status_code,
-        })),
-        500.. => Some(Aria2Error::Recoverable(RecoverableError::ServerError {
-            code: status_code,
-        })),
+        code if code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&code) => {
+            Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code,
+            }))
+        }
         400.. => Some(Aria2Error::Recoverable(
             RecoverableError::HttpProtocolError {
                 message: format!("HTTP error: {status}"),
@@ -239,10 +238,7 @@ impl HttpSegmentDownloader {
             let request = self.request_policy.apply_with_basic_auth(
                 self.client
                     .get(current_url.as_str())
-                    .header("Range", range_header)
-                    .timeout(Duration::from_secs(
-                        constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                    )),
+                    .header("Range", range_header),
                 request_cookie_header,
                 headers,
                 authorization.as_deref(),
@@ -339,10 +335,7 @@ impl HttpSegmentDownloader {
                 let retry_request = self.request_policy.apply(
                     self.client
                         .get(current_url.as_str())
-                        .header("Range", range_header)
-                        .timeout(Duration::from_secs(
-                            constants::HTTP_DEFAULT_OVERALL_TIMEOUT_SECS,
-                        )),
+                        .header("Range", range_header),
                     retry_cookie_header,
                     &[(header_name.to_string(), authorization_header)],
                 );
@@ -511,6 +504,58 @@ impl HttpSegmentDownloader {
         write_tx: &mpsc::Sender<WriteChunk>,
         expected_entity_length: u64,
     ) -> Result<u64> {
+        self.download_range_streaming_inner(
+            url,
+            offset,
+            length,
+            cookie_header,
+            headers,
+            progress_tx.map(StreamingProgress::Channel),
+            write_tx,
+            expected_entity_length,
+        )
+        .await
+    }
+
+    /// Streaming range download with lock-free progress aggregation for the
+    /// concurrent HTTP scheduler.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn download_range_streaming_with_progress(
+        &self,
+        url: &str,
+        offset: u64,
+        length: u64,
+        cookie_header: Option<&str>,
+        headers: &[(String, String)],
+        progress: Option<&SegmentProgress>,
+        write_tx: &mpsc::Sender<WriteChunk>,
+        expected_entity_length: u64,
+    ) -> Result<u64> {
+        self.download_range_streaming_inner(
+            url,
+            offset,
+            length,
+            cookie_header,
+            headers,
+            progress.map(StreamingProgress::Segment),
+            write_tx,
+            expected_entity_length,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn download_range_streaming_inner(
+        &self,
+        url: &str,
+        offset: u64,
+        length: u64,
+        cookie_header: Option<&str>,
+        headers: &[(String, String)],
+        progress: Option<StreamingProgress<'_>>,
+        write_tx: &mpsc::Sender<WriteChunk>,
+        expected_entity_length: u64,
+    ) -> Result<u64> {
         if length == 0 {
             return Ok(0);
         }
@@ -543,6 +588,11 @@ impl HttpSegmentDownloader {
                 })
             })?;
             let chunk_len = bytes.len() as u64;
+            if chunk_len > 0
+                && let Some(StreamingProgress::Segment(segment)) = progress
+            {
+                segment.record_network_activity();
+            }
             if total_written.saturating_add(chunk_len) > length {
                 return Err(Aria2Error::Recoverable(
                     RecoverableError::TemporaryNetworkFailure {
@@ -572,16 +622,25 @@ impl HttpSegmentDownloader {
             current_offset += chunk_len;
             total_written += chunk_len;
 
-            // Report per-chunk progress if a progress channel is provided
-            if let Some(tx) = progress_tx
+            // Report progress at the same byte threshold without scheduling a
+            // receiver task for every segment.
+            if progress.is_some()
                 && total_written - last_reported_progress >= constants::PROGRESS_UPDATE_BYTES as u64
             {
-                let update = ProgressUpdate {
-                    completed_bytes: offset + total_written,
-                    download_speed: 0,
-                    upload_speed: 0,
-                };
-                let _ = tx.send(update).await;
+                match progress {
+                    Some(StreamingProgress::Channel(tx)) => {
+                        let update = ProgressUpdate {
+                            completed_bytes: offset + total_written,
+                            download_speed: 0,
+                            upload_speed: 0,
+                        };
+                        let _ = tx.send(update).await;
+                    }
+                    Some(StreamingProgress::Segment(segment)) => {
+                        segment.record(total_written);
+                    }
+                    None => unreachable!("progress presence checked above"),
+                }
                 last_reported_progress = total_written;
             }
         }
@@ -605,10 +664,17 @@ impl HttpSegmentDownloader {
     }
 }
 
+#[derive(Clone, Copy)]
+enum StreamingProgress<'a> {
+    Channel(&'a mpsc::Sender<ProgressUpdate>),
+    Segment(&'a SegmentProgress),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::http::auth::AuthResolveOptions;
+    use std::time::Duration;
 
     fn has_header(request: &str, name: &str, value: &str) -> bool {
         request.lines().any(|line| {
@@ -732,6 +798,12 @@ mod tests {
             classify_range_status(reqwest::StatusCode::TOO_MANY_REQUESTS, "bytes=0-9"),
             Some(Aria2Error::Recoverable(RecoverableError::ServerError {
                 code: 429
+            }))
+        ));
+        assert!(matches!(
+            classify_range_status(reqwest::StatusCode::REQUEST_TIMEOUT, "bytes=0-9"),
+            Some(Aria2Error::Recoverable(RecoverableError::ServerError {
+                code: 408
             }))
         ));
     }

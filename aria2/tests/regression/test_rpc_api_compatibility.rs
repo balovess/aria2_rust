@@ -3,12 +3,16 @@
 //! These tests verify that all 36 original RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
-use aria2_core::request::request_group_man::RequestGroupMan;
-use aria2_rpc::engine::RpcEngine;
+#[path = "../support/mod.rs"]
+mod support;
+
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
 use aria2_rpc::server::RpcAuthMiddleware;
-use std::sync::Arc;
+use support::rpc::{
+    RpcFixture, engine as core_engine,
+    engine_with_save_session_path as core_engine_with_save_session_path,
+};
 
 /// Helper to create a JSON-RPC request.
 fn make_request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
@@ -37,7 +41,7 @@ fn assert_error_code(resp: &JsonRpcResponse, expected_code: i32) {
 /// Test: aria2.addUri returns a 16-character GID string.
 #[tokio::test]
 async fn regression_add_uri_returns_gid_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let req = make_request(
         "aria2.addUri",
         serde_json::json!([["http://example.com/file.zip"]]),
@@ -56,7 +60,7 @@ async fn regression_add_uri_returns_gid_format() {
 /// Test: aria2.addUri with options returns valid GID.
 #[tokio::test]
 async fn regression_add_uri_with_options() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let req = make_request(
         "aria2.addUri",
         serde_json::json!([
@@ -75,7 +79,7 @@ async fn regression_add_uri_with_options() {
 /// list at parameter zero.
 #[tokio::test]
 async fn regression_add_uri_rejects_single_uri_parameter() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let req = make_request(
         "aria2.addUri",
         serde_json::json!(["http://example.com/file.zip"]),
@@ -90,7 +94,7 @@ async fn regression_add_uri_rejects_single_uri_parameter() {
 /// falling back to an empty dictionary.
 #[tokio::test]
 async fn regression_add_uri_rejects_non_dictionary_options() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let req = make_request(
         "aria2.addUri",
         serde_json::json!([["http://example.com/file.zip"], "not-a-dictionary"]),
@@ -104,7 +108,7 @@ async fn regression_add_uri_rejects_non_dictionary_options() {
 /// Test: negative addUri positions fail instead of being silently ignored.
 #[tokio::test]
 async fn regression_add_uri_rejects_negative_position() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let req = make_request(
         "aria2.addUri",
         serde_json::json!([["http://example.com/file.zip"], {}, -1]),
@@ -118,7 +122,7 @@ async fn regression_add_uri_rejects_negative_position() {
 /// Test: aria2.addTorrent validates base64 torrent data.
 #[tokio::test]
 async fn regression_add_torrent_validates_bencode() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     // Valid bencode prefix: d8:
     let valid_torrent = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
@@ -133,7 +137,7 @@ async fn regression_add_torrent_validates_bencode() {
 /// Test: aria2.addTorrent rejects invalid bencode.
 #[tokio::test]
 async fn regression_add_torrent_rejects_invalid() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let invalid_data = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         b"not a torrent file",
@@ -149,7 +153,7 @@ async fn regression_add_torrent_rejects_invalid() {
 #[tokio::test]
 #[cfg(feature = "bittorrent")]
 async fn regression_add_torrent_rejects_invalid_uri_parameter() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let torrent = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         b"d8:announce42:http://example.com/announce",
@@ -168,7 +172,7 @@ async fn regression_add_torrent_rejects_invalid_uri_parameter() {
 #[tokio::test]
 #[cfg(feature = "metalink")]
 async fn regression_add_metalink_validates_xml() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let metalink_xml = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         b"<metalink version=\"3.0\"><file><name>test.iso</name></file></metalink>",
@@ -182,7 +186,7 @@ async fn regression_add_metalink_validates_xml() {
 /// Test: aria2.remove returns array with removed GID.
 #[tokio::test]
 async fn regression_remove_returns_gid_array() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // First add a task
     let add_req = make_request(
@@ -208,7 +212,7 @@ async fn regression_remove_returns_gid_array() {
 /// Test: aria2.remove with nonexistent GID returns error.
 #[tokio::test]
 async fn regression_remove_nonexistent_returns_error() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let req = make_request("aria2.remove", serde_json::json!(["0000000000000000"]));
     let resp = engine.handle_request(&req).await;
 
@@ -218,7 +222,7 @@ async fn regression_remove_nonexistent_returns_error() {
 /// Test: aria2.forceRemove returns the GID (matching C++ aria2).
 #[tokio::test]
 async fn regression_force_remove_returns_ok() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add a task first
     let add_req = make_request(
@@ -243,7 +247,7 @@ async fn regression_force_remove_returns_ok() {
 /// Test: aria2.pause changes status to Paused.
 #[tokio::test]
 async fn regression_pause_changes_status() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -257,9 +261,9 @@ async fn regression_pause_changes_status() {
 
     assert_success(&pause_resp);
 
-    // `RpcEngine::new` is a handler-only seam; lifecycle commands are consumed
-    // by the wired DownloadEngine in end-to-end tests. The task remains valid
-    // in the waiting state until that consumer processes the command.
+    // This fixture owns the real core manager but deliberately does not run a
+    // download loop, so a newly added task remains in the manager's waiting
+    // state while lifecycle commands are queued for the retained receiver.
     let status_req = make_request("aria2.tellStatus", serde_json::json!([gid]));
     let status_resp = engine.handle_request(&status_req).await;
     assert_success(&status_resp);
@@ -273,7 +277,7 @@ async fn regression_pause_changes_status() {
 /// Test: aria2.forcePause returns "OK".
 #[tokio::test]
 async fn regression_force_pause_returns_ok() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -297,7 +301,7 @@ async fn regression_force_pause_returns_ok() {
 /// Test: aria2.unpause changes status back to Active.
 #[tokio::test]
 async fn regression_unpause_restores_active() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -333,7 +337,7 @@ async fn regression_unpause_restores_active() {
 /// Test: aria2.tellStatus returns complete StatusInfo structure.
 #[tokio::test]
 async fn regression_tell_status_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -359,7 +363,7 @@ async fn regression_tell_status_format() {
 /// Test: status query `keys` parameters filter the aria2 wire object.
 #[tokio::test]
 async fn regression_status_keys_filter_fields() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let add_req = make_request(
         "aria2.addUri",
         serde_json::json!([["http://example.com/file"]]),
@@ -395,7 +399,7 @@ async fn regression_status_keys_filter_fields() {
 /// Test: aria2.tellActive returns array of StatusInfo.
 #[tokio::test]
 async fn regression_tell_active_returns_array() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add multiple tasks
     for i in 0..3 {
@@ -411,8 +415,8 @@ async fn regression_tell_active_returns_array() {
 
     assert_success(&resp);
     let active: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    // `RpcEngine::new` is a handler-only seam; without a running core loop,
-    // newly added groups remain waiting rather than active.
+    // The fixture does not run a download loop, so newly added groups remain
+    // waiting rather than active.
     assert!(active.is_empty());
 
     // Each entry should have gid and status
@@ -425,7 +429,7 @@ async fn regression_tell_active_returns_array() {
 /// Test: aria2.tellWaiting with pagination parameters.
 #[tokio::test]
 async fn regression_tell_waiting_pagination() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.tellWaiting", serde_json::json!([0, 10]));
     let resp = engine.handle_request(&req).await;
@@ -438,7 +442,7 @@ async fn regression_tell_waiting_pagination() {
 /// Test: aria2.tellWaiting supports negative offsets from the end of the queue.
 #[tokio::test]
 async fn regression_tell_waiting_negative_offset() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut gids = Vec::new();
     for index in 0..3 {
         let add_req = make_request(
@@ -459,7 +463,7 @@ async fn regression_tell_waiting_negative_offset() {
 /// Test: aria2.tellStopped with pagination.
 #[tokio::test]
 async fn regression_tell_stopped_pagination() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.tellStopped", serde_json::json!([0, 10]));
     let resp = engine.handle_request(&req).await;
@@ -472,7 +476,7 @@ async fn regression_tell_stopped_pagination() {
 /// Test: aria2.getGlobalStat returns correct field names (camelCase).
 #[tokio::test]
 async fn regression_global_stat_camel_case_fields() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getGlobalStat", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -507,7 +511,7 @@ async fn regression_global_stat_camel_case_fields() {
 /// Test: aria2.getGlobalOption returns object.
 #[tokio::test]
 async fn regression_get_global_option_returns_object() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getGlobalOption", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -522,7 +526,7 @@ async fn regression_get_global_option_returns_object() {
 /// Test: aria2.changeGlobalOption returns "OK".
 #[tokio::test]
 async fn regression_change_global_option_returns_ok() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request(
         "aria2.changeGlobalOption",
@@ -537,10 +541,103 @@ async fn regression_change_global_option_returns_ok() {
     assert_eq!(result, "OK");
 }
 
+/// Test: zero removes the process-wide concurrency limit.
+#[tokio::test]
+async fn regression_change_global_option_accepts_unlimited_concurrency() {
+    let engine = core_engine();
+
+    let req = make_request(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{"max-concurrent-downloads": 0}]),
+    );
+    assert_success(&engine.handle_request(&req).await);
+
+    let response = engine
+        .handle_request(&make_request(
+            "aria2.getGlobalOption",
+            serde_json::json!([]),
+        ))
+        .await;
+    assert_success(&response);
+    assert_eq!(
+        response
+            .result
+            .unwrap()
+            .get("max-concurrent-downloads")
+            .and_then(serde_json::Value::as_str),
+        Some("0")
+    );
+}
+
+/// Test: semantic validation rejects the entire option batch before storage.
+#[tokio::test]
+#[cfg(feature = "bittorrent")]
+async fn regression_change_global_option_is_atomic_on_tracker_validation_error() {
+    let engine = core_engine();
+
+    let req = make_request(
+        "aria2.changeGlobalOption",
+        serde_json::json!([{
+            "max-concurrent-downloads": 0,
+            "bt-tracker-source": ""
+        }]),
+    );
+    assert_error_code(&engine.handle_request(&req).await, 1);
+
+    let response = engine
+        .handle_request(&make_request(
+            "aria2.getGlobalOption",
+            serde_json::json!([]),
+        ))
+        .await;
+    assert_success(&response);
+    assert_eq!(
+        response
+            .result
+            .unwrap()
+            .get("max-concurrent-downloads")
+            .and_then(serde_json::Value::as_str),
+        Some("5")
+    );
+}
+
+/// Test: addMetalink reports and publishes every group it creates.
+#[tokio::test]
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+async fn regression_add_metalink_returns_all_graph_gids() {
+    let engine = core_engine();
+    let mut events = engine.publisher().subscribe("metalink-gids", None).await;
+    let metalink_xml = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        br#"<metalink version="3.0"><file name="test.iso"><size>1</size><url>https://example.test/test.iso</url><metaurl mediatype="torrent">https://example.test/test.torrent</metaurl></file></metalink>"#,
+    );
+
+    let response = engine
+        .handle_request(&make_request(
+            "aria2.addMetalink",
+            serde_json::json!([metalink_xml]),
+        ))
+        .await;
+    assert_success(&response);
+    let gids: Vec<String> = serde_json::from_value(response.result.unwrap()).unwrap();
+    assert_eq!(gids.len(), 2, "metadata and payload GIDs must be returned");
+    assert_eq!(engine.task_count().await, 2);
+
+    for expected_gid in gids {
+        let (event_type, event) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("Metalink start notification should arrive")
+                .expect("Metalink start notification should be present");
+        assert_eq!(event_type, aria2_rpc::websocket::EventType::DownloadStart);
+        assert_eq!(event.gid(), expected_gid);
+    }
+}
+
 /// Test: aria2.getOption for nonexistent GID returns error.
 #[tokio::test]
 async fn regression_get_option_nonexistent_gid() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getOption", serde_json::json!(["nonexistent-gid"]));
     let resp = engine.handle_request(&req).await;
@@ -551,7 +648,7 @@ async fn regression_get_option_nonexistent_gid() {
 /// Test: aria2.changeOption validates option keys.
 #[tokio::test]
 async fn regression_change_option_validates_keys() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add a task first
     let add_req = make_request(
@@ -578,7 +675,7 @@ async fn regression_change_option_validates_keys() {
 /// Test: aria2.changeOption accepts max-connection-per-server (runtime-changeable).
 #[tokio::test]
 async fn regression_change_option_accepts_max_connection_per_server() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add a task first
     let add_req = make_request(
@@ -604,7 +701,7 @@ async fn regression_change_option_accepts_max_connection_per_server() {
 /// Test: aria2.getPeers returns array for torrent download.
 #[tokio::test]
 async fn regression_get_peers_returns_array() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add a torrent task
     let valid_torrent = base64::Engine::encode(
@@ -628,7 +725,7 @@ async fn regression_get_peers_returns_array() {
 /// Test: aria2.getUris returns array with status field.
 #[tokio::test]
 async fn regression_get_uris_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -657,7 +754,7 @@ async fn regression_get_uris_format() {
 /// Test: aria2.getFiles returns array with file info.
 #[tokio::test]
 async fn regression_get_files_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -688,9 +785,9 @@ async fn regression_get_files_format() {
 /// Test: aria2.getServers returns array with server info.
 #[tokio::test]
 async fn regression_get_servers_format() {
-    let group_man = Arc::new(RequestGroupMan::new());
-    let (engine_cmd_tx, _engine_cmd_rx) = tokio::sync::mpsc::unbounded_channel();
-    let engine = RpcEngine::wired(group_man.clone(), engine_cmd_tx);
+    let fixture = RpcFixture::new(None);
+    let engine = &fixture.engine;
+    let group_man = &fixture.group_man;
 
     let add_req = make_request(
         "aria2.addUri",
@@ -699,8 +796,7 @@ async fn regression_get_servers_format() {
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
 
-    let manager = &group_man;
-    assert_eq!(manager.fill_from_reserver().len(), 1);
+    assert_eq!(group_man.fill_from_reserver().len(), 1);
 
     let req = make_request("aria2.getServers", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
@@ -731,7 +827,7 @@ async fn regression_get_servers_format() {
 /// Test: aria2.pauseAll returns "OK".
 #[tokio::test]
 async fn regression_pause_all_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add multiple tasks
     for i in 0..3 {
@@ -759,7 +855,7 @@ async fn regression_pause_all_format() {
 /// Test: aria2.forcePauseAll returns "OK".
 #[tokio::test]
 async fn regression_force_pause_all_returns_ok() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     for i in 0..2 {
         let req = make_request(
@@ -780,7 +876,7 @@ async fn regression_force_pause_all_returns_ok() {
 /// Test: aria2.unpauseAll returns "OK" with count.
 #[tokio::test]
 async fn regression_unpause_all_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add and pause tasks
     for i in 0..2 {
@@ -809,7 +905,7 @@ async fn regression_unpause_all_format() {
 /// Test: aria2.changeUri modifies URI list.
 #[tokio::test]
 async fn regression_change_uri_modifies_list() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -834,25 +930,14 @@ async fn regression_change_uri_modifies_list() {
     let resp = engine.handle_request(&req).await;
 
     assert_success(&resp);
-    let result: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(result.len(), 2);
-    // changeUri returns [delCount, addCount] matching original aria2
-    assert_eq!(
-        result[0].as_i64(),
-        Some(1),
-        "delCount should be the JSON integer 1 (1 URI removed)"
-    );
-    assert_eq!(
-        result[1].as_i64(),
-        Some(1),
-        "addCount should be the JSON integer 1 (1 URI added)"
-    );
+    // changeUri returns [delCount, addCount] as aria2 wire strings.
+    assert_eq!(resp.result.unwrap(), serde_json::json!(["1", "1"]));
 }
 
 /// Test: aria2.changeUri inserts new URIs at the optional zero-based position.
 #[tokio::test]
 async fn regression_change_uri_honors_position() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -876,7 +961,7 @@ async fn regression_change_uri_honors_position() {
     );
     let change_resp = engine.handle_request(&change_req).await;
     assert_success(&change_resp);
-    assert_eq!(change_resp.result.unwrap(), serde_json::json!([0, 2]));
+    assert_eq!(change_resp.result.unwrap(), serde_json::json!(["0", "2"]));
 
     let uris_req = make_request("aria2.getUris", serde_json::json!([gid]));
     let uris_resp = engine.handle_request(&uris_req).await;
@@ -902,7 +987,7 @@ async fn regression_change_uri_honors_position() {
 /// Test: aria2.changePosition modifies URI position.
 #[tokio::test]
 async fn regression_change_position_modifies_position() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let mut gid = String::new();
     for index in 1..=3 {
@@ -938,7 +1023,7 @@ async fn regression_change_position_modifies_position() {
 /// Test: aria2.getVersion returns version and enabledFeatures.
 #[tokio::test]
 async fn regression_get_version_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getVersion", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -949,7 +1034,7 @@ async fn regression_get_version_format() {
     assert!(version.get("version").is_some(), "version field required");
     assert_eq!(
         version.get("version").and_then(serde_json::Value::as_str),
-        Some(aria2_protocol::identity::PRODUCT_VERSION),
+        Some(aria2::identity::PRODUCT_VERSION),
         "getVersion must expose the independent Rust product version"
     );
     assert!(
@@ -967,7 +1052,7 @@ async fn regression_get_version_format() {
 /// Test: aria2.getSessionInfo returns sessionId.
 #[tokio::test]
 async fn regression_get_session_info_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getSessionInfo", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -997,7 +1082,7 @@ async fn regression_save_session_format() {
         std::process::id()
     ));
     let _ = std::fs::remove_file(&session_path);
-    let engine = RpcEngine::new().with_save_session_path(session_path.clone());
+    let engine = core_engine_with_save_session_path(session_path.clone());
 
     // Add a task
     let req = make_request(
@@ -1022,7 +1107,7 @@ async fn regression_save_session_ignores_extra_parameters() {
     let directory = tempfile::tempdir().unwrap();
     let configured = directory.path().join("configured.sess");
     let explicit = directory.path().join("explicit.sess");
-    let engine = RpcEngine::new().with_save_session_path(configured.clone());
+    let engine = core_engine_with_save_session_path(configured.clone());
 
     let req = make_request(
         "aria2.saveSession",
@@ -1038,7 +1123,7 @@ async fn regression_save_session_ignores_extra_parameters() {
 /// Test: aria2.shutdown returns "OK" with active count.
 #[tokio::test]
 async fn regression_shutdown_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.shutdown", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1051,7 +1136,7 @@ async fn regression_shutdown_format() {
 /// Test: aria2.forceShutdown returns "OK" with terminated count.
 #[tokio::test]
 async fn regression_force_shutdown_format() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Add tasks
     for i in 0..2 {
@@ -1074,7 +1159,7 @@ async fn regression_force_shutdown_format() {
 /// Test: system.multicall executes multiple calls.
 #[tokio::test]
 async fn regression_multicall_executes_batch() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request(
         "system.multicall",
@@ -1099,7 +1184,7 @@ async fn regression_multicall_executes_batch() {
 /// Test: aria2.purgeDownloadResult clears results.
 #[tokio::test]
 async fn regression_purge_download_result_returns_ok() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.purgeDownloadResult", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1112,7 +1197,7 @@ async fn regression_purge_download_result_returns_ok() {
 /// Test: aria2.removeDownloadResult returns "OK" for a valid stopped task.
 #[tokio::test]
 async fn regression_remove_download_result_returns_ok() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // First add a task, then remove it to populate stopped_tasks.
     let add_req = make_request(
@@ -1126,9 +1211,8 @@ async fn regression_remove_download_result_returns_ok() {
     let remove_req = make_request("aria2.remove", serde_json::json!([gid]));
     engine.handle_request(&remove_req).await;
 
-    // Reserved tasks are removed synchronously from the shared manager, so the
-    // result is available even when this handler-only fixture has no engine
-    // loop consuming commands.
+    // Removal updates the shared manager synchronously, so the result is
+    // available even though this focused fixture has no download loop.
     let req = make_request("aria2.removeDownloadResult", serde_json::json!([gid]));
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
@@ -1143,7 +1227,7 @@ async fn regression_remove_download_result_returns_ok() {
 /// Test: system.listMethods matches aria2's feature-specific method order.
 #[tokio::test]
 async fn regression_list_methods_returns_feature_specific_methods() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("system.listMethods", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1214,7 +1298,7 @@ async fn regression_list_methods_returns_feature_specific_methods() {
 /// WebSocketSessionMan.cc in the original source.
 #[tokio::test]
 async fn regression_list_notifications_returns_feature_specific_events() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("system.listNotifications", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1253,7 +1337,7 @@ async fn regression_list_notifications_returns_feature_specific_events() {
 /// Test: All responses include jsonrpc version "2.0".
 #[tokio::test]
 async fn regression_jsonrpc_version_field() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getVersion", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1264,7 +1348,7 @@ async fn regression_jsonrpc_version_field() {
 /// Test: Error responses use correct JSON-RPC error codes.
 #[tokio::test]
 async fn regression_error_codes_jsonrpc_spec() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     // Invalid method: code 1 (C++ RpcMethod domain error, not -32601)
     let req = make_request("aria2.nonexistent", serde_json::json!([]));
@@ -1280,7 +1364,7 @@ async fn regression_error_codes_jsonrpc_spec() {
 /// Test: Unknown method returns RpcExecution error (code 1).
 #[tokio::test]
 async fn regression_unknown_method_error() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("unknown.method", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1296,7 +1380,7 @@ async fn regression_unknown_method_error() {
 /// Test: GID format matches aria2 (16 hex characters).
 #[tokio::test]
 async fn regression_gid_format_matches_aria2() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request(
         "aria2.addUri",
@@ -1313,7 +1397,7 @@ async fn regression_gid_format_matches_aria2() {
 /// Test: Status values match aria2 enum (Active, Waiting, Paused, Complete, Error, Removed).
 #[tokio::test]
 async fn regression_status_values_match_aria2() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add_req = make_request(
         "aria2.addUri",
@@ -1337,7 +1421,7 @@ async fn regression_status_values_match_aria2() {
 /// Test: GlobalStat field names use camelCase (aria2 convention).
 #[tokio::test]
 async fn regression_global_stat_camelcase_convention() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getGlobalStat", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1359,7 +1443,7 @@ async fn regression_global_stat_camelcase_convention() {
 /// Test: VersionInfo enabledFeatures is array of strings.
 #[tokio::test]
 async fn regression_version_enabled_features_array() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("aria2.getVersion", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -1440,7 +1524,7 @@ fn assert_multicall_error_code(resp: &JsonRpcResponse, index: usize, expected_co
 /// getGlobalStat) resolves all four sub-calls instead of returning -32601.
 #[tokio::test]
 async fn regression_multicall_arianng_refresh_batch_all_methods_dispatch() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add = make_request(
         "aria2.addUri",
@@ -1484,7 +1568,7 @@ async fn regression_multicall_arianng_refresh_batch_all_methods_dispatch() {
     let active = assert_multicall_ok(&resp, 0, "aria2.tellActive");
     assert!(
         active.as_array().unwrap().is_empty(),
-        "handler-only RpcEngine keeps newly added groups waiting"
+        "core-backed fixture keeps newly added groups waiting"
     );
 }
 
@@ -1492,7 +1576,7 @@ async fn regression_multicall_arianng_refresh_batch_all_methods_dispatch() {
 /// multicall (no `-32601 Method not found`).
 #[tokio::test]
 async fn regression_multicall_covers_previously_missing_methods() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let add = make_request(
         "aria2.addUri",
@@ -1545,7 +1629,7 @@ async fn regression_multicall_covers_previously_missing_methods() {
 /// aborting the surrounding batch.
 #[tokio::test]
 async fn regression_multicall_nested_multicall_rejected() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request(
         "system.multicall",
@@ -1568,7 +1652,7 @@ async fn regression_multicall_nested_multicall_rejected() {
 /// Test: an unknown sub-call still yields error code 1 for that entry only.
 #[tokio::test]
 async fn regression_multicall_unknown_method_isolated_to_entry() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request(
         "system.multicall",
@@ -1594,7 +1678,7 @@ async fn regression_multicall_unknown_method_isolated_to_entry() {
 #[tokio::test]
 async fn regression_multicall_subcall_token_is_stripped_not_leaked() {
     let secret = "multicall-secret";
-    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
+    let engine = core_engine().with_auth_middleware(RpcAuthMiddleware::new(secret));
 
     // Add a download using the same per-call token convention.
     let add = make_request(
@@ -1639,7 +1723,7 @@ async fn regression_multicall_subcall_token_is_stripped_not_leaked() {
 #[tokio::test]
 async fn regression_multicall_subcall_bad_token_isolated() {
     let secret = "multicall-secret";
-    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
+    let engine = core_engine().with_auth_middleware(RpcAuthMiddleware::new(secret));
 
     let req = make_request(
         "system.multicall",
@@ -1663,7 +1747,7 @@ async fn regression_multicall_subcall_bad_token_isolated() {
 #[tokio::test]
 async fn regression_multicall_envelope_token_is_not_a_fallback() {
     let secret = "multicall-secret";
-    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new(secret));
+    let engine = core_engine().with_auth_middleware(RpcAuthMiddleware::new(secret));
 
     let req = make_request(
         "system.multicall",
@@ -1683,7 +1767,7 @@ async fn regression_multicall_envelope_token_is_not_a_fallback() {
 /// a wrong multicall parameter, rather than being treated as authentication.
 #[tokio::test]
 async fn regression_multicall_envelope_bad_token_rejected() {
-    let engine = RpcEngine::new().with_auth_middleware(RpcAuthMiddleware::new("real-secret"));
+    let engine = core_engine().with_auth_middleware(RpcAuthMiddleware::new("real-secret"));
 
     let req = make_request(
         "system.multicall",
@@ -1701,7 +1785,7 @@ async fn regression_multicall_envelope_bad_token_rejected() {
 /// are in a top-level response.
 #[tokio::test]
 async fn regression_multicall_wire_format_applies_to_nested_results() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let direct = make_request("aria2.getGlobalStat", serde_json::json!([]));
     let direct_resp = engine.handle_request(&direct).await;

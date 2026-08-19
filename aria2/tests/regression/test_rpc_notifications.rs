@@ -6,9 +6,13 @@
 //! - aria2.onDownloadComplete, onDownloadError
 //! - aria2.onBtDownloadComplete
 
-use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::websocket::EventType;
+
+#[path = "../support/mod.rs"]
+mod support;
+
+use support::rpc::engine as core_engine;
 
 /// Helper to create a JSON-RPC request.
 fn make_request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
@@ -27,7 +31,7 @@ fn assert_success(resp: &aria2_rpc::json_rpc::JsonRpcResponse) {
 /// Test: aria2.addUri fires onDownloadStart notification.
 #[tokio::test]
 async fn notification_add_uri_fires_download_start() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut rx = engine.publisher().subscribe("test-start", None).await;
 
     let req = make_request(
@@ -49,7 +53,7 @@ async fn notification_add_uri_fires_download_start() {
 /// Test: aria2.pause fires onDownloadPause notification.
 #[tokio::test]
 async fn notification_pause_fires_download_pause() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut rx = engine.publisher().subscribe("test-pause", None).await;
 
     // Add a task first
@@ -80,7 +84,7 @@ async fn notification_pause_fires_download_pause() {
 /// Test: aria2.remove fires onDownloadStop notification.
 #[tokio::test]
 async fn notification_remove_fires_download_stop() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut rx = engine.publisher().subscribe("test-stop", None).await;
 
     // Add a task first
@@ -112,7 +116,7 @@ async fn notification_remove_fires_download_stop() {
 /// C++ aria2 does not have a separate onDownloadResume event; it reuses onDownloadStart.
 #[tokio::test]
 async fn notification_unpause_fires_download_start() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut rx = engine.publisher().subscribe("test-resume", None).await;
 
     // Add a task first
@@ -147,7 +151,7 @@ async fn notification_unpause_fires_download_start() {
 /// Test: system.listNotifications returns all 6 C++ event types.
 #[tokio::test]
 async fn notification_list_notifications_returns_all_events() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
 
     let req = make_request("system.listNotifications", serde_json::json!([]));
     let resp = engine.handle_request(&req).await;
@@ -167,7 +171,7 @@ async fn notification_list_notifications_returns_all_events() {
 /// Test: forceRemove fires onDownloadStop notification.
 #[tokio::test]
 async fn notification_force_remove_fires_download_stop() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut rx = engine.publisher().subscribe("test-force-stop", None).await;
 
     let add_req = make_request(
@@ -195,7 +199,7 @@ async fn notification_force_remove_fires_download_stop() {
 /// Test: pauseAll fires onDownloadPause for each active task.
 #[tokio::test]
 async fn notification_pause_all_fires_pause_for_each_task() {
-    let engine = RpcEngine::new();
+    let engine = core_engine();
     let mut rx = engine.publisher().subscribe("test-pause-all", None).await;
 
     // Add multiple tasks

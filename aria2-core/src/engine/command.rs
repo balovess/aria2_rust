@@ -1,4 +1,5 @@
 use crate::error::Result;
+use crate::network::ConnectionContext;
 use crate::request::request_group::{GroupId, RequestGroup};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -78,5 +79,15 @@ pub trait Command: Send + Sync {
     /// default `None`.
     fn request_group(&self) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
         None
+    }
+
+    /// Return the last concrete network peer observed by this command.
+    ///
+    /// The engine uses this only when a command reports a network failure, so
+    /// DNS candidate attribution stays tied to an address that actually
+    /// participated in the command rather than to every resolved candidate.
+    fn connection_context(&self) -> Option<ConnectionContext> {
+        self.request_group()
+            .and_then(|group| group.try_read().ok()?.latest_connection_context())
     }
 }

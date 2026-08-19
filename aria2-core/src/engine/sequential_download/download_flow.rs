@@ -17,6 +17,17 @@ use crate::util::rwlock_ext::RwLockRecover;
 use super::SequentialDownloader;
 use super::auth_retry::{AuthRetryOutcome, AuthRetryRequest};
 
+fn classify_http_status(status: reqwest::StatusCode) -> Aria2Error {
+    let status_code = status.as_u16();
+    if status_code >= 500 || constants::RETRYABLE_HTTP_CODES.contains(&status_code) {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code: status_code })
+    } else {
+        Aria2Error::Recoverable(RecoverableError::HttpProtocolError {
+            message: format!("HTTP error: {status}"),
+        })
+    }
+}
+
 async fn finalize_cancelled_download(
     writer: &mut Box<dyn DiskWriter>,
     control_file: &mut Option<ControlFile>,
@@ -39,6 +50,33 @@ async fn finalize_cancelled_download(
 }
 
 impl SequentialDownloader {
+    async fn flush_requested_control_file(
+        &self,
+        writer: &mut Box<dyn DiskWriter>,
+        control_file: &mut Option<ControlFile>,
+        completed_bytes: u64,
+    ) -> Result<bool> {
+        if !self.group.recover().is_save_control_file_requested() {
+            return Ok(false);
+        }
+
+        writer.flush().await.map_err(|error| {
+            Aria2Error::FileIo(format!(
+                "Failed to flush requested sequential checkpoint: {error}"
+            ))
+        })?;
+        if let Some(control_file) = control_file {
+            control_file.update_completed_length(completed_bytes);
+            control_file.save().await.map_err(|error| {
+                Aria2Error::FileIo(format!(
+                    "Failed to save requested sequential checkpoint: {error}"
+                ))
+            })?;
+        }
+        self.group.recover().take_save_control_file_request();
+        Ok(true)
+    }
+
     /// Main entry point for sequential HTTP download.
     ///
     /// Handles redirect loop, auth challenge, 304 Not Modified, and
@@ -362,16 +400,7 @@ impl SequentialDownloader {
                 if status_code == 404 {
                     return Err(self.classify_file_not_found());
                 }
-                if status_code >= 500 {
-                    return Err(Aria2Error::Recoverable(RecoverableError::ServerError {
-                        code: status_code,
-                    }));
-                }
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::HttpProtocolError {
-                        message: format!("HTTP error: {}", status),
-                    },
-                ));
+                return Err(classify_http_status(status));
             }
 
             // A server which ignores Range returns the complete entity with
@@ -552,14 +581,36 @@ impl SequentialDownloader {
         let mut ctrl_bytes_since_save: u64 = 0;
         let ctrl_save_interval = (actual_total / 10).max(1024 * 1024); // save every ~10% or 1MB
 
-        while let Some(chunk) = tokio::select! {
-            chunk = stream.next() => chunk,
-            cancellation = self.wait_for_cancellation() => {
-                let error = cancellation.expect_err("cancellation watcher must not complete successfully");
-                finalize_cancelled_download(&mut writer, &mut ctrl_file, completed_bytes).await;
-                return Err(error);
-            }
-        } {
+        let lifecycle_notifier = self.group.recover().lifecycle_notifier();
+        loop {
+            let next_chunk = {
+                let lifecycle_changed = lifecycle_notifier.notified();
+                tokio::pin!(lifecycle_changed);
+                lifecycle_changed.as_mut().enable();
+                tokio::select! {
+                    chunk = stream.next() => chunk,
+                    _ = &mut lifecycle_changed => {
+                        if let Err(error) = self.check_cancelled() {
+                            finalize_cancelled_download(
+                                &mut writer,
+                                &mut ctrl_file,
+                                completed_bytes,
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                        self.flush_requested_control_file(
+                            &mut writer,
+                            &mut ctrl_file,
+                            completed_bytes,
+                        )
+                        .await?;
+                        continue;
+                    }
+                }
+            };
+            let Some(chunk) = next_chunk else { break };
+
             // Check whether the task was removed between chunks. This is the
             // primary cancellation signal: `aria2.remove` /
             // `aria2.forceRemove` sets the RequestGroup status to `Removed`,
@@ -574,6 +625,9 @@ impl SequentialDownloader {
                     message: e.to_string(),
                 })
             })?;
+            if !data.is_empty() {
+                self.progress.record_network_activity();
+            }
 
             let mut offset = 0usize;
             while offset < data.len() {
@@ -585,22 +639,17 @@ impl SequentialDownloader {
 
                 // ADR-0001: Periodically update control file with progress.
                 ctrl_bytes_since_save += piece.len() as u64;
-                if let Some(ref mut cf) = ctrl_file {
-                    let save_requested = self.group.recover().take_save_control_file_request();
-                    if save_requested {
-                        writer.flush().await.map_err(|error| {
-                            Aria2Error::FileIo(format!(
-                                "Failed to flush requested sequential checkpoint: {error}"
-                            ))
-                        })?;
+                let save_requested = self
+                    .flush_requested_control_file(&mut writer, &mut ctrl_file, completed_bytes)
+                    .await?;
+                if let Some(cf) = ctrl_file.as_mut()
+                    && (save_requested || ctrl_bytes_since_save >= ctrl_save_interval)
+                {
+                    cf.update_completed_length(completed_bytes);
+                    if let Err(e) = cf.save().await {
+                        tracing::warn!("Sequential: control file save failed: {}", e);
                     }
-                    if save_requested || ctrl_bytes_since_save >= ctrl_save_interval {
-                        cf.update_completed_length(completed_bytes);
-                        if let Err(e) = cf.save().await {
-                            tracing::warn!("Sequential: control file save failed: {}", e);
-                        }
-                        ctrl_bytes_since_save = 0;
-                    }
+                    ctrl_bytes_since_save = 0;
                 }
 
                 self.progress_updater
@@ -684,5 +733,32 @@ impl SequentialDownloader {
         }
         self.cookie_helper.save_cookies_if_configured();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_configured_transient_statuses_as_server_errors() {
+        for status_code in [408, 429, 500, 502, 503, 504] {
+            let status = reqwest::StatusCode::from_u16(status_code).unwrap();
+            assert!(matches!(
+                classify_http_status(status),
+                Aria2Error::Recoverable(RecoverableError::ServerError { code })
+                    if code == status_code
+            ));
+        }
+    }
+
+    #[test]
+    fn preserves_non_transient_http_statuses_as_protocol_errors() {
+        let status = reqwest::StatusCode::FORBIDDEN;
+        assert!(matches!(
+            classify_http_status(status),
+            Aria2Error::Recoverable(RecoverableError::HttpProtocolError { message })
+                if message.contains("403")
+        ));
     }
 }

@@ -72,7 +72,7 @@ async fn e2e_https_jsonrpc_get_version_uses_tls_connection_service() {
     let server_task = tokio::spawn(async move { server.serve_on_listener(listener).await });
 
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
+        .tls_danger_accept_invalid_certs(true)
         .build()
         .expect("failed to build HTTPS client");
     let url = format!("https://127.0.0.1:{port}/jsonrpc");

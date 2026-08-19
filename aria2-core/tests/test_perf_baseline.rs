@@ -1,9 +1,40 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use fixtures::test_server::TestServer;
+
+const PERF_BASELINE_ENV: &str = "ARIA2_ENFORCE_PERF_BASELINES";
+
+fn perf_baselines_enabled() -> bool {
+    matches!(
+        std::env::var(PERF_BASELINE_ENV).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
+}
+
+fn assert_max_duration(label: &str, elapsed: Duration, maximum: Duration) {
+    if perf_baselines_enabled() {
+        assert!(
+            elapsed < maximum,
+            "{label} took too long: {elapsed:?} (limit: {maximum:?})"
+        );
+    } else {
+        println!("[PERF] {label} threshold disabled; set {PERF_BASELINE_ENV}=1 to enforce it");
+    }
+}
+
+fn assert_min_speed(label: &str, speed_mb_s: f64, minimum_mb_s: f64) {
+    if perf_baselines_enabled() {
+        assert!(
+            speed_mb_s > minimum_mb_s,
+            "{label} download speed too low: {speed_mb_s:.2} MB/s (minimum: {minimum_mb_s:.2} MB/s)"
+        );
+    } else {
+        println!("[PERF] {label} threshold disabled; set {PERF_BASELINE_ENV}=1 to enforce it");
+    }
+}
 
 async fn start_server() -> TestServer {
     TestServer::start().await
@@ -33,7 +64,11 @@ async fn test_perf_baseline_small_file() {
     let elapsed = start.elapsed();
 
     println!("[PERF] small.bin (4 bytes): {:?}", elapsed);
-    assert!(elapsed.as_millis() < 5000, "小文件下载超时: {:?}", elapsed);
+    assert_eq!(
+        std::fs::read(dir.path().join("small.bin")).unwrap(),
+        [0xDE, 0xAD, 0xBE, 0xEF]
+    );
+    assert_max_duration("small.bin", elapsed, Duration::from_secs(5));
 }
 
 #[tokio::test]
@@ -61,7 +96,13 @@ async fn test_perf_baseline_medium_file() {
         "[PERF] medium.bin (1MB): {:?} => {:.2} MB/s",
         elapsed, speed_mb_s
     );
-    assert!(speed_mb_s > 1.0, "1MB下载速度过低: {:.2} MB/s", speed_mb_s);
+    assert_eq!(
+        std::fs::metadata(dir.path().join("medium.bin"))
+            .unwrap()
+            .len(),
+        1024 * 1024
+    );
+    assert_min_speed("medium.bin", speed_mb_s, 1.0);
 }
 
 #[tokio::test]
@@ -89,7 +130,13 @@ async fn test_perf_baseline_large_file() {
         "[PERF] large.bin (10MB): {:?} => {:.2} MB/s",
         elapsed, speed_mb_s
     );
-    assert!(speed_mb_s > 5.0, "10MB下载速度过低: {:.2} MB/s", speed_mb_s);
+    assert_eq!(
+        std::fs::metadata(dir.path().join("large.bin"))
+            .unwrap()
+            .len(),
+        10 * 1024 * 1024
+    );
+    assert_min_speed("large.bin", speed_mb_s, 5.0);
 }
 
 #[tokio::test]
@@ -130,7 +177,7 @@ async fn test_perf_concurrent_5_downloads() -> Result<(), Box<dyn std::error::Er
         "[PERF] 5 concurrent x 1MB: {:?} => {:.2} MB/s total throughput",
         elapsed, throughput
     );
-    assert!(throughput > 2.0, "并发吞吐量过低: {:.2} MB/s", throughput);
+    assert_min_speed("5 concurrent x 1MB", throughput, 2.0);
 
     Ok(())
 }

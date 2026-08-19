@@ -18,6 +18,8 @@ pub enum OptionType {
     Boolean,
     List,
     Enum,
+    /// An IPv4 address serialized as the original string wire value.
+    Ipv4Address,
     IndexOut,
     /// aria2's `head[=SIZE],tail[=SIZE]` BitTorrent piece-priority syntax.
     PiecePriority,
@@ -35,6 +37,7 @@ impl fmt::Display for OptionType {
             Self::Boolean => write!(f, "boolean"),
             Self::List => write!(f, "list"),
             Self::Enum => write!(f, "enum"),
+            Self::Ipv4Address => write!(f, "ipv4-address"),
             Self::IndexOut => write!(f, "index-out"),
             Self::PiecePriority => write!(f, "piece-priority"),
             Self::Path => write!(f, "path"),
@@ -115,6 +118,27 @@ pub enum OptionCategory {
     BitTorrent,
     Rpc,
     Advanced,
+}
+
+/// Production component that owns an option's behavior.
+///
+/// The registry is the only source of this metadata.  An option may be
+/// accepted by several adapters, but its behavior is owned by exactly one
+/// component so adapters cannot grow independent shadow state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OptionOwner {
+    /// Internal construction state used only while a definition is being
+    /// assembled.  Built-in registration replaces this value before storing
+    /// the definition.
+    Unassigned,
+    /// Per-download typed options and protocol execution.
+    DownloadTask,
+    /// Process-wide engine, scheduler, persistence, or network setup.
+    ProcessEngine,
+    /// RPC listener and RPC-specific behavior.
+    RpcServer,
+    /// CLI input, session, logging, and terminal/UI behavior.
+    Application,
 }
 
 impl fmt::Display for OptionCategory {
@@ -310,6 +334,15 @@ pub struct OptionDef {
     pub default_value: OptionValue,
     pub description: String,
     pub category: OptionCategory,
+    /// Whether this option has a real runtime consumer in this build.
+    ///
+    /// Unsupported compatibility names stay in the registry so adapters can
+    /// report a precise error, but they must never be silently stored or have
+    /// a default injected into runtime state.
+    pub supported: bool,
+    /// Unique production owner. Built-in definitions receive this value from
+    /// the registry's explicit canonical-name mapping.
+    pub owner: OptionOwner,
     pub min: Option<i64>,
     pub max: Option<u64>,
     /// Exact wire values accepted for `OptionType::Enum`.
@@ -347,6 +380,8 @@ impl Default for OptionDef {
             default_value: OptionValue::None,
             description: String::new(),
             category: OptionCategory::General,
+            supported: true,
+            owner: OptionOwner::Unassigned,
             min: None,
             max: None,
             allowed_values: &[],
@@ -383,6 +418,14 @@ impl OptionDef {
     pub fn get_category(&self) -> OptionCategory {
         self.category
     }
+
+    pub fn is_supported(&self) -> bool {
+        self.supported
+    }
+
+    pub fn owner(&self) -> OptionOwner {
+        self.owner
+    }
     pub fn is_deprecated(&self) -> bool {
         self.deprecated
     }
@@ -406,7 +449,8 @@ impl OptionDef {
     /// parsing. Defaults are injected by the configuration loader as a
     /// separate phase, matching aria2's `parseDefaultValues` behavior.
     pub fn parse_default_value(&self) -> Option<OptionValue> {
-        (!matches!(self.default_value, OptionValue::None)).then(|| self.default_value.clone())
+        (self.supported && !matches!(self.default_value, OptionValue::None))
+            .then(|| self.default_value.clone())
     }
 
     /// Parse one explicitly supplied wire value.
@@ -414,6 +458,13 @@ impl OptionDef {
     /// An empty string is still a value. It must not be confused with a
     /// missing value or with the option's configured default.
     pub fn parse_value(&self, s: &str) -> Result<OptionValue, String> {
+        if !self.supported {
+            return Err(format!(
+                "option '{}' is not supported by this runtime",
+                self.name
+            ));
+        }
+
         match self.opt_type {
             OptionType::String | OptionType::Path => {
                 if !self.allow_empty && s.is_empty() {
@@ -421,6 +472,10 @@ impl OptionDef {
                 }
                 Ok(OptionValue::Str(s.to_string()))
             }
+            OptionType::Ipv4Address => s
+                .parse::<std::net::Ipv4Addr>()
+                .map(|_| OptionValue::Str(s.to_string()))
+                .map_err(|error| format!("invalid IPv4 address '{}': {}", s, error)),
             OptionType::IntegerRange => {
                 let max = self
                     .max

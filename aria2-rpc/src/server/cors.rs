@@ -42,8 +42,8 @@ impl CorsConfig {
 
         Self {
             allow_origin: allow_origin.clone(),
-            allow_methods: aria2_core::constants::CORS_ALLOW_METHODS.to_string(),
-            allow_headers: aria2_core::constants::CORS_ALLOW_HEADERS.to_string(),
+            allow_methods: crate::constants::CORS_ALLOW_METHODS.to_string(),
+            allow_headers: crate::constants::CORS_ALLOW_HEADERS.to_string(),
             allow_credentials: false,
             allowed_origins: origins,
         }
@@ -157,24 +157,24 @@ impl CorsConfig {
             ("Access-Control-Allow-Headers", self.allow_headers.clone()),
             (
                 "Access-Control-Max-Age",
-                aria2_core::constants::CORS_MAX_AGE.to_string(),
+                crate::constants::CORS_MAX_AGE.to_string(),
             ),
         ])
     }
 
-    /// Get headers as static str pairs (for non-origin-specific responses)
-    pub fn to_headers(&self) -> Vec<(&str, &str)> {
+    /// Get headers as owned pairs (for non-origin-specific responses).
+    pub fn to_headers(&self) -> Vec<(&str, String)> {
         if self.allowed_origins.is_empty() {
             return Vec::new();
         }
 
         vec![
-            ("Access-Control-Allow-Origin", &self.allow_origin),
-            ("Access-Control-Allow-Methods", &self.allow_methods),
-            ("Access-Control-Allow-Headers", &self.allow_headers),
+            ("Access-Control-Allow-Origin", self.allow_origin.clone()),
+            ("Access-Control-Allow-Methods", self.allow_methods.clone()),
+            ("Access-Control-Allow-Headers", self.allow_headers.clone()),
             (
                 "Access-Control-Max-Age",
-                aria2_core::constants::CORS_MAX_AGE,
+                crate::constants::CORS_MAX_AGE.to_string(),
             ),
         ]
     }

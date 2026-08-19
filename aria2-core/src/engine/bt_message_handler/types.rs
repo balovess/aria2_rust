@@ -76,7 +76,7 @@ pub struct BlockDownloadResult {
     /// Whether the block was successfully received
     pub success: bool,
     /// The received data (if successful)
-    pub data: Option<Vec<u8>>,
+    pub data: Option<bytes::Bytes>,
     /// Index of the peer that supplied the block.
     pub peer_index: Option<usize>,
     /// Number of bytes received (for statistics)

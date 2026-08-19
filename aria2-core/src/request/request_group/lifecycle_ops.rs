@@ -27,6 +27,7 @@ impl super::RequestGroup {
     /// setters are also called from synchronous contexts; shell hooks stay
     /// owned by the engine-loop hook sites where a runtime is guaranteed.
     fn notify_terminal_event(&self, event: DownloadEvent) {
+        self.notify_activity_changed();
         DownloadEventHooks::shared().notify_listeners(event, &self.gid.to_hex_string());
     }
 
@@ -41,6 +42,8 @@ impl super::RequestGroup {
 
         *status = DownloadStatus::Active;
         *start_time = Some(std::time::Instant::now());
+        self.progress.reset_network_activity();
+        self.notify_lifecycle_changed();
 
         tracing::info!("Starting download task #{}", self.gid.value());
         Ok(())
@@ -56,7 +59,8 @@ impl super::RequestGroup {
         if matches!(*status, DownloadStatus::Active | DownloadStatus::Waiting) {
             *status = DownloadStatus::Paused;
             self.control_flags.request_halt();
-            self.control_flags.request_pause();
+            self.request_pause();
+            self.notify_lifecycle_changed();
             tracing::info!("Pausing download task #{}", self.gid.value());
         }
 
@@ -72,6 +76,7 @@ impl super::RequestGroup {
             *status = DownloadStatus::Paused;
             self.control_flags.request_force_halt();
             self.control_flags.request_force_pause();
+            self.notify_lifecycle_changed();
             tracing::info!("Force-pausing download task #{}", self.gid.value());
         }
 
@@ -85,12 +90,13 @@ impl super::RequestGroup {
         if matches!(*status, DownloadStatus::Paused) {
             *status = DownloadStatus::Waiting;
             self.clear_command_failure();
-            self.control_flags.clear_pause();
+            self.clear_pause();
             self.control_flags.clear_halt();
             // Also clear a pending restart intent so a group that was paused
             // by `reduce_to_limit()` (which sets the restart flag alongside
             // pause) does not carry a stale flag after a manual unpause.
             self.control_flags.clear_restart();
+            self.notify_lifecycle_changed();
             tracing::info!("Resuming download task #{}", self.gid.value());
         }
 
@@ -108,6 +114,7 @@ impl super::RequestGroup {
         *status = DownloadStatus::Removed;
         *end_time = Some(std::time::Instant::now());
         *self.halt_reason.recover_mut() = HaltReason::UserRequest;
+        self.notify_lifecycle_changed();
 
         tracing::info!("Removing download task #{}", self.gid.value());
         Ok(())
@@ -118,6 +125,7 @@ impl super::RequestGroup {
         *self.status.recover_mut() = DownloadStatus::Removed;
         *self.end_time.recover_mut() = Some(std::time::Instant::now());
         *self.halt_reason.recover_mut() = HaltReason::UserRequest;
+        self.notify_lifecycle_changed();
         tracing::info!(gid = self.gid.value(), "Marked download as removed");
     }
 
@@ -126,6 +134,7 @@ impl super::RequestGroup {
     pub fn request_halt(&self, reason: HaltReason) {
         self.control_flags.request_halt();
         *self.halt_reason.recover_mut() = reason;
+        self.notify_lifecycle_changed();
         tracing::info!(gid = self.gid.value(), ?reason, "Halt requested");
     }
 
@@ -134,6 +143,7 @@ impl super::RequestGroup {
     pub fn request_force_halt(&self, reason: HaltReason) {
         self.control_flags.request_force_halt();
         *self.halt_reason.recover_mut() = reason;
+        self.notify_lifecycle_changed();
         tracing::info!(gid = self.gid.value(), ?reason, "Force halt requested");
     }
 
@@ -250,6 +260,7 @@ impl super::RequestGroup {
         // message untouched. In particular, do not invent a pause error code
         // or erase a code recorded by an earlier URI attempt.
         tracing::info!(gid = self.gid.value(), "Marked download as paused");
+        self.notify_lifecycle_changed();
     }
 
     /// Transition the group back to `Waiting` status (interior mutability).
@@ -261,6 +272,7 @@ impl super::RequestGroup {
         *self.status.recover_mut() = DownloadStatus::Waiting;
         *self.end_time.recover_mut() = None;
         tracing::debug!(gid = self.gid.value(), "Marked download as waiting");
+        self.notify_lifecycle_changed();
     }
 
     // ── Status Queries ───────────────────────────────────────────────────
@@ -296,10 +308,10 @@ impl super::RequestGroup {
         }
     }
 
-    /// Per-command timeout duration. Returns `None` for no timeout.
+    /// Per-command I/O inactivity timeout. Returns `None` for no timeout.
     ///
-    /// Mirrors C++ `RequestGroup::timeout_`. Currently derived from
-    /// download options; may be overridden per-group in the future.
+    /// Mirrors C++ `RequestGroup::timeout_`. The engine refreshes this clock
+    /// only when the protocol receives non-empty payload bytes.
     pub fn timeout(&self) -> Option<std::time::Duration> {
         self.options.timeout.map(std::time::Duration::from_secs)
     }

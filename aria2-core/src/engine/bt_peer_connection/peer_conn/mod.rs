@@ -15,7 +15,7 @@ mod messages;
 mod session;
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::engine::peer_stats::PeerStats;
 
@@ -116,6 +116,10 @@ pub struct BtPeerConn {
     pub(crate) last_keepalive_sent: Instant,
     /// Last time we received any message from the peer.
     pub(crate) last_message_received: Instant,
+    /// Configured interval for sending keep-alive frames.
+    pub(crate) keep_alive_interval: Duration,
+    /// Configured maximum interval without receiving a peer message.
+    pub(crate) peer_timeout: Duration,
 
     // -----------------------------------------------------------------------
     // Statistics (integration with choking algorithm)
@@ -131,9 +135,22 @@ pub struct BtPeerConn {
     /// to the connection pool. This avoids having to thread extension-update
     /// types through the legacy `BtMessageHandler` API.
     pub pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    /// Whether this connection may receive and accumulate BEP 11 peers.
+    pub(crate) pex_enabled: bool,
 }
 
 impl BtPeerConn {
+    pub(crate) fn set_pex_enabled(&mut self, enabled: bool) {
+        self.pex_enabled = enabled;
+        if !enabled {
+            self.pending_pex_peers.clear();
+        }
+    }
+
+    pub(crate) fn is_pex_enabled(&self) -> bool {
+        self.pex_enabled
+    }
+
     /// Transfer a TCP connection into the upload-session transport seam.
     ///
     /// uTP remains a download transport for now; the previous seeding path

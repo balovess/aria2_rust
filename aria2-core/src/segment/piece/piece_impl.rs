@@ -73,7 +73,6 @@ pub struct Piece {
     pub(super) block_length: u32,
     /// Whether this piece is currently used by a segment
     pub(super) used_by_segment: bool,
-    // TODO: WrDiskCache support (wr_cache field)
 }
 
 impl Piece {
@@ -329,12 +328,10 @@ impl Piece {
     }
 
     /// Clears all blocks (both completed and in-use), resetting the piece.
-    ///
-    /// Note: WrDiskCache clearing is not yet implemented (TODO).
+    /// Disk-cache state is owned by the active writer, not by the piece.
     pub fn clear_all_blocks(&mut self) {
         self.completed.clear_all();
         self.in_use.clear_all();
-        // TODO: Clear WrDiskCache when implemented
     }
 
     /// Sets a block as in-use (being requested by a peer/connection).

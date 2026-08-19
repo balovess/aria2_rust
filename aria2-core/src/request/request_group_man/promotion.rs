@@ -40,20 +40,24 @@ impl super::RequestGroupMan {
         let _lifecycle = self.lifecycle_guard();
         let max = self.max_concurrent();
         let current_active = self.active_count();
-        let slots_available = if max == 0 {
-            self.reserved.len()
-        } else {
-            max.saturating_sub(current_active)
-        };
+        let queued_at_start = self.reserved.len();
 
-        if slots_available == 0 || self.reserved.is_empty() {
+        if (max != 0 && current_active >= max) || queued_at_start == 0 {
             return Vec::new();
         }
 
         let mut promoted = Vec::new();
         let mut pending = Vec::new(); // Paused/dependency-blocked groups
+        let mut inspected = 0;
 
-        for _ in 0..slots_available {
+        // Inspect each group that was queued at the start at most once. A
+        // paused or dependency-blocked group must not consume a usable slot
+        // and prevent a later runnable group from being promoted.
+        while inspected < queued_at_start
+            && !self.reserved.is_empty()
+            && (max == 0 || self.active_count() < max)
+        {
+            inspected += 1;
             let group = match self.reserved.pop_front() {
                 Some(g) => g,
                 None => break,
@@ -116,7 +120,7 @@ impl super::RequestGroupMan {
                     DownloadStatus::Waiting => {
                         g.clear_command_failure();
                         g.start().ok(); // Sets status to Active
-                        g.control_flags.clear_pause();
+                        g.clear_pause();
                         false
                     }
                     DownloadStatus::Paused => true,
@@ -149,7 +153,7 @@ impl super::RequestGroupMan {
         // ── Re-insert pending groups at front of reserved queue ─────────
         // C++: `reservedGroups_.insert(reservedGroups_.begin(), ...)`
         // Pending groups (paused / dependency-blocked) go back to the front
-        // so they are checked again on the next tick.
+        // so the next scheduling pass can re-evaluate them.
         for group in pending.into_iter().rev() {
             self.reserved.push_front(group);
         }

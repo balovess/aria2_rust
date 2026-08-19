@@ -1,15 +1,13 @@
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::engine::bt_download_command::{
-    BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES, PEER_CONNECTION_DELAY_MS,
-};
+use crate::engine::bt_download_command::{BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES};
 use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
-use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
 use crate::error::{Aria2Error, FatalError, Result};
@@ -19,6 +17,31 @@ use crate::request::request_group::{BtPeerSnapshot, DownloadResultCode, HaltReas
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::types::{EndgameState, PeerKey};
+
+fn progress_snapshot(
+    info_hash: [u8; 20],
+    bitfield: &[u8],
+    piece_length: u32,
+    total_size: u64,
+    num_pieces: u32,
+    stats: ProgressDownloadStats,
+) -> BtProgress {
+    let upload_length = stats.uploaded_bytes;
+    BtProgress {
+        info_hash,
+        bitfield: bitfield.to_vec(),
+        peers: vec![],
+        stats,
+        piece_length,
+        total_size,
+        num_pieces,
+        upload_length,
+        in_flight_pieces: vec![],
+        is_torrent: true,
+        save_time: std::time::SystemTime::now(),
+        version: 1,
+    }
+}
 
 fn sync_peer_snapshots(
     group: &crate::request::request_group::RequestGroup,
@@ -103,9 +126,208 @@ impl BtStopTimeoutState {
 
         configured.is_some_and(|timeout| now.duration_since(self.last_progress_at) >= timeout)
     }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.configured
+            .map(|timeout| self.last_progress_at + timeout)
+    }
+}
+
+enum PeerWaitEvent {
+    Incoming(crate::engine::bt_peer_listener::IncomingPeer),
+    PeerMessage {
+        index: usize,
+        result: Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>>,
+    },
+    Wake,
 }
 
 impl BtDownloadCommand {
+    fn next_peer_event_deadline(
+        &self,
+        active_connections: &[BtPeerConn],
+        stop_timeout_deadline: Option<Instant>,
+    ) -> Instant {
+        let now = Instant::now();
+        let mut deadline = now + Duration::from_secs(24 * 60 * 60);
+
+        if self.dht_engine.is_some()
+            && let Some(delay) = self
+                .dht_periodic_lookup
+                .next_lookup_delay(active_connections.len())
+        {
+            deadline = deadline.min(now + delay);
+        }
+        if let Some(delay) = self
+            .tracker_announcer
+            .as_ref()
+            .and_then(|announcer| announcer.next_default_announce_delay())
+        {
+            deadline = deadline.min(now + delay);
+        }
+        if let Some(stop_timeout_deadline) = stop_timeout_deadline {
+            deadline = deadline.min(stop_timeout_deadline);
+        }
+        for connection in active_connections {
+            deadline = deadline.min(connection.keepalive_deadline());
+        }
+        deadline
+    }
+
+    async fn send_due_keepalives(active_connections: &mut [BtPeerConn]) {
+        for connection in active_connections {
+            if connection.should_send_keepalive()
+                && let Err(error) = connection.send_keepalive().await
+            {
+                tracing::debug!(
+                    peer = %format!("{}:{}", connection.ip_addr, connection.port),
+                    %error,
+                    "Failed to send configured BitTorrent keep-alive"
+                );
+            }
+        }
+    }
+
+    /// Wait for a peer/discovery event instead of waking on a fixed short
+    /// delay. Network messages are read concurrently from all active peers;
+    /// tracker and DHT timers are only used at their protocol deadlines.
+    async fn wait_for_peer_event(
+        &mut self,
+        active_connections: &mut [BtPeerConn],
+        deadline: Instant,
+    ) -> PeerWaitEvent {
+        let completion_notify = self.dht_periodic_lookup.completion_notifier();
+        let completion_wait = completion_notify.notified();
+        let lifecycle_notify = self.group.recover().lifecycle_notifier();
+        let lifecycle_wait = lifecycle_notify.notified();
+        let mut incoming_receiver = self.incoming_peers.take();
+        let deadline_wait = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+        tokio::pin!(deadline_wait);
+
+        let mut peer_reads = active_connections
+            .iter_mut()
+            .enumerate()
+            .map(|(index, connection)| async move { (index, connection.read_message().await) })
+            .collect::<futures::stream::FuturesUnordered<_>>();
+
+        let event = tokio::select! {
+            incoming = async {
+                match incoming_receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending::<Option<crate::engine::bt_peer_listener::IncomingPeer>>().await,
+                }
+            } => match incoming {
+                Some(incoming) => PeerWaitEvent::Incoming(incoming),
+                None => {
+                    incoming_receiver = None;
+                    PeerWaitEvent::Wake
+                }
+            },
+            peer = peer_reads.next(), if !peer_reads.is_empty() => {
+                peer.map_or(PeerWaitEvent::Wake, |(index, result)| {
+                    PeerWaitEvent::PeerMessage { index, result }
+                })
+            },
+            _ = completion_wait => PeerWaitEvent::Wake,
+            _ = lifecycle_wait => PeerWaitEvent::Wake,
+            _ = &mut deadline_wait => PeerWaitEvent::Wake,
+        };
+
+        drop(peer_reads);
+        self.incoming_peers = incoming_receiver;
+        event
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_peer_wait_event(
+        event: PeerWaitEvent,
+        active_connections: &mut Vec<BtPeerConn>,
+        peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        pex_enabled_peers: &mut HashSet<PeerKey>,
+        peer_last_data_time: &mut HashMap<PeerKey, Instant>,
+        allowed_fast_sent_peers: &mut HashMap<PeerKey, HashSet<u32>>,
+        suggest_sent_counts: &mut HashMap<PeerKey, usize>,
+        endgame_state: &mut EndgameState,
+        choking_algo: Option<&mut crate::engine::choking_algorithm::ChokingAlgorithm>,
+        peer_storage: &std::sync::Arc<
+            std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
+        >,
+    ) -> Option<crate::engine::bt_peer_listener::IncomingPeer> {
+        match event {
+            PeerWaitEvent::Incoming(incoming) => return Some(incoming),
+            PeerWaitEvent::PeerMessage { index, result } => {
+                let failed_address = {
+                    let connection = active_connections.get_mut(index)?;
+                    let peer_key = PeerKey::from_peer(&connection.ip_addr, connection.port);
+                    match result {
+                        Ok(Some(message)) => {
+                            let before = connection
+                                .session_resource
+                                .as_ref()
+                                .map(|resource| resource.bitfield().to_vec());
+                            match message {
+                                aria2_protocol::bittorrent::message::types::BtMessage::Have {
+                                    piece_index,
+                                } => connection.update_peer_bitfield(piece_index as usize, 1),
+                                aria2_protocol::bittorrent::message::types::BtMessage::Bitfield {
+                                    data,
+                                } => connection.set_peer_bitfield(&data),
+                                aria2_protocol::bittorrent::message::types::BtMessage::HaveAll => {
+                                    connection.mark_seeder()
+                                }
+                                aria2_protocol::bittorrent::message::types::BtMessage::HaveNone => {
+                                    connection.set_peer_bitfield(&[])
+                                }
+                                aria2_protocol::bittorrent::message::types::BtMessage::Choke => {
+                                    connection.stats.peer_choking = true;
+                                }
+                                aria2_protocol::bittorrent::message::types::BtMessage::Unchoke => {
+                                    connection.stats.peer_choking = false;
+                                }
+                                _ => {}
+                            }
+                            let after = connection
+                                .session_resource
+                                .as_ref()
+                                .map(|resource| resource.bitfield().to_vec());
+                            if before != after
+                                && let (Some(peer_key), Some(bitfield)) =
+                                    (peer_key, after.as_deref())
+                            {
+                                peer_tracker.update_peer_bitfield(
+                                    &BtPeerInteraction::peer_tracker_key(connection),
+                                    bitfield,
+                                );
+                                peer_last_data_time.insert(peer_key, Instant::now());
+                            }
+                            None
+                        }
+                        Ok(None) | Err(_) => {
+                            connection.disconnected_gracefully = true;
+                            connection.remote_endpoint()
+                        }
+                    }
+                };
+                if let Some(address) = failed_address {
+                    Self::remove_failed_peers(
+                        active_connections,
+                        &[address],
+                        choking_algo,
+                        pex_enabled_peers,
+                        peer_last_data_time,
+                        allowed_fast_sent_peers,
+                        suggest_sent_counts,
+                        endgame_state,
+                        peer_tracker,
+                        peer_storage,
+                    );
+                }
+            }
+            PeerWaitEvent::Wake => {}
+        }
+        None
+    }
+
     // Parameters are individually meaningful; grouping into a struct would
     // reduce clarity for this inner download loop.
     #[allow(clippy::too_many_arguments)]
@@ -319,12 +541,13 @@ impl BtDownloadCommand {
         // pieces did not arrive in index order. The write-back cache also
         // coalesces adjacent pieces before flushing (C++ WrDiskCache usage).
         // Multi-file torrents go through the coalesced per-file writer below.
-        let cache_mb: Option<usize> = Some(16);
+        let cache_size_bytes = self.group.recover().options().disk_cache_size_bytes();
         let raw_writer: Box<dyn SeekableDiskWriter> = if self.multi_file_layout.is_none() {
-            Box::new(CachedDiskWriter::new(
+            Box::new(CachedDiskWriter::new_with_mmap_bytes(
                 &self.output_path,
                 Some(total_size),
-                cache_mb,
+                cache_size_bytes,
+                false,
             ))
         } else {
             Box::new(
@@ -466,6 +689,10 @@ impl BtDownloadCommand {
 
         // Phase 14 - B1: Initialize endgame state for this download session
         let mut endgame_state = EndgameState::new();
+        let request_timeout = {
+            let group = self.group.recover();
+            Duration::from_secs(group.options().bt_request_timeout.max(1))
+        };
 
         // G1: Snub detection state - track last data received time per peer index
         let mut peer_last_data_time: HashMap<PeerKey, Instant> = HashMap::new();
@@ -533,16 +760,6 @@ impl BtDownloadCommand {
                     endgame_state.exit_endgame();
                 }
                 break;
-            }
-
-            // With no connected peers, keep the torrent alive for tracker,
-            // DHT, PEX, or incoming-peer discovery. A configured
-            // `bt-stop-timeout` is checked at the top of each cycle and will
-            // terminate this wait when the no-progress interval expires.
-            if active_connections.is_empty() && web_seed_manager.is_none() {
-                debug!("[BT] No peers available, waiting for peer discovery...");
-                tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
-                continue;
             }
 
             // Phase 14 - B1: Check if we should enter endgame mode
@@ -689,8 +906,8 @@ impl BtDownloadCommand {
             }
 
             // DHTGetPeersCommand counterpart. The lookup runs in a background
-            // task and this poll never waits on network I/O, so DHT timeouts do
-            // not stall piece scheduling or halt detection.
+            // task and publishes its result through an event slot, so DHT
+            // timeouts do not stall piece scheduling or halt detection.
             self.dht_periodic_lookup
                 .set_peer_limits(self.bt_runtime.min_peers(), self.bt_runtime.max_peers());
             let mut dht_peers = Vec::new();
@@ -746,6 +963,39 @@ impl BtDownloadCommand {
                     .on_lookup_completed(self.tracked_peer_count());
             }
 
+            // With no connected peers, keep the torrent alive for tracker,
+            // DHT, PEX, or incoming-peer discovery. The wait is driven by a
+            // socket/message event, a lifecycle notification, a completed DHT
+            // lookup, or the next protocol/stop-timeout deadline.
+            if active_connections.is_empty() && web_seed_manager.is_none() {
+                debug!("[BT] No peers available, waiting for peer discovery...");
+                let deadline =
+                    self.next_peer_event_deadline(active_connections, stop_timeout.deadline());
+                let event = self.wait_for_peer_event(active_connections, deadline).await;
+                let incoming = Self::apply_peer_wait_event(
+                    event,
+                    active_connections,
+                    &mut peer_tracker,
+                    pex_enabled_peers,
+                    &mut peer_last_data_time,
+                    &mut self.allowed_fast_sent_peers,
+                    &mut self.suggest_sent_counts,
+                    &mut endgame_state,
+                    self.choking_algo.as_mut(),
+                    &self.peer_storage,
+                );
+                if let Some(incoming) = incoming {
+                    self.admit_incoming_peer(
+                        active_connections,
+                        incoming,
+                        piece_length,
+                        total_size,
+                    );
+                }
+                Self::send_due_keepalives(active_connections).await;
+                continue;
+            }
+
             let remaining = piece_picker.remaining_count();
             let selection = piece_selector.select_next_piece(&mut piece_picker, remaining);
 
@@ -753,7 +1003,30 @@ impl BtDownloadCommand {
                 Some(idx) => idx,
                 None => {
                     tracing::debug!("[BT] No piece available, waiting...");
-                    tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
+                    let deadline =
+                        self.next_peer_event_deadline(active_connections, stop_timeout.deadline());
+                    let event = self.wait_for_peer_event(active_connections, deadline).await;
+                    let incoming = Self::apply_peer_wait_event(
+                        event,
+                        active_connections,
+                        &mut peer_tracker,
+                        pex_enabled_peers,
+                        &mut peer_last_data_time,
+                        &mut self.allowed_fast_sent_peers,
+                        &mut self.suggest_sent_counts,
+                        &mut endgame_state,
+                        self.choking_algo.as_mut(),
+                        &self.peer_storage,
+                    );
+                    if let Some(incoming) = incoming {
+                        self.admit_incoming_peer(
+                            active_connections,
+                            incoming,
+                            piece_length,
+                            total_size,
+                        );
+                    }
+                    Self::send_due_keepalives(active_connections).await;
                     continue;
                 }
             };
@@ -773,30 +1046,81 @@ impl BtDownloadCommand {
             let mut piece_ok = false;
 
             // Phase 14 - B1: Use endgame-aware download when in endgame mode
-            let download_result = if endgame_state.is_endgame_active() {
-                info!(
-                    "[BT] Endgame: downloading piece {} with duplicate requests ({} peers available)",
-                    next_piece_idx,
-                    active_connections.len()
-                );
-                BtMessageHandler::download_piece_blocks_endgame_with_sources(
-                    active_connections,
-                    next_piece_idx as u32,
-                    actual_piece_len,
-                    num_blocks,
-                    &mut endgame_state,
-                    self.dht_engine.clone(),
-                )
-                .await
-            } else {
-                BtMessageHandler::download_piece_blocks_with_sources(
-                    active_connections,
-                    next_piece_idx as u32,
-                    actual_piece_len,
-                    num_blocks,
-                    self.dht_engine.clone(),
-                )
-                .await
+            // A block read can otherwise wait for the full protocol timeout
+            // after pause/remove. Keep the low-level message handler focused
+            // on peer I/O and let the owning RequestGroup interrupt the whole
+            // piece future through its lifecycle notification.
+            let lifecycle_notify = self.group.recover().lifecycle_notifier();
+            let lifecycle_wait = lifecycle_notify.notified();
+            tokio::pin!(lifecycle_wait);
+            lifecycle_wait.as_mut().enable();
+            let piece_download = async {
+                if endgame_state.is_endgame_active() {
+                    info!(
+                        "[BT] Endgame: downloading piece {} with duplicate requests ({} peers available)",
+                        next_piece_idx,
+                        active_connections.len()
+                    );
+                    BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
+                        active_connections,
+                        next_piece_idx as u32,
+                        actual_piece_len,
+                        num_blocks,
+                        &mut endgame_state,
+                        self.dht_engine.clone(),
+                        Some(self.progress.as_ref()),
+                        request_timeout,
+                    )
+                    .await
+                } else {
+                    BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout(
+                        active_connections,
+                        next_piece_idx as u32,
+                        actual_piece_len,
+                        num_blocks,
+                        self.dht_engine.clone(),
+                        Some(self.progress.as_ref()),
+                        request_timeout,
+                    )
+                    .await
+                }
+            };
+            let download_result = tokio::select! {
+                result = piece_download => result,
+                _ = &mut lifecycle_wait => {
+                    let halt_requested = {
+                        let group = self.group.recover();
+                        group.is_force_halt_requested() || group.is_halt_requested()
+                    };
+                    if !halt_requested {
+                        // Save-session and other non-terminal lifecycle
+                        // updates share this notifier. Retry the interrupted
+                        // piece so its normal completion boundary can consume
+                        // the requested checkpoint.
+                        continue;
+                    }
+
+                    writer.flush().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
+                    })?;
+                    writer.close().await.map_err(|error| {
+                        Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                    })?;
+                    if let Some(checkpoint) = self.checkpoint.as_mut() {
+                        checkpoint
+                            .save(&piece_picker.export_bitfield(), self.completed_bytes)
+                            .await
+                            .map_err(|error| {
+                                Aria2Error::FileIo(format!(
+                                    "Failed to save halted BT checkpoint: {error}"
+                                ))
+                            })?;
+                        self.group.recover().take_save_control_file_request();
+                    }
+                    return Err(Aria2Error::DownloadFailed(
+                        "BitTorrent download halted".into(),
+                    ));
+                }
             };
 
             match download_result {
@@ -864,18 +1188,23 @@ impl BtDownloadCommand {
                         "[BT] All blocks received for piece {}, verifying...",
                         next_piece_idx
                     );
-                    if piece_manager.verify_piece_hash(next_piece_idx as u32, &piece_data) {
+                    let expected_hash = piece_manager.expected_piece_hash(next_piece_idx as u32);
+                    let (piece_verified, piece_data) =
+                        super::verify_piece_hash_async(expected_hash, piece_data).await?;
+                    if piece_verified {
                         tracing::info!("[BT] Piece {} verified OK", next_piece_idx);
                         piece_manager.mark_piece_complete(next_piece_idx as u32);
                         piece_picker.mark_completed(next_piece_idx as u32);
 
                         let piece_bytes = bytes::Bytes::from(piece_data);
                         if let Some(ref layout) = self.multi_file_layout {
-                            write_piece_to_multi_files_coalesced(
+                            let max_open_files = self.group.recover().options().bt_max_open_files;
+                            crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit(
                                 layout,
                                 next_piece_idx as u32,
                                 &piece_bytes,
                                 layout.piece_length(),
+                                max_open_files,
                             )
                             .await?;
                         } else {
@@ -895,8 +1224,12 @@ impl BtDownloadCommand {
                             let g = self.group.recover();
                             g.set_bt_bitfield(Some(bitfield.clone()));
                         }
-                        self.persist_checkpoint_after_piece(&mut writer, &bitfield)
-                            .await?;
+                        self.persist_checkpoint_after_piece(
+                            &mut writer,
+                            &bitfield,
+                            piece_data_len as u64,
+                        )
+                        .await?;
 
                         BtPeerInteraction::broadcast_have(
                             active_connections,
@@ -908,6 +1241,7 @@ impl BtDownloadCommand {
                         // P1 integration: periodically save download progress
                         self.maybe_save_progress(
                             meta,
+                            &bitfield,
                             piece_length,
                             total_size,
                             num_pieces,
@@ -1022,6 +1356,7 @@ impl BtDownloadCommand {
     fn maybe_save_progress(
         &self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        bitfield: &[u8],
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
@@ -1032,44 +1367,39 @@ impl BtDownloadCommand {
         if let Some(ref mgr) = self.progress_manager
             && last_progress_save.elapsed() >= self.progress_save_interval
         {
-            let progress = BtProgress {
-                info_hash: meta.info_hash.bytes,
-                bitfield: vec![],
-                peers: vec![],
-                stats: ProgressDownloadStats {
+            let progress = progress_snapshot(
+                meta.info_hash.bytes,
+                bitfield,
+                piece_length,
+                total_size,
+                num_pieces,
+                ProgressDownloadStats {
                     downloaded_bytes: self.completed_bytes,
                     uploaded_bytes: self.total_uploaded,
                     upload_speed: 0.0,
                     download_speed: 0.0,
                     elapsed_seconds: start_time.elapsed().as_secs(),
                 },
-                piece_length,
-                total_size,
-                num_pieces,
-                upload_length: self.total_uploaded,
-                in_flight_pieces: vec![],
-                is_torrent: true,
-                save_time: std::time::SystemTime::now(),
-                version: 1,
-            };
+            );
 
-            if let Err(e) = mgr.save_progress(&meta.info_hash.bytes, &progress) {
-                warn!(error = %e, "Failed to save BT progress");
-            } else {
-                debug!(
-                    pieces_completed = next_piece_idx + 1,
-                    total_pieces = num_pieces,
-                    "BT progress saved successfully"
-                );
+            match mgr.save_progress(&meta.info_hash.bytes, &progress) {
+                Ok(()) => {
+                    *last_progress_save = Instant::now();
+                    debug!(
+                        pieces_completed = next_piece_idx + 1,
+                        total_pieces = num_pieces,
+                        "BT progress saved successfully"
+                    );
+                }
+                Err(e) => warn!(error = %e, "Failed to save BT progress"),
             }
-            *last_progress_save = Instant::now();
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::BtStopTimeoutState;
+    use super::{BtStopTimeoutState, ProgressDownloadStats, progress_snapshot};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1091,5 +1421,30 @@ mod tests {
         assert!(!state.should_halt(Some(2), 1, start + Duration::from_secs(1)));
         assert!(!state.should_halt(Some(2), 1, start + Duration::from_secs(2)));
         assert!(state.should_halt(Some(2), 1, start + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn progress_snapshot_preserves_completed_bitfield() {
+        let snapshot = progress_snapshot(
+            [0x11; 20],
+            &[0b1100_0000],
+            4,
+            8,
+            2,
+            ProgressDownloadStats {
+                downloaded_bytes: 8,
+                uploaded_bytes: 3,
+                upload_speed: 0.0,
+                download_speed: 0.0,
+                elapsed_seconds: 9,
+            },
+        );
+
+        assert_eq!(snapshot.bitfield, vec![0b1100_0000]);
+        assert_eq!(snapshot.piece_length, 4);
+        assert_eq!(snapshot.total_size, 8);
+        assert_eq!(snapshot.num_pieces, 2);
+        assert_eq!(snapshot.upload_length, 3);
+        assert_eq!(snapshot.stats.downloaded_bytes, 8);
     }
 }

@@ -10,7 +10,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 use url::Url;
 
-use crate::checksum::checksum::{Checksum, verify_file};
+use crate::checksum::checksum::Checksum;
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
@@ -201,6 +201,9 @@ impl FtpDownloadCommand {
             if bytes_read == 0 {
                 break;
             }
+            // Refresh the inactivity clock when bytes arrive from the proxy,
+            // before any disk write or rate limiting can delay the loop.
+            self.group.recover().record_network_activity();
             if let Err(error) = writer.write(&buffer[..bytes_read]).await {
                 self.finalize_partial_writer(&mut writer).await;
                 return Err(FtpAttemptError::from(error));
@@ -226,7 +229,7 @@ impl FtpDownloadCommand {
             ))));
         }
 
-        let finalized_data = match writer.finalize().await {
+        let mut finalized_data = match writer.finalize().await {
             Ok(data) => data,
             Err(error) => {
                 self.flush_checkpoint().await;
@@ -242,9 +245,18 @@ impl FtpDownloadCommand {
                 })?;
             let checksum = Checksum::new(hash_type, &expected)?;
             let verified = if in_memory_download {
-                checksum.verify(&finalized_data)
+                let (data, verified) = checksum.verify_async(finalized_data).await?;
+                finalized_data = data;
+                verified
             } else {
-                verify_file(&self.output_path, &checksum).await?
+                crate::checksum::check_integrity::man::enqueue_file_checksum_for_group(
+                    &crate::checksum::check_integrity::man::shared(),
+                    std::sync::Arc::clone(&self.group),
+                    &self.output_path,
+                    self.completed_bytes,
+                    checksum,
+                )
+                .await?
             };
             if !verified {
                 return Err(FtpAttemptError::from(Aria2Error::Checksum(format!(

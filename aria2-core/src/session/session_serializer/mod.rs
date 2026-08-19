@@ -47,7 +47,8 @@
 
 // Re-export core types from session_entry module
 pub use super::session_entry::{
-    SessionEntry, decode_hex, download_options_to_map, escape_uri, unescape_uri,
+    SessionEntry, decode_hex, download_options_to_map, download_options_to_map_with_snapshot,
+    escape_uri, unescape_uri,
 };
 
 mod deserialization;
@@ -58,5 +59,10 @@ mod tests;
 
 // Re-export all public functions from sub-modules
 pub use deserialization::deserialize;
-pub use file_io::{load_from_file, save_to_file, save_to_file_with_entries};
-pub use serialize::{group_to_entry, serialize_groups};
+pub use file_io::{
+    load_from_file, save_to_file, save_to_file_with_entries, save_to_file_with_results,
+};
+pub(crate) use serialize::should_save_download_result;
+pub use serialize::{
+    download_result_to_entry, group_to_entry, serialize_groups, serialize_groups_with_results,
+};

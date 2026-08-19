@@ -4,7 +4,6 @@ use super::*;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use crate::engine::resume_data::ResumeData;
 use crate::request::request_group::{
@@ -674,28 +673,6 @@ async fn test_session_cleanup_removes_all_files() {
 }
 
 #[tokio::test]
-async fn test_session_custom_interval() {
-    let session_dir = create_test_session_dir();
-
-    let persistence = SessionPersistence::new(&session_dir).with_interval(30);
-
-    assert_eq!(
-        persistence.auto_save_interval,
-        Duration::from_secs(30),
-        "Custom interval should be set"
-    );
-
-    // Test minimum interval enforcement
-    let short_interval = SessionPersistence::new(&session_dir).with_interval(1);
-    assert!(
-        short_interval.auto_save_interval >= Duration::from_secs(10),
-        "Interval should be at least 10 seconds"
-    );
-
-    let _ = fs::remove_dir_all(&session_dir);
-}
-
-#[tokio::test]
 async fn test_resume_data_roundtrip_via_persistence() {
     let session_dir = create_test_session_dir();
     let mut persistence = SessionPersistence::new(&session_dir);
@@ -1011,68 +988,6 @@ async fn test_cookie_persist_integration() {
         .find(|c| c.name == "session_id")
         .expect("Should find session_id cookie from parent domain");
     assert_eq!(session_cookie.value, "abc123");
-
-    // Clean up
-    let _ = fs::remove_dir_all(&session_dir);
-}
-
-/// Test K2.4 #4: Auto-save with custom interval works correctly.
-///
-/// Verifies that non-default intervals are accepted and stored properly,
-/// including enforcement of minimum interval requirement.
-#[tokio::test]
-async fn test_auto_save_with_custom_interval() {
-    let session_dir = create_test_session_dir();
-
-    // Test custom interval of 30 seconds
-    let persistence_30s = SessionPersistence::new(&session_dir).with_interval(30);
-    assert_eq!(
-        persistence_30s.auto_save_interval,
-        Duration::from_secs(30),
-        "Custom 30s interval should be set"
-    );
-
-    // Test very short interval gets clamped to minimum (10 seconds)
-    let persistence_too_short = SessionPersistence::new(&session_dir).with_interval(1);
-    assert!(
-        persistence_too_short.auto_save_interval >= Duration::from_secs(10),
-        "Interval below minimum should be clamped to 10s"
-    );
-
-    // Test exact minimum interval
-    let persistence_exact_min = SessionPersistence::new(&session_dir).with_interval(10);
-    assert_eq!(
-        persistence_exact_min.auto_save_interval,
-        Duration::from_secs(10),
-        "Exact minimum interval (10s) should be accepted"
-    );
-
-    // Test large interval
-    let persistence_large = SessionPersistence::new(&session_dir).with_interval(300); // 5 minutes
-    assert_eq!(
-        persistence_large.auto_save_interval,
-        Duration::from_secs(300),
-        "Large interval (300s) should be accepted"
-    );
-
-    // Verify auto-save is enabled by default
-    let persistence_default = SessionPersistence::new(&session_dir);
-    assert!(
-        persistence_default.auto_save_enabled,
-        "Auto-save should be enabled by default"
-    );
-    assert_eq!(
-        persistence_default.auto_save_interval,
-        Duration::from_secs(DEFAULT_AUTO_SAVE_INTERVAL_SECS),
-        "Default interval should be 60 seconds"
-    );
-
-    // Verify without_auto_save disables it
-    let persistence_disabled = SessionPersistence::new(&session_dir).without_auto_save();
-    assert!(
-        !persistence_disabled.auto_save_enabled,
-        "Auto-save should be disabled after without_auto_save()"
-    );
 
     // Clean up
     let _ = fs::remove_dir_all(&session_dir);

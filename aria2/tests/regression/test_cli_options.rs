@@ -673,8 +673,8 @@ fn regression_v_triggers_version() {
     assert!(
         version_output.starts_with(&format!(
             "{} {}",
-            aria2_protocol::identity::PRODUCT_NAME,
-            aria2_protocol::identity::PRODUCT_VERSION
+            aria2::identity::PRODUCT_NAME,
+            aria2::identity::PRODUCT_VERSION
         )),
         "--version must use the product version number"
     );
@@ -877,8 +877,6 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-peer-blocklist",
         "bt-tracker-source",
         "bt-tracker-update-interval",
-        "dht-message-path",
-        "enable-lpd",
         "enable-public-trackers",
         "enable-utp",
         "log-backup-count",
@@ -893,7 +891,6 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "rpc-listen-address",
         "save-server-stat-interval",
         "secure-falloc",
-        "server-stat-file",
         "utp-listen-port",
     ];
 
@@ -901,6 +898,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         .lines()
         .map(str::trim)
         .filter(|name| !name.is_empty() && !name.starts_with('#'))
+        .map(OptionRegistry::canonical_name)
         .collect::<BTreeSet<_>>();
     let registry = OptionRegistry::new();
     let registered = registry
@@ -913,10 +911,10 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         .copied()
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(baseline.len(), 214, "compatibility inventory changed");
+    assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        234,
+        230,
         "all-features registry inventory changed"
     );
     assert_eq!(
@@ -1084,6 +1082,10 @@ fn regression_registry_default_values() {
     );
     assert_eq!(
         registry.get("timeout").unwrap().default_value(),
+        &OptionValue::Int(60)
+    );
+    assert_eq!(
+        registry.get("auto-save-interval").unwrap().default_value(),
         &OptionValue::Int(60)
     );
     assert_eq!(
@@ -1307,6 +1309,22 @@ fn regression_split_range_validation() {
     let mut parser3 = ConfigParser::new();
     parser3.parse_cli_args(&["--split=100"]);
     assert_eq!(parser3.get_i64("split").unwrap(), 100);
+}
+
+/// Test: auto-save-interval keeps aria2's 0..600 second range.
+#[test]
+fn regression_auto_save_interval_range_validation() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--auto-save-interval=0"]);
+    assert_eq!(parser.get_i64("auto-save-interval"), Some(0));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--auto-save-interval=600"]);
+    assert_eq!(parser.get_i64("auto-save-interval"), Some(600));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--auto-save-interval=601"]);
+    assert!(parser.has_errors());
 }
 
 /// Test: max-connection-per-server range validation (1-16).

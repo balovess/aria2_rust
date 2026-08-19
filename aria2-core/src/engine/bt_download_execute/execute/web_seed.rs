@@ -1,7 +1,7 @@
 use tracing::{info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced;
+use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit;
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -29,15 +29,25 @@ pub(super) async fn try_web_seed_fallback(
         next_piece_idx
     );
 
-    match ws_mgr.request_piece(next_piece_idx as u32).await {
+    match ws_mgr
+        .request_piece_with_activity(next_piece_idx as u32, Some(cmd.progress.as_ref()))
+        .await
+    {
         Ok(web_seed_data) => {
+            if !web_seed_data.is_empty() {
+                cmd.progress.record_network_activity();
+            }
             info!(
                 "[BT] Piece {} downloaded from web seed ({} bytes)",
                 next_piece_idx,
                 web_seed_data.len()
             );
-            // Verify hash
-            if piece_manager.verify_piece_hash(next_piece_idx as u32, &web_seed_data) {
+            // Verify the piece on a bounded blocking worker so a large web
+            // seed response cannot monopolize the download task.
+            let expected_hash = piece_manager.expected_piece_hash(next_piece_idx as u32);
+            let (verified, web_seed_data) =
+                super::verify_piece_hash_async(expected_hash, web_seed_data).await?;
+            if verified {
                 tracing::info!("[BT] Piece {} from web seed verified OK", next_piece_idx);
                 piece_manager.mark_piece_complete(next_piece_idx as u32);
                 piece_picker.mark_completed(next_piece_idx as u32);
@@ -45,11 +55,13 @@ pub(super) async fn try_web_seed_fallback(
                 let web_seed_len = web_seed_data.len() as u64;
                 let web_seed_bytes = bytes::Bytes::from(web_seed_data);
                 if let Some(ref layout) = cmd.multi_file_layout {
-                    write_piece_to_multi_files_coalesced(
+                    let max_open_files = cmd.group.recover().options().bt_max_open_files;
+                    write_piece_to_multi_files_coalesced_with_limit(
                         layout,
                         next_piece_idx as u32,
                         &web_seed_bytes,
                         layout.piece_length(),
+                        max_open_files,
                     )
                     .await?;
                 } else {
@@ -67,7 +79,7 @@ pub(super) async fn try_web_seed_fallback(
                 }
 
                 cmd.completed_bytes += web_seed_len;
-                cmd.persist_checkpoint_after_piece(writer, &bitfield)
+                cmd.persist_checkpoint_after_piece(writer, &bitfield, web_seed_len)
                     .await?;
                 Ok(true)
             } else {
