@@ -157,7 +157,6 @@ dependencies = [
  "libc",
  "mimalloc",
  "serde_json",
- "signal-hook",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

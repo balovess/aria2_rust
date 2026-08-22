@@ -9,5 +9,5 @@ pub mod daemon;
 pub mod identity;
 pub mod ui;
 
-pub use daemon::{DaemonConfig, DaemonError, Daemonizer, PidFileManager};
+pub use daemon::{DaemonConfig, DaemonError, Daemonizer, PidFileGuard, PidFileManager};
 pub use ui::progress_bar;

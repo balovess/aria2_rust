@@ -35,7 +35,7 @@ use aria2_core::validation::protocol_detector::DetectedInput;
 use tracing::{info, warn};
 
 // Daemon support (module declared in lib.rs as `pub mod daemon;`)
-use crate::daemon::{DaemonConfig, Daemonizer, PidFileManager};
+use crate::daemon::{DaemonConfig, Daemonizer, PidFileGuard, PidFileManager, is_daemon_child};
 
 // Sub-modules
 pub mod cli;
@@ -56,6 +56,10 @@ pub struct App {
     engine: Arc<Mutex<Option<aria2_core::engine::download_engine::DownloadEngine>>>,
     request_man: Arc<RequestGroupMan>,
     detected_inputs: Vec<DetectedInput>,
+    /// Whether the user explicitly supplied the generic `--timeout` option.
+    /// The registry keeps the HTTP/FTP-compatible default at 60 seconds, but
+    /// an omitted generic timeout must not impose a BT-wide inactivity halt.
+    explicit_timeout: bool,
 }
 
 fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
@@ -78,6 +82,7 @@ impl App {
             engine: Arc::new(Mutex::new(None)),
             request_man,
             detected_inputs: Vec::new(),
+            explicit_timeout: false,
         }
     }
 
@@ -138,14 +143,15 @@ impl App {
         }
 
         // Check daemon mode early - must happen before any output
-        let daemon_mode = self.get_opt_bool("daemon").await.unwrap_or(false);
+        let daemon_child = is_daemon_child();
+        let daemon_mode = daemon_child || self.get_opt_bool("daemon").await.unwrap_or(false);
         let pid_file = self.get_opt_str("pid-file").await.map(PathBuf::from);
 
-        if daemon_mode {
+        if daemon_mode && !daemon_child {
             // Check if daemon is already running
             if let Some(ref path) = pid_file {
                 let pid_mgr = PidFileManager::new(path.clone());
-                if let Some(existing_pid) = pid_mgr.check_existing() {
+                if let Some(existing_pid) = pid_mgr.check_existing_for_current_executable() {
                     eprintln!(
                         "{}",
                         format!("Daemon already running with PID: {}", existing_pid).yellow()
@@ -238,6 +244,15 @@ impl App {
 
             info!("Daemon started successfully");
         }
+
+        // `daemonize()` only returns in the daemon child. The parent exits
+        // inside the platform implementation, so this guard is created with
+        // the actual daemon PID and remains alive for App::run.
+        let _pid_file_guard = if daemon_mode {
+            pid_file.map(|path| PidFileGuard::new(path, std::process::id()))
+        } else {
+            None
+        };
 
         // In daemon mode, logging was already re-initialized after daemonization above.
         if !daemon_mode {
@@ -378,8 +393,8 @@ impl App {
             match self.start_rpc_server(group_man, engine_cmd_tx).await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
-                    warn!("RPC server failed to start: {}", e);
-                    None
+                    eprintln!("Failed to start RPC server: {}", e);
+                    return 1;
                 }
             }
         } else {

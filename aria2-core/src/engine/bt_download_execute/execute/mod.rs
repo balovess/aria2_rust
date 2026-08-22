@@ -39,7 +39,7 @@ use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::request::request_group::GroupId;
+use crate::request::request_group::{ActiveConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_PIECE_HASH_WORKERS: usize = 4;
@@ -139,6 +139,15 @@ fn completed_piece_bytes(indices: &[usize], piece_length: u32, total_size: u64) 
                 .min(piece_length as u64)
         })
         .sum()
+}
+
+fn initial_bt_progress(check_integrity: bool, checkpoint_completed_length: u64) -> (u64, u64) {
+    let command_completed_length = if check_integrity {
+        0
+    } else {
+        checkpoint_completed_length
+    };
+    (command_completed_length, checkpoint_completed_length)
 }
 
 impl BtDownloadCommand {
@@ -271,6 +280,9 @@ impl BtDownloadCommand {
         conn.allocate_session_resource(piece_length, total_size);
         active_connections.push(conn);
         self.bt_runtime.set_connections(active_connections.len());
+        self.group
+            .recover()
+            .set_active_connection_count(active_connections.len());
         info!("[BT] Admitted incoming peer {}", endpoint);
     }
 }
@@ -283,6 +295,7 @@ impl Command for BtDownloadCommand {
     }
 
     async fn execute(&mut self) -> Result<()> {
+        let _connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
         if !self.started {
             self.group.recover_mut().start()?;
             self.started = true;
@@ -380,12 +393,14 @@ impl Command for BtDownloadCommand {
             meta.info_hash.bytes,
         )
         .await?;
-        self.completed_bytes = if self.check_integrity {
-            0
-        } else {
-            checkpoint.completed_length()
-        };
-        self.progress.set_completed_length(self.completed_bytes);
+        let checkpoint_completed_length = checkpoint.completed_length();
+        let (command_completed_length, visible_completed_length) =
+            initial_bt_progress(self.check_integrity, checkpoint_completed_length);
+        self.completed_bytes = command_completed_length;
+        // Integrity checking may take a long time for a large payload. Keep
+        // the last durable piece progress visible while it runs; the
+        // verified-piece result below replaces it if corruption is found.
+        self.progress.set_completed_length(visible_completed_length);
         self.group
             .recover()
             .set_bt_bitfield(checkpoint.bitfield().map(ToOwned::to_owned));
@@ -1089,8 +1104,8 @@ impl BtDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::{
-        checkpoint_save_due, completed_piece_bytes, legacy_progress_piece_indices,
-        parse_listen_ports,
+        checkpoint_save_due, completed_piece_bytes, initial_bt_progress,
+        legacy_progress_piece_indices, parse_listen_ports,
     };
     use crate::engine::bt_progress_info_file::BtProgress;
     use std::time::{Duration, Instant};
@@ -1159,5 +1174,11 @@ mod tests {
         };
 
         assert!(legacy_progress_piece_indices(&progress, 4, 10, 3).is_none());
+    }
+
+    #[test]
+    fn integrity_check_keeps_durable_progress_visible_while_recounting() {
+        assert_eq!(initial_bt_progress(true, 1024), (0, 1024));
+        assert_eq!(initial_bt_progress(false, 1024), (1024, 1024));
     }
 }

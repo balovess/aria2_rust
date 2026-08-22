@@ -47,7 +47,7 @@ fn sync_peer_snapshots(
     group: &crate::request::request_group::RequestGroup,
     active_connections: &[BtPeerConn],
 ) {
-    let snapshots = active_connections
+    let snapshots: Vec<BtPeerSnapshot> = active_connections
         .iter()
         .filter_map(|conn| {
             Some(BtPeerSnapshot {
@@ -72,6 +72,7 @@ fn sync_peer_snapshots(
             })
         })
         .collect();
+    group.set_active_connection_count(snapshots.len());
     group.set_bt_peer_snapshots(snapshots);
 }
 

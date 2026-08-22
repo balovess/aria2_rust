@@ -150,6 +150,15 @@ impl DownloadEvent {
 pub trait DownloadEventListener: Send + Sync {
     /// Called for every fired download event.
     fn on_download_event(&self, event: DownloadEvent, gid: &str);
+
+    /// Whether the observer still has a live destination.
+    ///
+    /// Process-wide buses can outlive a server instance. Implementations that
+    /// hold a weak destination should return false after that destination is
+    /// dropped so the bus can release the stale observer.
+    fn is_alive(&self) -> bool {
+        true
+    }
 }
 
 // ============================================================================
@@ -253,6 +262,7 @@ impl DownloadEventHooks {
     /// live for the lifetime of the process.
     pub fn add_listener(&self, listener: Arc<dyn DownloadEventListener>) {
         let mut listeners = self.listeners.recover_mut();
+        listeners.retain(|listener| listener.is_alive());
         listeners.push(listener);
         debug!(
             count = listeners.len(),
@@ -282,7 +292,8 @@ impl DownloadEventHooks {
         // Snapshot under a short read lock so a listener callback can never
         // deadlock against `add_listener`.
         let listeners: Vec<Arc<dyn DownloadEventListener>> = {
-            let guard = self.listeners.recover();
+            let mut guard = self.listeners.recover_mut();
+            guard.retain(|listener| listener.is_alive());
             if guard.is_empty() {
                 // Nothing to do — and importantly, do not pollute the
                 // de-duplication ledger when no one is listening.
@@ -742,6 +753,34 @@ mod tests {
         hooks.add_listener(Arc::new(RecordingListener::default()));
         hooks.add_listener(Arc::new(RecordingListener::default()));
         assert_eq!(hooks.listener_count(), 2);
+    }
+
+    struct ToggleListener {
+        alive: std::sync::atomic::AtomicBool,
+    }
+
+    impl DownloadEventListener for ToggleListener {
+        fn on_download_event(&self, _event: DownloadEvent, _gid: &str) {}
+
+        fn is_alive(&self) -> bool {
+            self.alive.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn test_registration_prunes_dead_listeners() {
+        let hooks = DownloadEventHooks::new();
+        let stale = Arc::new(ToggleListener {
+            alive: std::sync::atomic::AtomicBool::new(true),
+        });
+        hooks.add_listener(stale.clone());
+        stale
+            .alive
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+
+        hooks.add_listener(Arc::new(RecordingListener::default()));
+
+        assert_eq!(hooks.listener_count(), 1);
     }
 
     #[test]

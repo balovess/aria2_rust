@@ -372,6 +372,15 @@ impl ConfigManager {
     pub fn parser(&self) -> &ConfigParser {
         &self.parser
     }
+
+    /// Return the source that supplied the currently effective option value.
+    ///
+    /// This is intentionally read-only metadata for application startup
+    /// decisions; runtime option mutation remains governed by the normal
+    /// global-option APIs.
+    pub async fn global_option_source(&self, name: &str) -> Option<ConfigSource> {
+        self.parser.option_source(name).cloned()
+    }
     pub fn has_errors(&self) -> bool {
         self.parser.has_errors()
     }

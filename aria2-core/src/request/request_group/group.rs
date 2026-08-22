@@ -98,6 +98,14 @@ pub struct RequestGroup {
     /// Current active BT peer snapshots for read-only consumers.
     pub bt_peer_snapshots: std::sync::RwLock<Vec<BtPeerSnapshot>>,
 
+    /// Number of currently active protocol connections.
+    ///
+    /// This is deliberately separate from `num_commands` and from option
+    /// limits such as HTTP `split` or BT `bt_max_peers`.  It is the value
+    /// exposed through the shared status snapshot and is updated by the
+    /// protocol schedulers while their real connections are active.
+    pub active_connection_count: AtomicU32,
+
     /// Download context — central metadata (file entries, piece hashes, attributes).
     /// In C++ aria2, `RequestGroup` owns `shared_ptr<DownloadContext> dctx_`.
     /// `None` until the download engine populates it.
@@ -256,6 +264,7 @@ impl RequestGroup {
             progress: Arc::new(AtomicProgress::new()),
             bt_bitfield: std::sync::RwLock::new(None),
             bt_peer_snapshots: std::sync::RwLock::new(Vec::new()),
+            active_connection_count: AtomicU32::new(0),
             download_context: std::sync::RwLock::new(None),
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),

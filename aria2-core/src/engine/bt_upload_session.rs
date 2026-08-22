@@ -126,6 +126,46 @@ impl BtUploadSession {
         self.message_validator = Some(BtMessageValidator::new(num_pieces, piece_length));
     }
 
+    /// Announce the pieces currently available from this upload peer.
+    ///
+    /// A leecher must receive availability before it can decide whether to
+    /// become interested. This is especially important for peers admitted by
+    /// the process-level incoming listener, where no download-side setup
+    /// message has been sent yet.
+    pub async fn send_piece_availability(
+        &mut self,
+        provider: &dyn PieceDataProvider,
+    ) -> Result<()> {
+        let num_pieces = provider.num_pieces();
+        if num_pieces == 0 {
+            self.conn
+                .send_message(&BtMessage::HaveNone)
+                .await
+                .map_err(|error| {
+                    crate::error::Aria2Error::Recoverable(
+                        crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
+                    )
+                })?;
+            return Ok(());
+        }
+
+        let mut bitfield = vec![0u8; (num_pieces as usize).div_ceil(8)];
+        for piece_index in 0..num_pieces {
+            if provider.has_piece(piece_index) {
+                bitfield[piece_index as usize / 8] |= 1 << (7 - piece_index % 8);
+            }
+        }
+        self.conn
+            .send_message(&BtMessage::Bitfield { data: bitfield })
+            .await
+            .map_err(|error| {
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
+                )
+            })?;
+        Ok(())
+    }
+
     pub async fn handle_incoming_messages(
         &mut self,
         provider: &dyn PieceDataProvider,

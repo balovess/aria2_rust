@@ -537,6 +537,9 @@ impl BtDownloadCommand {
         }
         self.reconcile_checked_out_peers(&checked_out, &active_connections);
         self.bt_runtime.set_connections(active_connections.len());
+        self.group
+            .recover()
+            .set_active_connection_count(active_connections.len());
 
         if active_connections.is_empty() {
             return Err(Aria2Error::Recoverable(

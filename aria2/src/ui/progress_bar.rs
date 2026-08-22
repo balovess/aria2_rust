@@ -73,6 +73,8 @@ pub struct TaskProgress {
     pub upload_speed: f64,
     /// Whether this is a BitTorrent task (affects display)
     pub is_bt: bool,
+    /// Number of currently active protocol connections.
+    pub connections: usize,
     /// Number of connected seeders (BT only)
     pub num_seeders: usize,
     /// Number of connected peers (BT only)
@@ -355,11 +357,12 @@ impl ProgressBar {
                 };
 
                 lines.push(format!(
-                    "     {} {}  ({}/{})  DL:{}{}  Time:{}",
+                    "     {} {}  ({}/{})  CN:{}  DL:{}{}  Time:{}",
                     bar,
                     format_percentage(task),
                     format_bytes(task.completed_length),
                     format_bytes(task.total_length),
+                    task.connections,
                     format_speed(task.download_speed),
                     eta_str,
                     aria2_core::util::format::format_duration_short(task.elapsed.as_secs())
@@ -640,6 +643,7 @@ mod tests {
             download_speed: 2.34 * 1024.0 * 1024.0, // 2.34 MiB/s
             upload_speed: 0.5 * 1024.0 * 1024.0,
             is_bt: false,
+            connections: 1,
             num_seeders: 0,
             num_peers: 0,
             uploaded: 0,
@@ -657,6 +661,7 @@ mod tests {
             download_speed: 5.6 * 1024.0 * 1024.0,
             upload_speed: 1.2 * 1024.0 * 1024.0,
             is_bt: true,
+            connections: 12,
             num_seeders: 3,
             num_peers: 12,
             uploaded: 1700 * 1024 * 1024,

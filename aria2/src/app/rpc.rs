@@ -148,6 +148,10 @@ impl DownloadEventListener for CoreEventBridge {
             }
         }
     }
+
+    fn is_alive(&self) -> bool {
+        self.engine.strong_count() > 0
+    }
 }
 
 impl App {

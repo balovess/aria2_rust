@@ -31,34 +31,13 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
-use std::sync::{Arc, OnceLock};
-
 use tracing::{debug, error, info, warn};
 
-/// Global flag indicating shutdown was requested via signal.
-#[cfg(unix)]
-static SHUTDOWN_REQUESTED: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+const DAEMON_CHILD_ENV: &str = "ARIA2_DAEMON_CHILD";
 
-#[cfg(not(unix))]
-#[allow(dead_code)] // Stub for non-Unix platforms; Unix uses OnceLock<Arc<AtomicBool>> above
-static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
-
-/// Check if shutdown was requested via signal.
-#[cfg(unix)]
-#[allow(dead_code)] // Public API for checking shutdown state; used by external callers
-pub fn is_shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED
-        .get()
-        .map(|flag| flag.load(Ordering::Relaxed))
-        .unwrap_or(false)
-}
-
-#[cfg(not(unix))]
-#[allow(dead_code)]
-pub fn is_shutdown_requested() -> bool {
-    SHUTDOWN_REQUESTED.load(Ordering::Relaxed)
+/// Return whether this process was spawned as the detached daemon child.
+pub fn is_daemon_child() -> bool {
+    std::env::var_os(DAEMON_CHILD_ENV).is_some_and(|value| value == "1")
 }
 
 /// Configuration for daemon mode.
@@ -121,11 +100,11 @@ pub enum DaemonError {
     #[error("Failed to change directory: {0}")]
     ChdirFailed(String),
 
-    #[error("Failed to set up signal handlers: {0}")]
-    SignalSetup(String),
-
     #[error("Platform not supported for daemon mode")]
     PlatformNotSupported,
+
+    #[error("A daemon is already running with PID {0}")]
+    AlreadyRunning(u32),
 
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
@@ -285,9 +264,6 @@ impl Daemonizer {
         // Step 8: Write PID file
         self.write_pid_file()?;
 
-        // Step 9: Set up signal handlers
-        self.setup_signal_handlers_unix()?;
-
         info!("Daemonization complete");
         Ok(())
     }
@@ -381,27 +357,6 @@ impl Daemonizer {
         debug!("Closed extra file descriptors");
     }
 
-    /// Set up signal handlers for graceful shutdown on Unix.
-    #[cfg(unix)]
-    fn setup_signal_handlers_unix(&self) -> DaemonResult<()> {
-        use signal_hook::consts::signal::{SIGHUP, SIGINT, SIGTERM};
-        use signal_hook::flag;
-
-        // Initialize the shutdown flag once
-        let shutdown_flag = SHUTDOWN_REQUESTED.get_or_init(|| Arc::new(AtomicBool::new(false)));
-
-        // Register signal handlers
-        flag::register(SIGTERM, shutdown_flag.clone())
-            .inspect_err(|e| error!("SIGTERM handler: {e}"))?;
-        flag::register(SIGINT, shutdown_flag.clone())
-            .inspect_err(|e| error!("SIGINT handler: {e}"))?;
-        flag::register(SIGHUP, shutdown_flag.clone())
-            .inspect_err(|e| error!("SIGHUP handler: {e}"))?;
-
-        debug!("Signal handlers registered for SIGTERM, SIGINT, SIGHUP");
-        Ok(())
-    }
-
     /// Windows-specific daemonization using detached process.
     #[cfg(windows)]
     fn daemonize_windows(&self) -> DaemonResult<()> {
@@ -418,12 +373,13 @@ impl Daemonizer {
         // Get current arguments (excluding the program name)
         let args: Vec<String> = std::env::args()
             .skip(1)
-            .filter(|arg| arg != "--daemon" && arg != "-D")
+            .filter(|arg| !is_daemon_argument(arg))
             .collect();
 
         // Build the command for the detached process
         let mut cmd = Command::new(&exe_path);
         cmd.args(&args);
+        cmd.env(DAEMON_CHILD_ENV, "1");
 
         // Windows creation flags:
         // CREATE_NO_WINDOW (0x08000000) - No console window
@@ -453,17 +409,22 @@ impl Daemonizer {
         }
 
         // Spawn the detached process
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .inspect_err(|e| error!("Failed to spawn detached process: {e}"))?;
 
         let child_pid = child.id();
         info!("Spawned detached process with PID: {}", child_pid);
 
-        // Write PID file for the child process
+        // Write PID file for the child process. This is atomic with respect to
+        // concurrent daemon launches; a losing child is terminated before the
+        // parent reports failure.
         if let Some(ref path) = self.config.pid_file {
-            let pid_str = format!("{}", child_pid);
-            fs::write(path, &pid_str).inspect_err(|e| error!("Failed to write PID file: {e}"))?;
+            if let Err(error) = PidFileManager::new(path.clone()).write_pid(child_pid) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
             info!("Wrote PID {} to {:?}", child_pid, path);
         }
 
@@ -476,48 +437,43 @@ impl Daemonizer {
     }
 
     /// Write PID file with current process ID.
-    #[allow(dead_code)]
+    #[cfg(unix)]
     fn write_pid_file(&self) -> DaemonResult<()> {
         if let Some(ref path) = self.config.pid_file {
             let pid = std::process::id();
-            let pid_str = format!("{}", pid);
-
-            // Create parent directory if it doesn't exist
-            if let Some(parent) = path.parent()
-                && !parent.exists()
-            {
-                fs::create_dir_all(parent)
-                    .inspect_err(|e| error!("Failed to create directory: {e}"))?;
-            }
-
-            // Write PID file
-            let mut file = OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(path)
-                .inspect_err(|e| error!("Failed to create PID file: {e}"))?;
-
-            file.write_all(pid_str.as_bytes())
-                .inspect_err(|e| error!("Failed to write PID: {e}"))?;
-
+            PidFileManager::new(path.clone()).write_pid(pid)?;
             info!("Wrote PID {} to {:?}", pid, path);
         }
         Ok(())
     }
 }
 
-impl Drop for Daemonizer {
+/// Remove a PID file only when it still belongs to the expected process.
+pub struct PidFileGuard {
+    path: PathBuf,
+    owner_pid: u32,
+}
+
+impl PidFileGuard {
+    pub fn new(path: PathBuf, owner_pid: u32) -> Self {
+        Self { path, owner_pid }
+    }
+}
+
+impl Drop for PidFileGuard {
     fn drop(&mut self) {
-        // Clean up PID file on exit
-        if let Some(ref path) = self.config.pid_file
-            && path.exists()
+        let Ok(content) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if content.trim() != self.owner_pid.to_string() {
+            return;
+        }
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
         {
-            if let Err(e) = fs::remove_file(path) {
-                warn!("Failed to remove PID file {:?}: {}", path, e);
-            } else {
-                debug!("Removed PID file {:?}", path);
-            }
+            warn!("Failed to remove PID file {:?}: {}", self.path, error);
+        } else {
+            debug!("Removed PID file {:?}", self.path);
         }
     }
 }
@@ -535,22 +491,105 @@ impl PidFileManager {
 
     /// Check if a daemon is already running by reading the PID file.
     ///
-    /// Returns `Some(pid)` if a running daemon is found, `None` otherwise.
+    /// Returns `Some(pid)` if a running process is found, `None` otherwise.
+    ///
+    /// This method deliberately does not compare executable identities. It is
+    /// also used by library and integration-test callers whose `current_exe()`
+    /// is not necessarily the daemon binary. The application startup path
+    /// uses [`Self::check_existing_for_current_executable`] when it needs the
+    /// stronger daemon-specific check.
     pub fn check_existing(&self) -> Option<u32> {
+        self.check_existing_inner(false)
+    }
+
+    /// Check for a running process that has the same executable as this
+    /// process.
+    pub fn check_existing_for_current_executable(&self) -> Option<u32> {
+        self.check_existing_inner(true)
+    }
+
+    fn check_existing_inner(&self, verify_identity: bool) -> Option<u32> {
         if !self.path.exists() {
             return None;
         }
 
         let content = fs::read_to_string(&self.path).ok()?;
-        let pid: u32 = content.trim().parse().ok()?;
+        if content.trim().is_empty() {
+            // A newly created PID file can be observed before its owner has
+            // finished writing. Keep it intact so a competing launcher does
+            // not delete the file that another daemon is initializing.
+            return None;
+        }
+        let pid: u32 = match content.trim().parse() {
+            Ok(pid) => pid,
+            Err(_) => {
+                // A non-empty invalid record cannot identify a live daemon.
+                // Remove it so a later launch can recover.
+                let _ = fs::remove_file(&self.path);
+                return None;
+            }
+        };
 
         // Check if process is running
-        if self.is_process_running(pid) {
+        if self.is_process_running(pid) && (!verify_identity || self.is_expected_process(pid)) {
             Some(pid)
         } else {
             // Stale PID file, remove it
             let _ = fs::remove_file(&self.path);
             None
+        }
+    }
+
+    /// Atomically create and write a PID record for `pid`.
+    pub fn write_pid(&self, pid: u32) -> DaemonResult<()> {
+        if let Some(parent) = self.path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
+
+        loop {
+            match OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&self.path)
+            {
+                Ok(mut file) => {
+                    file.write_all(pid.to_string().as_bytes())?;
+                    file.flush()?;
+                    return Ok(());
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let mut content = fs::read_to_string(&self.path)?;
+                    if content.trim().is_empty() {
+                        // The creator writes the PID immediately after the
+                        // create_new call. Give that write a bounded window
+                        // to become visible before treating the file as
+                        // unusable.
+                        for _ in 0..100 {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            content = fs::read_to_string(&self.path)?;
+                            if !content.trim().is_empty() {
+                                break;
+                            }
+                        }
+                    }
+                    if content.trim().is_empty() {
+                        return Err(DaemonError::PidFileRead(format!(
+                            "PID file {:?} is still being initialized",
+                            self.path
+                        )));
+                    }
+                    let existing_pid = content.trim().parse::<u32>().map_err(|_| {
+                        DaemonError::PidFileRead(format!("Invalid PID file {:?}", self.path))
+                    })?;
+                    if self.is_process_running(existing_pid) {
+                        return Err(DaemonError::AlreadyRunning(existing_pid));
+                    }
+                    fs::remove_file(&self.path)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
         }
     }
 
@@ -568,13 +607,17 @@ impl PidFileManager {
 
         // Use tasklist to check if process exists
         let output = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .args(["/FI", &format!("PID eq {}", pid), "/FO", "CSV", "/NH"])
             .output();
 
         if let Ok(output) = output {
             let stdout = String::from_utf8_lossy(&output.stdout);
-            // If the output contains the PID, process is running
-            stdout.contains(&pid.to_string())
+            stdout.lines().any(|line| {
+                line.split(',')
+                    .nth(1)
+                    .map(|value| value.trim_matches('"') == pid.to_string())
+                    .unwrap_or(false)
+            })
         } else {
             false
         }
@@ -583,6 +626,56 @@ impl PidFileManager {
     #[cfg(not(any(unix, windows)))]
     fn is_process_running(&self, _pid: u32) -> bool {
         false
+    }
+
+    #[cfg(target_os = "linux")]
+    fn is_expected_process(&self, pid: u32) -> bool {
+        let expected = std::env::current_exe()
+            .ok()
+            .and_then(|path| fs::canonicalize(path).ok());
+        let actual = fs::canonicalize(format!("/proc/{pid}/exe")).ok();
+        expected.is_some() && expected == actual
+    }
+
+    #[cfg(target_os = "macos")]
+    fn is_expected_process(&self, pid: u32) -> bool {
+        let expected = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.file_name().map(|name| name.to_owned()));
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output();
+        let actual = output.ok().and_then(|output| {
+            PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+                .file_name()
+                .map(|name| name.to_owned())
+        });
+        expected.is_some() && expected == actual
+    }
+
+    #[cfg(windows)]
+    fn is_expected_process(&self, pid: u32) -> bool {
+        use std::process::Command;
+
+        let expected = std::env::current_exe().ok().and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        });
+        let output = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output();
+        let actual = output.ok().and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.split(',').next())
+                .map(|name| name.trim_matches('"').to_ascii_lowercase())
+        });
+        expected.is_some() && expected == actual
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    fn is_expected_process(&self, _pid: u32) -> bool {
+        true
     }
 
     /// Stop the daemon by sending SIGTERM.
@@ -658,6 +751,24 @@ pub fn is_daemon_mode(args: &[String]) -> bool {
     false
 }
 
+fn is_daemon_argument(arg: &str) -> bool {
+    arg == "--daemon" || arg == "-D" || arg.starts_with("--daemon=")
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::is_daemon_argument;
+
+    #[test]
+    fn recognizes_all_boolean_daemon_spellings() {
+        assert!(is_daemon_argument("--daemon"));
+        assert!(is_daemon_argument("--daemon=true"));
+        assert!(is_daemon_argument("--daemon=false"));
+        assert!(is_daemon_argument("-D"));
+        assert!(!is_daemon_argument("--daemonize"));
+    }
+}
+
 /// Extract PID file path from command line arguments.
 #[allow(dead_code)] // Public utility; not yet wired into CLI main() but available for integration
 pub fn get_pid_file_path(args: &[String]) -> Option<PathBuf> {
@@ -722,29 +833,63 @@ mod tests {
     }
 
     #[test]
-    fn test_shutdown_flag() {
-        assert!(!is_shutdown_requested());
-        #[cfg(unix)]
-        {
-            SHUTDOWN_REQUESTED
-                .get_or_init(|| Arc::new(AtomicBool::new(false)))
-                .store(true, Ordering::Relaxed);
-        }
-        #[cfg(not(unix))]
-        {
-            SHUTDOWN_REQUESTED.store(true, Ordering::Relaxed);
-        }
-        assert!(is_shutdown_requested());
-        #[cfg(unix)]
-        {
-            SHUTDOWN_REQUESTED
-                .get_or_init(|| Arc::new(AtomicBool::new(false)))
-                .store(false, Ordering::Relaxed);
-        }
-        #[cfg(not(unix))]
-        {
-            SHUTDOWN_REQUESTED.store(false, Ordering::Relaxed);
-        }
-        assert!(!is_shutdown_requested());
+    fn pid_file_write_is_atomic_and_guarded_by_owner_pid() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp_dir.path().join("nested").join("aria2c.pid");
+        let manager = PidFileManager::new(path.clone());
+
+        manager
+            .write_pid(std::process::id())
+            .expect("first PID write should succeed");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            std::process::id().to_string()
+        );
+
+        let error = manager
+            .write_pid(std::process::id())
+            .expect_err("a second live owner must be rejected");
+        assert!(matches!(error, DaemonError::AlreadyRunning(_)));
+
+        drop(PidFileGuard::new(path.clone(), std::process::id()));
+        assert!(!path.exists(), "owner guard should remove its PID file");
+    }
+
+    #[test]
+    fn pid_file_guard_does_not_remove_a_reused_path() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp_dir.path().join("aria2c.pid");
+        fs::write(&path, "22").expect("PID file should be written");
+
+        drop(PidFileGuard::new(path.clone(), 11));
+        assert!(
+            path.exists(),
+            "a guard must not remove another owner's file"
+        );
+    }
+
+    #[test]
+    fn check_existing_does_not_require_callers_to_be_the_daemon_binary() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp_dir.path().join("aria2c.pid");
+        fs::write(&path, std::process::id().to_string()).expect("PID file should be written");
+
+        let manager = PidFileManager::new(path.clone());
+        assert_eq!(manager.check_existing(), Some(std::process::id()));
+        assert!(path.exists(), "a live PID record should be preserved");
+    }
+
+    #[test]
+    fn check_existing_preserves_an_in_progress_empty_pid_file() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let path = temp_dir.path().join("aria2c.pid");
+        fs::write(&path, "").expect("PID file should be created");
+
+        let manager = PidFileManager::new(path.clone());
+        assert_eq!(manager.check_existing(), None);
+        assert!(
+            path.exists(),
+            "an empty in-progress record must not be removed"
+        );
     }
 }

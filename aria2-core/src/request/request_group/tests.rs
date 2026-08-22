@@ -39,6 +39,72 @@ fn test_bt_peer_snapshots_roundtrip() {
 }
 
 #[test]
+fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
+    let group = RequestGroup::new(GroupId::new(100), Vec::new(), DownloadOptions::default());
+    group.set_total_length_atomic(1000);
+    group.set_completed_length(250);
+    group.set_uploaded_length(64);
+    group.set_download_speed_cached(128);
+    group.set_upload_speed_cached(32);
+    group.set_active_connection_count(2);
+    group.set_bt_metadata(2, 512, "01234567890123456789".to_string());
+    group.set_bt_bitfield(Some(vec![0xC0]));
+
+    let mut peers = Vec::new();
+    for (port, seeder) in [(6881, true), (6882, false)] {
+        peers.push(super::BtPeerSnapshot {
+            peer_id: [port as u8; 20],
+            addr: format!("127.0.0.1:{port}")
+                .parse()
+                .expect("valid peer address"),
+            uploaded_bytes: 0,
+            downloaded_bytes: 1,
+            upload_speed: 0.0,
+            download_speed: 1.0,
+            avg_upload_speed: 0,
+            avg_download_speed: 1,
+            am_choking: false,
+            peer_choking: false,
+            seeder: Some(seeder),
+            connection_duration_secs: 1,
+            last_data_age_secs: 0,
+            is_snubbed: false,
+            is_banned: false,
+        });
+    }
+    group.set_bt_peer_snapshots(peers);
+
+    let snapshot = group.status_snapshot();
+    let bt = snapshot.bt.expect("BT metadata should be present");
+    assert_eq!(snapshot.completed_length, 250);
+    assert_eq!(snapshot.upload_length, 64);
+    assert_eq!(snapshot.download_speed, 128);
+    assert_eq!(snapshot.connections, 2);
+    assert_eq!(bt.peer_count(), 2);
+    assert_eq!(bt.seeder_count(), 1);
+    assert_eq!(bt.num_pieces, 2);
+    assert_eq!(bt.piece_length, 512);
+    assert_eq!(bt.bitfield, Some(vec![0xC0]));
+}
+
+#[test]
+fn active_connection_guard_clears_protocol_count_on_exit() {
+    let group = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(101),
+        Vec::new(),
+        DownloadOptions::default(),
+    )));
+
+    {
+        let guard = super::ActiveConnectionGuard::new(std::sync::Arc::clone(&group));
+        guard.set(3);
+        assert_eq!(group.read().expect("group lock should be readable").active_connection_count(), 3);
+    }
+
+    assert_eq!(group.read().expect("group lock should be readable").active_connection_count(), 0);
+}
+
+#[test]
 fn test_connection_contexts_are_deduplicated_and_reset() {
     use std::net::SocketAddr;
 

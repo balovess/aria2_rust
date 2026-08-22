@@ -1,5 +1,6 @@
 mod activity;
 mod bt_peer_snapshot;
+mod connection_state;
 mod dependency;
 pub mod download_result;
 mod group;
@@ -9,6 +10,7 @@ mod options;
 mod progress;
 pub mod result_code;
 mod status;
+mod status_snapshot;
 
 // Sub-modules with impl blocks split from group.rs for the 600-line limit.
 mod context_ops;
@@ -31,6 +33,7 @@ pub use crate::config::runtime::{
 };
 pub use activity::ActivitySignal;
 pub use bt_peer_snapshot::BtPeerSnapshot;
+pub(crate) use connection_state::ActiveConnectionGuard;
 #[cfg(feature = "bittorrent")]
 pub use dependency::BtDependencyResolution;
 #[cfg(feature = "bittorrent")]
@@ -45,3 +48,4 @@ pub use options::{DEFAULT_DISK_CACHE_BYTES, DownloadOptions, FollowMode, option_
 pub use progress::AtomicProgress;
 pub use result_code::DownloadResultCode;
 pub use status::DownloadStatus;
+pub use status_snapshot::{BtStatusSnapshot, DownloadStatusSnapshot};

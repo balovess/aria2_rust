@@ -274,6 +274,7 @@ async fn run_shared_listener(
                     return;
                 }
             };
+            tracing::debug!(%endpoint, info_hash = %hex::encode(incoming.info_hash()), "Incoming BitTorrent handshake accepted");
             let info_hash = *incoming.info_hash();
             let route = {
                 let routes = routes
@@ -300,6 +301,7 @@ async fn run_shared_listener(
                     return;
                 }
             };
+            tracing::debug!(%endpoint, remote_peer_id = ?connection.remote_peer_id(), "Incoming BitTorrent handshake completed");
             let admitted = {
                 let mut storage = route
                     .peer_storage
@@ -319,6 +321,7 @@ async fn run_shared_listener(
                 }
             };
             if !admitted {
+                tracing::debug!(%endpoint, "Rejected incoming BitTorrent peer at peer-storage admission");
                 return;
             }
             if route
@@ -330,6 +333,7 @@ async fn run_shared_listener(
                 .await
                 .is_err()
             {
+                tracing::debug!(%endpoint, "Incoming BitTorrent peer route receiver closed");
                 route
                     .peer_storage
                     .lock()

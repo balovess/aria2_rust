@@ -52,7 +52,15 @@ impl App {
     /// Positional URIs are collected from `cli.uris`, with `@file` references
     /// expanded via `UriListFile`. `--input-file` URIs are also appended.
     pub async fn load_cli_args(&mut self, cli: CliArgs) -> std::result::Result<(), String> {
+        let cli_explicit_timeout = cli.http_ftp.timeout.is_some();
         let mut conf = self.config.write().await;
+        self.explicit_timeout = cli_explicit_timeout
+            || conf
+                .global_option_source("timeout")
+                .await
+                .is_some_and(|source| {
+                    !matches!(source, aria2_core::config::ConfigSource::Defaults)
+                });
 
         // Helper macros: set option only if value is present and propagate the
         // registry's validation error back to the CLI entry point.

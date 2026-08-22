@@ -186,16 +186,15 @@ impl ConsoleProgressReporter {
                 DownloadStatus::Removed => TaskStatus::Removed,
             };
 
-            let completed = group.get_completed_length();
-            let total = group.get_total_length_atomic();
-            let speed = group.get_download_speed_cached();
-            let upload_speed = group.get_upload_speed_cached();
-            let peer_snapshots = group.bt_peer_snapshots();
-            let is_bt = group.get_bt_num_pieces() > 0 || group.get_bt_info_hash_hex().is_some();
-            let num_seeders = peer_snapshots
-                .iter()
-                .filter(|peer| peer.seeder == Some(true))
-                .count();
+            let snapshot = group.status_snapshot();
+            let completed = snapshot.completed_length;
+            let total = snapshot.total_length;
+            let speed = snapshot.download_speed;
+            let upload_speed = snapshot.upload_speed;
+            let bt = snapshot.bt.as_ref();
+            let is_bt = bt.is_some();
+            let num_seeders = bt.map_or(0, |bt| bt.seeder_count());
+            let num_peers = bt.map_or(0, |bt| bt.peer_count());
 
             let filename = group
                 .uris()
@@ -211,11 +210,12 @@ impl ConsoleProgressReporter {
                 download_speed: speed as f64,
                 upload_speed: upload_speed as f64,
                 is_bt,
+                connections: snapshot.connections as usize,
                 num_seeders,
-                num_peers: peer_snapshots.len(),
-                uploaded: group.get_uploaded_length(),
+                num_peers,
+                uploaded: snapshot.upload_length,
                 status: task_status,
-                elapsed: group.elapsed_time().unwrap_or_default(),
+                elapsed: snapshot.elapsed.unwrap_or_default(),
             });
         }
 
@@ -259,6 +259,7 @@ impl ConsoleProgressReporter {
                 download_speed: result.download_speed as f64,
                 upload_speed: result.upload_speed as f64,
                 is_bt: result.num_pieces > 0 || !result.info_hash.is_empty(),
+                connections: 0,
                 num_seeders: 0,
                 num_peers: 0,
                 uploaded: result.upload_length,

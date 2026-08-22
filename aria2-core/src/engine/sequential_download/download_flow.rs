@@ -2,6 +2,7 @@
 // and download_response_body() for streaming the response to disk.
 
 use futures::StreamExt;
+use std::sync::Arc;
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
@@ -12,6 +13,7 @@ use crate::http::conditional_get::SimpleDateTime;
 use crate::http::response::is_redirect_status;
 use crate::http::skip_response::{MAX_REDIRECT_COUNT, RedirectType};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
+use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
@@ -87,6 +89,7 @@ impl SequentialDownloader {
         resume_state: &ResumeState,
         total_length: u64,
     ) -> Result<()> {
+        let connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
         // Keep the caller's detection result immutable. A server can reject a
         // resume request with HTTP 200, in which case aria2 either aborts with
         // CANNOT_RESUME. DownloadCommand owns the higher-level decision to
@@ -210,6 +213,7 @@ impl SequentialDownloader {
                     .iter()
                     .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
 
+            connection_guard.set(1);
             let response = tokio::select! {
                 result = request.send() => result.map_err(|e| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {

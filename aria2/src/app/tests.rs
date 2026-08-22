@@ -186,6 +186,98 @@ async fn test_cli_bittorrent_timeout_and_dht_options_reach_download_options() {
     assert_eq!(options.dht_file_path6.as_deref(), Some("dht6.dat"));
 }
 
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_bt_input_does_not_inherit_implicit_generic_timeout() {
+    let temp_dir = TempDir::new().expect("temporary input directory");
+    let torrent_path = temp_dir.path().join("input.torrent");
+    tokio::fs::write(&torrent_path, b"d8:announce0:e")
+        .await
+        .expect("write torrent fixture");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        torrent_path.to_str().expect("torrent path is UTF-8"),
+    ])
+    .expect("torrent CLI should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("torrent input should be detected");
+    let (options, _) = app.download_options_with_snapshot().await;
+    let task_options = super::engine::task_options_for_input(
+        &options,
+        &aria2_core::validation::protocol_detector::InputType::TorrentFile,
+        false,
+    );
+    assert_eq!(task_options.timeout, None);
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_bt_input_preserves_explicit_generic_timeout() {
+    let temp_dir = TempDir::new().expect("temporary input directory");
+    let torrent_path = temp_dir.path().join("input.torrent");
+    tokio::fs::write(&torrent_path, b"d8:announce0:e")
+        .await
+        .expect("write torrent fixture");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        "--timeout=300",
+        torrent_path.to_str().expect("torrent path is UTF-8"),
+    ])
+    .expect("torrent CLI should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("torrent input should be detected");
+    let (options, _) = app.download_options_with_snapshot().await;
+    let task_options = super::engine::task_options_for_input(
+        &options,
+        &aria2_core::validation::protocol_detector::InputType::TorrentFile,
+        true,
+    );
+    assert_eq!(task_options.timeout, Some(300));
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_bt_input_preserves_explicit_generic_timeout_from_config_file() {
+    let temp_dir = TempDir::new().expect("temporary input directory");
+    let torrent_path = temp_dir.path().join("input.torrent");
+    tokio::fs::write(&torrent_path, b"d8:announce0:e")
+        .await
+        .expect("write torrent fixture");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, b"timeout=60\n")
+        .await
+        .expect("write config fixture");
+
+    let mut app = App::new();
+    app.load_startup_config(false, config_path.to_str())
+        .await
+        .expect("config file should load");
+    let cli = CliArgs::try_parse_from([
+        "aria2",
+        torrent_path.to_str().expect("torrent path is UTF-8"),
+    ])
+    .expect("torrent CLI should parse");
+    app.load_cli_args(cli)
+        .await
+        .expect("torrent input should be detected");
+    assert!(app.explicit_timeout);
+
+    let (options, snapshot) = app.download_options_with_snapshot().await;
+    let task_options = super::engine::task_options_for_input(
+        &options,
+        &aria2_core::validation::protocol_detector::InputType::TorrentFile,
+        app.explicit_timeout,
+    );
+    assert_eq!(task_options.timeout, Some(60));
+    assert_eq!(snapshot.get("timeout"), Some(&serde_json::json!(60)));
+}
+
 #[test]
 fn every_registered_option_has_one_cli_argument() {
     let registry = aria2_core::config::OptionRegistry::new();
@@ -492,6 +584,34 @@ async fn application_rpc_does_not_enable_cors_by_default() {
             .any(|line| line.eq_ignore_ascii_case("access-control-allow-origin: *")),
         "aria2_original only emits CORS headers after explicit opt-in, response was:\n{response}"
     );
+}
+
+#[tokio::test]
+async fn application_run_fails_when_rpc_bind_fails() {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let port = occupied
+        .local_addr()
+        .expect("test listener should expose an address")
+        .port();
+
+    let port_argument = format!("--rpc-listen-port={port}");
+    let cli = CliArgs::try_parse_from([
+        "aria2c",
+        "--no-conf=true",
+        "--enable-rpc=true",
+        "--quiet=true",
+        port_argument.as_str(),
+    ])
+    .expect("RPC-only CLI arguments should parse");
+
+    let mut app = App::new();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), app.run(cli))
+        .await
+        .expect("startup must fail instead of hanging after RPC bind failure");
+
+    assert_eq!(result, 1);
 }
 
 #[tokio::test]

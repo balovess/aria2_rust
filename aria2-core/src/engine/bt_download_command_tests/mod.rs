@@ -1,5 +1,6 @@
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::request::request_group::{DownloadOptions, GroupId};
+use crate::util::rwlock_ext::RwLockRecover;
 
 // Sub-modules for logically grouped test suites
 mod choke_tracking;
@@ -7,6 +8,26 @@ mod multi_file_layout;
 mod multi_file_write;
 mod piece_provider;
 mod private_torrent;
+
+#[test]
+fn resumed_bt_command_preserves_uploaded_length() {
+    let torrent = build_test_torrent();
+    let options = DownloadOptions::default();
+    let group = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            GroupId::new(901),
+            vec!["bt://resume-upload".to_string()],
+            options.clone(),
+        ),
+    ));
+    group.recover().set_uploaded_length(16_384);
+
+    let command =
+        BtDownloadCommand::new_with_group(std::sync::Arc::clone(&group), &torrent, &options, None)
+            .expect("resumed BT command should construct");
+
+    assert_eq!(command.total_uploaded, 16_384);
+}
 
 /// Build a minimal single-file public torrent (no `private` flag).
 /// Shared across BT/magnet test modules to avoid duplicating bencode
