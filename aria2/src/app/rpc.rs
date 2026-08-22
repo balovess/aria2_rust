@@ -308,7 +308,12 @@ impl App {
 
         let rpc_url = server.rpc_url();
         info!("RPC server listening at {}", rpc_url);
-        println!("  {} RPC server: {}", "📡".cyan(), rpc_url.yellow());
+        let output = format!("  {} RPC server: {}\n", "📡".cyan(), rpc_url.yellow());
+        if self.get_opt_bool("stderr").await.unwrap_or(false) {
+            eprint!("{}", output);
+        } else {
+            print!("{}", output);
+        }
 
         // Spawn server in background
         let handle = tokio::spawn(async move {

@@ -131,7 +131,11 @@ impl super::RequestGroup {
     /// Time elapsed since download start.
     pub fn elapsed_time(&self) -> Option<std::time::Duration> {
         let start = *self.start_time.recover();
-        start.map(|t| t.elapsed())
+        let end = *self.end_time.recover();
+        start.map(|t| {
+            end.map(|end| end.duration_since(t))
+                .unwrap_or_else(|| t.elapsed())
+        })
     }
 
     /// Estimated time to completion based on current download speed.

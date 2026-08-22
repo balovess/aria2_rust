@@ -19,6 +19,8 @@
 
 use std::time::{Duration, Instant};
 
+use aria2_core::request::request_group::DownloadResult;
+
 /// Status of a single download task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -26,10 +28,14 @@ pub enum TaskStatus {
     Active,
     /// Task is queued and waiting to start
     Waiting,
+    /// Task is paused by the user
+    Paused,
     /// Download completed successfully
     Complete,
     /// Task encountered an error
     Error,
+    /// Task was explicitly removed by the user
+    Removed,
     /// Task is in seeding mode (BT only)
     Seeding,
 }
@@ -39,8 +45,10 @@ impl std::fmt::Display for TaskStatus {
         match self {
             TaskStatus::Active => write!(f, "{}", crate::constants::STATUS_ACTIVE),
             TaskStatus::Waiting => write!(f, "{}", crate::constants::STATUS_WAITING),
+            TaskStatus::Paused => write!(f, "{}", crate::constants::STATUS_PAUSED),
             TaskStatus::Complete => write!(f, "{}", crate::constants::STATUS_COMPLETE),
             TaskStatus::Error => write!(f, "{}", crate::constants::STATUS_ERROR),
+            TaskStatus::Removed => write!(f, "{}", crate::constants::STATUS_REMOVED),
             TaskStatus::Seeding => write!(f, "{}", crate::constants::STATUS_SEEDING),
         }
     }
@@ -73,6 +81,8 @@ pub struct TaskProgress {
     pub uploaded: u64,
     /// Current status of the task
     pub status: TaskStatus,
+    /// Time spent downloading this task.
+    pub elapsed: Duration,
 }
 
 /// Main progress bar renderer for aria2-rust CLI.
@@ -92,6 +102,8 @@ pub struct ProgressBar {
     last_render: Instant,
     /// Minimum interval between renders
     render_interval: Duration,
+    /// Optional terminal width used to keep task headers within one line.
+    max_line_width: Option<usize>,
 }
 
 impl ProgressBar {
@@ -115,6 +127,7 @@ impl ProgressBar {
             started: Instant::now(),
             last_render: Instant::now() - Duration::from_secs(1), // Allow immediate first render
             render_interval: Duration::from_millis(250),          // ~4 FPS max
+            max_line_width: None,
         }
     }
 
@@ -131,6 +144,12 @@ impl ProgressBar {
     /// Default is 250ms (~4 FPS). Used for rate-limiting terminal updates.
     pub fn with_render_interval(mut self, interval: Duration) -> Self {
         self.render_interval = interval;
+        self
+    }
+
+    /// Set the available terminal width for line-local rendering.
+    pub fn with_terminal_width(mut self, width: usize) -> Self {
+        self.max_line_width = Some(width.max(1));
         self
     }
 
@@ -198,6 +217,15 @@ impl ProgressBar {
     ///
     /// In quiet mode, returns an empty string.
     pub fn render(&self) -> String {
+        self.render_with_summary(true)
+    }
+
+    /// Render the task readout, optionally including the aggregate summary.
+    ///
+    /// `summary-interval=0` disables periodic aggregate summaries while
+    /// preserving per-task progress output. The final application summary is
+    /// rendered separately and is not affected by this flag.
+    pub fn render_with_summary(&self, include_summary: bool) -> String {
         if self.quiet {
             return String::new();
         }
@@ -211,7 +239,7 @@ impl ProgressBar {
         }
 
         // Render overall summary if there are tasks
-        if !self.tasks.is_empty() {
+        if include_summary && !self.tasks.is_empty() {
             output.push_str(&self.render_overall_summary());
         }
 
@@ -233,7 +261,11 @@ impl ProgressBar {
         let mut lines = Vec::new();
 
         // Header line: [#N] filename
-        lines.push(format!("[#{}] {}", index, task.filename));
+        let filename = self
+            .max_line_width
+            .map(|width| truncate_display(&task.filename, width.saturating_sub(5)))
+            .unwrap_or_else(|| task.filename.clone());
+        lines.push(format!("[#{}] {}", index, filename));
 
         // Determine what to show based on status
         match task.status {
@@ -257,10 +289,12 @@ impl ProgressBar {
             TaskStatus::Complete => {
                 let bar = format_progress_bar(1.0, self.width);
                 lines.push(format!(
-                    "     {} [COMPLETE]  ({}/{})",
+                    "     {} [COMPLETE]  ({}/{})  Avg:{}  Time:{}",
                     bar,
                     format_bytes(task.completed_length),
-                    format_bytes(task.total_length)
+                    format_bytes(task.total_length),
+                    format_speed(average_speed(task)),
+                    aria2_core::util::format::format_duration_short(task.elapsed.as_secs())
                 ));
             }
             TaskStatus::Error => {
@@ -286,13 +320,28 @@ impl ProgressBar {
                     format_bytes(task.total_length)
                 ));
             }
+            TaskStatus::Removed => {
+                let fraction = progress_fraction(task);
+                let bar = format_progress_bar(fraction, self.width);
+                lines.push(format!(
+                    "     {} [REMOVED]  ({}/{})",
+                    bar,
+                    format_bytes(task.completed_length),
+                    format_bytes(task.total_length)
+                ));
+            }
+            TaskStatus::Paused => {
+                let fraction = progress_fraction(task);
+                let bar = format_progress_bar(fraction, self.width);
+                lines.push(format!(
+                    "     {} [PAUSED]  ({}/{})",
+                    bar,
+                    format_bytes(task.completed_length),
+                    format_bytes(task.total_length)
+                ));
+            }
             TaskStatus::Active => {
-                let fraction = if task.total_length > 0 {
-                    task.completed_length as f64 / task.total_length as f64
-                } else {
-                    0.0
-                };
-                let percentage = fraction * 100.0;
+                let fraction = progress_fraction(task);
                 let bar = format_progress_bar(fraction, self.width);
 
                 let eta = format_eta(
@@ -306,13 +355,14 @@ impl ProgressBar {
                 };
 
                 lines.push(format!(
-                    "     {} {:.1}%  ({}/{})  DL:{}{}",
+                    "     {} {}  ({}/{})  DL:{}{}  Time:{}",
                     bar,
-                    percentage,
+                    format_percentage(task),
                     format_bytes(task.completed_length),
                     format_bytes(task.total_length),
                     format_speed(task.download_speed),
-                    eta_str
+                    eta_str,
+                    aria2_core::util::format::format_duration_short(task.elapsed.as_secs())
                 ));
 
                 // BT extra info line
@@ -347,7 +397,21 @@ impl ProgressBar {
 
         let total_length: u64 = self.tasks.iter().map(|t| t.total_length).sum();
         let completed_length: u64 = self.tasks.iter().map(|t| t.completed_length).sum();
-        let total_download_speed: f64 = self.tasks.iter().map(|t| t.download_speed).sum();
+        let total_download_speed: f64 = self
+            .tasks
+            .iter()
+            .map(|task| match task.status {
+                TaskStatus::Complete => average_speed(task),
+                _ if task.download_speed > 0.0 => task.download_speed,
+                _ => average_speed(task),
+            })
+            .sum();
+        let total_elapsed = self
+            .tasks
+            .iter()
+            .map(|task| task.elapsed)
+            .max()
+            .unwrap_or_default();
         let active_count = self
             .tasks
             .iter()
@@ -360,19 +424,29 @@ impl ProgressBar {
         } else {
             0.0
         };
-        let percentage = fraction * 100.0;
+        let percentage = if total_length > 0 {
+            format!("{:.0}%", fraction * 100.0)
+        } else {
+            "--%".to_string()
+        };
         let bar = format_progress_bar(fraction, self.width);
 
         format!(
-            "Overall: {} {:.0}%  ({}/{})  DL:{}  {}/{} total\n",
+            "Overall: {} {} ({}/{}) DL:{} Time:{} {}/{} total\n",
             bar,
             percentage,
             format_bytes(completed_length),
             format_bytes(total_length),
             format_speed(total_download_speed),
+            aria2_core::util::format::format_duration_short(total_elapsed.as_secs()),
             active_count,
             total_count
         )
+    }
+
+    /// Render one stable line for redirected output such as a PowerShell pipe.
+    pub fn render_compact_summary(&self) -> String {
+        self.render_overall_summary().trim_end().to_string()
     }
 
     /// Format a visual progress bar string.
@@ -435,6 +509,122 @@ fn format_progress_bar(fraction: f64, width: usize) -> String {
     format!("[{}]", bar)
 }
 
+fn truncate_display(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 3 {
+        return value.chars().take(max_chars).collect();
+    }
+    let prefix: String = value.chars().take(max_chars - 3).collect();
+    format!("{prefix}...")
+}
+
+/// Render stable per-download results and aggregate statistics after the
+/// engine exits. This output is intentionally independent of the live TTY
+/// frame so a completed result remains readable in logs and pipes.
+pub fn render_final_summary(results: &[DownloadResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+
+    let completed = results
+        .iter()
+        .filter(|result| result.code.is_success())
+        .count();
+    let failed = results.len().saturating_sub(completed);
+    let total_bytes = results
+        .iter()
+        .map(|result| result.completed_length)
+        .sum::<u64>();
+    let total_time = results
+        .iter()
+        .map(|result| result.session_time)
+        .max()
+        .unwrap_or_default();
+    let average_speed = if total_time > 0 {
+        total_bytes as f64 / total_time as f64
+    } else {
+        results
+            .iter()
+            .map(|result| result.download_speed as f64)
+            .sum()
+    };
+
+    let mut output = String::from("Download results:\n");
+    for result in results {
+        let filename = result
+            .files
+            .first()
+            .map(|file| file.path.as_str())
+            .filter(|path| !path.is_empty())
+            .unwrap_or("unknown");
+        let elapsed = aria2_core::util::format::format_duration_short(result.session_time);
+        if result.code.is_success() {
+            let speed = if result.session_time > 0 {
+                result.completed_length as f64 / result.session_time as f64
+            } else {
+                result.download_speed as f64
+            };
+            output.push_str(&format!(
+                "[#{}] COMPLETE {} Size:{}/{} Avg:{} Time:{}\n",
+                result.gid_hex(),
+                filename,
+                format_bytes(result.completed_length),
+                format_bytes(result.total_length),
+                format_speed(speed),
+                elapsed
+            ));
+        } else {
+            output.push_str(&format!(
+                "[#{}] ERROR {} Size:{}/{} Code:{} Time:{} Message:{}\n",
+                result.gid_hex(),
+                filename,
+                format_bytes(result.completed_length),
+                format_bytes(result.total_length),
+                result.code,
+                elapsed,
+                result.message
+            ));
+        }
+    }
+    output.push_str(&format!(
+        "Overall: {} tasks, {} complete, {} failed, Total:{}, Time:{}, Avg:{}\n",
+        results.len(),
+        completed,
+        failed,
+        format_bytes(total_bytes),
+        aria2_core::util::format::format_duration_short(total_time),
+        format_speed(average_speed)
+    ));
+    output
+}
+
+fn average_speed(task: &TaskProgress) -> f64 {
+    let seconds = task.elapsed.as_secs_f64();
+    if seconds > 0.0 {
+        task.completed_length as f64 / seconds
+    } else {
+        task.download_speed
+    }
+}
+
+fn progress_fraction(task: &TaskProgress) -> f64 {
+    if task.total_length == 0 {
+        0.0
+    } else {
+        (task.completed_length as f64 / task.total_length as f64).clamp(0.0, 1.0)
+    }
+}
+
+fn format_percentage(task: &TaskProgress) -> String {
+    if task.total_length == 0 {
+        "--%".to_string()
+    } else {
+        format!("{:.1}%", progress_fraction(task) * 100.0)
+    }
+}
+
 // ==================== Tests ====================
 
 #[cfg(test)]
@@ -454,6 +644,7 @@ mod tests {
             num_peers: 0,
             uploaded: 0,
             status: TaskStatus::Active,
+            elapsed: Duration::from_secs(31),
         }
     }
 
@@ -470,6 +661,7 @@ mod tests {
             num_peers: 12,
             uploaded: 1700 * 1024 * 1024,
             status: TaskStatus::Active,
+            elapsed: Duration::from_secs(120),
         }
     }
 
@@ -491,6 +683,7 @@ mod tests {
         assert!(output.contains("MiB"), "Should use MiB units");
         assert!(output.contains("DL:"), "Should show download speed label");
         assert!(output.contains("ETA:"), "Should show ETA");
+        assert!(output.contains("Time:31s"), "Should show elapsed time");
     }
 
     #[test]
@@ -707,6 +900,37 @@ mod tests {
 
         let output = bar.render();
         assert!(output.contains("[COMPLETE]"));
+        assert!(output.contains("Avg:"));
+        assert!(output.contains("Time:31s"));
+    }
+
+    #[test]
+    fn test_complete_task_uses_average_speed_when_current_speed_is_zero() {
+        let mut bar = ProgressBar::new(false);
+        let mut task = make_active_task();
+        task.status = TaskStatus::Complete;
+        task.completed_length = 100;
+        task.total_length = 100;
+        task.download_speed = 0.0;
+        task.elapsed = Duration::from_secs(10);
+        bar.add_task(task);
+
+        let output = bar.render();
+        assert!(output.contains("Avg:10 B/s"));
+    }
+
+    #[test]
+    fn test_compact_summary_contains_completion_statistics() {
+        let mut bar = ProgressBar::new(false);
+        let mut task = make_active_task();
+        task.status = TaskStatus::Complete;
+        task.completed_length = task.total_length;
+        bar.add_task(task);
+
+        let output = bar.render_compact_summary();
+        assert!(output.contains("Overall:"));
+        assert!(output.contains("DL:"));
+        assert!(output.contains("Time:31s"));
     }
 
     #[test]
@@ -719,5 +943,100 @@ mod tests {
 
         let output = bar.render();
         assert!(output.contains("[ERROR]"));
+    }
+
+    #[test]
+    fn test_paused_task_display_is_distinct_from_waiting() {
+        let mut bar = ProgressBar::new(false);
+        let mut task = make_active_task();
+        task.status = TaskStatus::Paused;
+        task.completed_length = 25 * 1024 * 1024;
+        bar.add_task(task);
+
+        let output = bar.render();
+        assert!(output.contains("[PAUSED]"));
+        assert!(!output.contains("[WAITING]"));
+    }
+
+    #[test]
+    fn test_removed_task_display_is_distinct_from_error() {
+        let mut bar = ProgressBar::new(false);
+        let mut task = make_active_task();
+        task.status = TaskStatus::Removed;
+        bar.add_task(task);
+
+        let output = bar.render();
+        assert!(output.contains("[REMOVED]"));
+        assert!(!output.contains("[ERROR]"));
+    }
+
+    #[test]
+    fn test_long_filename_is_truncated_to_terminal_width() {
+        let mut bar = ProgressBar::new(false)
+            .with_width(4)
+            .with_terminal_width(32);
+        let mut task = make_active_task();
+        task.filename = "a-very-long-file-name-that-would-wrap.bin".to_string();
+        bar.add_task(task);
+
+        let output = bar.render();
+        let header = output.lines().next().unwrap();
+        assert!(header.chars().count() <= 32);
+        assert!(header.ends_with("..."));
+    }
+
+    #[test]
+    fn test_unknown_total_does_not_report_zero_percent() {
+        let mut bar = ProgressBar::new(false);
+        let mut task = make_active_task();
+        task.total_length = 0;
+        task.completed_length = 0;
+        bar.add_task(task);
+
+        let output = bar.render();
+        assert!(output.contains("--%"));
+        assert!(!output.contains("0.0%"));
+    }
+
+    #[test]
+    fn test_final_summary_contains_terminal_statistics() {
+        let mut result = DownloadResult::finished();
+        result.completed_length = 2048;
+        result.total_length = 2048;
+        result.session_time = 2;
+
+        let output = render_final_summary(&[result]);
+        assert!(output.contains("Download results:"));
+        assert!(output.contains("1 complete, 0 failed"));
+        assert!(output.contains("Avg:1.00 KiB/s"));
+    }
+
+    #[test]
+    fn test_render_performance_snapshot() {
+        for task_count in [1usize, 8, 64] {
+            let mut bar = ProgressBar::new(false).with_width(16);
+            for index in 0..task_count {
+                let mut task = make_active_task();
+                task.gid = format!("task-{index}");
+                task.filename = format!("file-{index:03}.bin");
+                bar.add_task(task);
+            }
+
+            let mut samples = Vec::with_capacity(100);
+            let mut bytes_per_frame = 0;
+            for _ in 0..100 {
+                let start = Instant::now();
+                let output = bar.render();
+                bytes_per_frame = output.len();
+                std::hint::black_box(output);
+                samples.push(start.elapsed().as_nanos() as u64);
+            }
+            samples.sort_unstable();
+            let average_ns = samples.iter().sum::<u64>() / samples.len() as u64;
+            let p95_ns = samples[(samples.len() * 95 / 100).saturating_sub(1)];
+            println!(
+                "ui-perf tasks={task_count} frames=100 avg_ns={average_ns} p95_ns={p95_ns} bytes_per_frame={bytes_per_frame}"
+            );
+        }
     }
 }

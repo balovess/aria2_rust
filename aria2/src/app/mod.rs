@@ -65,10 +65,12 @@ fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
 impl App {
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
-        let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
-            crate::identity::DEFAULT_USER_AGENT,
-            crate::identity::DEFAULT_PEER_AGENT,
-        )));
+        let config = Arc::new(RwLock::new(
+            ConfigManager::new_with_identity_without_config(
+                crate::identity::DEFAULT_USER_AGENT,
+                crate::identity::DEFAULT_PEER_AGENT,
+            ),
+        ));
         let request_man = Arc::new(RequestGroupMan::new());
 
         Self {
@@ -109,7 +111,6 @@ impl App {
         // - neither: use default ~/.aria2/aria2.conf
         let no_conf = cli.general.no_conf.unwrap_or(false);
         let conf_path = if no_conf {
-            eprintln!("[*] --no-conf set, skipping config file loading");
             None
         } else {
             cli.general
@@ -123,12 +124,17 @@ impl App {
             .load_startup_config(no_conf, conf_path.as_deref())
             .await
         {
-            tracing::error!("Failed to load config file: {}", e);
+            eprintln!("Failed to load config file: {}", e);
+            return 1;
         }
 
         if let Err(e) = self.load_cli_args(cli).await {
             eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
+        }
+
+        if !self.get_opt_bool("enable-color").await.unwrap_or(true) {
+            colored::control::set_override(false);
         }
 
         // Check daemon mode early - must happen before any output
@@ -206,10 +212,13 @@ impl App {
                 .get_opt_str("log-level")
                 .await
                 .unwrap_or_else(|| "info".to_string());
-            let console_log_level = self
-                .get_opt_str("console-log-level")
-                .await
-                .unwrap_or_else(|| "notice".to_string());
+            let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
+                "error".to_string()
+            } else {
+                self.get_opt_str("console-log-level")
+                    .await
+                    .unwrap_or_else(|| "notice".to_string())
+            };
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
             let log_max_size = self
@@ -236,10 +245,13 @@ impl App {
                 .get_opt_str("log-level")
                 .await
                 .unwrap_or_else(|| "info".to_string());
-            let console_log_level = self
-                .get_opt_str("console-log-level")
-                .await
-                .unwrap_or_else(|| "notice".to_string());
+            let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
+                "error".to_string()
+            } else {
+                self.get_opt_str("console-log-level")
+                    .await
+                    .unwrap_or_else(|| "notice".to_string())
+            };
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
             let log_max_size = self
@@ -258,7 +270,11 @@ impl App {
             );
         }
 
-        self.print_banner();
+        let quiet = self.get_opt_bool("quiet").await.unwrap_or(false);
+        let output_to_stderr = self.get_opt_bool("stderr").await.unwrap_or(false);
+        if !quiet {
+            self.print_banner(output_to_stderr);
+        }
 
         // Apply engine-level options from config (CLI/file/env) BEFORE tasks
         // are added. Zero is the explicit unlimited value, so it must also
@@ -322,8 +338,16 @@ impl App {
             match self.add_downloads().await {
                 Ok(gids) => {
                     info!("Added {} download tasks", gids.len());
-                    for gid in &gids {
-                        println!("  {} Task #{}", "#".cyan(), gid.to_string().yellow());
+                    if !quiet {
+                        for gid in &gids {
+                            let line =
+                                format!("  {} Task #{}\n", "#".cyan(), gid.to_string().yellow());
+                            if output_to_stderr {
+                                eprint!("{}", line);
+                            } else {
+                                print!("{}", line);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -335,7 +359,13 @@ impl App {
             info!("Using restored download tasks only");
         }
 
-        println!();
+        if !quiet {
+            if output_to_stderr {
+                eprintln!();
+            } else {
+                println!();
+            }
+        }
 
         // Step 6: Start RPC server (if enabled)
         let rpc_handle = if rpc_enabled {
@@ -379,10 +409,33 @@ impl App {
             // Save failure doesn't affect exit code
         }
 
+        let stopped_results = self.request_man.get_stopped_results(0, usize::MAX);
+        if !quiet {
+            let summary = crate::ui::progress_bar::render_final_summary(&stopped_results);
+            if !summary.is_empty() {
+                if output_to_stderr {
+                    eprint!("{}", summary);
+                } else {
+                    print!("{}", summary);
+                }
+            }
+        }
+
         match run_result {
-            Ok(()) => {
-                println!("{}", "All tasks completed!".green().bold());
+            Ok(())
+                if stopped_results
+                    .iter()
+                    .all(|result| !result_is_failure(result)) =>
+            {
                 0
+            }
+            Ok(()) => {
+                let failed = stopped_results
+                    .iter()
+                    .filter(|result| result_is_failure(result))
+                    .count();
+                eprintln!("Download failed: {} task(s) failed", failed);
+                1
             }
             Err(e) => {
                 eprintln!("{}", format!("Download failed: {}", e).red());
@@ -390,6 +443,10 @@ impl App {
             }
         }
     }
+}
+
+fn result_is_failure(result: &aria2_core::request::request_group::DownloadResult) -> bool {
+    !result.code.is_success() && !result.code.is_user_stopped() && !result.code.is_resumable()
 }
 
 impl Default for App {

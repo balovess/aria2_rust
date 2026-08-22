@@ -77,8 +77,12 @@ docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balove
 | Platform | Command |
 |----------|---------|
 | Homebrew (macOS/Linux) | `brew install ./homebrew/aria2-rust.rb` |
-| Scoop (Windows) | `scoop install ./scoop/aria2-rust.json` |
+| Scoop (Windows) | `scoop install https://raw.githubusercontent.com/balovess/aria2_rust/master/scoop/aria2-rust.json` |
 | Cargo (from source) | `cargo install --path aria2` |
+
+To update an existing Scoop installation, run `scoop update aria2-rust`. The
+manifest is checked against the published Windows ZIP and its SHA-256 asset in
+CI before each stable release.
 
 ### First Download
 

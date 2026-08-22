@@ -449,15 +449,19 @@ impl App {
                 self.detected_inputs.len()
             );
 
-            // Spawn the engine in a background task so we can run the progress
-            // reporter concurrently.
-            let engine_handle = tokio::spawn(async move { engine.run().await });
-
-            // Spawn the progress reporter if requested.
+            // Create the reporter before the engine starts. This captures the
+            // pre-existing stopped-result set without racing a very fast
+            // download into the reporter's history filter.
             let (_reporter_stop_tx, reporter_handle) = if show_progress {
                 let group_man = self.request_man.clone();
+                let summary_interval = self.get_opt_i64("summary-interval").await.unwrap_or(60);
+                let output_to_stderr = self.get_opt_bool("stderr").await.unwrap_or(false);
                 let (mut reporter, stop_tx) =
-                    crate::ui::console_progress::ConsoleProgressReporter::new(group_man);
+                    crate::ui::console_progress::ConsoleProgressReporter::new_with_options(
+                        group_man,
+                        summary_interval,
+                        output_to_stderr,
+                    );
                 let handle = tokio::spawn(async move {
                     reporter.run().await;
                 });
@@ -465,6 +469,10 @@ impl App {
             } else {
                 (None, None)
             };
+
+            // Spawn the engine in a background task so the progress reporter
+            // can observe its activity concurrently.
+            let engine_handle = tokio::spawn(async move { engine.run().await });
 
             // Wait for the engine to complete.
             let result = engine_handle

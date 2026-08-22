@@ -111,9 +111,24 @@ impl ConfigManager {
     /// Use this when you need to register custom options beyond the
     /// built-in set (e.g., application-specific configuration).
     pub fn new_with_registry(registry: OptionRegistry) -> Self {
+        Self::new_with_registry_and_config(registry, true)
+    }
+
+    /// Create a manager with defaults but without reading a configuration
+    /// file. Standalone applications use this when they must honor
+    /// command-line configuration controls such as no-conf.
+    pub fn new_with_registry_without_config(registry: OptionRegistry) -> Self {
+        Self::new_with_registry_and_config(registry, false)
+    }
+
+    fn new_with_registry_and_config(registry: OptionRegistry, load_config_file: bool) -> Self {
         let (change_tx, _) = tokio::sync::broadcast::channel(64);
         let mut parser = ConfigParser::with_registry(registry.clone());
-        parser.load_defaults_first();
+        if load_config_file {
+            parser.load_defaults_first();
+        } else {
+            parser.apply_defaults();
+        }
         Self {
             global_opts: Arc::new(tokio::sync::RwLock::new(parser.options().clone())),
             task_defaults: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -121,6 +136,19 @@ impl ConfigManager {
             registry,
             change_tx,
         }
+    }
+
+    /// Identity-aware constructor that does not implicitly read a config file.
+    pub fn new_with_identity_without_config(
+        user_agent: impl Into<String>,
+        peer_agent: impl Into<String>,
+    ) -> Self {
+        let mut registry = OptionRegistry::new();
+        registry
+            .set_default_value("user-agent", OptionValue::Str(user_agent.into()))
+            .expect("the built-in user-agent option must be registered");
+        let _ = registry.set_default_value("peer-agent", OptionValue::Str(peer_agent.into()));
+        Self::new_with_registry_without_config(registry)
     }
 
     /// Parse and load command-line arguments into global options.

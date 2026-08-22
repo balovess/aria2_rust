@@ -8,6 +8,7 @@
 use aria2::app::App;
 use aria2::app::cli::{CliArgs, Commands, render_help};
 use clap::CommandFactory;
+use clap::error::ErrorKind;
 
 // Use mimalloc as the global allocator for better multi-threaded throughput.
 // On Windows, the system allocator has higher lock contention under concurrent
@@ -17,7 +18,19 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[tokio::main]
 async fn main() {
-    let cli = CliArgs::parse();
+    let cli = match CliArgs::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => match error.kind() {
+            ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => {
+                print!("{}", error);
+                std::process::exit(0);
+            }
+            _ => {
+                eprint!("{}", error);
+                std::process::exit(1);
+            }
+        },
+    };
 
     if let Some(request) = cli.help.as_ref() {
         print!("{}", render_help(request));

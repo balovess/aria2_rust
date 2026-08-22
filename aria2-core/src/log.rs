@@ -230,6 +230,7 @@ pub fn init_logging(
         let console_layer = fmt::layer()
             .with_span_events(FmtSpan::CLOSE)
             .with_target(false)
+            .with_writer(std::io::stderr)
             .with_filter(console_filter);
 
         let file_layer = fmt::Layer::new()
@@ -253,7 +254,8 @@ pub fn init_logging(
             .with(
                 fmt::layer()
                     .with_span_events(FmtSpan::CLOSE)
-                    .with_target(false),
+                    .with_target(false)
+                    .with_writer(std::io::stderr),
             )
             .try_init();
     }

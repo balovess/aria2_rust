@@ -273,10 +273,10 @@ impl CoreRpcBackend {
                 }
             }
 
-            if let Some(position) = position {
-                if let Some(gid) = response_gids.first() {
-                    self.change_position(gid, position as i32, PositionMode::SetFromStart)?;
-                }
+            if let Some(position) = position
+                && let Some(gid) = response_gids.first()
+            {
+                self.change_position(gid, position as i32, PositionMode::SetFromStart)?;
             }
             Ok(BackendResult::with_events(
                 BackendResponse::Gids(response_gids),
