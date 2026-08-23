@@ -248,6 +248,17 @@ async fn bind_ports(
     }))
 }
 
+fn normalize_peer_endpoint(endpoint: SocketAddr) -> SocketAddr {
+    match endpoint {
+        SocketAddr::V6(address) => address
+            .ip()
+            .to_ipv4()
+            .map(|ip| SocketAddr::new(IpAddr::V4(ip), address.port()))
+            .unwrap_or(endpoint),
+        SocketAddr::V4(_) => endpoint,
+    }
+}
+
 async fn run_shared_listener(
     listener: Arc<TcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
@@ -261,6 +272,7 @@ async fn run_shared_listener(
         let Ok((stream, endpoint)) = accepted else {
             break;
         };
+        let endpoint = normalize_peer_endpoint(endpoint);
         let routes = Arc::clone(&routes);
         tokio::spawn(async move {
             let known_info_hashes = {
