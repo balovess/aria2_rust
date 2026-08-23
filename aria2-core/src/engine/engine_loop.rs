@@ -39,6 +39,10 @@ use crate::util::rwlock_ext::RwLockRecover;
 /// Mirrors C++ `MAX_DOWNLOAD_RESULT` (default 1000).
 const MAX_STOPPED_RESULTS: usize = 1000;
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(5);
+// forceShutdown is an emergency path. Give protocol cleanup a short bounded
+// window, then abort the task so process shutdown cannot be held open by a
+// broken or unresponsive protocol implementation.
+const FORCE_SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 
 fn should_mark_failed_connection(error: &Aria2Error) -> bool {
     matches!(
@@ -642,7 +646,7 @@ async fn process_engine_commands<R: EngineCommandQueue>(
                 *force_halt_requested = true;
 
                 for (_, running) in running_downloads.iter_mut() {
-                    let _ = request_shutdown_and_wait(running).await;
+                    let _ = request_shutdown_and_wait(running, FORCE_SHUTDOWN_WAIT).await;
                 }
             }
 
@@ -1205,12 +1209,12 @@ async fn run_event_cleanup(ctx: &EngineLoopContext) {
     }
 }
 
-async fn request_shutdown_and_wait(running: &mut RunningDownload) -> bool {
+async fn request_shutdown_and_wait(running: &mut RunningDownload, wait: Duration) -> bool {
     let Some(shutdown) = running.shutdown.take() else {
         return false;
     };
     shutdown.cancel();
-    match tokio::time::timeout(SHUTDOWN_WAIT, &mut running._handle).await {
+    match tokio::time::timeout(wait, &mut running._handle).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
             warn!(%error, "Download task panicked during shutdown");
@@ -1263,7 +1267,7 @@ async fn on_end_of_run(
     // Request protocol-level shutdown and wait for each task before dropping
     // the engine, bounded so a broken command cannot hang engine teardown.
     for (gid, mut rd) in running_downloads.drain(..) {
-        let completed = request_shutdown_and_wait(&mut rd).await;
+        let completed = request_shutdown_and_wait(&mut rd, SHUTDOWN_WAIT).await;
         debug!(
             gid = gid.value(),
             completed, "Finished running task shutdown"

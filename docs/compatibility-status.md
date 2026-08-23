@@ -1,10 +1,10 @@
 # Compatibility Status
 
-Last verified: 2026-08-18
+Last verified: 2026-08-23
 Reference implementation: aria2_original/  
-Binary package version: 0.3.2
-Library package versions: aria2-core 0.3.2, aria2-protocol 0.3.2, aria2-rpc 0.3.2
-Public product identity: aria2-rust 0.3.2
+Binary package version: 0.3.3
+Library package versions: aria2-core 0.3.3, aria2-protocol 0.3.2, aria2-rpc 0.3.2
+Public product identity: aria2-rust 0.3.3
 
 The binary release source is `aria2/Cargo.toml`. The CLI `--version`, startup
 banner, and RPC `aria2.getVersion` resolve to the `aria2` package version;

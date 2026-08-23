@@ -968,7 +968,11 @@ impl RpcBackend for CoreRpcBackend {
                 }
                 aria2_core::engine::halt_watchers::spawn_timed_halt(
                     self.engine_cmd_tx.clone(),
-                    RPC_SHUTDOWN_GRACE,
+                    if force {
+                        std::time::Duration::ZERO
+                    } else {
+                        RPC_SHUTDOWN_GRACE
+                    },
                     force,
                 );
                 let text = if force {
