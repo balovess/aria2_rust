@@ -24,6 +24,36 @@ claims.
 | Graceful and forced RPC shutdown | `src/aria2api.cc` (`shutdown`) | `aria2/src/app/rpc_backend.rs`, `aria2-core/src/engine/engine_loop.rs` | WebSocket reconnect E2E and engine halt tests; force path is immediate and bounded | PASS |
 | Full-screen TUI framework | Original console readout, not a separate widget framework | Text/in-place renderer using `crossterm` width detection | The original has no ratatui-equivalent public contract; adding one would change output semantics | JUSTIFIED_DIFFERENCE |
 
+## Final Regression Closure
+
+The force-shutdown path now sends a synthetic `TaskResult::Cancelled` through
+the same completion queue when a running task exceeds the bounded abort wait.
+This removes the running generation and decrements `num_commands`, so an
+aborted protocol task cannot keep the engine alive indefinitely or block stopped
+group cleanup.
+
+An explicit force shutdown is also recorded by the shared request-group
+manager. The application preserves any already-recorded stopped error for RPC
+inspection, but returns a successful process exit code for the intentional
+force-shutdown operation instead of misreporting that shutdown as a failed
+download run.
+
+Verified on the `ui` branch:
+
+```text
+cargo fmt --all -- --check
+git diff --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p aria2-core --lib engine::engine_loop -- --test-threads=1  # 23 passed
+cargo test -p aria2 --test e2e_websocket_rpc_client -- --nocapture --test-threads=1  # 3 passed
+```
+
+The SFTP default timeout assertions are separately verified: default options
+produce no command-level timeout, while an explicit `timeout=300` produces a
+300-second timeout. The Debian public torrent remains a protocol fixture only;
+its observed zero public upload is not used as a false claim of client upload
+failure, and no Debian payload was retained in the workspace.
+
 ## Reproducible gates
 
 ```text

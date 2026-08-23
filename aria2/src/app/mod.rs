@@ -448,6 +448,7 @@ impl App {
         }
 
         match run_result {
+            Ok(()) if self.request_man.force_shutdown_requested() => 0,
             Ok(())
                 if stopped_results
                     .iter()

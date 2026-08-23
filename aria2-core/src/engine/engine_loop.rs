@@ -220,7 +220,7 @@ pub(crate) async fn run_engine_loop_with_receiver(
 
     // Completion channel: spawned tasks send (GID, TaskResult) here when done.
     let (completion_tx, mut completion_rx) =
-        mpsc::channel::<(GroupId, CommandGeneration, TaskResult)>(128);
+        mpsc::unbounded_channel::<(GroupId, CommandGeneration, TaskResult)>();
 
     loop {
         // ── 1. Process all incoming EngineCommands ───────────────────────
@@ -233,6 +233,7 @@ pub(crate) async fn run_engine_loop_with_receiver(
             &mut running_downloads,
             &mut halt_requested,
             &mut force_halt_requested,
+            &completion_tx,
         )
         .await;
 
@@ -307,7 +308,8 @@ pub(crate) async fn run_engine_loop_with_receiver(
         // since `all_done && !keep_alive` can never be true there.
         let graceful_done = halt_requested && running_downloads.is_empty();
 
-        let force_done = force_halt_requested && running_downloads.is_empty();
+        let force_done =
+            force_halt_requested && running_downloads.is_empty() && completion_rx.is_empty();
         if force_done || graceful_done || (all_done && !ctx.keep_alive) {
             if force_halt_requested {
                 info!("Force halt completed, shutting down engine");
@@ -339,6 +341,7 @@ pub(crate) async fn run_engine_loop_with_receiver(
                             &mut running_downloads,
                             &mut halt_requested,
                             &mut force_halt_requested,
+                            &completion_tx,
                         )
                         .await;
                     }
@@ -402,7 +405,7 @@ fn promote_reserved_groups(
     halt_requested: bool,
     force_halt_requested: bool,
     next_generation: &mut CommandGeneration,
-    completion_tx: &mpsc::Sender<(GroupId, CommandGeneration, TaskResult)>,
+    completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
 ) {
     // Once a halt has been requested the engine must stop admitting new work.
     let promoted = if halt_requested || force_halt_requested {
@@ -500,9 +503,10 @@ impl<R: EngineCommandQueue> EngineCommandQueue for PrefetchedEngineCommand<'_, R
 async fn process_engine_commands<R: EngineCommandQueue>(
     ctx: &mut EngineLoopContext,
     cmd_rx: &mut R,
-    running_downloads: &mut [(GroupId, RunningDownload)],
+    running_downloads: &mut Vec<(GroupId, RunningDownload)>,
     halt_requested: &mut bool,
     force_halt_requested: &mut bool,
+    completion_tx: &mpsc::UnboundedSender<(GroupId, CommandGeneration, TaskResult)>,
 ) -> bool {
     let mut processed = false;
     while let Ok(cmd) = cmd_rx.try_command() {
@@ -645,9 +649,34 @@ async fn process_engine_commands<R: EngineCommandQueue>(
                 }
                 *force_halt_requested = true;
 
-                for (_, running) in running_downloads.iter_mut() {
-                    let _ = request_shutdown_and_wait(running, FORCE_SHUTDOWN_WAIT).await;
+                for (gid, running) in running_downloads.iter_mut() {
+                    let generation = running.generation;
+                    let completed = request_shutdown_and_wait(running, FORCE_SHUTDOWN_WAIT).await;
+                    if !completed {
+                        // A timed-out task is aborted and cannot publish its
+                        // normal completion. Feed the same completion path so
+                        // command accounting and group demotion stay correct.
+                        let _ = completion_tx.send((*gid, generation, TaskResult::Cancelled));
+                    }
                 }
+                for gid in running_downloads.iter().map(|(gid, _)| gid.value()) {
+                    let cancelled = crate::filesystem::file_allocation_man::cancel_gid(
+                        &ctx.file_alloc_man,
+                        gid,
+                    )
+                    .await;
+                    if cancelled > 0 {
+                        debug!(
+                            gid,
+                            cancelled, "Cancelled file allocations after force halt"
+                        );
+                    }
+                }
+                // Every entry has either completed or been explicitly
+                // aborted above. The completion queue still owns lifecycle
+                // accounting; removing the handles here lets the engine
+                // reach the force-halt exit check in the same pass.
+                running_downloads.clear();
             }
 
             EngineCommand::SetMaxConcurrent { max } => {
@@ -1210,11 +1239,10 @@ async fn run_event_cleanup(ctx: &EngineLoopContext) {
 }
 
 async fn request_shutdown_and_wait(running: &mut RunningDownload, wait: Duration) -> bool {
-    let Some(shutdown) = running.shutdown.take() else {
-        return false;
-    };
-    shutdown.cancel();
-    match tokio::time::timeout(wait, &mut running._handle).await {
+    if let Some(shutdown) = running.shutdown.take() {
+        shutdown.cancel();
+    }
+    let completed = match tokio::time::timeout(wait, &mut running._handle).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
             warn!(%error, "Download task panicked during shutdown");
@@ -1225,7 +1253,13 @@ async fn request_shutdown_and_wait(running: &mut RunningDownload, wait: Duration
             running._handle.abort();
             false
         }
+    };
+    if !completed {
+        // A previously-consumed shutdown token must not turn cleanup into a
+        // no-op. Force the same bounded lifecycle regardless of token state.
+        running._handle.abort();
     }
+    completed
 }
 
 /// Cleanup on engine exit.
@@ -1409,6 +1443,74 @@ mod tests {
             .expect("queued force-halted group should have a stopped result");
         assert_eq!(result.status, DownloadStatus::Removed);
         assert_eq!(result.code, DownloadResultCode::Removed);
+    }
+
+    #[tokio::test]
+    async fn force_halt_accounts_for_aborted_running_task() {
+        let mut ctx = test_ctx(true);
+        let gid = ctx
+            .group_man
+            .add_group(
+                vec!["http://example.com/force-halt-running.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .unwrap();
+        let group = ctx.group_man.fill_from_reserver().remove(0);
+        group.recover().inc_commands();
+
+        let handle = tokio::spawn(async {
+            std::future::pending::<()>().await;
+        });
+        let mut running_downloads = vec![(
+            gid,
+            RunningDownload {
+                _handle: handle,
+                shutdown: Some(CancellationToken::new()),
+                generation: 41,
+                last_activity: Instant::now(),
+                timeout: None,
+            },
+        )];
+        let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        cmd_tx
+            .send(EngineCommand::ForceHaltAll {
+                reason: HaltReason::ShutdownSignal,
+            })
+            .unwrap();
+        let mut cmd_rx = EngineCommandReceiver::from_unbounded(cmd_rx);
+        let mut halt_requested = false;
+        let mut force_halt_requested = false;
+
+        process_engine_commands(
+            &mut ctx,
+            &mut cmd_rx,
+            &mut running_downloads,
+            &mut halt_requested,
+            &mut force_halt_requested,
+            &completion_tx,
+        )
+        .await;
+
+        let mut completed_generations = HashSet::new();
+        let processed = process_task_completions(
+            &ctx,
+            &mut completion_rx,
+            &mut running_downloads,
+            &mut completed_generations,
+        )
+        .await;
+        assert!(processed);
+        assert!(running_downloads.is_empty());
+        assert_eq!(completed_generations.get(&41), Some(&41));
+        assert_eq!(
+            ctx.group_man
+                .find_group(gid)
+                .unwrap()
+                .recover()
+                .num_commands(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1619,6 +1721,7 @@ mod tests {
 
         let mut halt_requested = false;
         let mut force_halt_requested = false;
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         // Hold the coordinator lock while the command mutates state. The
         // engine must retain the dirty notification instead of dropping it
         // because the autosave writer is busy.
@@ -1629,6 +1732,7 @@ mod tests {
             &mut Vec::new(),
             &mut halt_requested,
             &mut force_halt_requested,
+            &completion_tx,
         )
         .await;
         drop(auto_save_guard);
@@ -1665,12 +1769,14 @@ mod tests {
         let mut running_downloads = Vec::new();
         let mut halt_requested = false;
         let mut force_halt_requested = false;
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         process_engine_commands(
             &mut ctx,
             &mut rx,
             &mut running_downloads,
             &mut halt_requested,
             &mut force_halt_requested,
+            &completion_tx,
         )
         .await;
 
