@@ -264,9 +264,5 @@ fn cli_success_error_quiet_and_plain_output_are_stable() {
         "console log level should suppress INFO records"
     );
     let log_contents = std::fs::read_to_string(&log_path).expect("file log must be created");
-    assert!(
-        log_contents.contains(" INFO "),
-        "file log must contain INFO records; RUST_LOG={:?}; contents={log_contents:?}",
-        std::env::var("RUST_LOG").ok()
-    );
+    assert!(log_contents.contains(" INFO "));
 }

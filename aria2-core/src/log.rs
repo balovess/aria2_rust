@@ -251,6 +251,7 @@ pub fn init_logging(
         let file_layer = fmt::Layer::new()
             .with_span_events(FmtSpan::CLOSE)
             .with_target(false)
+            .with_ansi(false)
             .with_writer(Mutex::new(file_writer))
             .with_filter(file_filter);
 
