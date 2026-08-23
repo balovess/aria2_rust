@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use tracing::Level;
 use tracing_subscriber::{
     EnvFilter,
@@ -9,9 +9,6 @@ use tracing_subscriber::{
     layer::{Layer, SubscriberExt},
     util::SubscriberInitExt,
 };
-
-static LOG_GUARD: OnceLock<Mutex<Option<Vec<tracing_appender::non_blocking::WorkerGuard>>>> =
-    OnceLock::new();
 
 fn parse_log_level(level_str: &str) -> Level {
     match level_str.to_lowercase().as_str() {
@@ -196,27 +193,24 @@ pub fn init_logging(
         let path = log_file.unwrap();
         let p = std::path::Path::new(path);
 
-        use tracing_appender::non_blocking;
-
         // Size-based rotation when a max size is configured; otherwise fall
         // back to daily time-based rotation for backward compatibility.
-        let (non_blocking, guard) = match log_max_size {
+        let file_writer: Box<dyn Write + Send> = match log_max_size {
             Some(max_size) => match SizeRotatingWriter::new(
                 p,
                 max_size,
                 log_max_files.unwrap_or(log_backup_count),
             ) {
-                Ok(writer) => non_blocking(writer),
+                Ok(writer) => Box::new(writer),
                 Err(e) => {
                     eprintln!(
                         "[aria2] size-rotating log writer init failed ({e}); using daily rotation"
                     );
-                    non_blocking(build_daily_appender(p, log_backup_count))
+                    Box::new(build_daily_appender(p, log_backup_count))
                 }
             },
-            None => non_blocking(build_daily_appender(p, log_backup_count)),
+            None => Box::new(build_daily_appender(p, log_backup_count)),
         };
-        let _ = LOG_GUARD.set(Mutex::new(Some(vec![guard])));
 
         let file_filter = EnvFilter::from_default_env()
             .add_directive(file_level.into())
@@ -257,7 +251,7 @@ pub fn init_logging(
         let file_layer = fmt::Layer::new()
             .with_span_events(FmtSpan::CLOSE)
             .with_target(false)
-            .with_writer(non_blocking)
+            .with_writer(Mutex::new(file_writer))
             .with_filter(file_filter);
 
         let _ = tracing_subscriber::registry()
@@ -292,19 +286,6 @@ pub fn init_logging(
     }
 
     tracing::info!("Log system initialization complete");
-}
-
-/// Flush and stop the asynchronous file logger before the process exits.
-///
-/// `std::process::exit` skips destructors, so callers must release the worker
-/// guard explicitly or the final log records can remain in the channel.
-pub fn shutdown_logging() {
-    let guards = LOG_GUARD.get().and_then(|lock| {
-        lock.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-    });
-    drop(guards);
 }
 
 #[cfg(test)]

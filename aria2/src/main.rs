@@ -47,6 +47,5 @@ async fn main() {
     }
 
     let exit_code = App::new().run(cli).await;
-    aria2_core::shutdown_logging();
     std::process::exit(exit_code);
 }

@@ -140,8 +140,3 @@ pub fn init_logging(
         log_max_files,
     );
 }
-
-/// Flush and stop asynchronous file logging before process termination.
-pub fn shutdown_logging() {
-    log::shutdown_logging();
-}
