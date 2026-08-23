@@ -220,11 +220,31 @@ pub fn init_logging(
 
         let file_filter = EnvFilter::from_default_env()
             .add_directive(file_level.into())
+            .add_directive(
+                format!("aria2={}", file_level.to_string().to_lowercase())
+                    .parse()
+                    .unwrap(),
+            )
+            .add_directive(
+                format!("aria2_core={}", file_level.to_string().to_lowercase())
+                    .parse()
+                    .unwrap(),
+            )
             .add_directive("hyper=warn".parse().unwrap())
             .add_directive("reqwest=warn".parse().unwrap());
 
         let console_filter = EnvFilter::from_default_env()
             .add_directive(console_level.into())
+            .add_directive(
+                format!("aria2={}", console_level.to_string().to_lowercase())
+                    .parse()
+                    .unwrap(),
+            )
+            .add_directive(
+                format!("aria2_core={}", console_level.to_string().to_lowercase())
+                    .parse()
+                    .unwrap(),
+            )
             .add_directive("hyper=warn".parse().unwrap())
             .add_directive("reqwest=warn".parse().unwrap());
 
@@ -247,6 +267,16 @@ pub fn init_logging(
     } else {
         let env_filter = EnvFilter::from_default_env()
             .add_directive(console_level.into())
+            .add_directive(
+                format!("aria2={}", console_level.to_string().to_lowercase())
+                    .parse()
+                    .unwrap(),
+            )
+            .add_directive(
+                format!("aria2_core={}", console_level.to_string().to_lowercase())
+                    .parse()
+                    .unwrap(),
+            )
             .add_directive("hyper=warn".parse().unwrap())
             .add_directive("reqwest=warn".parse().unwrap());
 
