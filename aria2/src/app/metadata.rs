@@ -135,6 +135,7 @@ fn write_file_row(output: &mut String, index: usize, path: &str, length: u64) {
     .unwrap();
 }
 
+#[cfg(feature = "metalink")]
 fn print_file_row(index: usize, path: &str, length: u64) {
     println!("{index:>3}|{path}");
     println!("   |{} ({length} B)", format_bytes(length));

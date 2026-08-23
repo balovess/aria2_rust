@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use tracing::Level;
 use tracing_subscriber::{
     EnvFilter,
@@ -10,7 +10,8 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-static LOG_GUARD: OnceLock<Vec<tracing_appender::non_blocking::WorkerGuard>> = OnceLock::new();
+static LOG_GUARD: OnceLock<Mutex<Option<Vec<tracing_appender::non_blocking::WorkerGuard>>>> =
+    OnceLock::new();
 
 fn parse_log_level(level_str: &str) -> Level {
     match level_str.to_lowercase().as_str() {
@@ -215,7 +216,7 @@ pub fn init_logging(
             },
             None => non_blocking(build_daily_appender(p, log_backup_count)),
         };
-        let _ = LOG_GUARD.set(vec![guard]);
+        let _ = LOG_GUARD.set(Mutex::new(Some(vec![guard])));
 
         let file_filter = EnvFilter::from_default_env()
             .add_directive(file_level.into())
@@ -261,6 +262,19 @@ pub fn init_logging(
     }
 
     tracing::info!("Log system initialization complete");
+}
+
+/// Flush and stop the asynchronous file logger before the process exits.
+///
+/// `std::process::exit` skips destructors, so callers must release the worker
+/// guard explicitly or the final log records can remain in the channel.
+pub fn shutdown_logging() {
+    let guards = LOG_GUARD.get().and_then(|lock| {
+        lock.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    });
+    drop(guards);
 }
 
 #[cfg(test)]
