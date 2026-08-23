@@ -35,13 +35,14 @@ use aria2_core::validation::protocol_detector::DetectedInput;
 use tracing::{info, warn};
 
 // Daemon support (module declared in lib.rs as `pub mod daemon;`)
-use crate::daemon::{DaemonConfig, Daemonizer, PidFileManager};
+use crate::daemon::{DaemonConfig, Daemonizer, PidFileGuard, PidFileManager, is_daemon_child};
 
 // Sub-modules
 pub mod cli;
 use cli::CliArgs;
 mod config;
 mod engine;
+mod metadata;
 pub mod rpc_backend;
 // Public so integration tests can exercise the core → RPC notification bridge
 // (`rpc::CoreEventBridge`) without spinning up a real RPC server.
@@ -56,6 +57,10 @@ pub struct App {
     engine: Arc<Mutex<Option<aria2_core::engine::download_engine::DownloadEngine>>>,
     request_man: Arc<RequestGroupMan>,
     detected_inputs: Vec<DetectedInput>,
+    /// Whether the user explicitly supplied the generic `--timeout` option.
+    /// The registry keeps the HTTP/FTP-compatible default at 60 seconds, but
+    /// an omitted generic timeout must not impose a BT-wide inactivity halt.
+    explicit_timeout: bool,
 }
 
 fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
@@ -65,10 +70,12 @@ fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
 impl App {
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
-        let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
-            crate::identity::DEFAULT_USER_AGENT,
-            crate::identity::DEFAULT_PEER_AGENT,
-        )));
+        let config = Arc::new(RwLock::new(
+            ConfigManager::new_with_identity_without_config(
+                crate::identity::DEFAULT_USER_AGENT,
+                crate::identity::DEFAULT_PEER_AGENT,
+            ),
+        ));
         let request_man = Arc::new(RequestGroupMan::new());
 
         Self {
@@ -76,6 +83,7 @@ impl App {
             engine: Arc::new(Mutex::new(None)),
             request_man,
             detected_inputs: Vec::new(),
+            explicit_timeout: false,
         }
     }
 
@@ -109,7 +117,6 @@ impl App {
         // - neither: use default ~/.aria2/aria2.conf
         let no_conf = cli.general.no_conf.unwrap_or(false);
         let conf_path = if no_conf {
-            eprintln!("[*] --no-conf set, skipping config file loading");
             None
         } else {
             cli.general
@@ -123,7 +130,8 @@ impl App {
             .load_startup_config(no_conf, conf_path.as_deref())
             .await
         {
-            tracing::error!("Failed to load config file: {}", e);
+            eprintln!("Failed to load config file: {}", e);
+            return 1;
         }
 
         if let Err(e) = self.load_cli_args(cli).await {
@@ -131,15 +139,30 @@ impl App {
             return 1;
         }
 
+        if self.get_opt_bool("show-files").await.unwrap_or(false) {
+            return match metadata::show_files(&self.detected_inputs) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("Failed to show metadata: {error}");
+                    1
+                }
+            };
+        }
+
+        if !self.get_opt_bool("enable-color").await.unwrap_or(true) {
+            colored::control::set_override(false);
+        }
+
         // Check daemon mode early - must happen before any output
-        let daemon_mode = self.get_opt_bool("daemon").await.unwrap_or(false);
+        let daemon_child = is_daemon_child();
+        let daemon_mode = daemon_child || self.get_opt_bool("daemon").await.unwrap_or(false);
         let pid_file = self.get_opt_str("pid-file").await.map(PathBuf::from);
 
-        if daemon_mode {
+        if daemon_mode && !daemon_child {
             // Check if daemon is already running
             if let Some(ref path) = pid_file {
                 let pid_mgr = PidFileManager::new(path.clone());
-                if let Some(existing_pid) = pid_mgr.check_existing() {
+                if let Some(existing_pid) = pid_mgr.check_existing_for_current_executable() {
                     eprintln!(
                         "{}",
                         format!("Daemon already running with PID: {}", existing_pid).yellow()
@@ -206,10 +229,13 @@ impl App {
                 .get_opt_str("log-level")
                 .await
                 .unwrap_or_else(|| "info".to_string());
-            let console_log_level = self
-                .get_opt_str("console-log-level")
-                .await
-                .unwrap_or_else(|| "notice".to_string());
+            let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
+                "error".to_string()
+            } else {
+                self.get_opt_str("console-log-level")
+                    .await
+                    .unwrap_or_else(|| "notice".to_string())
+            };
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
             let log_max_size = self
@@ -230,16 +256,28 @@ impl App {
             info!("Daemon started successfully");
         }
 
+        // `daemonize()` only returns in the daemon child. The parent exits
+        // inside the platform implementation, so this guard is created with
+        // the actual daemon PID and remains alive for App::run.
+        let _pid_file_guard = if daemon_mode {
+            pid_file.map(|path| PidFileGuard::new(path, std::process::id()))
+        } else {
+            None
+        };
+
         // In daemon mode, logging was already re-initialized after daemonization above.
         if !daemon_mode {
             let log_level = self
                 .get_opt_str("log-level")
                 .await
                 .unwrap_or_else(|| "info".to_string());
-            let console_log_level = self
-                .get_opt_str("console-log-level")
-                .await
-                .unwrap_or_else(|| "notice".to_string());
+            let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
+                "error".to_string()
+            } else {
+                self.get_opt_str("console-log-level")
+                    .await
+                    .unwrap_or_else(|| "notice".to_string())
+            };
             let log_path = self.get_opt_str("log").await;
             let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
             let log_max_size = self
@@ -258,7 +296,11 @@ impl App {
             );
         }
 
-        self.print_banner();
+        let quiet = self.get_opt_bool("quiet").await.unwrap_or(false);
+        let output_to_stderr = self.get_opt_bool("stderr").await.unwrap_or(false);
+        if !quiet {
+            self.print_banner(output_to_stderr);
+        }
 
         // Apply engine-level options from config (CLI/file/env) BEFORE tasks
         // are added. Zero is the explicit unlimited value, so it must also
@@ -322,8 +364,16 @@ impl App {
             match self.add_downloads().await {
                 Ok(gids) => {
                     info!("Added {} download tasks", gids.len());
-                    for gid in &gids {
-                        println!("  {} Task #{}", "#".cyan(), gid.to_string().yellow());
+                    if !quiet {
+                        for gid in &gids {
+                            let line =
+                                format!("  {} Task #{}\n", "#".cyan(), gid.to_string().yellow());
+                            if output_to_stderr {
+                                eprint!("{}", line);
+                            } else {
+                                print!("{}", line);
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -335,7 +385,13 @@ impl App {
             info!("Using restored download tasks only");
         }
 
-        println!();
+        if !quiet {
+            if output_to_stderr {
+                eprintln!();
+            } else {
+                println!();
+            }
+        }
 
         // Step 6: Start RPC server (if enabled)
         let rpc_handle = if rpc_enabled {
@@ -348,8 +404,8 @@ impl App {
             match self.start_rpc_server(group_man, engine_cmd_tx).await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
-                    warn!("RPC server failed to start: {}", e);
-                    None
+                    eprintln!("Failed to start RPC server: {}", e);
+                    return 1;
                 }
             }
         } else {
@@ -379,10 +435,34 @@ impl App {
             // Save failure doesn't affect exit code
         }
 
+        let stopped_results = self.request_man.get_stopped_results(0, usize::MAX);
+        if !quiet {
+            let summary = crate::ui::progress_bar::render_final_summary(&stopped_results);
+            if !summary.is_empty() {
+                if output_to_stderr {
+                    eprint!("{}", summary);
+                } else {
+                    print!("{}", summary);
+                }
+            }
+        }
+
         match run_result {
-            Ok(()) => {
-                println!("{}", "All tasks completed!".green().bold());
+            Ok(()) if self.request_man.force_shutdown_requested() => 0,
+            Ok(())
+                if stopped_results
+                    .iter()
+                    .all(|result| !result_is_failure(result)) =>
+            {
                 0
+            }
+            Ok(()) => {
+                let failed = stopped_results
+                    .iter()
+                    .filter(|result| result_is_failure(result))
+                    .count();
+                eprintln!("Download failed: {} task(s) failed", failed);
+                1
             }
             Err(e) => {
                 eprintln!("{}", format!("Download failed: {}", e).red());
@@ -390,6 +470,10 @@ impl App {
             }
         }
     }
+}
+
+fn result_is_failure(result: &aria2_core::request::request_group::DownloadResult) -> bool {
+    !result.code.is_success() && !result.code.is_user_stopped() && !result.code.is_resumable()
 }
 
 impl Default for App {

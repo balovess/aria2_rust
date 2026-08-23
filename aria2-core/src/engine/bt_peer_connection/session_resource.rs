@@ -102,9 +102,7 @@ impl PeerSessionResource {
         let copy_len = std::cmp::min(bitfield.len(), self.bitfield.len());
         self.bitfield[..copy_len].copy_from_slice(&bitfield[..copy_len]);
         // Zero-fill remaining bytes if source is shorter
-        for byte in &mut self.bitfield[copy_len..] {
-            *byte = 0;
-        }
+        self.bitfield[copy_len..].fill(0);
         old
     }
 
@@ -128,9 +126,7 @@ impl PeerSessionResource {
 
     /// Mark all pieces as available (seeder bitfield).
     pub fn set_all_bitfield(&mut self) {
-        for byte in &mut self.bitfield {
-            *byte = 0xFF;
-        }
+        self.bitfield.fill(0xFF);
         // Clear trailing bits beyond num_pieces
         let remaining = (self.num_pieces as usize) % 8;
         if remaining != 0 {
@@ -152,9 +148,7 @@ impl PeerSessionResource {
     /// peer's piece availability.
     /// Mirrors C++ `BtHaveNoneMessage::doReceivedAction()`.
     pub fn clear_bitfield(&mut self) {
-        for byte in &mut self.bitfield {
-            *byte = 0;
-        }
+        self.bitfield.fill(0);
     }
 
     /// Check whether the peer is a seeder (has all pieces).

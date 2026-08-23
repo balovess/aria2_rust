@@ -12,6 +12,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 impl super::RequestGroup {
     pub(crate) fn attach_activity_signal(&mut self, signal: Arc<super::ActivitySignal>) {
         let _ = self.activity_signal.set(Arc::clone(&signal));
+        self.connection_state
+            .attach_activity_signal(Arc::clone(&signal));
         self.progress.attach_activity_signal(signal);
     }
 

@@ -88,6 +88,10 @@ pub struct RequestGroupMan {
 
     /// Wakes snapshot observers when a group or its progress changes.
     activity_signal: Arc<ActivitySignal>,
+
+    /// Records an explicit process-level force shutdown so the application
+    /// can distinguish intentional termination from an ordinary failed run.
+    force_shutdown_requested: std::sync::atomic::AtomicBool,
 }
 
 impl RequestGroupMan {
@@ -109,6 +113,7 @@ impl RequestGroupMan {
             global_net_stat: Arc::new(GlobalNetStat::default()),
             download_finished_notify: Arc::new(Notify::new()),
             activity_signal: Arc::new(ActivitySignal::new()),
+            force_shutdown_requested: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -652,10 +657,18 @@ impl RequestGroupMan {
     }
 
     pub fn force_halt_all(&self, reason: HaltReason) {
+        if matches!(reason, HaltReason::ShutdownSignal) {
+            self.force_shutdown_requested.store(true, Ordering::Release);
+        }
         for entry in self.groups.iter() {
             let group = entry.recover();
             group.request_force_halt(reason);
         }
+    }
+
+    /// Whether the process was explicitly asked to force-shutdown.
+    pub fn force_shutdown_requested(&self) -> bool {
+        self.force_shutdown_requested.load(Ordering::Acquire)
     }
 
     /// Remove all groups that have not started yet.

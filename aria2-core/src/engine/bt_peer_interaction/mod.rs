@@ -89,23 +89,35 @@ impl BtPeerInteraction {
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
-        let mut active_connections: Vec<BtPeerConn> = Vec::new();
+        // A peer can legitimately delay Unchoke while the tracker has already
+        // supplied other usable peers. Establish each candidate independently
+        // so one slow peer cannot prevent the piece scheduler from starting.
+        let results = stream::iter(peer_addrs.iter().cloned())
+            .map(|addr| {
+                let utp_socket = utp_socket.clone();
+                async move {
+                    debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
+                    let result = Self::connect_peer_ready(
+                        &addr,
+                        info_hash_raw,
+                        connection_options,
+                        num_pieces,
+                        piece_length,
+                        total_length,
+                        utp_socket.clone(),
+                    )
+                    .await;
+                    (addr, result)
+                }
+            })
+            .buffer_unordered(peer_addrs.len().max(1))
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut active_connections = Vec::with_capacity(results.len());
         let mut failed_count = 0usize;
-
-        for addr in peer_addrs {
-            debug!("[BT] Connecting to peer {}:{}", addr.ip, addr.port);
-
-            match Self::connect_peer_ready(
-                addr,
-                info_hash_raw,
-                connection_options,
-                num_pieces,
-                piece_length,
-                total_length,
-                utp_socket.clone(),
-            )
-            .await
-            {
+        for (addr, result) in results {
+            match result {
                 Ok(conn) => active_connections.push(conn),
                 Err(e) => {
                     error!("[BT] Failed to connect peer {}: {}", addr.ip, e);
@@ -272,6 +284,44 @@ impl BtPeerInteraction {
         Ok(())
     }
 
+    /// Apply peer state messages consumed while waiting for the initial
+    /// unchoke. Peers commonly send their bitfield or HaveAll before Unchoke;
+    /// dropping those messages leaves the piece selector with no availability.
+    fn apply_setup_message(conn: &mut BtPeerConn, msg: BtMessage) -> bool {
+        match msg {
+            BtMessage::Have { piece_index } => {
+                conn.update_peer_bitfield(piece_index as usize, 1);
+                if conn
+                    .session_resource
+                    .as_ref()
+                    .is_some_and(|resource| resource.is_seeder())
+                {
+                    conn.seeder = true;
+                }
+            }
+            BtMessage::Bitfield { data } => {
+                conn.set_peer_bitfield(&data);
+                conn.seeder = conn
+                    .session_resource
+                    .as_ref()
+                    .is_some_and(|resource| resource.is_seeder());
+            }
+            BtMessage::HaveAll => conn.mark_seeder(),
+            BtMessage::HaveNone => {
+                conn.set_peer_bitfield(&[]);
+                conn.seeder = false;
+            }
+            BtMessage::Choke => conn.stats.peer_choking = true,
+            BtMessage::Unchoke => {
+                conn.stats.peer_choking = false;
+                return true;
+            }
+            BtMessage::AllowedFast { index } => conn.add_allowed_fast(index),
+            _ => {}
+        }
+        false
+    }
+
     /// Wait for an unchoke message from a peer
     ///
     /// Polls the connection for messages until we receive an Unchoke
@@ -282,47 +332,67 @@ impl BtPeerInteraction {
     ) -> Result<()> {
         debug!("[BT] Waiting for unchoke from {}:{}", addr.ip, addr.port);
 
-        for _ in 0..MAX_UNCHOKE_WAIT_ATTEMPTS {
-            match tokio::time::timeout(
-                Duration::from_secs(PEER_MESSAGE_TIMEOUT_SECS),
-                conn.read_message(),
-            )
-            .await
-            {
-                Ok(Ok(Some(msg))) => {
-                    if matches!(msg, BtMessage::Unchoke) {
+        // Read only the initial setup burst here. A peer that delays Unchoke
+        // must not hold the whole initial peer batch hostage; the piece loop
+        // owns the connection after this point and can consume late setup
+        // messages normally.
+        let first_message = tokio::time::timeout(
+            Duration::from_secs(PEER_MESSAGE_TIMEOUT_SECS),
+            conn.read_message(),
+        )
+        .await;
+        let mut got_unchoke = false;
+        match first_message {
+            Ok(Ok(Some(msg))) => {
+                if Self::apply_setup_message(conn, msg) {
+                    got_unchoke = true;
+                    info!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
+                }
+                debug!("[BT] Applied message while waiting for unchoke");
+
+                // Consume the rest of the setup burst without waiting for a
+                // second full peer timeout. This preserves HaveAll/bitfield
+                // state while still bounding slow peers to one initial wait.
+                while let Ok(Ok(Some(msg))) =
+                    tokio::time::timeout(Duration::from_millis(100), conn.read_message()).await
+                {
+                    if Self::apply_setup_message(conn, msg) {
+                        got_unchoke = true;
                         info!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
-                        return Ok(());
                     }
-                    debug!("[BT] Got message while waiting for unchoke: {:?}", msg);
-                }
-                Ok(Ok(None)) => {
-                    warn!("[BT] EOF from peer while waiting for unchoke");
-                    return Err(Aria2Error::Recoverable(
-                        RecoverableError::TemporaryNetworkFailure {
-                            message: "Peer closed connection".into(),
-                        },
-                    ));
-                }
-                Ok(Err(e)) => {
-                    error!("[BT] Error reading from peer: {}", e);
-                    return Err(Aria2Error::Recoverable(
-                        RecoverableError::TemporaryNetworkFailure {
-                            message: format!("Read error: {}", e),
-                        },
-                    ));
-                }
-                Err(_) => {
-                    debug!("[BT] Timeout reading from peer, retrying...");
+                    debug!("[BT] Applied setup message while waiting for unchoke");
                 }
             }
+            Ok(Ok(None)) => {
+                warn!("[BT] EOF from peer while waiting for unchoke");
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: "Peer closed connection".into(),
+                    },
+                ));
+            }
+            Ok(Err(e)) => {
+                error!("[BT] Error reading from peer: {}", e);
+                return Err(Aria2Error::Recoverable(
+                    RecoverableError::TemporaryNetworkFailure {
+                        message: format!("Read error: {}", e),
+                    },
+                ));
+            }
+            Err(_) => {
+                debug!("[BT] Setup message wait elapsed; continuing with peer");
+            }
+        }
+
+        if got_unchoke {
+            return Ok(());
         }
 
         warn!(
             "[BT] Did not receive unchoke from {}:{} after {} attempts",
-            addr.ip, addr.port, MAX_UNCHOKE_WAIT_ATTEMPTS
+            addr.ip, addr.port, 1
         );
-        Ok(()) // Continue anyway, might get unchoke later
+        Ok(()) // Continue anyway; the piece loop can receive it later.
     }
 
     /// Broadcast a HAVE message to all connected peers

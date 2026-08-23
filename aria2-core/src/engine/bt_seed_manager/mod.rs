@@ -52,6 +52,7 @@ use crate::engine::bt_upload_session::{
 };
 use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::engine::peer_stats::PeerStats;
+use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -129,6 +130,11 @@ pub struct BtSeedManager {
     /// Incoming peers routed to this torrent while it remains in seeding mode.
     incoming_peers:
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
+    /// Lock-free progress sink for live RPC/UI upload statistics.
+    upload_progress: Option<Arc<AtomicProgress>>,
+    /// Shared protocol counters and peer snapshots consumed by RPC/TUI.
+    connection_state: Option<Arc<ConnectionState>>,
+    peer_snapshot_store: Option<Arc<std::sync::RwLock<Vec<BtPeerSnapshot>>>>,
 }
 
 impl BtSeedManager {
@@ -374,10 +380,16 @@ impl BtSeedManager {
             cancel_token,
             peer_storage: None,
             halt_requested: false,
-            last_choke_time: Instant::now(),
+            // Run the first choke round immediately after the first peer state
+            // update.  A newly admitted interested peer should not wait for
+            // the full rotation interval before receiving an unchoke.
+            last_choke_time: Instant::now() - Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS),
             announcer,
             peer_id,
             incoming_peers,
+            upload_progress: None,
+            connection_state: None,
+            peer_snapshot_store: None,
         }
     }
 
@@ -409,6 +421,17 @@ impl BtSeedManager {
             self.exit_condition.seed_time,
             self.upload_sessions.len()
         );
+
+        if let Some(provider) = self.piece_provider.as_ref() {
+            for session in &mut self.upload_sessions {
+                if let Err(error) = session.send_piece_availability(provider.as_ref()).await {
+                    warn!(%error, "Failed to announce completed BitTorrent seed availability");
+                    session.is_dead = true;
+                }
+            }
+        }
+        self.publish_connection_state();
+        self.publish_upload_stats();
 
         loop {
             // -- Cancellation check (non-blocking) ----------------------------
@@ -454,12 +477,19 @@ impl BtSeedManager {
             // is the Rust equivalent of PeerListenCommand continuing beside
             // SeedCheckCommand, including when no peer was connected at the
             // instant the download finished.
-            self.drain_incoming_peers();
+            self.drain_incoming_peers().await;
 
             // -- Process state changes observed since the last event ---------
             self.remove_dead_sessions();
             self.sync_sessions_to_stats();
-            if self.last_choke_time.elapsed().as_secs() >= CHOKE_ROUND_INTERVAL_SECS {
+            self.publish_connection_state();
+            let interested_peer_needs_decision = self
+                .upload_sessions
+                .iter()
+                .any(|session| session.is_peer_interested() && session.is_peer_choked());
+            if self.last_choke_time.elapsed().as_secs() >= CHOKE_ROUND_INTERVAL_SECS
+                || interested_peer_needs_decision
+            {
                 self.run_choke_round();
                 self.last_choke_time = Instant::now();
             }
@@ -478,12 +508,14 @@ impl BtSeedManager {
                             incoming,
                             provider.num_pieces(),
                             provider.piece_length(),
-                        );
+                        )
+                        .await;
                     }
                 }
                 SeedWaitEvent::PeerMessage { index, result } => {
                     if let Ok(bytes) = result {
                         self.total_uploaded = self.total_uploaded.saturating_add(bytes);
+                        self.publish_upload_stats();
                     } else if let Some(session) = self.upload_sessions.get_mut(index) {
                         session.is_dead = true;
                     }
@@ -504,6 +536,7 @@ impl BtSeedManager {
                 .await;
         }
         self.is_active = false;
+        self.clear_connection_state();
         info!(
             "Seeding loop ended: uploaded {} bytes in {:?}",
             self.total_uploaded,
@@ -538,9 +571,18 @@ impl BtSeedManager {
     async fn wait_for_seed_event(&mut self, deadline: Instant) -> SeedWaitEvent {
         let cancel_token = self.cancel_token.clone();
         let cancel_wait = cancel_token.cancelled();
-        let mut incoming_receiver = self.incoming_peers.take();
         let deadline_wait = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
         tokio::pin!(deadline_wait);
+        let incoming_wait = async {
+            match self.incoming_peers.as_mut() {
+                Some(receiver) => receiver.recv().await,
+                None => {
+                    std::future::pending::<Option<crate::engine::bt_peer_listener::IncomingPeer>>()
+                        .await
+                }
+            }
+        };
+        tokio::pin!(incoming_wait);
 
         let provider = self.piece_provider.clone();
         let mut peer_reads = futures::stream::FuturesUnordered::new();
@@ -562,17 +604,9 @@ impl BtSeedManager {
         }
 
         let event = tokio::select! {
-            incoming = async {
-                match incoming_receiver.as_mut() {
-                    Some(receiver) => receiver.recv().await,
-                    None => std::future::pending::<Option<crate::engine::bt_peer_listener::IncomingPeer>>().await,
-                }
-            } => match incoming {
+            incoming = &mut incoming_wait => match incoming {
                 Some(incoming) => SeedWaitEvent::Incoming(incoming),
-                None => {
-                    incoming_receiver = None;
-                    SeedWaitEvent::Wake
-                }
+                None => SeedWaitEvent::Wake,
             },
             peer = peer_reads.next(), if !peer_reads.is_empty() => {
                 peer.map_or(SeedWaitEvent::Wake, |(index, result)| {
@@ -584,12 +618,11 @@ impl BtSeedManager {
         };
 
         drop(peer_reads);
-        self.incoming_peers = incoming_receiver;
         event
     }
 
     /// Admit handshaken peers that arrive while the torrent is seeding.
-    fn drain_incoming_peers(&mut self) {
+    async fn drain_incoming_peers(&mut self) {
         let Some(provider) = self.piece_provider.as_ref() else {
             return;
         };
@@ -600,12 +633,13 @@ impl BtSeedManager {
             return;
         };
         while let Ok(incoming) = receiver.try_recv() {
-            self.admit_incoming_peer(incoming, num_pieces, piece_length);
+            self.admit_incoming_peer(incoming, num_pieces, piece_length)
+                .await;
         }
         self.incoming_peers = Some(receiver);
     }
 
-    fn admit_incoming_peer(
+    async fn admit_incoming_peer(
         &mut self,
         incoming: crate::engine::bt_peer_listener::IncomingPeer,
         num_pieces: u32,
@@ -624,8 +658,8 @@ impl BtSeedManager {
         });
 
         if duplicate {
+            debug!(%endpoint, remote_peer_id = ?remote_peer_id, "Rejected duplicate or self BitTorrent seed peer");
             self.release_peer(endpoint);
-            debug!(%endpoint, "Rejected duplicate or self BitTorrent seed peer");
             return;
         }
 
@@ -639,9 +673,18 @@ impl BtSeedManager {
         };
         let mut session = BtUploadSession::new_with_connection(transport, &self.config);
         session.configure_message_validator(num_pieces, piece_length);
+        if let Some(provider) = self.piece_provider.as_ref()
+            && let Err(error) = session.send_piece_availability(provider.as_ref()).await
+        {
+            debug!(%endpoint, %error, "Failed to announce completed BitTorrent seed availability");
+            self.release_peer(endpoint);
+            warn!(%endpoint, %error, "Failed to announce BitTorrent seed availability");
+            return;
+        }
         let peer_stats = PeerStats::new(remote_peer_id.unwrap_or([0u8; 20]), endpoint);
         self.upload_sessions.push(session);
         self.peer_stats.push(peer_stats);
+        self.publish_connection_state();
         info!(%endpoint, "Admitted incoming BitTorrent seed peer");
     }
 
@@ -834,7 +877,13 @@ impl BtSeedManager {
 
     /// Record bytes uploaded to a peer.
     pub fn record_upload(&mut self, bytes: u64) {
-        self.total_uploaded += bytes;
+        self.total_uploaded = self.total_uploaded.saturating_add(bytes);
+    }
+
+    /// Restore upload statistics when a paused BT command resumes seeding.
+    pub(crate) fn set_total_uploaded(&mut self, total_uploaded: u64) {
+        self.total_uploaded = total_uploaded;
+        self.publish_upload_stats();
     }
 
     /// Cancel the seeding loop (external shutdown signal).
@@ -846,6 +895,86 @@ impl BtSeedManager {
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
+
+    /// Attach the command's lock-free progress counters for live statistics.
+    pub(crate) fn set_upload_progress(&mut self, progress: Arc<AtomicProgress>) {
+        self.upload_progress = Some(progress);
+        self.publish_upload_stats();
+    }
+
+    pub(crate) fn set_connection_state(
+        &mut self,
+        connection_state: Arc<ConnectionState>,
+        peer_snapshot_store: Arc<std::sync::RwLock<Vec<BtPeerSnapshot>>>,
+    ) {
+        self.connection_state = Some(connection_state);
+        self.peer_snapshot_store = Some(peer_snapshot_store);
+        self.publish_connection_state();
+    }
+
+    fn clear_connection_state(&self) {
+        if let Some(connection_state) = self.connection_state.as_ref() {
+            connection_state.set_bt(0);
+        }
+        if let Some(store) = self.peer_snapshot_store.as_ref() {
+            *store
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
+        }
+    }
+
+    fn publish_connection_state(&self) {
+        if let Some(connection_state) = self.connection_state.as_ref() {
+            connection_state.set_bt(self.num_sessions());
+        }
+        if let Some(store) = self.peer_snapshot_store.as_ref() {
+            *store
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = self.peer_snapshots();
+        }
+    }
+
+    fn peer_snapshots(&self) -> Vec<BtPeerSnapshot> {
+        self.upload_sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, session)| {
+                let addr = session.remote_endpoint()?;
+                let stats = self.peer_stats.get(index);
+                Some(BtPeerSnapshot {
+                    peer_id: session.remote_peer_id().unwrap_or([0; 20]),
+                    addr,
+                    is_incoming: true,
+                    uploaded_bytes: session.uploaded_bytes(),
+                    downloaded_bytes: 0,
+                    upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),
+                    download_speed: 0.0,
+                    avg_upload_speed: stats.map_or(0, |stats| stats.avg_upload_speed),
+                    avg_download_speed: 0,
+                    am_choking: session.is_peer_choked(),
+                    peer_choking: false,
+                    seeder: Some(false),
+                    connection_duration_secs: stats
+                        .map_or(0, |stats| stats.connection_duration_secs()),
+                    last_data_age_secs: stats.map_or(0, |stats| {
+                        stats
+                            .last_data_time
+                            .map(|time| time.elapsed().as_secs())
+                            .unwrap_or_else(|| stats.connection_duration_secs())
+                    }),
+                    is_snubbed: stats.is_some_and(|stats| stats.is_snubbed),
+                    is_banned: false,
+                })
+            })
+            .collect()
+    }
+
+    fn publish_upload_stats(&self) {
+        if let Some(progress) = self.upload_progress.as_ref() {
+            progress.set_upload_length(self.total_uploaded);
+            progress.set_upload_speed(self.get_upload_stats().1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -853,6 +982,7 @@ mod tests {
     use super::*;
     use aria2_protocol::bittorrent::peer::connection::PeerConnection;
     use aria2_protocol::bittorrent::peer::incoming::IncomingConnection;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::mpsc;
 
@@ -888,9 +1018,122 @@ mod tests {
             .await
             .unwrap();
 
-        manager.drain_incoming_peers();
+        manager.drain_incoming_peers().await;
 
         assert_eq!(manager.num_sessions(), 1);
+    }
+
+    #[tokio::test]
+    async fn incoming_seed_peer_receives_piece_availability_before_interested() {
+        let info_hash = [0x52u8; 20];
+        let local_peer_id = [0x62u8; 20];
+        let remote_peer_id = [0x72u8; 20];
+        let piece = (0..16 * 1024)
+            .map(|index| (index as u8).wrapping_mul(17))
+            .collect::<Vec<_>>();
+        let mut provider =
+            crate::engine::bt_upload_session::InMemoryPieceProvider::new(16 * 1024, 1);
+        provider.set_piece_data(0, piece.clone());
+        let provider = Arc::new(provider);
+        let piece_len = piece.len();
+        let (sender, receiver) = mpsc::channel(1);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream
+                .write_all(
+                    &aria2_protocol::bittorrent::message::handshake::Handshake::new(
+                        &info_hash,
+                        &remote_peer_id,
+                    )
+                    .to_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let mut response = [0u8; 68];
+            tokio::io::AsyncReadExt::read_exact(&mut stream, &mut response)
+                .await
+                .unwrap();
+            assert_eq!(
+                aria2_protocol::bittorrent::message::handshake::Handshake::parse(&response)
+                    .unwrap()
+                    .info_hash,
+                info_hash
+            );
+
+            let availability = read_bt_frame(&mut stream).await;
+            assert!(matches!(availability.first(), Some(5)));
+            assert_eq!(availability.get(1), Some(&0x80));
+
+            stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap();
+            loop {
+                let payload = read_bt_frame(&mut stream).await;
+                assert!(!payload.is_empty(), "seed peer closed before unchoking");
+                if payload[0] == 1 {
+                    break;
+                }
+            }
+
+            let mut request = Vec::with_capacity(17);
+            request.extend_from_slice(&13u32.to_be_bytes());
+            request.push(6);
+            request.extend_from_slice(&0u32.to_be_bytes());
+            request.extend_from_slice(&0u32.to_be_bytes());
+            request.extend_from_slice(&(piece_len as u32).to_be_bytes());
+            stream.write_all(&request).await.unwrap();
+
+            let payload = read_bt_frame(&mut stream).await;
+            assert_eq!(payload.first().copied(), Some(7));
+            assert_eq!(u32::from_be_bytes(payload[1..5].try_into().unwrap()), 0);
+            assert_eq!(u32::from_be_bytes(payload[5..9].try_into().unwrap()), 0);
+            assert_eq!(&payload[9..], piece.as_slice());
+        });
+
+        let (server_stream, endpoint) = listener.accept().await.unwrap();
+        let connection =
+            PeerConnection::from_incoming_stream(server_stream, &info_hash, &local_peer_id)
+                .await
+                .unwrap();
+        sender
+            .send(crate::engine::bt_peer_listener::IncomingPeer {
+                connection: IncomingConnection::Plain(Box::new(connection)),
+                endpoint,
+            })
+            .await
+            .unwrap();
+        drop(sender);
+
+        let mut manager = BtSeedManager::new_with_transports(
+            info_hash,
+            Vec::new(),
+            provider,
+            BtSeedingConfig::default(),
+            SeedExitCondition::with_ratio(1.0),
+            16 * 1024,
+            None,
+            None,
+            local_peer_id,
+            Some(receiver),
+        );
+        tokio::time::timeout(Duration::from_secs(5), manager.run_seeding_loop())
+            .await
+            .expect("seed manager did not finish after incoming upload")
+            .expect("seed manager returned an error");
+        client.await.unwrap();
+
+        assert_eq!(manager.total_uploaded(), piece_len as u64);
+        assert!(manager.halt_requested(), "ratio exit should request halt");
+    }
+
+    async fn read_bt_frame(stream: &mut TcpStream) -> Vec<u8> {
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).await.unwrap();
+        let mut payload = vec![0u8; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut payload).await.unwrap();
+        payload
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 use crate::constants;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 
-use super::super::BtPeerInteractive;
+use super::super::{BtPeerInteraction, BtPeerInteractive};
 use super::make_test_conn;
 
 #[test]
@@ -114,6 +114,32 @@ fn test_dispatch_have_all_marks_seeder() {
     assert_eq!(transition.old, vec![0]);
     assert_eq!(transition.new, vec![0xf0]);
     assert!(conn.seeder);
+}
+
+#[test]
+fn test_setup_messages_preserve_have_all_before_unchoke() {
+    let mut conn = make_test_conn();
+    conn.allocate_session_resource(16 * 1024, 16 * 1024 * 8);
+
+    assert!(conn.stats.peer_choking);
+    assert!(!conn.seeder);
+
+    assert!(!BtPeerInteraction::apply_setup_message(
+        &mut conn,
+        BtMessage::HaveAll,
+    ));
+    assert!(conn.seeder);
+    assert!(
+        conn.session_resource
+            .as_ref()
+            .is_some_and(|resource| resource.is_seeder())
+    );
+
+    assert!(BtPeerInteraction::apply_setup_message(
+        &mut conn,
+        BtMessage::Unchoke,
+    ));
+    assert!(!conn.stats.peer_choking);
 }
 
 #[test]

@@ -75,9 +75,7 @@ impl BlockBitfield {
 
     /// Set all bits.
     pub(crate) fn set_all(&mut self) {
-        for byte in &mut self.data {
-            *byte = 0xFF;
-        }
+        self.data.fill(0xFF);
         // Clear trailing bits beyond num_bits
         if !self.num_bits.is_multiple_of(8) {
             let extra = 8 - (self.num_bits % 8);
@@ -128,8 +126,6 @@ impl BlockBitfield {
 
     /// Clear all bits.
     pub(crate) fn clear_all(&mut self) {
-        for byte in &mut self.data {
-            *byte = 0;
-        }
+        self.data.fill(0);
     }
 }

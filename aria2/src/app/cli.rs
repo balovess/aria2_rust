@@ -191,6 +191,13 @@ impl CliArgs {
         <Self as Parser>::parse_from(normalize_short_help_args(std::env::args_os()))
     }
 
+    /// Parse process arguments without letting clap terminate the process.
+    /// The binary maps ordinary parse failures to aria2's nonzero CLI error
+    /// path while retaining successful help/version exits.
+    pub fn try_parse() -> Result<Self, clap::Error> {
+        <Self as Parser>::try_parse_from(normalize_short_help_args(std::env::args_os()))
+    }
+
     /// Testable equivalent of [`Parser::try_parse_from`] with aria2 argv
     /// normalization applied before clap sees the tokens.
     pub fn try_parse_from<I, T>(args: I) -> Result<Self, clap::Error>
@@ -1835,14 +1842,18 @@ pub(crate) fn product_banner_title() -> String {
 
 impl App {
     /// Print the application banner using the product identity.
-    pub(super) fn print_banner(&self) {
-        println!("{}", product_banner_title().green().bold());
-        println!(
-            "{} {}",
+    pub(super) fn print_banner(&self, output_to_stderr: bool) {
+        let banner = format!(
+            "{}\n{} {}\n\n",
+            product_banner_title().green().bold(),
             "Copyright:".blue(),
             "(C) aria2-rust contributors".white()
         );
-        println!();
+        if output_to_stderr {
+            eprint!("{}", banner);
+        } else {
+            print!("{}", banner);
+        }
     }
 }
 

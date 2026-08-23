@@ -131,7 +131,11 @@ impl super::RequestGroup {
     /// Time elapsed since download start.
     pub fn elapsed_time(&self) -> Option<std::time::Duration> {
         let start = *self.start_time.recover();
-        start.map(|t| t.elapsed())
+        let end = *self.end_time.recover();
+        start.map(|t| {
+            end.map(|end| end.duration_since(t))
+                .unwrap_or_else(|| t.elapsed())
+        })
     }
 
     /// Estimated time to completion based on current download speed.
@@ -231,6 +235,13 @@ impl super::RequestGroup {
 
     pub fn clear_bt_peer_snapshots(&self) {
         self.bt_peer_snapshots.recover_mut().clear();
+        self.connection_state.set_bt(0);
+    }
+
+    pub(crate) fn bt_peer_snapshot_store(
+        &self,
+    ) -> std::sync::Arc<std::sync::RwLock<Vec<super::BtPeerSnapshot>>> {
+        std::sync::Arc::clone(&self.bt_peer_snapshots)
     }
 
     // ── BT Metadata ─────────────────────────────────────────────────────

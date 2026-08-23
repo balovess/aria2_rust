@@ -183,7 +183,7 @@ impl SegmentMan {
 
     /// Cancels all in-flight segments.
     pub fn cancel_all_segments(&mut self) {
-        let entries: Vec<TrackingEntry> = self.used_segment_entries.drain(..).collect();
+        let entries = std::mem::take(&mut self.used_segment_entries);
         for entry in entries {
             self.cancel_segment_internal(entry.cuid, entry.segment_index);
         }
