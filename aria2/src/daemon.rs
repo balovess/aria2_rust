@@ -751,6 +751,7 @@ pub fn is_daemon_mode(args: &[String]) -> bool {
     false
 }
 
+#[cfg(any(windows, test))]
 fn is_daemon_argument(arg: &str) -> bool {
     arg == "--daemon" || arg == "-D" || arg.starts_with("--daemon=")
 }
