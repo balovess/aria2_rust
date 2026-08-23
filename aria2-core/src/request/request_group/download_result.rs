@@ -252,11 +252,12 @@ impl DownloadResult {
         self.upload_length = group.upload_length();
         self.download_speed = group.download_speed();
         self.upload_speed = group.upload_speed();
+        self.session_time = group.elapsed_time().map_or(0, |elapsed| elapsed.as_secs());
         self.dir = group.options().dir.clone().unwrap_or_default();
         self.info_hash = group.info_hash_hex().unwrap_or_default();
         self.in_memory_download = group.is_in_memory_download();
 
-        self.files = if let Some(context) = group.get_download_context() {
+        let files = if let Some(context) = group.get_download_context() {
             context
                 .get_file_entries()
                 .iter()
@@ -315,6 +316,29 @@ impl DownloadResult {
                 selected: true,
                 uris,
             }]
+        };
+        self.files = if files.is_empty() {
+            let uris = group
+                .get_all_uris()
+                .into_iter()
+                .map(|uri| UriEntry {
+                    uri,
+                    status: "waiting".to_string(),
+                })
+                .collect();
+            vec![FileEntry {
+                index: 1,
+                path: group
+                    .output_name()
+                    .or_else(|| group.options().out.clone())
+                    .unwrap_or_default(),
+                length: self.total_length,
+                completed_length: self.completed_length,
+                selected: true,
+                uris,
+            }]
+        } else {
+            files
         };
 
         self.num_pieces = group.get_bt_num_pieces();

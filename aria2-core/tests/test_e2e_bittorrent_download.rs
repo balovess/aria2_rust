@@ -827,10 +827,19 @@ async fn test_e2e_bt_complete_integrity_default_seed_path_reaches_tracker() {
         Some(dir.path().to_str().unwrap()),
     )
     .unwrap();
+    let group = command.group_handle();
     tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
         .await
         .expect("default hash-check seed path timed out")
         .expect("default hash-check seed path failed");
+
+    let snapshot = group.recover().status_snapshot();
+    assert_eq!(snapshot.completed_length, 1024);
+    assert_eq!(
+        snapshot.bt.as_ref().and_then(|bt| bt.bitfield.as_deref()),
+        Some([0b1100_0000].as_slice()),
+        "a complete integrity check must publish the verified BT bitfield"
+    );
 
     assert!(
         tracker

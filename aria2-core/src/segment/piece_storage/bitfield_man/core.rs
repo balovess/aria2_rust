@@ -302,18 +302,14 @@ impl BitfieldMan {
     /// Clears all completion bits.
     /// C++: `clearAllBit()` — sets all bits in `bitfield_` to 0.
     pub fn clear_all_bit(&mut self) {
-        for byte in &mut self.bitfield {
-            *byte = 0;
-        }
+        self.bitfield.fill(0);
         self.cached_num_piece = 0;
     }
 
     /// Sets all completion bits.
     /// C++: `setAllBit()` — marks all pieces as completed.
     pub fn set_all_bit(&mut self) {
-        for byte in &mut self.bitfield {
-            *byte = 0xFF;
-        }
+        self.bitfield.fill(0xFF);
         self.clear_trailing_bits();
         self.cached_num_piece = self.num_pieces;
     }
@@ -321,17 +317,13 @@ impl BitfieldMan {
     /// Clears all use bits.
     /// C++: `clearAllUseBit()` — marks no pieces as in-use.
     pub fn clear_all_use_bit(&mut self) {
-        for byte in &mut self.use_bitfield {
-            *byte = 0;
-        }
+        self.use_bitfield.fill(0);
     }
 
     /// Sets all use bits.
     /// C++: `setAllUseBit()` — marks all pieces as in-use.
     pub fn set_all_use_bit(&mut self) {
-        for byte in &mut self.use_bitfield {
-            *byte = 0xFF;
-        }
+        self.use_bitfield.fill(0xFF);
         self.clear_trailing_use_bits();
     }
 

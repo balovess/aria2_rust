@@ -52,7 +52,15 @@ impl App {
     /// Positional URIs are collected from `cli.uris`, with `@file` references
     /// expanded via `UriListFile`. `--input-file` URIs are also appended.
     pub async fn load_cli_args(&mut self, cli: CliArgs) -> std::result::Result<(), String> {
+        let cli_explicit_timeout = cli.http_ftp.timeout.is_some();
         let mut conf = self.config.write().await;
+        self.explicit_timeout = cli_explicit_timeout
+            || conf
+                .global_option_source("timeout")
+                .await
+                .is_some_and(|source| {
+                    !matches!(source, aria2_core::config::ConfigSource::Defaults)
+                });
 
         // Helper macros: set option only if value is present and propagate the
         // registry's validation error back to the CLI entry point.
@@ -484,11 +492,11 @@ impl App {
         no_conf: bool,
         path: Option<&str>,
     ) -> std::result::Result<(), String> {
-        self.load_env().await;
-        if no_conf {
-            return Ok(());
+        if !no_conf {
+            self.load_config_file(path).await?;
         }
-        self.load_config_file(path).await
+        self.load_env().await;
+        Ok(())
     }
 
     /// Load configuration from a file.
@@ -534,19 +542,18 @@ impl App {
                 crate::constants::CONFIG_FILE_NAME
             );
 
-            eprintln!("[*] Looking for config file at: {}", candidate);
-
             if std::path::Path::new(&candidate).exists() {
                 candidate
             } else {
-                eprintln!("[*] Config file not found, using default options");
                 return Ok(());
             }
         };
 
         let mut conf = self.config.write().await;
         conf.load_file(&conf_path).await;
-        eprintln!("[+] Loaded config file: {}", conf_path);
+        if conf.has_errors() {
+            return Err(format!("Failed to parse config file: {}", conf_path));
+        }
         Ok(())
     }
 

@@ -20,7 +20,6 @@ impl BtDownloadCommand {
         let final_speed = elapsed_speed(self.completed_bytes, start_time);
         self.progress.set_completed_length(self.completed_bytes);
         self.progress.set_download_speed(final_speed);
-        self.progress.set_upload_speed(self.total_uploaded);
         self.group
             .recover()
             .set_uploaded_length(self.total_uploaded);

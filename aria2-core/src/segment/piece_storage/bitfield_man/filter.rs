@@ -34,9 +34,7 @@ impl BitfieldMan {
     /// Clears and disables the filter bitfield entirely.
     /// C++: `clearFilter()` — deletes `filterBitfield_` and sets `filterEnabled_ = false`.
     pub fn clear_filter(&mut self) {
-        for byte in &mut self.filter_bitfield {
-            *byte = 0;
-        }
+        self.filter_bitfield.fill(0);
         self.filter_enabled = false;
     }
 

@@ -4,6 +4,7 @@
 //! single-attempt download procedure (connect, authenticate, transfer,
 //! finalize).
 
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
@@ -17,7 +18,7 @@ use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::network::ConnectionContext;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::GroupId;
+use crate::request::request_group::{ActiveConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::control::RawFtpControl;
@@ -273,6 +274,8 @@ impl FtpDownloadCommand {
         &mut self,
         attempt_index: u32,
     ) -> std::result::Result<(), FtpAttemptError> {
+        let connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
+        connection_guard.set(1);
         let in_memory_download = self.group.recover().is_in_memory_download();
         let proxy_config = self.ftp_proxy_config().map_err(FtpAttemptError::from)?;
         if let Some((proxy, crate::ftp::connection::ProxyMethod::Get)) = proxy_config.as_ref() {

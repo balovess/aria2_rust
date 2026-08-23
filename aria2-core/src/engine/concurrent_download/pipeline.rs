@@ -22,6 +22,7 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
+use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{
@@ -251,6 +252,7 @@ pub async fn execute_with_coordinator(
         &server_keys,
         max_conn,
     );
+    let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
     let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut active: HashMap<u32, (usize, Instant)> = HashMap::new();
     let progress_tracker =
@@ -333,6 +335,8 @@ pub async fn execute_with_coordinator(
                 break;
             }
 
+            connection_guard.set(executor.in_flight());
+
             active.insert(seg_idx, (mirror_idx, Instant::now()));
             segment_progress.insert(seg_idx, progress);
             tracing::debug!(
@@ -397,6 +401,7 @@ pub async fn execute_with_coordinator(
 
         tokio::select! {
             Some(pool_result) = executor.next_result() => {
+                connection_guard.set(executor.in_flight());
                 let seg_idx = pool_result.segment_index;
                 let Some((mirror_idx, seg_start)) = active.remove(&seg_idx) else {
                     continue;

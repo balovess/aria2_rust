@@ -5,6 +5,7 @@
 //! `aria2-core` state changes, queries, and engine commands.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,7 +13,6 @@ use aria2_core::checksum::checksum::Checksum;
 use aria2_core::config::{
     ConfigManager, OptionRegistry, is_global_option_changeable, project_initial_options,
 };
-use aria2_core::constants as core_constants;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
 use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
@@ -28,6 +28,10 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 const RPC_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
+    if is_incoming { 0 } else { addr.port() }
+}
 
 /// The application adapter behind the RPC wire layer.
 pub struct CoreRpcBackend {
@@ -273,10 +277,10 @@ impl CoreRpcBackend {
                 }
             }
 
-            if let Some(position) = position {
-                if let Some(gid) = response_gids.first() {
-                    self.change_position(gid, position as i32, PositionMode::SetFromStart)?;
-                }
+            if let Some(position) = position
+                && let Some(gid) = response_gids.first()
+            {
+                self.change_position(gid, position as i32, PositionMode::SetFromStart)?;
             }
             Ok(BackendResult::with_events(
                 BackendResponse::Gids(response_gids),
@@ -373,33 +377,27 @@ impl CoreRpcBackend {
     }
 
     fn status_from_group(group: &RequestGroup, gid: &str) -> StatusInfo {
-        let status = map_status(group.status());
-        let total = group.get_total_length_atomic();
-        let completed = group.get_completed_length();
-        let bt_hash = group.get_bt_info_hash_hex();
+        let snapshot = group.status_snapshot();
+        let status = map_status(snapshot.status.clone());
+        let bt = snapshot.bt.as_ref();
         let mut info = StatusInfo::new(gid)
             .with_status(status.clone())
-            .with_total_length(total)
-            .with_completed_length(completed)
-            .with_upload_length(group.get_uploaded_length())
-            .with_download_speed(group.get_download_speed_cached())
-            .with_upload_speed(group.get_upload_speed_cached())
-            .with_connections(
-                group
-                    .options()
-                    .split
-                    .unwrap_or(core_constants::DEFAULT_SPLIT),
-            )
+            .with_total_length(snapshot.total_length)
+            .with_completed_length(snapshot.completed_length)
+            .with_upload_length(snapshot.upload_length)
+            .with_download_speed(snapshot.download_speed)
+            .with_upload_speed(snapshot.upload_speed)
+            .with_connections(u16::try_from(snapshot.connections).unwrap_or(u16::MAX))
             .with_dir(group.options().dir.clone().unwrap_or_default())
-            .with_files(build_file_infos(group, completed));
+            .with_files(build_file_infos(group, snapshot.completed_length));
 
-        if let Some(info_hash) = bt_hash {
+        if let Some(bt) = bt {
             info = info
-                .with_info_hash(info_hash)
-                .with_num_seeders(0)
-                .with_num_pieces(group.get_bt_num_pieces())
-                .with_piece_length(group.get_bt_piece_length() as u64);
-            if let Some(bitfield) = group.get_bt_bitfield() {
+                .with_info_hash(bt.info_hash.clone())
+                .with_num_seeders(bt.seeder_count() as u32)
+                .with_num_pieces(bt.num_pieces)
+                .with_piece_length(bt.piece_length as u64);
+            if let Some(bitfield) = &bt.bitfield {
                 info = info.with_bitfield(
                     bitfield
                         .iter()
@@ -408,13 +406,13 @@ impl CoreRpcBackend {
                 );
             }
         }
-        if info.piece_length.is_none() && total > 0 {
+        if info.piece_length.is_none() && snapshot.total_length > 0 {
             info = info.with_piece_length(1_048_576);
         }
-        if info.num_pieces.is_none() && total > 0 {
+        if info.num_pieces.is_none() && snapshot.total_length > 0 {
             let piece_length = info.piece_length.unwrap_or(1_048_576);
             if piece_length > 0 {
-                info = info.with_num_pieces(total.div_ceil(piece_length) as u32);
+                info = info.with_num_pieces(snapshot.total_length.div_ceil(piece_length) as u32);
             }
         }
         match status {
@@ -710,7 +708,10 @@ impl CoreRpcBackend {
         let group = self.group(&gid)?;
         let peers = group
             .recover()
-            .bt_peer_snapshots()
+            .status_snapshot()
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default()
             .into_iter()
             .map(|peer| PeerInfo {
                 peer_id: peer
@@ -719,7 +720,7 @@ impl CoreRpcBackend {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
                 ip: peer.addr.ip().to_string(),
-                port: peer.addr.port(),
+                port: rpc_peer_port(peer.addr, peer.is_incoming),
                 bitfield: None,
                 am_choking: peer.am_choking,
                 peer_choking: peer.peer_choking,
@@ -967,7 +968,11 @@ impl RpcBackend for CoreRpcBackend {
                 }
                 aria2_core::engine::halt_watchers::spawn_timed_halt(
                     self.engine_cmd_tx.clone(),
-                    RPC_SHUTDOWN_GRACE,
+                    if force {
+                        std::time::Duration::ZERO
+                    } else {
+                        RPC_SHUTDOWN_GRACE
+                    },
                     force,
                 );
                 let text = if force {
@@ -1245,5 +1250,31 @@ struct SelfError;
 impl SelfError {
     fn execution(message: impl Into<String>) -> BackendError {
         BackendError::Execution(message.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_uses_real_non_bt_connection_count_instead_of_split() {
+        let options = DownloadOptions {
+            split: Some(16),
+            ..DownloadOptions::default()
+        };
+        let group = RequestGroup::new(GroupId::new(0x101), Vec::new(), options);
+        group.set_stream_connection_count(1);
+
+        let status = CoreRpcBackend::status_from_group(&group, "0000000000000101");
+
+        assert_eq!(status.connections, Some(1));
+    }
+
+    #[test]
+    fn incoming_bt_peer_reports_aria2_compatible_zero_port() {
+        let incoming_addr = "127.0.0.1:7673".parse().expect("valid socket address");
+        assert_eq!(rpc_peer_port(incoming_addr, true), 0);
+        assert_eq!(rpc_peer_port(incoming_addr, false), 7673);
     }
 }

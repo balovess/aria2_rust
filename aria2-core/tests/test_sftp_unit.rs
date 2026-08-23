@@ -48,15 +48,20 @@ fn test_sftp_uri_parsing_default_port() {
 
 #[test]
 fn test_sftp_uri_without_user_preserves_host_and_path() {
+    let uri = "sftp://127.0.0.1:2222/data/file.bin";
     let result = SftpDownloadCommand::new(
         GroupId::new(31),
-        "sftp://127.0.0.1:2222/data/file.bin",
+        uri,
         &DownloadOptions::default(),
         None,
         None,
     )
     .unwrap();
-    assert!(result.timeout().is_some());
+    assert_eq!(result.group().uris(), &[uri.to_string()]);
+    assert!(
+        result.timeout().is_none(),
+        "SFTP default options do not impose a command-level I/O timeout"
+    );
 }
 
 #[test]
@@ -155,14 +160,17 @@ fn test_sftp_memory_option_marks_request_group() {
 
 #[test]
 fn test_sftp_timeout_returns_value() {
+    let options = DownloadOptions {
+        timeout: Some(300),
+        ..DownloadOptions::default()
+    };
     let cmd = SftpDownloadCommand::new(
         GroupId::new(8),
         "sftp://user@host/file.txt",
-        &DownloadOptions::default(),
+        &options,
         None,
         None,
     )
     .unwrap();
-    assert!(cmd.timeout().is_some(), "SFTP命令应有超时设置");
     assert_eq!(cmd.timeout().unwrap().as_secs(), 300);
 }

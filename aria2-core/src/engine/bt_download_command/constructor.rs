@@ -279,6 +279,7 @@ impl BtDownloadCommand {
         }
         command.group = group;
         command.progress = command.group.recover().progress.clone();
+        command.total_uploaded = command.group.recover().get_uploaded_length();
         command.apply_context_paths()?;
         Ok(command)
     }

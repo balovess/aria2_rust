@@ -20,6 +20,31 @@ use aria2_protocol::metalink::parser::MetalinkDocument;
 use std::sync::Arc;
 use tracing::info;
 
+#[cfg(feature = "bittorrent")]
+pub(super) fn task_options_for_input(
+    options: &aria2_core::request::request_group::DownloadOptions,
+    input_type: &InputType,
+    explicit_timeout: bool,
+) -> aria2_core::request::request_group::DownloadOptions {
+    let mut task_options = options.clone();
+    if matches!(input_type, InputType::TorrentFile | InputType::MagnetLink) && !explicit_timeout {
+        task_options.timeout = None;
+    }
+    task_options
+}
+
+#[cfg(feature = "bittorrent")]
+fn task_option_snapshot_for_input(
+    mut snapshot: std::collections::HashMap<String, serde_json::Value>,
+    input_type: &InputType,
+    explicit_timeout: bool,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    if matches!(input_type, InputType::TorrentFile | InputType::MagnetLink) && !explicit_timeout {
+        snapshot.remove("timeout");
+    }
+    snapshot
+}
+
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
@@ -327,14 +352,23 @@ impl App {
             if matches!(input.input_type, InputType::TorrentFile) {
                 initial_uri = format!("bt://{}", gid.value());
             }
+            #[cfg(feature = "bittorrent")]
+            let task_options =
+                task_options_for_input(&options, &input.input_type, self.explicit_timeout);
+            #[cfg(not(feature = "bittorrent"))]
+            let task_options = options.clone();
             let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
                 gid,
                 vec![initial_uri],
-                options.clone(),
+                task_options,
             )));
             group
                 .recover_mut()
-                .set_option_snapshot(option_snapshot.clone());
+                .set_option_snapshot(task_option_snapshot_for_input(
+                    option_snapshot.clone(),
+                    &input.input_type,
+                    self.explicit_timeout,
+                ));
             if options.uses_memory_download() {
                 group.recover().mark_in_memory_download();
             }
@@ -407,34 +441,10 @@ impl App {
             self.engine.lock().await;
         if let Some(mut engine) = engine_lock.take() {
             engine.set_keep_alive(keep_alive);
-            // Two-stage Ctrl+C handling (mirrors C++ aria2 behavior):
-            // 1st Ctrl+C: graceful halt (finish in-flight downloads, save session)
-            // 2nd Ctrl+C: force halt (abort all downloads immediately)
             if let Some(tx) = engine.take_shutdown_sender() {
                 let cmd_tx = engine.engine_cmd_tx();
                 tokio::spawn(async move {
-                    // First Ctrl+C: graceful shutdown
-                    if tokio::signal::ctrl_c().await.is_ok() {
-                        tracing::info!(
-                            "Ctrl+C received, shutting down gracefully \
-                             (press again to force halt)..."
-                        );
-                        let _ = tx.send(());
-                    }
-                    // Second Ctrl+C: force halt
-                    if tokio::signal::ctrl_c().await.is_ok() {
-                        tracing::warn!("Second Ctrl+C received, force halting all downloads!");
-                        let _ = cmd_tx.send(
-                            aria2_core::engine::engine_command::EngineCommand::ForceHaltAll {
-                                reason:
-                                    aria2_core::request::request_group::HaltReason::ShutdownSignal,
-                            },
-                        );
-                    }
-                    // Ignore subsequent Ctrl+C signals
-                    loop {
-                        let _ = tokio::signal::ctrl_c().await;
-                    }
+                    run_shutdown_signal_handler(tx, cmd_tx).await;
                 });
             }
 
@@ -449,15 +459,19 @@ impl App {
                 self.detected_inputs.len()
             );
 
-            // Spawn the engine in a background task so we can run the progress
-            // reporter concurrently.
-            let engine_handle = tokio::spawn(async move { engine.run().await });
-
-            // Spawn the progress reporter if requested.
+            // Create the reporter before the engine starts. This captures the
+            // pre-existing stopped-result set without racing a very fast
+            // download into the reporter's history filter.
             let (_reporter_stop_tx, reporter_handle) = if show_progress {
                 let group_man = self.request_man.clone();
+                let summary_interval = self.get_opt_i64("summary-interval").await.unwrap_or(60);
+                let output_to_stderr = self.get_opt_bool("stderr").await.unwrap_or(false);
                 let (mut reporter, stop_tx) =
-                    crate::ui::console_progress::ConsoleProgressReporter::new(group_man);
+                    crate::ui::console_progress::ConsoleProgressReporter::new_with_options(
+                        group_man,
+                        summary_interval,
+                        output_to_stderr,
+                    );
                 let handle = tokio::spawn(async move {
                     reporter.run().await;
                 });
@@ -465,6 +479,10 @@ impl App {
             } else {
                 (None, None)
             };
+
+            // Spawn the engine in a background task so the progress reporter
+            // can observe its activity concurrently.
+            let engine_handle = tokio::spawn(async move { engine.run().await });
 
             // Wait for the engine to complete.
             let result = engine_handle
@@ -482,6 +500,69 @@ impl App {
             result
         } else {
             Err("Engine not initialized".to_string())
+        }
+    }
+}
+
+async fn run_shutdown_signal_handler(
+    tx: tokio::sync::oneshot::Sender<()>,
+    cmd_tx: aria2_core::engine::engine_command::EngineCommandSender,
+) {
+    let mut graceful_tx = Some(tx);
+
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let (Ok(mut sigterm), Ok(mut sigint), Ok(mut sighup)) = (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::hangup()),
+        ) else {
+            tracing::error!("Failed to install Unix shutdown signal listeners");
+            return;
+        };
+
+        loop {
+            tokio::select! {
+                _ = sigterm.recv() => {}
+                _ = sigint.recv() => {}
+                _ = sighup.recv() => {}
+            }
+
+            if let Some(tx) = graceful_tx.take() {
+                tracing::info!(
+                    "Shutdown signal received, stopping gracefully (send another signal to force halt)..."
+                );
+                let _ = tx.send(());
+            } else {
+                tracing::warn!("Second shutdown signal received, force halting all downloads!");
+                let _ = cmd_tx.send(
+                    aria2_core::engine::engine_command::EngineCommand::ForceHaltAll {
+                        reason: aria2_core::request::request_group::HaltReason::ShutdownSignal,
+                    },
+                );
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    loop {
+        if tokio::signal::ctrl_c().await.is_err() {
+            return;
+        }
+        if let Some(tx) = graceful_tx.take() {
+            tracing::info!(
+                "Ctrl+C received, shutting down gracefully (press again to force halt)..."
+            );
+            let _ = tx.send(());
+        } else {
+            tracing::warn!("Second Ctrl+C received, force halting all downloads!");
+            let _ = cmd_tx.send(
+                aria2_core::engine::engine_command::EngineCommand::ForceHaltAll {
+                    reason: aria2_core::request::request_group::HaltReason::ShutdownSignal,
+                },
+            );
         }
     }
 }

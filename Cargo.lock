@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "aria2"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aria2-core",
  "aria2-protocol",
@@ -157,7 +157,6 @@ dependencies = [
  "libc",
  "mimalloc",
  "serde_json",
- "signal-hook",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -167,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "adler32",
  "anyhow",

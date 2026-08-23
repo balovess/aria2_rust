@@ -29,7 +29,7 @@ struct SharedRoute {
 }
 
 struct SharedListenerState {
-    listener: Option<Arc<TcpListener>>,
+    listeners: Vec<Arc<TcpListener>>,
     local_addr: Option<SocketAddr>,
     next_route_id: u64,
 }
@@ -70,7 +70,7 @@ impl BtPeerListenerManager {
     pub fn new() -> Self {
         Self {
             state: Arc::new(tokio::sync::Mutex::new(SharedListenerState {
-                listener: None,
+                listeners: Vec::new(),
                 local_addr: None,
                 next_route_id: 1,
             })),
@@ -86,7 +86,7 @@ impl BtPeerListenerManager {
         config: BtPeerRouteConfig,
     ) -> io::Result<(u16, mpsc::Receiver<IncomingPeer>, BtPeerRouteHandle)> {
         let mut state = self.state.lock().await;
-        if let Some(listener) = state.listener.as_ref() {
+        if let Some(listener) = state.listeners.first() {
             let port = listener.local_addr()?.port();
             drop(state);
             return self.insert_route(config, port);
@@ -94,14 +94,31 @@ impl BtPeerListenerManager {
 
         let listener = bind_ports(config.bind_ip, config.ports.clone()).await?;
         let local_addr = listener.local_addr()?;
-        let listener = Arc::new(listener);
+        let mut listeners = vec![Arc::new(listener)];
+        if config.bind_ip == IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED) {
+            // aria2_original starts one peer listener per address family. On
+            // Windows, an IPv6 socket is commonly v6-only, so an IPv4 peer
+            // returned by a tracker would otherwise receive ECONNREFUSED.
+            if let Ok(listener) = TcpListener::bind(SocketAddr::new(
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+                local_addr.port(),
+            ))
+            .await
+            {
+                listeners.push(Arc::new(listener));
+            }
+        }
         state.local_addr = Some(local_addr);
-        state.listener = Some(Arc::clone(&listener));
+        state.listeners = listeners.clone();
         drop(state);
 
         let routes = Arc::clone(&self.routes);
         let shutdown = self.shutdown.clone();
-        tokio::spawn(async move { run_shared_listener(listener, routes, shutdown).await });
+        for listener in listeners {
+            let routes = Arc::clone(&routes);
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move { run_shared_listener(listener, routes, shutdown).await });
+        }
 
         self.insert_route(config, local_addr.port())
     }
@@ -114,7 +131,7 @@ impl BtPeerListenerManager {
     pub async fn shutdown(&self) {
         self.shutdown.cancel();
         let mut state = self.state.lock().await;
-        state.listener.take();
+        state.listeners.clear();
         state.local_addr = None;
     }
 
@@ -231,6 +248,17 @@ async fn bind_ports(
     }))
 }
 
+fn normalize_peer_endpoint(endpoint: SocketAddr) -> SocketAddr {
+    match endpoint {
+        SocketAddr::V6(address) => address
+            .ip()
+            .to_ipv4()
+            .map(|ip| SocketAddr::new(IpAddr::V4(ip), address.port()))
+            .unwrap_or(endpoint),
+        SocketAddr::V4(_) => endpoint,
+    }
+}
+
 async fn run_shared_listener(
     listener: Arc<TcpListener>,
     routes: Arc<RwLock<HashMap<[u8; 20], SharedRoute>>>,
@@ -244,6 +272,7 @@ async fn run_shared_listener(
         let Ok((stream, endpoint)) = accepted else {
             break;
         };
+        let endpoint = normalize_peer_endpoint(endpoint);
         let routes = Arc::clone(&routes);
         tokio::spawn(async move {
             let known_info_hashes = {
@@ -274,6 +303,7 @@ async fn run_shared_listener(
                     return;
                 }
             };
+            tracing::debug!(%endpoint, info_hash = %hex::encode(incoming.info_hash()), "Incoming BitTorrent handshake accepted");
             let info_hash = *incoming.info_hash();
             let route = {
                 let routes = routes
@@ -300,6 +330,7 @@ async fn run_shared_listener(
                     return;
                 }
             };
+            tracing::debug!(%endpoint, remote_peer_id = ?connection.remote_peer_id(), "Incoming BitTorrent handshake completed");
             let admitted = {
                 let mut storage = route
                     .peer_storage
@@ -319,6 +350,7 @@ async fn run_shared_listener(
                 }
             };
             if !admitted {
+                tracing::debug!(%endpoint, "Rejected incoming BitTorrent peer at peer-storage admission");
                 return;
             }
             if route
@@ -330,6 +362,7 @@ async fn run_shared_listener(
                 .await
                 .is_err()
             {
+                tracing::debug!(%endpoint, "Incoming BitTorrent peer route receiver closed");
                 route
                     .peer_storage
                     .lock()
@@ -413,6 +446,50 @@ mod tests {
 
         drop(route_a);
         drop(route_b);
+    }
+
+    #[tokio::test]
+    async fn ipv6_registration_also_accepts_ipv4_peers() {
+        use aria2_protocol::bittorrent::message::handshake::Handshake;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let manager = BtPeerListenerManager::new();
+        let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+        let info_hash = [55u8; 20];
+        let (port, mut incoming_peers, _route) = manager
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
+                ports: vec![0],
+                info_hash,
+                local_peer_id: [1; 20],
+                caretaker_id: 55,
+                max_peers: 1,
+                peer_storage: storage,
+                crypto_policy: Default::default(),
+            })
+            .await
+            .expect("IPv6 listener should be available for this test");
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("an IPv6-enabled BT listener must accept IPv4 peers too");
+        stream
+            .write_all(&Handshake::new(&info_hash, &[2; 20]).to_bytes())
+            .await
+            .unwrap();
+        let mut response = [0u8; 68];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(Handshake::parse(&response).unwrap().info_hash, info_hash);
+
+        let incoming =
+            tokio::time::timeout(std::time::Duration::from_secs(2), incoming_peers.recv())
+                .await
+                .expect("IPv4 peer admission timed out")
+                .expect("IPv4 peer was not routed");
+        assert_eq!(
+            incoming.endpoint.ip(),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
     }
 
     #[tokio::test]

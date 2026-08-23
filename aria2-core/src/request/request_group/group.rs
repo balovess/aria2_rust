@@ -19,6 +19,7 @@ use crate::segment::Segment;
 
 use super::activity::ActivitySignal;
 use super::bt_peer_snapshot::BtPeerSnapshot;
+use super::connection_state::ConnectionState;
 use super::group_id::GroupId;
 use super::halt_reason::{DownloadControlFlags, HaltReason};
 use super::options::DownloadOptions;
@@ -96,7 +97,15 @@ pub struct RequestGroup {
     /// BT piece bitfield.
     pub bt_bitfield: std::sync::RwLock<Option<Vec<u8>>>,
     /// Current active BT peer snapshots for read-only consumers.
-    pub bt_peer_snapshots: std::sync::RwLock<Vec<BtPeerSnapshot>>,
+    pub(crate) bt_peer_snapshots: Arc<std::sync::RwLock<Vec<BtPeerSnapshot>>>,
+
+    /// Number of currently active protocol connections.
+    ///
+    /// This is deliberately separate from `num_commands` and from option
+    /// limits such as HTTP `split` or BT `bt_max_peers`.  It is the value
+    /// exposed through the shared status snapshot and is updated by the
+    /// protocol schedulers while their real connections are active.
+    pub(crate) connection_state: Arc<ConnectionState>,
 
     /// Download context — central metadata (file entries, piece hashes, attributes).
     /// In C++ aria2, `RequestGroup` owns `shared_ptr<DownloadContext> dctx_`.
@@ -255,7 +264,8 @@ impl RequestGroup {
             end_time: std::sync::RwLock::new(None),
             progress: Arc::new(AtomicProgress::new()),
             bt_bitfield: std::sync::RwLock::new(None),
-            bt_peer_snapshots: std::sync::RwLock::new(Vec::new()),
+            bt_peer_snapshots: Arc::new(std::sync::RwLock::new(Vec::new())),
+            connection_state: Arc::new(ConnectionState::new()),
             download_context: std::sync::RwLock::new(None),
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),

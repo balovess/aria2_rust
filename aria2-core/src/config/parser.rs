@@ -37,6 +37,7 @@ impl fmt::Display for ConfigError {
 
 pub struct ConfigParser {
     options: HashMap<String, OptionValue>,
+    option_sources: HashMap<String, ConfigSource>,
     sources: Vec<ConfigSource>,
     errors: Vec<ConfigError>,
     registry: OptionRegistry,
@@ -46,6 +47,7 @@ impl ConfigParser {
     pub fn new() -> Self {
         Self {
             options: HashMap::new(),
+            option_sources: HashMap::new(),
             sources: Vec::new(),
             errors: Vec::new(),
             registry: OptionRegistry::new(),
@@ -65,7 +67,8 @@ impl ConfigParser {
         if let Some(def) = self.registry.get(&key) {
             match def.parse_value(&value.to_string()) {
                 Ok(v) => {
-                    self.options.insert(key, v);
+                    self.options.insert(key.clone(), v);
+                    self.option_sources.insert(key, ConfigSource::CommandLine);
                 }
                 Err(e) => self.errors.push(ConfigError {
                     source: ConfigSource::CommandLine,
@@ -74,7 +77,8 @@ impl ConfigParser {
                 }),
             }
         } else {
-            self.options.insert(key, value);
+            self.options.insert(key.clone(), value);
+            self.option_sources.insert(key, ConfigSource::CommandLine);
         }
     }
 
@@ -107,15 +111,19 @@ impl ConfigParser {
                                 OptionValue::List(new_items),
                             ) => {
                                 existing_list.extend(new_items);
-                                self.options.insert(key, OptionValue::List(existing_list));
+                                self.options
+                                    .insert(key.clone(), OptionValue::List(existing_list));
+                                self.option_sources.insert(key, source.clone());
                             }
                             (OptionValue::Str(existing_str), OptionValue::Str(new_str)) => {
                                 let delim = def.cumulative_delimiter.unwrap_or("");
                                 let combined = existing_str + delim + &new_str;
-                                self.options.insert(key, OptionValue::Str(combined));
+                                self.options.insert(key.clone(), OptionValue::Str(combined));
+                                self.option_sources.insert(key, source.clone());
                             }
                             (_, new) => {
-                                self.options.insert(key, new);
+                                self.options.insert(key.clone(), new);
+                                self.option_sources.insert(key, source.clone());
                             }
                         }
                     }
@@ -128,7 +136,8 @@ impl ConfigParser {
             } else {
                 match def.parse_value(&val_str) {
                     Ok(v) => {
-                        self.options.insert(key, v);
+                        self.options.insert(key.clone(), v);
+                        self.option_sources.insert(key, source.clone());
                     }
                     Err(e) => self.errors.push(ConfigError {
                         source: source.clone(),
@@ -138,7 +147,9 @@ impl ConfigParser {
                 }
             }
         } else {
-            self.options.insert(original_key, OptionValue::Str(val_str));
+            self.options
+                .insert(original_key.clone(), OptionValue::Str(val_str));
+            self.option_sources.insert(original_key, source);
         }
     }
 
@@ -157,6 +168,11 @@ impl ConfigParser {
     pub fn contains(&self, name: &str) -> bool {
         self.options
             .contains_key(OptionRegistry::canonical_name(name))
+    }
+
+    pub fn option_source(&self, name: &str) -> Option<&ConfigSource> {
+        self.option_sources
+            .get(OptionRegistry::canonical_name(name))
     }
 
     pub fn parse_cli_args(&mut self, args: &[&str]) {
@@ -311,9 +327,13 @@ impl ConfigParser {
             if !matches!(def.default_value(), OptionValue::None)
                 && let Some(default_value) = def.parse_default_value()
             {
-                self.options
-                    .entry(def.name().to_string())
-                    .or_insert(default_value);
+                let name = def.name().to_string();
+                if let std::collections::hash_map::Entry::Vacant(entry) =
+                    self.options.entry(name.clone())
+                {
+                    entry.insert(default_value);
+                    self.option_sources.insert(name, ConfigSource::Defaults);
+                }
             }
         }
     }
@@ -388,7 +408,33 @@ mod tests {
         p.set("dir", OptionValue::Str("/downloads".into()));
         assert_eq!(p.get_str("dir").unwrap(), "/downloads");
         assert!(p.contains("dir"));
+        assert!(matches!(
+            p.option_source("dir"),
+            Some(ConfigSource::CommandLine)
+        ));
         assert!(!p.contains("nonexistent"));
+    }
+
+    #[test]
+    fn test_option_source_tracks_file_and_environment_overrides() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("aria2.conf");
+        std::fs::write(&config_path, "timeout=120\n").unwrap();
+
+        let mut parser = ConfigParser::new();
+        parser.apply_defaults();
+        parser.parse_file(config_path.to_str().unwrap());
+        assert_eq!(parser.get_i64("timeout"), Some(120));
+        assert!(matches!(
+            parser.option_source("timeout"),
+            Some(ConfigSource::ConfigFile)
+        ));
+        parser.set_raw_from("timeout", "180", ConfigSource::Environment);
+        assert_eq!(parser.get_i64("timeout"), Some(180));
+        assert!(matches!(
+            parser.option_source("timeout"),
+            Some(ConfigSource::Environment)
+        ));
     }
 
     #[test]

@@ -22,6 +22,7 @@ use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count};
@@ -171,6 +172,7 @@ pub async fn execute(
         std::slice::from_ref(&authority_key),
         max_conn,
     );
+    let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
 
     // Lifecycle changes wake the scheduler even when all segment requests are
     // blocked on slow network reads.
@@ -226,6 +228,7 @@ pub async fn execute(
                         manager.requeue_segment(seg_idx);
                         break;
                     }
+                    connection_guard.set(executor.in_flight());
                     tracing::debug!(
                         seg_idx = seg_idx,
                         offset = offset,
@@ -310,6 +313,7 @@ pub async fn execute(
         tokio::select! {
             // A segment completed
             Some(pool_result) = executor.next_result() => {
+                connection_guard.set(executor.in_flight());
                 let seg_idx = pool_result.segment_index;
                 let result = pool_result.result;
                 let peer_addr = pool_result.peer_addr;

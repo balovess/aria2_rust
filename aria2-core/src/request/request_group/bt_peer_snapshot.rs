@@ -7,6 +7,11 @@ use std::net::SocketAddr;
 pub struct BtPeerSnapshot {
     pub peer_id: [u8; 20],
     pub addr: SocketAddr,
+    /// Whether this peer accepted our inbound connection.
+    ///
+    /// aria2's RPC compatibility rule reports port `0` for incoming peers;
+    /// the socket source port is only an ephemeral transport detail.
+    pub is_incoming: bool,
     pub uploaded_bytes: u64,
     pub downloaded_bytes: u64,
     pub upload_speed: f64,

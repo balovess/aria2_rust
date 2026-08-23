@@ -69,6 +69,7 @@ impl BtDownloadCommand {
             peer_id,
             self.incoming_peers.take(),
         );
+        self.attach_seed_observers(&mut manager);
         let lifecycle_notifier = self.group.recover().lifecycle_notifier();
         let seeding_result = loop {
             if let Some(error) = self.seeding_lifecycle_error() {

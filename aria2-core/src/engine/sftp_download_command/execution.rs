@@ -4,6 +4,7 @@
 //! the full download lifecycle: SSH connect, SFTP session init, stat remote
 //! file, chunked read/write transfer, and cleanup/finalize.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -15,7 +16,7 @@ use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
-use crate::request::request_group::GroupId;
+use crate::request::request_group::{ActiveConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use aria2_protocol::sftp::connection::SshConnection;
@@ -46,6 +47,8 @@ impl SftpDownloadCommand {
     /// the entire download lifecycle from connection establishment through data
     /// transfer to cleanup.
     async fn execute_once(&mut self) -> Result<()> {
+        let connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
+        connection_guard.set(1);
         // -----------------------------------------------------------------
         // Phase 0: Initialization
         // -----------------------------------------------------------------

@@ -7,6 +7,7 @@ use crate::constants;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::{GapDownloadResult, SequentialDownloader};
@@ -34,6 +35,8 @@ impl SequentialDownloader {
         total_length: u64,
         completed_ranges: &[(u64, u64)],
     ) -> GapDownloadResult {
+        let connection_guard = ActiveConnectionGuard::new(std::sync::Arc::clone(&self.group));
+        connection_guard.set(1);
         let gaps = Self::find_all_gaps(completed_ranges, total_length);
         tracing::info!(
             "Starting sequential download with gaps: uri={}, total={}, gaps={:?}",
