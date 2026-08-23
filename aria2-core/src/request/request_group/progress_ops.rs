@@ -235,6 +235,13 @@ impl super::RequestGroup {
 
     pub fn clear_bt_peer_snapshots(&self) {
         self.bt_peer_snapshots.recover_mut().clear();
+        self.connection_state.set_bt(0);
+    }
+
+    pub(crate) fn bt_peer_snapshot_store(
+        &self,
+    ) -> std::sync::Arc<std::sync::RwLock<Vec<super::BtPeerSnapshot>>> {
+        std::sync::Arc::clone(&self.bt_peer_snapshots)
     }
 
     // ── BT Metadata ─────────────────────────────────────────────────────

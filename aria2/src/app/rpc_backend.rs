@@ -5,6 +5,7 @@
 //! `aria2-core` state changes, queries, and engine commands.
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -27,6 +28,10 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 const RPC_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
+    if is_incoming { 0 } else { addr.port() }
+}
 
 /// The application adapter behind the RPC wire layer.
 pub struct CoreRpcBackend {
@@ -703,7 +708,10 @@ impl CoreRpcBackend {
         let group = self.group(&gid)?;
         let peers = group
             .recover()
-            .bt_peer_snapshots()
+            .status_snapshot()
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default()
             .into_iter()
             .map(|peer| PeerInfo {
                 peer_id: peer
@@ -712,7 +720,7 @@ impl CoreRpcBackend {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
                 ip: peer.addr.ip().to_string(),
-                port: peer.addr.port(),
+                port: rpc_peer_port(peer.addr, peer.is_incoming),
                 bitfield: None,
                 am_choking: peer.am_choking,
                 peer_choking: peer.peer_choking,
@@ -801,24 +809,6 @@ impl CoreRpcBackend {
             .change_group_options(&gid, normalize_options(&options))
             .map_err(Self::execution)?;
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::Ordering;
-
-    #[test]
-    fn status_uses_real_non_bt_connection_count_instead_of_split() {
-        let mut options = DownloadOptions::default();
-        options.split = Some(16);
-        let group = RequestGroup::new(GroupId::new(0x101), Vec::new(), options);
-        group.active_connection_count.store(1, Ordering::Release);
-
-        let status = CoreRpcBackend::status_from_group(&group, "0000000000000101");
-
-        assert_eq!(status.connections, Some(1));
     }
 }
 
@@ -1256,5 +1246,31 @@ struct SelfError;
 impl SelfError {
     fn execution(message: impl Into<String>) -> BackendError {
         BackendError::Execution(message.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_uses_real_non_bt_connection_count_instead_of_split() {
+        let options = DownloadOptions {
+            split: Some(16),
+            ..DownloadOptions::default()
+        };
+        let group = RequestGroup::new(GroupId::new(0x101), Vec::new(), options);
+        group.set_stream_connection_count(1);
+
+        let status = CoreRpcBackend::status_from_group(&group, "0000000000000101");
+
+        assert_eq!(status.connections, Some(1));
+    }
+
+    #[test]
+    fn incoming_bt_peer_reports_aria2_compatible_zero_port() {
+        let incoming_addr = "127.0.0.1:7673".parse().expect("valid socket address");
+        assert_eq!(rpc_peer_port(incoming_addr, true), 0);
+        assert_eq!(rpc_peer_port(incoming_addr, false), 7673);
     }
 }

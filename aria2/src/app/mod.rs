@@ -42,6 +42,7 @@ pub mod cli;
 use cli::CliArgs;
 mod config;
 mod engine;
+mod metadata;
 pub mod rpc_backend;
 // Public so integration tests can exercise the core → RPC notification bridge
 // (`rpc::CoreEventBridge`) without spinning up a real RPC server.
@@ -136,6 +137,16 @@ impl App {
         if let Err(e) = self.load_cli_args(cli).await {
             eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
+        }
+
+        if self.get_opt_bool("show-files").await.unwrap_or(false) {
+            return match metadata::show_files(&self.detected_inputs) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("Failed to show metadata: {error}");
+                    1
+                }
+            };
         }
 
         if !self.get_opt_bool("enable-color").await.unwrap_or(true) {

@@ -18,6 +18,7 @@ fn test_bt_peer_snapshots_roundtrip() {
     let snapshot = super::BtPeerSnapshot {
         peer_id: [1; 20],
         addr: "127.0.0.1:6881".parse().expect("valid test address"),
+        is_incoming: false,
         uploaded_bytes: 1,
         downloaded_bytes: 2,
         upload_speed: 3.0,
@@ -32,10 +33,12 @@ fn test_bt_peer_snapshots_roundtrip() {
         is_snubbed: false,
         is_banned: false,
     };
+    group.set_bt_connection_count(1);
     group.set_bt_peer_snapshots(vec![snapshot.clone()]);
     assert_eq!(group.bt_peer_snapshots(), vec![snapshot]);
     group.clear_bt_peer_snapshots();
     assert!(group.bt_peer_snapshots().is_empty());
+    assert_eq!(group.active_connection_count(), 0);
 }
 
 #[test]
@@ -46,7 +49,8 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     group.set_uploaded_length(64);
     group.set_download_speed_cached(128);
     group.set_upload_speed_cached(32);
-    group.set_active_connection_count(2);
+    group.set_stream_connection_count(1);
+    group.set_bt_connection_count(1);
     group.set_bt_metadata(2, 512, "01234567890123456789".to_string());
     group.set_bt_bitfield(Some(vec![0xC0]));
 
@@ -57,6 +61,7 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
             addr: format!("127.0.0.1:{port}")
                 .parse()
                 .expect("valid peer address"),
+            is_incoming: false,
             uploaded_bytes: 0,
             downloaded_bytes: 1,
             upload_speed: 0.0,
@@ -98,10 +103,33 @@ fn active_connection_guard_clears_protocol_count_on_exit() {
     {
         let guard = super::ActiveConnectionGuard::new(std::sync::Arc::clone(&group));
         guard.set(3);
-        assert_eq!(group.read().expect("group lock should be readable").active_connection_count(), 3);
+        assert_eq!(
+            group
+                .read()
+                .expect("group lock should be readable")
+                .active_connection_count(),
+            3
+        );
+        group
+            .read()
+            .expect("group lock should be readable")
+            .set_bt_connection_count(2);
+        assert_eq!(
+            group
+                .read()
+                .expect("group lock should be readable")
+                .active_connection_count(),
+            5
+        );
     }
 
-    assert_eq!(group.read().expect("group lock should be readable").active_connection_count(), 0);
+    assert_eq!(
+        group
+            .read()
+            .expect("group lock should be readable")
+            .active_connection_count(),
+        2
+    );
 }
 
 #[test]

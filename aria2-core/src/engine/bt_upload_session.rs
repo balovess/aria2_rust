@@ -351,6 +351,10 @@ impl BtUploadSession {
             .map(|addr| (addr.ip().to_string(), addr.port()))
     }
 
+    pub fn remote_endpoint(&self) -> Option<std::net::SocketAddr> {
+        self.conn.remote_addr()
+    }
+
     pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
         self.conn.remote_peer_id()
     }

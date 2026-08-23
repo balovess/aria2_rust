@@ -3,6 +3,7 @@ use tracing::{info, warn};
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit;
 use crate::error::Result;
+use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Attempt to download a piece from web seeds when peer download fails (BEP 19).
@@ -29,10 +30,14 @@ pub(super) async fn try_web_seed_fallback(
         next_piece_idx
     );
 
-    match ws_mgr
+    let web_seed_connection = ActiveConnectionGuard::new(std::sync::Arc::clone(&cmd.group));
+    web_seed_connection.set(1);
+    let web_seed_result = ws_mgr
         .request_piece_with_activity(next_piece_idx as u32, Some(cmd.progress.as_ref()))
-        .await
-    {
+        .await;
+    drop(web_seed_connection);
+
+    match web_seed_result {
         Ok(web_seed_data) => {
             if !web_seed_data.is_empty() {
                 cmd.progress.record_network_activity();

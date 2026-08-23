@@ -52,7 +52,7 @@ use crate::engine::bt_upload_session::{
 };
 use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::engine::peer_stats::PeerStats;
-use crate::request::request_group::AtomicProgress;
+use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -132,6 +132,9 @@ pub struct BtSeedManager {
         Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
     /// Lock-free progress sink for live RPC/UI upload statistics.
     upload_progress: Option<Arc<AtomicProgress>>,
+    /// Shared protocol counters and peer snapshots consumed by RPC/TUI.
+    connection_state: Option<Arc<ConnectionState>>,
+    peer_snapshot_store: Option<Arc<std::sync::RwLock<Vec<BtPeerSnapshot>>>>,
 }
 
 impl BtSeedManager {
@@ -385,6 +388,8 @@ impl BtSeedManager {
             peer_id,
             incoming_peers,
             upload_progress: None,
+            connection_state: None,
+            peer_snapshot_store: None,
         }
     }
 
@@ -425,6 +430,7 @@ impl BtSeedManager {
                 }
             }
         }
+        self.publish_connection_state();
         self.publish_upload_stats();
 
         loop {
@@ -476,6 +482,7 @@ impl BtSeedManager {
             // -- Process state changes observed since the last event ---------
             self.remove_dead_sessions();
             self.sync_sessions_to_stats();
+            self.publish_connection_state();
             let interested_peer_needs_decision = self
                 .upload_sessions
                 .iter()
@@ -529,6 +536,7 @@ impl BtSeedManager {
                 .await;
         }
         self.is_active = false;
+        self.clear_connection_state();
         info!(
             "Seeding loop ended: uploaded {} bytes in {:?}",
             self.total_uploaded,
@@ -676,6 +684,7 @@ impl BtSeedManager {
         let peer_stats = PeerStats::new(remote_peer_id.unwrap_or([0u8; 20]), endpoint);
         self.upload_sessions.push(session);
         self.peer_stats.push(peer_stats);
+        self.publish_connection_state();
         info!(%endpoint, "Admitted incoming BitTorrent seed peer");
     }
 
@@ -891,6 +900,73 @@ impl BtSeedManager {
     pub(crate) fn set_upload_progress(&mut self, progress: Arc<AtomicProgress>) {
         self.upload_progress = Some(progress);
         self.publish_upload_stats();
+    }
+
+    pub(crate) fn set_connection_state(
+        &mut self,
+        connection_state: Arc<ConnectionState>,
+        peer_snapshot_store: Arc<std::sync::RwLock<Vec<BtPeerSnapshot>>>,
+    ) {
+        self.connection_state = Some(connection_state);
+        self.peer_snapshot_store = Some(peer_snapshot_store);
+        self.publish_connection_state();
+    }
+
+    fn clear_connection_state(&self) {
+        if let Some(connection_state) = self.connection_state.as_ref() {
+            connection_state.set_bt(0);
+        }
+        if let Some(store) = self.peer_snapshot_store.as_ref() {
+            *store
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Vec::new();
+        }
+    }
+
+    fn publish_connection_state(&self) {
+        if let Some(connection_state) = self.connection_state.as_ref() {
+            connection_state.set_bt(self.num_sessions());
+        }
+        if let Some(store) = self.peer_snapshot_store.as_ref() {
+            *store
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = self.peer_snapshots();
+        }
+    }
+
+    fn peer_snapshots(&self) -> Vec<BtPeerSnapshot> {
+        self.upload_sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, session)| {
+                let addr = session.remote_endpoint()?;
+                let stats = self.peer_stats.get(index);
+                Some(BtPeerSnapshot {
+                    peer_id: session.remote_peer_id().unwrap_or([0; 20]),
+                    addr,
+                    is_incoming: true,
+                    uploaded_bytes: session.uploaded_bytes(),
+                    downloaded_bytes: 0,
+                    upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),
+                    download_speed: 0.0,
+                    avg_upload_speed: stats.map_or(0, |stats| stats.avg_upload_speed),
+                    avg_download_speed: 0,
+                    am_choking: session.is_peer_choked(),
+                    peer_choking: false,
+                    seeder: Some(false),
+                    connection_duration_secs: stats
+                        .map_or(0, |stats| stats.connection_duration_secs()),
+                    last_data_age_secs: stats.map_or(0, |stats| {
+                        stats
+                            .last_data_time
+                            .map(|time| time.elapsed().as_secs())
+                            .unwrap_or_else(|| stats.connection_duration_secs())
+                    }),
+                    is_snubbed: stats.is_some_and(|stats| stats.is_snubbed),
+                    is_banned: false,
+                })
+            })
+            .collect()
     }
 
     fn publish_upload_stats(&self) {

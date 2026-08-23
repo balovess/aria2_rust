@@ -539,7 +539,7 @@ impl BtDownloadCommand {
         self.bt_runtime.set_connections(active_connections.len());
         self.group
             .recover()
-            .set_active_connection_count(active_connections.len());
+            .set_bt_connection_count(active_connections.len());
 
         if active_connections.is_empty() {
             return Err(Aria2Error::Recoverable(

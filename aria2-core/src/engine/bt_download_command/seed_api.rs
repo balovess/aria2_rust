@@ -1,5 +1,6 @@
 use tracing::{debug, info};
 
+use crate::engine::bt_seed_manager::BtSeedManager;
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -85,7 +86,7 @@ impl BtDownloadCommand {
             }
         }
 
-        let seed_manager = BtSeedManager::new_with_info_hash(
+        let mut seed_manager = BtSeedManager::new_with_info_hash(
             meta.info_hash.bytes,
             connections,
             piece_provider,
@@ -94,6 +95,7 @@ impl BtDownloadCommand {
             total_downloaded,
         )
         .with_peer_storage(std::sync::Arc::clone(&self.peer_storage));
+        self.attach_seed_observers(&mut seed_manager);
 
         self.seed_manager = Some(seed_manager);
 
@@ -105,6 +107,20 @@ impl BtDownloadCommand {
         );
 
         Ok(true)
+    }
+
+    /// Attach the single status/progress observation path used by every
+    /// seeding entry point. RPC and terminal UI both read the resulting
+    /// RequestGroup snapshot, so constructors cannot silently omit live seed
+    /// connections or upload counters.
+    pub(crate) fn attach_seed_observers(&self, manager: &mut BtSeedManager) {
+        let (connection_state, peer_snapshot_store) = {
+            let group = self.group.recover();
+            (group.connection_state(), group.bt_peer_snapshot_store())
+        };
+        manager.set_connection_state(connection_state, peer_snapshot_store);
+        manager.set_total_uploaded(self.total_uploaded);
+        manager.set_upload_progress(std::sync::Arc::clone(&self.progress));
     }
 
     /// Get a reference to the seed manager.

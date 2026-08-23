@@ -52,7 +52,8 @@ fn sync_peer_snapshots(
         .filter_map(|conn| {
             Some(BtPeerSnapshot {
                 peer_id: conn.peer_id.unwrap_or(conn.stats.peer_id),
-                addr: format!("{}:{}", conn.ip_addr, conn.port).parse().ok()?,
+                addr: conn.remote_endpoint()?,
+                is_incoming: false,
                 uploaded_bytes: conn.stats.uploaded_bytes,
                 downloaded_bytes: conn.stats.downloaded_bytes,
                 upload_speed: conn.stats.upload_speed,
@@ -72,7 +73,7 @@ fn sync_peer_snapshots(
             })
         })
         .collect();
-    group.set_active_connection_count(snapshots.len());
+    group.set_bt_connection_count(snapshots.len());
     group.set_bt_peer_snapshots(snapshots);
 }
 

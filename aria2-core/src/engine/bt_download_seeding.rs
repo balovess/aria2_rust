@@ -69,8 +69,7 @@ impl BtDownloadCommand {
             peer_id,
             self.incoming_peers.take(),
         );
-        manager.set_total_uploaded(self.total_uploaded);
-        manager.set_upload_progress(std::sync::Arc::clone(&self.progress));
+        self.attach_seed_observers(&mut manager);
         let lifecycle_notifier = self.group.recover().lifecycle_notifier();
         let seeding_result = loop {
             if let Some(error) = self.seeding_lifecycle_error() {

@@ -34,12 +34,13 @@ use tracing::{debug, info, warn};
 use super::types::PeerKey;
 use crate::config::parse_integer_segments;
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_piece_selector::build_bitfield_from_completed;
 use crate::engine::bt_progress_info_file::BtProgress;
 use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::request::request_group::{ActiveConnectionGuard, GroupId};
+use crate::request::request_group::{ActiveConnectionGuard, BtConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_PIECE_HASH_WORKERS: usize = 4;
@@ -282,7 +283,7 @@ impl BtDownloadCommand {
         self.bt_runtime.set_connections(active_connections.len());
         self.group
             .recover()
-            .set_active_connection_count(active_connections.len());
+            .set_bt_connection_count(active_connections.len());
         info!("[BT] Admitted incoming peer {}", endpoint);
     }
 }
@@ -296,6 +297,7 @@ impl Command for BtDownloadCommand {
 
     async fn execute(&mut self) -> Result<()> {
         let _connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
+        let _bt_connection_guard = BtConnectionGuard::new(Arc::clone(&self.group));
         if !self.started {
             self.group.recover_mut().start()?;
             self.started = true;
@@ -533,6 +535,20 @@ impl Command for BtDownloadCommand {
                     }
                 }
             }
+        }
+
+        // Integrity results and the explicit unverified-seed path both replace
+        // the checkpoint's trust state. Publish the same verified-piece view
+        // to RPC, CLI, and TUI before the command enters peer/seeding phases.
+        if self.check_integrity || seed_unverified {
+            let verified_piece_set: HashSet<usize> =
+                verified_piece_indices.iter().copied().collect();
+            let verified_bitfield = build_bitfield_from_completed(num_pieces, |index| {
+                verified_piece_set.contains(&(index as usize))
+            });
+            self.group
+                .recover()
+                .set_bt_bitfield(Some(verified_bitfield));
         }
 
         if self.hash_check_only {
