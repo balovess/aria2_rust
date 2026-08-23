@@ -22,3 +22,4 @@ docs/compatibility-status.md
 docs/MIGRATION.md
 .codex-python-deps/
 !docs/compatibility-status.md
+.codex/goals/
