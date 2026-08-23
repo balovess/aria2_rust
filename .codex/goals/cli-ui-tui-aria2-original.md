@@ -71,3 +71,15 @@ The public swarm Debian torrent is an independent BitTorrent protocol E2E
 fixture. A public peer not requesting bytes from this client is not evidence
 of a CLI/UI defect; upload acceptance requires a controlled peer that requests
 at least one verified piece from this client.
+
+## Final CI and cleanup evidence
+
+GitHub Actions run `32619334218` passed on the `ui` branch at commit
+`5735e70a35a2b7514118ace5de888b98d9c0378b`: lint/format, Linux, macOS, and
+Windows jobs all succeeded. The controlled upload E2E
+`test_bt_download_to_seed_upload_and_ratio_exit_over_tcp` completed a real
+TCP peer request and verified the exact piece payload, uploaded byte count,
+unchoke, and ratio-based seeding shutdown. After verification,
+`cargo clean` removed 10,261 build files and 7.8 GiB; no `target` directory,
+Debian ISO, or partial download remains in the workspace. The original
+`aria2_original/debian-13.5.0-amd64-DVD-1.iso.torrent` fixture was preserved.
