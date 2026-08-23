@@ -38,7 +38,7 @@ pub struct HttpSegmentRequestResult {
     /// Internal identity used to reclaim the task handle when this completion
     /// event is consumed. The result channel is the completion signal, so the
     /// scheduler never needs to probe every handle for readiness.
-    task_id: u64,
+    pub(crate) task_id: u64,
     pub mirror_index: usize,
     pub segment_index: u32,
     pub authority_key: String,
@@ -74,6 +74,7 @@ impl Drop for AdmissionLease {
 
 struct RunningTask {
     id: u64,
+    segment_index: u32,
     handle: tokio::task::JoinHandle<()>,
 }
 
@@ -129,13 +130,9 @@ impl HttpSegmentRequestExecutor {
     }
 
     /// Admit and start a request if both total and authority targets have room.
-    pub fn try_submit(&mut self, request: HttpSegmentRequest) -> bool {
-        let Some(authority) = self.state.authority(&request.authority_key) else {
-            return false;
-        };
-        let Some(lease) = self.state.try_acquire(&authority, self.total_limit) else {
-            return false;
-        };
+    pub fn try_submit(&mut self, request: HttpSegmentRequest) -> Option<u64> {
+        let authority = self.state.authority(&request.authority_key)?;
+        let lease = self.state.try_acquire(&authority, self.total_limit)?;
 
         let client = self.client.clone();
         let request_policy = self.request_policy.clone();
@@ -180,9 +177,10 @@ impl HttpSegmentRequestExecutor {
         });
         self.tasks.push(RunningTask {
             id: task_id,
+            segment_index: request.segment_index,
             handle,
         });
-        true
+        Some(task_id)
     }
 
     pub fn set_target(&self, authority_key: &str, target: usize) {
@@ -215,6 +213,21 @@ impl HttpSegmentRequestExecutor {
         let result = self.result_rx.recv().await?;
         self.reap_task(result.task_id).await;
         Some(result)
+    }
+
+    /// Abort one stalled Range request and release its admission lease.
+    pub async fn abort_segment(&mut self, segment_index: u32) -> bool {
+        let Some(index) = self
+            .tasks
+            .iter()
+            .position(|task| task.segment_index == segment_index)
+        else {
+            return false;
+        };
+        let task = self.tasks.swap_remove(index);
+        task.handle.abort();
+        let _ = task.handle.await;
+        true
     }
 
     /// Reclaim the task handle associated with a completion event.
@@ -400,6 +413,7 @@ mod tests {
 
     #[tokio::test]
     async fn completion_event_reclaims_only_its_task() {
+        crate::http::client_pool::ensure_rustls_provider();
         let (result_tx, result_rx) = mpsc::channel(1);
         let mut executor = HttpSegmentRequestExecutor {
             result_rx,
@@ -417,10 +431,12 @@ mod tests {
             tasks: vec![
                 RunningTask {
                     id: 1,
+                    segment_index: 1,
                     handle: tokio::spawn(async {}),
                 },
                 RunningTask {
                     id: 2,
+                    segment_index: 2,
                     handle: tokio::spawn(async {}),
                 },
             ],

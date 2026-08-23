@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 
@@ -148,7 +149,7 @@ pub async fn execute(
     let ctrl_save_interval = total_length / num_pieces.max(1) as u64;
     let mut ctrl_bytes_since_save: u64 = 0;
 
-    let mut active_segs: HashMap<u32, u64> = HashMap::new();
+    let mut active_segs: HashMap<u32, (u64, u64)> = HashMap::new();
     let initial_completed = if resume_state.should_resume {
         resume_state.start_offset
     } else {
@@ -157,6 +158,11 @@ pub async fn execute(
     let progress_tracker = SegmentProgressTracker::new(initial_completed, Arc::clone(&dl.progress));
     let mut segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();
     let mut completed_bytes = initial_completed;
+    let segment_stall_timeout =
+        Duration::from_secs(constants::HTTP_DEFAULT_SEGMENT_STALL_TIMEOUT_SECS);
+    let stall_check_interval = Duration::from_secs(1);
+    let mut stall_check = tokio::time::interval(stall_check_interval);
+    stall_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     super::flush_requested_control_file(dl, &mut writer, &mut ctrl_file, completed_bytes).await?;
 
     // Write channel: segment futures send chunks as they arrive,
@@ -208,7 +214,7 @@ pub async fn execute(
                 Some((seg_idx, offset, length)) => {
                     let progress = progress_tracker.new_segment();
                     segment_progress.insert(seg_idx, Arc::clone(&progress));
-                    active_segs.insert(seg_idx, offset);
+                    active_segs.insert(seg_idx, (offset, 0));
 
                     let submitted = executor.try_submit(HttpSegmentRequest {
                         mirror_index: 0,
@@ -222,11 +228,14 @@ pub async fn execute(
                         write_tx: write_tx.clone(),
                         expected_entity_length: total_length,
                     });
-                    if !submitted {
+                    let Some(task_id) = submitted else {
                         active_segs.remove(&seg_idx);
                         segment_progress.remove(&seg_idx);
                         manager.requeue_segment(seg_idx);
                         break;
+                    };
+                    if let Some(active) = active_segs.get_mut(&seg_idx) {
+                        active.1 = task_id;
                     }
                     connection_guard.set(executor.in_flight());
                     tracing::debug!(
@@ -315,6 +324,12 @@ pub async fn execute(
             Some(pool_result) = executor.next_result() => {
                 connection_guard.set(executor.in_flight());
                 let seg_idx = pool_result.segment_index;
+                let Some((_, active_task_id)) = active_segs.get(&seg_idx).copied() else {
+                    continue;
+                };
+                if active_task_id != pool_result.task_id {
+                    continue;
+                }
                 let result = pool_result.result;
                 let peer_addr = pool_result.peer_addr;
                 if let Some(peer_addr) = peer_addr
@@ -346,7 +361,10 @@ pub async fn execute(
                     })?;
                 }
 
-                let _offset = active_segs.remove(&seg_idx).unwrap_or(0);
+                let _offset = active_segs
+                    .remove(&seg_idx)
+                    .map(|(offset, _)| offset)
+                    .unwrap_or(0);
 
                 // The request has emitted its completion only after all
                 // progress writes, so the atomic segment handle is already
@@ -542,6 +560,29 @@ pub async fn execute(
                     )
                     .await?;
                     return Err(e);
+                }
+            }
+            _ = stall_check.tick() => {
+                let stalled_segment = active_segs.keys().find_map(|seg_idx| {
+                    segment_progress
+                        .get(seg_idx)
+                        .filter(|progress| progress.is_stalled(segment_stall_timeout))
+                        .map(|_| *seg_idx)
+                });
+                if let Some(seg_idx) = stalled_segment
+                    && executor.abort_segment(seg_idx).await
+                {
+                    connection_guard.set(executor.in_flight());
+                    active_segs.remove(&seg_idx);
+                    if let Some(progress) = segment_progress.remove(&seg_idx) {
+                        progress.rollback();
+                    }
+                    manager.fail_segment(seg_idx);
+                    tracing::warn!(
+                        seg_idx,
+                        stall_timeout_secs = segment_stall_timeout.as_secs(),
+                        "Reclaimed stalled HTTP Range request"
+                    );
                 }
             }
         }
