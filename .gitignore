@@ -22,4 +22,10 @@ docs/compatibility-status.md
 docs/MIGRATION.md
 .codex-python-deps/
 !docs/compatibility-status.md
-.codex/goals/
+
+# Ignore local/tooling directories whose names start with a dot.
+.*/
+
+# CI workflows are repository files and must remain trackable.
+!/.github/
+!/.github/**
