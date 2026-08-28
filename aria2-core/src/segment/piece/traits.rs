@@ -6,6 +6,7 @@ use super::piece_impl::{DEFAULT_BLOCK_LENGTH, Piece};
 impl Clone for Piece {
     fn clone(&self) -> Self {
         Piece {
+            identity: self.identity,
             completed: self.completed.clone(),
             in_use: self.in_use.clone(),
             users: self.users.clone(),
@@ -66,6 +67,7 @@ impl std::fmt::Display for Piece {
 impl Default for Piece {
     fn default() -> Self {
         Piece {
+            identity: 0,
             completed: BlockBitfield::new(0),
             in_use: BlockBitfield::new(0),
             users: Vec::new(),
