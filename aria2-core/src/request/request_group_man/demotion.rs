@@ -401,6 +401,7 @@ impl super::RequestGroupMan {
         completed_gid: crate::request::request_group::GroupId,
         prerequisite_status: DownloadStatus,
     ) {
+        let mut failed_dependencies: Vec<(GroupId, String)> = Vec::new();
         #[cfg(feature = "bittorrent")]
         let mut failed_payloads: Vec<(crate::request::request_group::GroupId, String)> = Vec::new();
 
@@ -424,6 +425,23 @@ impl super::RequestGroupMan {
                         depends_on = completed_gid.value(),
                         "Resolved completion dependency"
                     );
+                } else if let Some(completion_dep) =
+                    dep.as_any()
+                        .downcast_ref::<crate::request::request_group::CompletionDependency>()
+                    && completion_dep.depends_on_gid == completed_gid
+                    && matches!(
+                        prerequisite_status,
+                        DownloadStatus::Error(_) | DownloadStatus::Removed
+                    )
+                {
+                    let reason = match &prerequisite_status {
+                        DownloadStatus::Error(message) => {
+                            format!("completion dependency failed: {message}")
+                        }
+                        DownloadStatus::Removed => "completion dependency was removed".to_string(),
+                        _ => unreachable!("status was checked above"),
+                    };
+                    failed_dependencies.push((payload_gid, reason));
                 }
 
                 #[cfg(feature = "bittorrent")]
@@ -447,6 +465,14 @@ impl super::RequestGroupMan {
                     }
                 }
             }
+        }
+
+        for (gid, error) in failed_dependencies {
+            self.fail_reserved_group_with_code(
+                gid,
+                crate::request::request_group::DownloadResultCode::UnknownError,
+                error,
+            );
         }
 
         #[cfg(feature = "bittorrent")]

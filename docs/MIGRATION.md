@@ -7,6 +7,32 @@
 是当前实现入口和性能证据的索引；本文件下面的 dated checkpoint 仍然是历史记录，
 不因新增索引而改变其验收状态。
 
+## 2026-08-28 Force-halt file-allocation ordering checkpoint
+
+The engine now cancels file allocations owned by running GIDs before waiting
+for protocol task teardown during `ForceHaltAll`, then repeats the cancellation
+after the wait to cover allocations queued during teardown. This closes the
+waiter wake-up ordering gap: a command blocked in `enqueue_path` or
+`enqueue_multi` no longer waits for the one-second force-shutdown timeout
+before its allocation result is delivered. The change is internal to engine
+lifecycle coordination and does not alter the public API or configuration.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --all-features --lib engine::engine_loop::tests::force_halt_wakes_file_allocation_waiter_before_protocol_timeout -- --exact --test-threads=1
+  1 passed, 0 failed
+cargo test -j 1 -p aria2-core --all-features --lib engine::engine_loop::tests -- --test-threads=1
+  24 passed, 0 failed
+cargo clippy -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+~~~
+
+Broader multi-file allocation, cross-protocol force-halt combinations,
+external interoperability, and final workspace acceptance remain open. The
+active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.
+
 ## 2026-08-28 PKCS#12 AES-GCM identity compatibility checkpoint
 
 The Rust-owned empty-password PKCS#12 identity adapter now decrypts PBES2
@@ -92,9 +118,9 @@ client or executable.
 Rust-owned verification:
 
 ~~~text
-cargo test --target-dir target-phase2 -j 1 -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
+cargo test --target-dir target -j 1 -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
   17 passed, 0 failed
-cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+cargo clippy --target-dir target -j 1 -p aria2-core --lib --all-features -- -D warnings
   PASS
 rustfmt --edition 2024 --check aria2-core/src/http/client_identity.rs
   PASS
@@ -118,7 +144,7 @@ engine-owned listener 负责，DHT UDP 监听端口不被误用为 BitTorrent pe
 Rust-owned 回归验证：
 
 ~~~text
-cargo test -p aria2-core --all-features --lib engine::bt_download_execute::execute::finalization::tests --target-dir target-phase2 -j 1 -- --test-threads=1
+cargo test -p aria2-core --all-features --lib engine::bt_download_execute::execute::finalization::tests --target-dir target -j 1 -- --test-threads=1
   3 passed, 0 failed
 ~~~
 
@@ -136,11 +162,11 @@ ID；收到自身发出的查询时直接转为 unknown 消息，不发送响应
 Rust-owned 验证：
 
 ~~~text
-cargo test -p aria2-protocol --all-features --lib bittorrent::dht::handler::tests --target-dir target-phase2 -j 1 -- --test-threads=1
+cargo test -p aria2-protocol --all-features --lib bittorrent::dht::handler::tests --target-dir target -j 1 -- --test-threads=1
   7 passed, 0 failed
-cargo test -p aria2-core --all-features --test dht_integration_tests --target-dir target-phase2 -j 1 -- --test-threads=1
+cargo test -p aria2-core --all-features --test dht_integration_tests --target-dir target -j 1 -- --test-threads=1
   30 passed, 0 failed, 4 ignored
-cargo clippy -p aria2-protocol --all-targets --all-features --target-dir target-phase2 -j 1 -- -D warnings
+cargo clippy -p aria2-protocol --all-targets --all-features --target-dir target -j 1 -- -D warnings
   PASS
 ~~~
 
@@ -4642,9 +4668,9 @@ owner or changing piece state behaviour.
 Rust-owned verification:
 
 ~~~text
-cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+cargo clippy --target-dir target -j 1 -p aria2-core --lib --all-features -- -D warnings
   PASS
-cargo test --target-dir target-phase2 -j 1 -p aria2-core --lib segment::piece -- --test-threads=1
+cargo test --target-dir target -j 1 -p aria2-core --lib segment::piece -- --test-threads=1
   110 passed, 0 failed, 0 ignored, 2520 filtered out
 git diff --check
   PASS
@@ -4669,9 +4695,9 @@ and keeps engine result-code mapping consistent across protocol entry points;
 Rust-owned verification:
 
 ~~~text
-cargo test --target-dir target-phase2 -j 1 -p aria2-core --all-features --lib engine::metalink_download_command::execution::http_status_tests -- --test-threads=1
+cargo test --target-dir target -j 1 -p aria2-core --all-features --lib engine::metalink_download_command::execution::http_status_tests -- --test-threads=1
   9 passed, 0 failed, 0 ignored, 3534 filtered out
-cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+cargo clippy --target-dir target -j 1 -p aria2-core --lib --all-features -- -D warnings
   PASS
 rustfmt --edition 2024 --check aria2-core/src/engine/metalink_download_command/execution.rs
   PASS
@@ -4698,9 +4724,9 @@ version changed.
 Rust-owned verification:
 
 ~~~text
-cargo test --target-dir target-phase2 -j 1 -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
+cargo test --target-dir target -j 1 -p aria2-core --lib http::client_identity --all-features -- --test-threads=1
   18 passed, 0 failed
-cargo clippy --target-dir target-phase2 -j 1 -p aria2-core --lib --all-features -- -D warnings
+cargo clippy --target-dir target -j 1 -p aria2-core --lib --all-features -- -D warnings
   PASS
 rustfmt --edition 2024 --check aria2-core/src/http/client_identity.rs
   PASS
@@ -4712,3 +4738,83 @@ This closes only the alternative PBKDF2 PRF slice. AES-GCM, unsupported bag
 variants, password-bearing archives, broader original-client and third-party
 HTTPS interoperability, and final workspace acceptance remain open. The
 active phase remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-28 Metalink batch lifecycle consistency checkpoint
+
+`RequestGroupMan::pause_all`, `force_pause_all`, and `unpause_all` now traverse
+the canonical group index through the existing Metalink metadata/payload graph
+helper. Each graph member is applied once by GID, so batch lifecycle commands
+cannot leave the metadata prerequisite and payload in different states. This
+keeps the batch APIs consistent with the existing single-GID lifecycle paths.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --all-features --lib request_group_man::tests::batch_pause_operations_cover_both_metalink_graph_groups -- --test-threads=1
+  1 passed, 0 failed, 3602 filtered out
+cargo clippy -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`; broader cross-protocol lifecycle, interoperability, bindings,
+measured performance, and final workspace acceptance remain open.
+
+## 2026-08-28 Completion dependency failure checkpoint
+
+Generic `CompletionDependency` consumers no longer remain permanently queued
+when their prerequisite reaches `Error` or `Removed`. The manager now records
+the dependent as a terminal `UnknownError` stopped result and removes it from
+the canonical and reserved indexes. Successful completion still marks the
+dependency resolved, and the BitTorrent-specific dependency continues to use
+its existing mirror fallback and parse-error handling.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --all-features --lib request_group_man -- --test-threads=1
+  43 passed, 0 failed, 3561 filtered out
+cargo clippy -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+The active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`; broader dependency graphs, cross-protocol lifecycle,
+interoperability, bindings, measured performance, and final workspace
+acceptance remain open.
+
+## 2026-08-28 BitTorrent multi-file force-halt checkpoint
+
+Added Rust-owned production-path coverage for a multi-file BitTorrent download
+with `prealloc`. The E2E starts the engine, waits until the peer path has
+received a request, force-halts the engine, and verifies that both allocated
+payload files retain their expected layout and lengths. The queued allocation
+waiter behavior is covered independently by the engine-loop regression, which
+confirms that force-halt cancels the matching allocation entry before waiting
+for the owning task.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --test test_e2e_bittorrent_download --features bittorrent test_e2e_engine_bt_multi_file_force_halt_preserves_layout -- --exact --nocapture
+  1 passed, 0 failed
+cargo test -j 1 -p aria2-core --lib engine::engine_loop::tests::force_halt_wakes_file_allocation_waiter_before_protocol_timeout -- --exact
+  1 passed, 0 failed
+cargo fmt --all -- --check
+  PASS
+git diff --check
+  PASS
+~~~
+
+This closes only the multi-file BitTorrent force-halt coverage slice. Broader
+cross-protocol lifecycle, interoperability, bindings, measured performance,
+and final workspace acceptance remain open. The active phase remains
+`phase-2-core-domain` and the migration remains `PARTIAL`.

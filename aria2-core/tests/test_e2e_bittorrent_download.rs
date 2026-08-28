@@ -317,6 +317,125 @@ async fn test_e2e_engine_bt_force_halt_preserves_resume_state() {
 }
 
 #[tokio::test]
+async fn test_e2e_engine_bt_multi_file_force_halt_preserves_layout() {
+    let dir = tmp_dir();
+    let file_lengths = [16 * 1024 * 1024, 16 * 1024 * 1024];
+    let piece_length = 64 * 1024;
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let placeholder = build_multi_file_test_torrent(
+        "engine-multi-force-halt",
+        &file_lengths,
+        piece_length,
+        &placeholder_tracker.announce_url(),
+    );
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("multi-file force-halt torrent should parse");
+    let peer = MockBtPeerServer::start_with_response_delay(
+        meta.info_hash.bytes,
+        (0..meta.num_pieces() as u32)
+            .map(|piece| expected_piece_data(piece, piece_length, file_lengths.iter().sum()))
+            .collect(),
+        std::time::Duration::from_secs(3),
+    )
+    .await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_multi_file_test_torrent(
+        "engine-multi-force-halt",
+        &file_lengths,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let options = DownloadOptions {
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        seed_time: Some(0.0),
+        enable_dht: false,
+        enable_public_trackers: false,
+        file_allocation: Some("prealloc".to_string()),
+        secure_falloc: true,
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1101);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec!["bt://engine-multi-force-halt".to_string()],
+        options,
+    )));
+    group.recover().set_bt_metadata_data(torrent_data);
+
+    let manager = Arc::new(RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&manager));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("multi-file BT engine command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if group.recover().status() == DownloadStatus::Active {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("multi-file BT engine did not promote the group");
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !peer.requested_pieces().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("multi-file BT peer did not receive a piece request");
+
+    command_tx
+        .send(EngineCommand::ForceHaltAll {
+            reason: HaltReason::ShutdownSignal,
+        })
+        .expect("multi-file BT force-halt command should be accepted");
+    tokio::time::timeout(std::time::Duration::from_secs(10), engine_task)
+        .await
+        .expect("multi-file BT force-halt engine did not stop")
+        .expect("multi-file BT force-halt engine task panicked")
+        .expect("multi-file BT force-halt engine returned an error");
+
+    assert_eq!(
+        group.recover().get_halt_reason(),
+        HaltReason::ShutdownSignal
+    );
+    assert_eq!(
+        group.recover().create_download_result().code,
+        DownloadResultCode::InProgress
+    );
+    assert!(
+        dir.path().join("part-0.bin").is_file() && dir.path().join("part-1.bin").is_file(),
+        "multi-file allocation should have created every payload file"
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path().join("part-0.bin"))
+            .expect("first multi-file payload metadata should be readable")
+            .len(),
+        file_lengths[0]
+    );
+    assert_eq!(
+        std::fs::metadata(dir.path().join("part-1.bin"))
+            .expect("second multi-file payload metadata should be readable")
+            .len(),
+        file_lengths[1]
+    );
+    tracker.wait_for_event("stopped").await;
+}
+
+#[tokio::test]
 async fn test_e2e_bt_stop_timeout_returns_timeout_result_without_peers() {
     let dir = tmp_dir();
     let tracker = MockTrackerServer::start_with_peers(Vec::new(), false).await;
