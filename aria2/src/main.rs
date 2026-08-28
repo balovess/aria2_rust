@@ -46,6 +46,56 @@ async fn main() {
         std::process::exit(0);
     }
 
+    if cli.general.repair_config || cli.general.reset_config {
+        let config_path = cli
+            .general
+            .conf_path
+            .as_deref()
+            .expect("clap requires --conf-path for config maintenance");
+        let result = if cli.general.repair_config {
+            App::repair_config_file(config_path).map(|(backup, count)| {
+                format!(
+                    "Repaired {count} invalid configuration entr{}; backup: {}",
+                    if count == 1 { "y" } else { "ies" },
+                    backup.display()
+                )
+            })
+        } else {
+            App::reset_config_file(config_path)
+                .map(|backup| format!("Reset configuration; backup: {}", backup.display()))
+        };
+        match result {
+            Ok(message) => {
+                println!("{message}");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("Configuration maintenance failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if cli.general.check_config.unwrap_or(false) {
+        let no_conf = cli.general.no_conf.unwrap_or(false);
+        let conf_path = cli
+            .general
+            .conf_path
+            .as_ref()
+            .and_then(|path| path.to_str());
+        let mut app = App::new();
+        match app.check_config(no_conf, conf_path).await {
+            Ok(()) => {
+                println!("Configuration is valid.");
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("Configuration is invalid: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let exit_code = App::new().run(cli).await;
     std::process::exit(exit_code);
 }

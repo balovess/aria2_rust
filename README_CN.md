@@ -75,6 +75,9 @@ cargo run --release -- --version
 
 ## 使用方法
 
+完整的用户使用说明、常用命令、配置文件、RPC、会话管理以及配置检查/修复/重置流程见
+[用户使用指南](docs/user-guide.md)。
+
 ### 基础 HTTP 下载
 
 ```bash

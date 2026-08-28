@@ -304,11 +304,11 @@ fn regression_config_file_empty_value() {
     assert!(parser.has_errors());
 }
 
-/// Test: Config file without equals sign is skipped.
+/// Test: Config file accepts boolean flags without an equals sign.
 #[test]
-fn regression_config_file_no_equals_skipped() {
+fn regression_config_file_boolean_flag_without_equals() {
     let mut parser = ConfigParser::new();
-    let content = "dir=/downloads\ninvalid_line_without_equals\nsplit=8\n";
+    let content = "dir=/downloads\nquiet\ninvalid_line_without_equals\nsplit=8\n";
 
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("aria2.conf");
@@ -319,7 +319,8 @@ fn regression_config_file_no_equals_skipped() {
     // Valid lines should be parsed
     assert_eq!(parser.get_str("dir").unwrap(), "/downloads");
     assert_eq!(parser.get_i64("split").unwrap(), 8);
-    // Invalid line should not create an option
+    assert_eq!(parser.get_bool("quiet"), Some(true));
+    // Unknown line should not create an option
     assert!(!parser.contains("invalid_line_without_equals"));
 }
 

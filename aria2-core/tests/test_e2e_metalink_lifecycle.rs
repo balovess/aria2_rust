@@ -9,7 +9,6 @@ use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
-#[cfg(feature = "bittorrent")]
 use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{
@@ -342,6 +341,67 @@ async fn metalink_stream_remove_preserves_partial_output_and_checkpoint() {
         control.exists(),
         "remove must preserve the Rust checkpoint for explicit recovery"
     );
+}
+
+#[tokio::test]
+async fn metalink_engine_force_halt_preserves_resume_state() {
+    let server = MockHttpServer::start().await.unwrap();
+    let data = payload(2 * 1024 * 1024);
+    install_slow_range_route(&server, "/metalink-force-halt.bin", &data);
+    let directory = tempfile::tempdir().unwrap();
+    let url = format!("{}/metalink-force-halt.bin", server.base_url());
+    let document = metalink("metalink-force-halt.bin", &url, &data);
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        ..DownloadOptions::default()
+    };
+
+    let mut gids = [GroupId::new(703)].into_iter();
+    let mut groups = MetalinkToRequestGroup::new()
+        .create_resource_groups_from_bytes(&document, &options, &mut gids)
+        .unwrap();
+    assert_eq!(groups.len(), 1);
+    let group = groups.pop().unwrap();
+    let group_man = Arc::new(RequestGroupMan::new());
+    let mut engine = DownloadEngine::new(5);
+    engine.set_request_group_man(Arc::clone(&group_man));
+    let command_tx = engine.engine_command_sender();
+    let group_handle = Arc::clone(&group);
+    command_tx
+        .send(EngineCommand::AddDownload { group })
+        .unwrap();
+
+    let engine_task = tokio::spawn(engine.run());
+    wait_for_partial_output(&group_handle).await;
+    command_tx
+        .send(EngineCommand::ForceHaltAll {
+            reason: aria2_core::request::request_group::HaltReason::ShutdownSignal,
+        })
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(10), engine_task)
+        .await
+        .expect("Metalink force-halt engine did not stop")
+        .expect("Metalink force-halt engine task panicked")
+        .expect("Metalink force-halt engine returned an error");
+
+    assert_eq!(
+        group_handle.recover().create_download_result().code,
+        aria2_core::request::request_group::DownloadResultCode::InProgress
+    );
+    assert_eq!(
+        group_handle.recover().get_halt_reason(),
+        aria2_core::request::request_group::HaltReason::ShutdownSignal
+    );
+    let output = directory.path().join("metalink-force-halt.bin");
+    let control = ControlFile::control_path_for(&output);
+    let saved = ControlFile::load(&control)
+        .await
+        .unwrap()
+        .expect("force-halt should leave the Rust checkpoint");
+    assert!(saved.completed_length() > 0);
+    assert!(saved.completed_length() < data.len() as u64);
 }
 
 #[tokio::test]

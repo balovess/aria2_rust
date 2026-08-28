@@ -30,8 +30,8 @@ fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
 ///
 /// - **Unix/Linux/macOS**: Uses `statvfs` syscall to query actual available
 ///   blocks. Returns error if insufficient space.
-/// - **Windows**: Logs warning but returns Ok(()) (space check skipped).
-///   Windows disk space APIs are less reliable for this use case.
+/// - **Windows**: Uses `GetDiskFreeSpaceExW` and returns an error when the
+///   available space is below the requested amount plus headroom.
 /// - **Other**: Returns Ok(()) without checking.
 ///
 /// # Arguments
@@ -217,15 +217,12 @@ mod tests {
     /// a small amount), the check passes successfully.
     #[test]
     fn test_sufficient_space_ok() {
-        // Request 100 MB - should succeed on any reasonable system
-        let required = 100 * 1024 * 1024; // 100 MB
+        // A one-byte request leaves enough headroom on any mounted filesystem.
+        let required = 1;
         let result = check_disk_space(Path::new("."), required);
-
-        // On Unix/Windows, this should succeed unless disk is critically low
-        // We just verify it doesn't panic and returns a Result
         assert!(
-            result.is_ok() || result.is_err(),
-            "Should return Ok or Err without panicking"
+            result.is_ok(),
+            "A one-byte request should have sufficient space"
         );
     }
 
@@ -239,9 +236,10 @@ mod tests {
         let required = u64::MAX / 2; // Exabytes - will certainly fail
         let result = check_disk_space(Path::new("."), required);
 
-        // On both Unix and Windows, this should fail with insufficient space
-        // or succeed if the check is skipped (very unlikely for exabytes)
-        if let Err(error_msg) = result {
+        #[cfg(any(unix, windows))]
+        {
+            let error_msg =
+                result.expect_err("platform disk-space checks must reject this request");
             assert!(
                 error_msg.to_lowercase().contains("insufficient")
                     || error_msg.to_lowercase().contains("space"),
@@ -249,17 +247,22 @@ mod tests {
                 error_msg
             );
         }
-        // If result.is_ok(), the check was skipped or disk reported huge space
+
+        #[cfg(not(any(unix, windows)))]
+        assert!(
+            result.is_ok(),
+            "unsupported-platform disk-space checks are intentionally non-blocking"
+        );
     }
 
     /// Additional test: Empty path handled gracefully.
     #[test]
     fn test_check_disk_space_empty_path() {
-        let result = check_disk_space(Path::new(""), 1024);
-        // Should not panic - either succeed (using ".") or fail gracefully
-        assert!(
-            result.is_ok() || result.is_err(),
-            "Empty path should be handled gracefully"
+        let empty_path_result = check_disk_space(Path::new(""), 1024);
+        let current_dir_result = check_disk_space(Path::new("."), 1024);
+        assert_eq!(
+            empty_path_result, current_dir_result,
+            "an empty path must be normalized to the current directory"
         );
     }
 

@@ -589,6 +589,73 @@ fn regression_help_rendering_filters_options() {
     assert!(!http_help.contains("--rpc-listen-port"));
 }
 
+#[test]
+fn regression_basic_help_includes_copyable_examples() {
+    let help = render_help(&HelpRequest::Basic);
+
+    assert!(help.contains("https://example.com/file.zip"));
+    assert!(help.contains("C:\\Downloads"));
+    assert!(help.contains("--option=true"));
+}
+
+#[test]
+fn regression_help_shows_registry_defaults_without_changing_cli_merge() {
+    let help = render_help(&HelpRequest::Basic);
+
+    assert!(help.contains("--dir") && help.contains("[default: .]"));
+    assert!(help.contains("--split") && help.contains("[default: 16]"));
+    assert!(help.contains("--quiet") && help.contains("[default: false]"));
+
+    let cli = parse(&["--split=4"]);
+    assert_eq!(cli.http_ftp.split, Some(4));
+}
+
+#[test]
+fn regression_help_shows_enum_values() {
+    let help = render_help(&HelpRequest::Filter("file-allocation".to_string()));
+
+    for value in ["none", "prealloc", "falloc", "trunc", "mmap"] {
+        assert!(
+            help.contains(value),
+            "help should list file-allocation value {value}: {help}"
+        );
+    }
+    assert!(help.contains("default: prealloc"));
+}
+
+#[test]
+fn regression_help_shows_ranges_and_units() {
+    let timeout_help = render_help(&HelpRequest::Filter("timeout".to_string()));
+    assert!(timeout_help.contains("unit: seconds"));
+    assert!(timeout_help.contains("range: >=0"));
+
+    let cache_help = render_help(&HelpRequest::Filter("disk-cache".to_string()));
+    assert!(cache_help.contains("unit: bytes"));
+    assert!(cache_help.contains("K/M/G/T suffixes"));
+}
+
+#[test]
+fn regression_basic_and_advanced_help_filters_keep_their_groups() {
+    let basic_help = render_help(&HelpRequest::Filter("#basic".to_string()));
+    assert!(basic_help.contains("--split"));
+    assert!(!basic_help.contains("--rpc-listen-port"));
+    assert!(!basic_help.contains("--disk-cache"));
+
+    let advanced_help = render_help(&HelpRequest::Filter("#advanced".to_string()));
+    assert!(advanced_help.contains("--disk-cache"));
+    assert!(!advanced_help.contains("--split"));
+    assert!(!advanced_help.contains("--rpc-listen-port"));
+}
+
+#[test]
+fn regression_check_config_is_an_optional_boolean_action() {
+    let cli = parse(&["--check-config"]);
+    assert_eq!(cli.general.check_config, Some(true));
+
+    let cli = parse(&["--check-config=false"]);
+    assert_eq!(cli.general.check_config, Some(false));
+}
+
 /// Test: original public options added from the registry remain reachable
 /// through the CLI, including the original short file selectors.
 #[test]

@@ -12,13 +12,12 @@ bindings/python/tests/__pycache__/
 !aria2/tests/fixtures/compatibility_option_inventory.txt
 !aria2-core/tests/fixtures/compatibility_option_policies.txt
 *.md
-!docs/performance-differentiators.md
 *.7z
 *.bak
 *.bin
-!docs/
 AGENTS.md
-docs/compatibility-status.md
-docs/MIGRATION.md
 .codex-python-deps/
-!docs/compatibility-status.md
+
+# Keep internal documents local; publish only the user-facing guide.
+/docs/*
+!/docs/user-guide.md

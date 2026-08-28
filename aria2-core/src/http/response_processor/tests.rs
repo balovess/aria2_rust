@@ -713,8 +713,9 @@ fn test_206_chunked_accepted() {
         true,
         false,
     );
-    // validate_response accepts 206+chunked; downstream processing may differ.
-    assert!(result.is_ok() || result.is_err());
+    // validate_response accepts 206+chunked and the processor should return
+    // the normal successful response description.
+    assert!(result.is_ok());
 }
 
 #[test]

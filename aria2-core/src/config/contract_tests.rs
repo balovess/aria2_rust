@@ -226,7 +226,7 @@ fn every_registered_option_uses_one_parser_contract() {
 }
 
 #[tokio::test]
-async fn unsupported_options_are_rejected_at_every_configuration_entry_point() {
+async fn unsupported_options_are_ignored_in_config_files_but_rejected_elsewhere() {
     let registry = OptionRegistry::new();
     let unsupported = registry
         .all()
@@ -249,7 +249,11 @@ async fn unsupported_options_are_rejected_at_every_configuration_entry_point() {
 
     let mut file_parser = ConfigParser::new();
     file_parser.parse_file(config_path.to_str().expect("UTF-8 temp path"));
-    assert_eq!(file_parser.errors().len(), unsupported.len());
+    assert!(
+        !file_parser.has_errors(),
+        "legacy config options should be ignored: {:?}",
+        file_parser.errors()
+    );
     assert!(file_parser.options().is_empty());
 
     let cli_args = unsupported

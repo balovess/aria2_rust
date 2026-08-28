@@ -17,7 +17,7 @@ pub use option::{
     PiecePriorityRule, RangeValidator, RegexValidator, UrlValidator, parse_index_out,
     parse_integer_segments, parse_piece_priority,
 };
-pub use parser::{ConfigError, ConfigParser, ConfigSource};
+pub use parser::{ConfigError, ConfigErrorContext, ConfigParser, ConfigSource};
 pub use runtime::{
     ChangeableKind, INITIAL_IDENTITY_OPTIONS, INITIAL_REQUEST_OPTIONS,
     INITIAL_SNAPSHOT_WIRE_OPTIONS, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,

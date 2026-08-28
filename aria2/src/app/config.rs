@@ -8,12 +8,36 @@
 
 use super::App;
 use super::cli::CliArgs;
+use super::config_maintenance;
 use aria2_core::config::{OptionValue, UriListFile, project_initial_options};
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::validation::protocol_detector::detect;
+use std::path::Path;
 use tracing::warn;
 
 impl App {
+    /// Validate startup configuration without initializing the download
+    /// engine or requiring a positional URI.
+    pub async fn check_config(
+        &mut self,
+        no_conf: bool,
+        path: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        self.load_startup_config(no_conf, path).await
+    }
+
+    /// Disable only invalid configuration entries while retaining a backup.
+    pub fn repair_config_file(path: &Path) -> Result<(std::path::PathBuf, usize), String> {
+        let update = config_maintenance::repair(path)?;
+        Ok((update.backup_path, update.changed_lines))
+    }
+
+    /// Replace a configuration file with the built-in defaults after backing it up.
+    pub fn reset_config_file(path: &Path) -> Result<std::path::PathBuf, String> {
+        let update = config_maintenance::reset(path)?;
+        Ok(update.backup_path)
+    }
+
     async fn global_option_values(&self) -> std::collections::HashMap<String, OptionValue> {
         let config = self.config.read().await;
         config.get_all_global_options().await
@@ -552,7 +576,26 @@ impl App {
         let mut conf = self.config.write().await;
         conf.load_file(&conf_path).await;
         if conf.has_errors() {
-            return Err(format!("Failed to parse config file: {}", conf_path));
+            let details = conf
+                .errors()
+                .iter()
+                .enumerate()
+                .map(|(index, error)| {
+                    if let Some(context) = conf.parser().error_context(index) {
+                        format!(
+                            "{}:{}: {} -> {}",
+                            conf_path, context.line, context.content, error
+                        )
+                    } else {
+                        error.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "Failed to parse config file '{}': {}",
+                conf_path, details
+            ));
         }
         Ok(())
     }

@@ -147,6 +147,7 @@ We provide ready-to-use configuration templates in `examples/configs/`:
 | [basic.conf](examples/configs/basic.conf) | Basic configuration with common options |
 | [advanced.conf](examples/configs/advanced.conf) | Advanced configuration with RPC, proxy, etc. |
 | [bittorrent.conf](examples/configs/bittorrent.conf) | Optimized for BitTorrent downloads |
+| [windows.conf](examples/configs/windows.conf) | Windows configuration using relative paths |
 
 **Usage:**
 ```bash
@@ -160,6 +161,10 @@ nano ~/.aria2/aria2.conf
 # Run with configuration
 aria2c --conf-path=~/.aria2/aria2.conf http://example.com/file.zip
 ```
+
+For common commands, configuration syntax, RPC/daemon setup, sessions, and
+configuration check/repair/reset workflows, see the
+[user guide](docs/user-guide.md).
 
 ### Basic HTTP Download
 

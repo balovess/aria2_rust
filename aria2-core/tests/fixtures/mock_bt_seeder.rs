@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 const BT_PROTOCOL: &[u8; 19] = b"BitTorrent protocol";
 const BT_HANDSHAKE_LEN: usize = 68;
+const MOCK_SEEDER_PEER_ID: &[u8; 20] = b"MockSeeder-000000001";
 const MSG_CHOKE: u8 = 0;
 const MSG_UNCHOKE: u8 = 1;
 const MSG_INTERESTED: u8 = 2;
@@ -168,8 +169,8 @@ impl MockBtSeeder {
             return;
         }
 
-        // Validate protocol prefix (bytes 0-18)
-        if &buf[0..19] != BT_PROTOCOL {
+        // Validate the standard 68-byte handshake layout.
+        if buf[0] != BT_PROTOCOL.len() as u8 || &buf[1..20] != BT_PROTOCOL {
             return;
         }
         // Validate info_hash (bytes 28-47)
@@ -178,31 +179,19 @@ impl MockBtSeeder {
         }
 
         // Build and send our handshake response
-        let mut response = Vec::with_capacity(BT_HANDSHAKE_LEN);
-        response.extend_from_slice(BT_PROTOCOL);
-        response.extend_from_slice(&[0u8; 8]); // reserved bytes
-        response.extend_from_slice(expected_info_hash); // our info_hash
-        response.extend_from_slice(b"MockSeeder-001"); // our peer_id
+        let mut response = [0u8; BT_HANDSHAKE_LEN];
+        response[0] = BT_PROTOCOL.len() as u8;
+        response[1..20].copy_from_slice(BT_PROTOCOL);
+        response[20..28].copy_from_slice(&[0u8; 8]); // reserved bytes
+        response[28..48].copy_from_slice(expected_info_hash); // our info_hash
+        response[48..68].copy_from_slice(MOCK_SEEDER_PEER_ID); // our peer_id
 
         if stream.write_all(&response).await.is_err() {
             return;
         }
 
-        // Wait for Bitfield message from client
-        let mut msg_buf = [0u8; 65536];
-        let msg_len_result = stream.read_u32().await;
-        if msg_len_result.is_err() {
-            return;
-        }
-        let msg_len = msg_len_result.unwrap() as usize;
-        if msg_len == 0 || msg_len > msg_buf.len() {
-            return;
-        }
-        if stream.read_exact(&mut msg_buf[..msg_len]).await.is_err() {
-            return;
-        }
-
-        // Send have-all bitfield
+        // Send the server bitfield immediately after the handshake. A client
+        // with no locally available pieces has no bitfield to send first.
         let num_pieces = pieces.len().max(1);
         let bf_size = num_pieces.div_ceil(8);
         let bitfield: Vec<u8> = vec![0xFF; bf_size];
@@ -212,6 +201,20 @@ impl MockBtSeeder {
         bf_msg.extend_from_slice(&bitfield);
 
         if stream.write_all(&bf_msg).await.is_err() {
+            return;
+        }
+
+        // Consume the first client message (normally Interested) before
+        // sending Unchoke.
+        let mut msg_buf = [0u8; 65536];
+        let msg_len = match stream.read_u32().await {
+            Ok(length) => length as usize,
+            Err(_) => return,
+        };
+        if msg_len == 0 || msg_len > msg_buf.len() {
+            return;
+        }
+        if stream.read_exact(&mut msg_buf[..msg_len]).await.is_err() {
             return;
         }
 
@@ -307,12 +310,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    // Note: Real TCP I/O tests are slow on Windows CI and may hang.
-    // The seeder is already validated by the 12 BT deep E2E tests in
-    // `deep_e2e_bittorrent.rs` which use it successfully.
-    #[ignore]
     async fn test_seeder_basic_handshake() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{Duration, timeout};
 
         let mut pieces = HashMap::new();
         pieces.insert(0u32, vec![1, 2, 3, 4]);
@@ -324,28 +324,33 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(seeder.addr()).await.unwrap();
 
         // Send handshake
-        let mut hs = Vec::with_capacity(68);
+        let mut hs = Vec::with_capacity(BT_HANDSHAKE_LEN);
+        hs.push(BT_PROTOCOL.len() as u8);
         hs.extend_from_slice(BT_PROTOCOL);
         hs.extend_from_slice(&[0u8; 8]);
         hs.extend_from_slice(&info_hash);
-        hs.extend_from_slice(b"TestClient-001");
+        hs.extend_from_slice(b"TestClient-000000001");
         stream.write_all(&hs).await.unwrap();
 
         // Receive server handshake
         let mut resp = [0u8; 68];
-        stream.read_exact(&mut resp).await.unwrap();
+        timeout(Duration::from_secs(5), stream.read_exact(&mut resp))
+            .await
+            .expect("server handshake timed out")
+            .unwrap();
 
         // Verify protocol + info_hash in response
-        assert_eq!(&resp[0..19], BT_PROTOCOL);
+        assert_eq!(resp[0], BT_PROTOCOL.len() as u8);
+        assert_eq!(&resp[1..20], BT_PROTOCOL);
         assert_eq!(&resp[28..48], info_hash.as_slice());
 
         seeder.shutdown().await;
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_seeder_serves_piece() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::time::{Duration, timeout};
 
         let mut pieces = HashMap::new();
         let piece_data = vec![0x42u8; 256];
@@ -357,21 +362,31 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(seeder.addr()).await.unwrap();
 
         // Handshake
-        let mut hs = Vec::with_capacity(68);
+        let mut hs = Vec::with_capacity(BT_HANDSHAKE_LEN);
+        hs.push(BT_PROTOCOL.len() as u8);
         hs.extend_from_slice(BT_PROTOCOL);
         hs.extend_from_slice(&[0u8; 8]);
         hs.extend_from_slice(&info_hash);
-        hs.extend_from_slice(b"TestClient-002");
+        hs.extend_from_slice(b"TestClient-000000002");
         stream.write_all(&hs).await.unwrap();
 
         // Read server handshake
         let mut resp = [0u8; 68];
-        stream.read_exact(&mut resp).await.unwrap();
+        timeout(Duration::from_secs(5), stream.read_exact(&mut resp))
+            .await
+            .expect("server handshake timed out")
+            .unwrap();
 
         // Read bitfield message
-        let bf_len = stream.read_u32().await.unwrap() as usize;
+        let bf_len = timeout(Duration::from_secs(5), stream.read_u32())
+            .await
+            .expect("bitfield length timed out")
+            .unwrap() as usize;
         let mut bf_buf = vec![0u8; bf_len];
-        stream.read_exact(&mut bf_buf).await.unwrap();
+        timeout(Duration::from_secs(5), stream.read_exact(&mut bf_buf))
+            .await
+            .expect("bitfield payload timed out")
+            .unwrap();
         assert_eq!(bf_buf[0], MSG_BITFIELD);
 
         // Send Interested
@@ -380,7 +395,10 @@ mod tests {
 
         // Read Unchoke
         let mut unchoke_buf = [0u8; 5];
-        stream.read_exact(&mut unchoke_buf).await.unwrap();
+        timeout(Duration::from_secs(5), stream.read_exact(&mut unchoke_buf))
+            .await
+            .expect("unchoke timed out")
+            .unwrap();
         assert_eq!(unchoke_buf[4], MSG_UNCHOKE);
 
         // Send Request for piece 0
@@ -393,9 +411,15 @@ mod tests {
         stream.write_all(&req).await.unwrap();
 
         // Read Piece response
-        let piece_len = stream.read_u32().await.unwrap() as usize;
+        let piece_len = timeout(Duration::from_secs(5), stream.read_u32())
+            .await
+            .expect("piece length timed out")
+            .unwrap() as usize;
         let mut piece_hdr = [0u8; 9];
-        stream.read_exact(&mut piece_hdr).await.unwrap();
+        timeout(Duration::from_secs(5), stream.read_exact(&mut piece_hdr))
+            .await
+            .expect("piece header timed out")
+            .unwrap();
         assert_eq!(piece_hdr[0], MSG_PIECE);
         let piece_index =
             u32::from_be_bytes([piece_hdr[1], piece_hdr[2], piece_hdr[3], piece_hdr[4]]);
@@ -403,7 +427,10 @@ mod tests {
 
         let data_len = piece_len - 9;
         let mut recv_data = vec![0u8; data_len];
-        stream.read_exact(&mut recv_data).await.unwrap();
+        timeout(Duration::from_secs(5), stream.read_exact(&mut recv_data))
+            .await
+            .expect("piece data timed out")
+            .unwrap();
         assert_eq!(recv_data, piece_data);
 
         seeder.shutdown().await;

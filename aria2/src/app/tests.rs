@@ -709,6 +709,52 @@ async fn test_no_conf_skips_explicit_config_file() {
     assert_eq!(app.get_opt_i64("split").await, Some(16));
 }
 
+#[tokio::test]
+async fn test_config_file_error_reports_invalid_option() {
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, "split=not-a-number\n")
+        .await
+        .expect("write config file");
+
+    let mut app = App::new();
+    let error = app
+        .load_startup_config(false, config_path.to_str())
+        .await
+        .expect_err("invalid config value should fail startup");
+
+    assert!(
+        error.contains("split"),
+        "error should name the option: {error}"
+    );
+    assert!(
+        error.contains("invalid integer"),
+        "error should explain the invalid value: {error}"
+    );
+    assert!(
+        error.contains(":1:"),
+        "error should include the line: {error}"
+    );
+    assert!(
+        error.contains("split=not-a-number"),
+        "error should include the source line: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_check_config_validates_without_starting_downloads() {
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, "split=4\nfile-allocation=none\n")
+        .await
+        .expect("write config file");
+
+    let mut app = App::new();
+    app.check_config(false, config_path.to_str())
+        .await
+        .expect("valid config should pass checking");
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_standard_session_restores_metalink_graph() {

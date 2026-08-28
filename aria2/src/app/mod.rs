@@ -41,6 +41,7 @@ use crate::daemon::{DaemonConfig, Daemonizer, PidFileGuard, PidFileManager, is_d
 pub mod cli;
 use cli::CliArgs;
 mod config;
+mod config_maintenance;
 mod engine;
 mod metadata;
 pub mod rpc_backend;

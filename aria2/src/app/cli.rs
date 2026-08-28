@@ -64,6 +64,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use aria2_core::config::{OptionRegistry, OptionValue};
 use clap::{Arg, ArgAction, Args, CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 
@@ -112,7 +113,8 @@ impl FromStr for HelpRequest {
     disable_version_flag = true,
     disable_help_subcommand = true,
     about = "aria2-rust - The ultra fast download utility",
-    long_about = None
+    long_about = None,
+    after_help = "Examples:\n  aria2c https://example.com/file.zip\n  aria2c -d C:\\Downloads -o file.zip https://example.com/file.zip\n  aria2c -i urls.txt\n  aria2c --conf-path C:\\Apps\\Aria2\\aria2.conf https://example.com/file.zip\n\nBoolean options accept --option, --option=true, and --option=false.\nUse --help=KEYWORD or --help=#basic, --help=#advanced, or --help=#http to narrow the help output."
 )]
 pub struct CliArgs {
     /// General options
@@ -251,16 +253,96 @@ pub fn render_help(request: &HelpRequest) -> String {
         HelpRequest::Basic => "#basic",
         HelpRequest::Filter(raw_filter) => normalize_help_filter(raw_filter),
     };
+    let registry = OptionRegistry::new();
     command = command.mut_args(|arg| {
         let visible = arg.get_long().is_some() || arg.get_short().is_some();
         if visible && matches_help_filter(&arg, filter) {
-            arg
+            add_default_to_help(arg, &registry)
         } else {
             arg.hide(true)
         }
     });
 
     command.render_help().to_string()
+}
+
+/// Add registry defaults to help text without configuring Clap defaults.
+///
+/// Clap defaults would change the merge contract: an absent CLI option must
+/// remain absent so config-file and environment values can win. The registry
+/// is therefore used only while rendering help.
+fn add_default_to_help(mut arg: Arg, registry: &OptionRegistry) -> Arg {
+    let Some(name) = arg.get_long() else {
+        return arg;
+    };
+    let Some(definition) = registry.get(name) else {
+        return arg;
+    };
+    let Some(default) = definition.parse_default_value() else {
+        return arg;
+    };
+    let Some(help) = arg.get_help().map(ToString::to_string) else {
+        return arg;
+    };
+
+    let mut details = Vec::new();
+    if !definition.allowed_values().is_empty() {
+        details.push(format!(
+            "possible values: {}",
+            definition.allowed_values().join(", ")
+        ));
+    }
+    if let Some(range) = format_help_range(definition) {
+        details.push(format!("range: {range}"));
+    }
+    if let Some(unit) = format_help_unit(name, definition.opt_type()) {
+        details.push(format!("unit: {unit}"));
+    }
+    details.push(format!("default: {}", format_help_value(&default)));
+
+    arg = arg.help(format!("{help} [{}]", details.join("] [")));
+    arg
+}
+
+fn format_help_range(definition: &aria2_core::config::OptionDef) -> Option<String> {
+    match (definition.min, definition.max) {
+        (Some(min), Some(max)) => Some(format!("{min}..={max}")),
+        (Some(min), None) => Some(format!(">={min}")),
+        (None, Some(max)) => Some(format!("<= {max}")),
+        (None, None) => None,
+    }
+}
+
+fn format_help_unit(
+    name: &str,
+    option_type: aria2_core::config::OptionType,
+) -> Option<&'static str> {
+    if option_type == aria2_core::config::OptionType::Size {
+        return Some("bytes (K/M/G/T suffixes accepted)");
+    }
+
+    const SECOND_OPTIONS: &[&str] = &[
+        "auto-save-interval",
+        "connect-timeout",
+        "dns-timeout",
+        "retry-wait",
+        "save-session-interval",
+        "server-stat-timeout",
+        "startup-idle-time",
+        "summary-interval",
+        "timeout",
+    ];
+    SECOND_OPTIONS.contains(&name).then_some("seconds")
+}
+
+fn format_help_value(value: &OptionValue) -> String {
+    match value {
+        OptionValue::Str(value) if value.is_empty() => "empty".to_string(),
+        OptionValue::Str(value) if value.contains(char::is_whitespace) => {
+            format!("'{value}'")
+        }
+        _ => value.to_string(),
+    }
 }
 
 fn normalize_help_filter(raw_filter: &str) -> &str {
@@ -412,6 +494,34 @@ pub struct GeneralArgs {
         value_name = "true|false"
     )]
     pub no_conf: Option<bool>,
+
+    /// Validate configuration and exit without starting downloads
+    #[arg(
+        long = "check-config",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub check_config: Option<bool>,
+
+    /// Disable invalid config entries in-place after creating a backup
+    #[arg(
+        long = "repair-config",
+        action = ArgAction::SetTrue,
+        requires = "conf_path",
+        conflicts_with_all = ["check_config", "reset_config", "no_conf"]
+    )]
+    pub repair_config: bool,
+
+    /// Reset a config file to built-in defaults after creating a backup
+    #[arg(
+        long = "reset-config",
+        action = ArgAction::SetTrue,
+        requires = "conf_path",
+        conflicts_with_all = ["check_config", "repair_config", "no_conf"]
+    )]
+    pub reset_config: bool,
 
     /// URI input file
     #[arg(short = 'i', long = "input-file")]
