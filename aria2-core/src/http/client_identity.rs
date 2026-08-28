@@ -297,7 +297,9 @@ fn is_supported_pkcs5_algorithm(algorithm: &p12_q3::AlgorithmIdentifier) -> bool
         | p12_q3::AlgorithmIdentifier::AesCbcPad(_) => true,
         p12_q3::AlgorithmIdentifier::OtherAlg(other) => {
             other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 2])
+                || other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 6])
                 || other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 22])
+                || other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 46])
                 || (is_pkcs5_hmac_prf(&other.algorithm_type)
                     && has_der_null_parameters(other.params.as_deref()))
         }
@@ -393,9 +395,140 @@ fn decrypt_pkcs12_pbe(
         return legacy;
     }
 
+    if let Some(plaintext) = decrypt_pkcs12_aes_gcm(algorithm, ciphertext, password) {
+        return Some(plaintext);
+    }
+
     let algorithm_der = pkcs5_algorithm_der(algorithm)?;
     let scheme = pkcs5::EncryptionScheme::try_from(algorithm_der.as_slice()).ok()?;
     scheme.decrypt(password.as_ref(), ciphertext).ok()
+}
+
+fn decrypt_pkcs12_aes_gcm(
+    algorithm: &p12_q3::AlgorithmIdentifier,
+    ciphertext: &[u8],
+    password: &p12_q3::BmpString,
+) -> Option<Vec<u8>> {
+    let p12_q3::AlgorithmIdentifier::Pbes2(params) = algorithm else {
+        return None;
+    };
+    let p12_q3::AlgorithmIdentifier::Pbkdf2(kdf) = params.key_derivation_function.as_ref() else {
+        return None;
+    };
+    let p12_q3::Pbkdf2Salt::Specified(salt) = &kdf.salt else {
+        return None;
+    };
+
+    let (key_len, nonce, tag_len) = match params.encryption_scheme.as_ref() {
+        p12_q3::AlgorithmIdentifier::OtherAlg(other)
+            if other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 6])
+                || other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 46]) =>
+        {
+            let nonce = yasna::parse_der(other.params.as_deref()?, |reader| {
+                reader.read_sequence(|reader| {
+                    let nonce = reader.next().read_bytes()?;
+                    let tag_length = reader
+                        .read_optional(|reader| reader.read_u64())?
+                        .unwrap_or(12);
+                    Ok((nonce, tag_length))
+                })
+            })
+            .ok()?;
+            if !matches!(nonce.1, 12 | 16) || nonce.0.len() != 12 {
+                return None;
+            }
+            let key_len = if other.algorithm_type == pkcs12_oid(&[2, 16, 840, 1, 101, 3, 4, 1, 6]) {
+                16
+            } else {
+                32
+            };
+            (key_len, nonce.0, nonce.1 as usize)
+        }
+        _ => return None,
+    };
+
+    if kdf
+        .key_length
+        .is_some_and(|length| length as usize != key_len)
+    {
+        return None;
+    }
+    let iterations = u32::try_from(kdf.iteration_count).ok()?;
+    let mut key = vec![0u8; key_len];
+    match kdf.prf.as_ref() {
+        p12_q3::AlgorithmIdentifier::HmacWithSha1 => {
+            pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password.as_ref(), salt, iterations, &mut key)
+        }
+        p12_q3::AlgorithmIdentifier::HmacWithSha256 => {
+            pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_ref(), salt, iterations, &mut key)
+        }
+        p12_q3::AlgorithmIdentifier::OtherAlg(other)
+            if is_pkcs5_hmac_prf(&other.algorithm_type)
+                && has_der_null_parameters(other.params.as_deref()) =>
+        {
+            match other.algorithm_type.components().as_slice() {
+                [1, 2, 840, 113549, 2, 8] => pbkdf2::pbkdf2_hmac::<sha2::Sha224>(
+                    password.as_ref(),
+                    salt,
+                    iterations,
+                    &mut key,
+                ),
+                [1, 2, 840, 113549, 2, 10] => pbkdf2::pbkdf2_hmac::<sha2::Sha384>(
+                    password.as_ref(),
+                    salt,
+                    iterations,
+                    &mut key,
+                ),
+                [1, 2, 840, 113549, 2, 11] => pbkdf2::pbkdf2_hmac::<sha2::Sha512>(
+                    password.as_ref(),
+                    salt,
+                    iterations,
+                    &mut key,
+                ),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    }
+
+    let (message, tag) = ciphertext.split_at_checked(ciphertext.len().checked_sub(tag_len)?)?;
+    use aes_gcm::aead::consts::U12;
+    use aes_gcm::aead::{AeadInPlace, KeyInit};
+    if key_len == 16 && tag_len == 12 {
+        let cipher =
+            aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12, U12>::new_from_slice(&key).ok()?;
+        let tag = aes_gcm::aead::generic_array::GenericArray::<u8, U12>::from_slice(tag);
+        let mut plaintext = message.to_vec();
+        cipher
+            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .ok()?;
+        Some(plaintext)
+    } else if key_len == 32 && tag_len == 12 {
+        let cipher =
+            aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12, U12>::new_from_slice(&key).ok()?;
+        let tag = aes_gcm::aead::generic_array::GenericArray::<u8, U12>::from_slice(tag);
+        let mut plaintext = message.to_vec();
+        cipher
+            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .ok()?;
+        Some(plaintext)
+    } else if key_len == 16 {
+        let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key).ok()?;
+        let tag = aes_gcm::Tag::from_slice(tag);
+        let mut plaintext = message.to_vec();
+        cipher
+            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .ok()?;
+        Some(plaintext)
+    } else {
+        let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key).ok()?;
+        let tag = aes_gcm::Tag::from_slice(tag);
+        let mut plaintext = message.to_vec();
+        cipher
+            .decrypt_in_place_detached(aes_gcm::Nonce::from_slice(&nonce), &[], &mut plaintext, tag)
+            .ok()?;
+        Some(plaintext)
+    }
 }
 
 fn passwordless_pkcs12_bags(
@@ -990,6 +1123,13 @@ mod tests {
     }
 
     fn passwordless_pkcs12_with_key_bag(key_bag: p12_q3::SafeBagKind) -> Vec<u8> {
+        passwordless_pkcs12_with_key_bag_and_extras(key_bag, &[])
+    }
+
+    fn passwordless_pkcs12_with_key_bag_and_extras(
+        key_bag: p12_q3::SafeBagKind,
+        extra_bags: &[p12_q3::SafeBagKind],
+    ) -> Vec<u8> {
         let certificates = pem_certificates(TEST_CHAIN_PEM);
         let password = p12_q3::BmpString::with_two_trailing_zeros("");
         let key_bag = p12_q3::SafeBag {
@@ -1011,6 +1151,9 @@ mod tests {
                 p12_q3::ContentInfo::Data(yasna::construct_der(|writer| {
                     writer.write_sequence_of(|writer| {
                         write_test_key_bag(writer.next(), &key_bag.bag);
+                        for extra_bag in extra_bags {
+                            write_test_key_bag(writer.next(), extra_bag);
+                        }
                     });
                 }))
                 .write(writer.next());
@@ -1033,7 +1176,11 @@ mod tests {
                 .write_tagged(yasna::Tag::context(0), |writer| match bag {
                     p12_q3::SafeBagKind::Pkcs8ShroudedKeyBag(key_bag) => {
                         let algorithm_der = pkcs5_algorithm_der(&key_bag.encryption_algorithm)
-                            .expect("test key algorithm should convert to PKCS#5 DER");
+                            .unwrap_or_else(|| {
+                                yasna::construct_der(|writer| {
+                                    key_bag.encryption_algorithm.write(writer)
+                                })
+                            });
                         writer.write_sequence(|writer| {
                             writer.next().write_der(&algorithm_der);
                             writer.next().write_bytes(&key_bag.encrypted_data);
@@ -1078,6 +1225,99 @@ mod tests {
         let encrypted_data = scheme
             .encrypt(password.as_ref(), private_key.secret_der())
             .expect("test private key should encrypt");
+
+        p12_q3::SafeBagKind::Pkcs8ShroudedKeyBag(p12_q3::EncryptedPrivateKeyInfo {
+            encryption_algorithm: algorithm,
+            encrypted_data,
+        })
+    }
+
+    fn aes_gcm_pkcs12_key_bag(algorithm_oid: &[u64], tag_len: usize) -> p12_q3::SafeBagKind {
+        use aes_gcm::aead::consts::U12;
+        use aes_gcm::aead::{AeadInPlace, KeyInit};
+
+        let password = p12_q3::BmpString::with_two_trailing_zeros("");
+        let salt = b"rust-owned-gcm-salt";
+        let nonce = [9u8; 12];
+        let key_len = if algorithm_oid.last() == Some(&6) {
+            16
+        } else {
+            32
+        };
+        let mut key = vec![0u8; key_len];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password.as_ref(), salt, 1000, &mut key);
+        let private_key = pem_private_key(TEST_PRIVATE_KEY_PEM);
+        let mut encrypted_data = private_key.secret_der().to_vec();
+        let tag: Vec<u8> = if key_len == 16 && tag_len == 12 {
+            let cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes128, U12, U12>::new_from_slice(&key)
+                .expect("AES-128-GCM test key should have the right length");
+            cipher
+                .encrypt_in_place_detached(
+                    aes_gcm::Nonce::from_slice(&nonce),
+                    &[],
+                    &mut encrypted_data,
+                )
+                .expect("AES-128-GCM test encryption should succeed")
+                .to_vec()
+        } else if key_len == 16 {
+            let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key)
+                .expect("AES-128-GCM test key should have the right length");
+            cipher
+                .encrypt_in_place_detached(
+                    aes_gcm::Nonce::from_slice(&nonce),
+                    &[],
+                    &mut encrypted_data,
+                )
+                .expect("AES-128-GCM test encryption should succeed")
+                .to_vec()
+        } else if tag_len == 12 {
+            let cipher = aes_gcm::AesGcm::<aes_gcm::aes::Aes256, U12, U12>::new_from_slice(&key)
+                .expect("AES-256-GCM test key should have the right length");
+            cipher
+                .encrypt_in_place_detached(
+                    aes_gcm::Nonce::from_slice(&nonce),
+                    &[],
+                    &mut encrypted_data,
+                )
+                .expect("AES-256-GCM test encryption should succeed")
+                .to_vec()
+        } else {
+            let cipher = aes_gcm::Aes256Gcm::new_from_slice(&key)
+                .expect("AES-256-GCM test key should have the right length");
+            cipher
+                .encrypt_in_place_detached(
+                    aes_gcm::Nonce::from_slice(&nonce),
+                    &[],
+                    &mut encrypted_data,
+                )
+                .expect("AES-256-GCM test encryption should succeed")
+                .to_vec()
+        };
+        encrypted_data.extend_from_slice(&tag);
+
+        let algorithm = p12_q3::AlgorithmIdentifier::Pbes2(p12_q3::Pkcs12Pbes2Params {
+            key_derivation_function: Box::new(p12_q3::AlgorithmIdentifier::Pbkdf2(
+                p12_q3::Pbkdf2Params {
+                    salt: p12_q3::Pbkdf2Salt::Specified(salt.to_vec()),
+                    iteration_count: 1000,
+                    key_length: None,
+                    prf: Box::new(p12_q3::AlgorithmIdentifier::HmacWithSha256),
+                },
+            )),
+            encryption_scheme: Box::new(p12_q3::AlgorithmIdentifier::OtherAlg(
+                p12_q3::OtherAlgorithmIdentifier {
+                    algorithm_type: pkcs12_oid(algorithm_oid),
+                    params: Some(yasna::construct_der(|writer| {
+                        writer.write_sequence(|writer| {
+                            writer.next().write_bytes(&nonce);
+                            if tag_len != 12 {
+                                writer.next().write_u64(tag_len as u64);
+                            }
+                        });
+                    })),
+                },
+            )),
+        });
 
         p12_q3::SafeBagKind::Pkcs8ShroudedKeyBag(p12_q3::EncryptedPrivateKeyInfo {
             encryption_algorithm: algorithm,
@@ -1171,6 +1411,59 @@ mod tests {
     }
 
     #[test]
+    fn accepts_aes128_and_aes256_gcm_pkcs12_private_keys() {
+        crate::http::client_pool::ensure_rustls_provider();
+        for algorithm_oid in [
+            [2, 16, 840, 1, 101, 3, 4, 1, 6],
+            [2, 16, 840, 1, 101, 3, 4, 1, 46],
+        ] {
+            for tag_len in [12, 16] {
+                let directory = tempfile::tempdir().expect("create temporary PKCS#12 directory");
+                let certificate_path = directory.path().join("client-gcm.p12");
+                let archive = passwordless_pkcs12_with_key_bag(aes_gcm_pkcs12_key_bag(
+                    &algorithm_oid,
+                    tag_len,
+                ));
+                std::fs::write(&certificate_path, archive).expect("write AES-GCM PKCS#12 fixture");
+                let archive =
+                    std::fs::read(&certificate_path).expect("read AES-GCM PKCS#12 fixture");
+                let pfx =
+                    p12_q3::PFX::parse(&archive).expect("AES-GCM PKCS#12 fixture should parse");
+                let password = p12_q3::BmpString::with_two_trailing_zeros("");
+                let bags = super::passwordless_pkcs12_bags(&pfx, &password)
+                    .expect("AES-GCM PKCS#12 bags should parse");
+                let key_bag = bags
+                    .iter()
+                    .find(|bag| super::is_pkcs12_private_key_bag(bag))
+                    .expect("AES-GCM PKCS#12 fixture should contain a key");
+                let p12_q3::SafeBagKind::Pkcs8ShroudedKeyBag(key_bag) = &key_bag.bag else {
+                    panic!("expected shrouded key bag");
+                };
+                assert!(
+                    super::decrypt_pkcs12_aes_gcm(
+                        &key_bag.encryption_algorithm,
+                        &key_bag.encrypted_data,
+                        &password,
+                    )
+                    .is_some(),
+                    "AES-GCM private key should decrypt"
+                );
+
+                apply(
+                    reqwest::Client::builder(),
+                    &ClientTlsConfig {
+                        certificate: Some(certificate_path.to_string_lossy().into_owned()),
+                        ..ClientTlsConfig::default()
+                    },
+                )
+                .expect("AES-GCM PKCS#12 identity should configure the client")
+                .build()
+                .expect("AES-GCM PKCS#12 client identity should build");
+            }
+        }
+    }
+
+    #[test]
     fn accepts_a_plaintext_pkcs12_key_bag() {
         crate::http::client_pool::ensure_rustls_provider();
         let private_key = pem_private_key(TEST_PRIVATE_KEY_PEM);
@@ -1194,6 +1487,33 @@ mod tests {
         builder
             .build()
             .expect("plaintext keyBag PKCS#12 client identity should build");
+    }
+
+    #[test]
+    fn ignores_unknown_pkcs12_bags_when_certificate_and_key_are_present() {
+        crate::http::client_pool::ensure_rustls_provider();
+        let unknown_bag = p12_q3::SafeBagKind::OtherBagKind(p12_q3::OtherBag {
+            bag_id: pkcs12_oid(&[1, 2, 840, 113549, 1, 12, 10, 1, 5]),
+            bag_value: yasna::construct_der(|writer| writer.write_bytes(b"ignored")),
+        });
+        let directory = tempfile::tempdir().expect("create temporary PKCS#12 directory");
+        let certificate_path = directory.path().join("client-with-unknown-bag.p12");
+        let archive = passwordless_pkcs12_with_key_bag_and_extras(
+            aes_cbc_pkcs12_key_bag(&[2, 16, 840, 1, 101, 3, 4, 1, 2]),
+            &[unknown_bag],
+        );
+        std::fs::write(&certificate_path, archive).expect("write unknown-bag PKCS#12 fixture");
+
+        apply(
+            reqwest::Client::builder(),
+            &ClientTlsConfig {
+                certificate: Some(certificate_path.to_string_lossy().into_owned()),
+                ..ClientTlsConfig::default()
+            },
+        )
+        .expect("unknown PKCS#12 bags should be ignored when identity is usable")
+        .build()
+        .expect("PKCS#12 identity with an unknown bag should build");
     }
 
     #[tokio::test]

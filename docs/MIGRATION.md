@@ -7,6 +7,76 @@
 是当前实现入口和性能证据的索引；本文件下面的 dated checkpoint 仍然是历史记录，
 不因新增索引而改变其验收状态。
 
+## 2026-08-28 PKCS#12 AES-GCM identity compatibility checkpoint
+
+The Rust-owned empty-password PKCS#12 identity adapter now decrypts PBES2
+private-key bags using AES-128-GCM and AES-256-GCM. It parses the standard GCM
+nonce and authentication-tag parameters, including the default 12-byte tag and
+explicit 16-byte tag forms, and derives the key with the existing
+PBKDF2 support, and keeps the result behind the existing `certificate` option.
+The change does not add password configuration or alter CLI, session, RPC, or
+certificate-chain wire behaviour; password-bearing PKCS#12 archives remain
+rejected as required by the original contract.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --all-features --lib http::client_identity::tests::accepts_aes128_and_aes256_gcm_pkcs12_private_keys -- --exact --test-threads=1
+  1 passed, 0 failed
+~~~
+
+This closes the AES-GCM decryption slice only. Unsupported bag variants,
+broader original-client and third-party HTTPS interoperability, and final
+workspace acceptance remain open. The active phase remains
+`phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-28 PKCS#12 unknown-bag compatibility checkpoint
+
+The empty-password PKCS#12 adapter now has Rust-owned coverage for archives
+that contain an unknown additional bag alongside a usable certificate and
+private key. As in the original OpenSSL import path, the unknown bag is
+ignored; an archive still requires a usable certificate and private key, and
+unsupported certificate representations remain rejected when no X.509
+certificate can be selected.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --all-features --lib http::client_identity -- --test-threads=1
+  22 passed, 0 failed
+~~~
+
+This closes the common unknown-additional-bag boundary only. Broader
+PKCS#12 variant coverage, original-client and third-party HTTPS
+interoperability, and final workspace acceptance remain open. The active phase
+remains `phase-2-core-domain` and the migration remains `PARTIAL`.
+
+## 2026-08-28 BitTorrent max-tries total-attempt checkpoint
+
+BitTorrent normal and endgame piece downloads now receive the owning
+RequestGroup's `max-tries` value instead of using the fixed internal retry
+constant. The value is interpreted as a total-attempt budget; `1` permits one
+piece attempt, finite values stop at that count, and `0` remains unlimited.
+Existing public handler entry points retain their previous default behavior,
+while the production download path uses the task configuration.
+
+Rust-owned verification:
+
+~~~text
+cargo test -j 1 -p aria2-core --lib bt_message_handler --all-features -- --test-threads=1
+  68 passed, 0 failed
+cargo clippy -j 1 -p aria2-core --lib --all-features -- -D warnings
+  PASS
+cargo test -j 1 -p aria2-core --all-features --test deep_e2e_bittorrent -- --test-threads=1
+  34 passed, 0 failed, 2 ignored
+~~~
+
+This closes the configured BitTorrent piece-attempt budget slice only. Full
+BitTorrent scheduler parity, cross-protocol lifecycle combinations, live
+interoperability, measured performance, and final workspace acceptance remain
+open. The active phase remains `phase-2-core-domain` and the migration remains
+`PARTIAL`.
+
 ## 2026-08-18 PKCS#12 AES-CBC identity compatibility checkpoint
 
 The Rust-owned empty-password PKCS#12 identity adapter now retains the

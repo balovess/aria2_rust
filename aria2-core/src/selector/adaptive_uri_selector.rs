@@ -74,25 +74,6 @@ fn extract_hosts(uris: &[String]) -> Vec<(usize, String, String)> {
         .collect()
 }
 
-/// Get ServerStat for a URI via (host, protocol) lookup.
-#[allow(dead_code)]
-fn get_server_stats(
-    stat_man: &ServerStatMan,
-    uri: &str,
-) -> Option<Arc<crate::selector::server_stat::ServerStat>> {
-    let (host, protocol) = extract_host_and_protocol(uri)?;
-    stat_man.find_stat_by_protocol(&host, &protocol)
-}
-
-/// Get the max speed for a URI: max(single_avg, multi_avg).
-/// Matches C++ `getUriMaxSpeed()`.
-#[allow(dead_code)]
-fn get_uri_max_speed(stat_man: &ServerStatMan, uri: &str) -> u64 {
-    get_server_stats(stat_man, uri)
-        .map(|s| s.get_single_avg_speed().max(s.get_multi_avg_speed()))
-        .unwrap_or(0)
-}
-
 // ---------------------------------------------------------------------------
 // AdaptiveUriSelector
 // ---------------------------------------------------------------------------

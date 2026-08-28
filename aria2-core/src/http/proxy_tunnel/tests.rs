@@ -55,14 +55,6 @@ fn test_connect_request_format() {
 }
 
 #[test]
-fn test_forward_request_line_get() {
-    assert_eq!(
-        HttpProxyTunnel::build_forward_request_line("GET", "http://t.com/p"),
-        "GET http://t.com/p HTTP/1.1\r\n"
-    );
-}
-
-#[test]
 fn test_basic_auth_header() {
     assert_eq!(basic_auth("user", "pass"), "Basic dXNlcjpwYXNz");
 }

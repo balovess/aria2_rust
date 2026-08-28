@@ -84,7 +84,6 @@ pub async fn execute_with_coordinator(
     let mut coordinator =
         crate::engine::mirror_coordinator::MirrorCoordinator::with_segment_manager(
             crate::selector::server_stat_man::ServerStatMan::shared().clone(),
-            Box::new(crate::selector::uri_selector::InorderUriSelector::new()),
             segment_manager,
             mirror_config,
             uris.to_vec(),

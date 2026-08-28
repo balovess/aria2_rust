@@ -379,36 +379,6 @@ pub(super) async fn send_periodic_pex(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Inbound PEX: process ExtensionUpdate from dispatch
-// ---------------------------------------------------------------------------
-
-/// Process an `ExtensionUpdate::PeerExchange` received from the interaction
-/// loop's dispatch layer. Converts compact peers to `PeerAddr`, adds them
-/// to the known-peers list, and returns the newly added peers for
-/// potential connection.
-///
-/// This is the bridge between the BEP 10/11 dispatch in `BtPeerInteractive`
-/// and the download command's PEX state.
-///
-/// # Wiring path
-///
-/// When `BtPeerInteractive::do_interaction_processing()` returns
-/// `InteractionResult::Continue { pex_update: Some(..), .. }`, the caller
-/// should invoke this function to feed the discovered peers into the
-/// known-peers list. The current download loop (`download_pieces_loop`)
-/// uses raw `BtMessageHandler` calls rather than the full interaction
-/// loop, so this path will become active once the interaction loop is
-/// wired into the command execution framework.
-#[allow(dead_code)] // Will be called from interaction loop wiring (see doc above)
-pub(super) fn process_incoming_pex_update(
-    cmd: &mut BtDownloadCommand,
-    update: &ExtensionUpdate,
-    local_addr: &PeerAddr,
-) -> Vec<PeerAddr> {
-    cmd.process_pex_extension_update(update, local_addr)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

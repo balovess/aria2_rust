@@ -15,18 +15,14 @@ pub enum TimerEvent {
 }
 
 pub struct Timer {
-    #[allow(dead_code)]
-    // Timer ID stored for identification; not yet used in current implementation
-    id: TimerId,
     next_fire: TokioInstant,
     interval: Option<Duration>,
 }
 
 impl Timer {
-    fn new(id: TimerId, delay: Duration, interval: Option<Duration>) -> Self {
+    fn new(delay: Duration, interval: Option<Duration>) -> Self {
         let next_fire = TokioInstant::now() + delay;
         Timer {
-            id,
             next_fire,
             interval,
         }
@@ -65,7 +61,7 @@ impl TimerA2 {
         let id = self.next_id;
         self.next_id += 1;
 
-        let timer = Timer::new(id, delay, interval);
+        let timer = Timer::new(delay, interval);
         self.timers.insert(id, timer);
 
         debug!(
