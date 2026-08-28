@@ -1,6 +1,6 @@
 # Performance Differentiators vs aria2_original
 
-Last reviewed: 2026-08-19
+Last reviewed: 2026-08-28
 
 本文档记录 `aria2-rust` 相对 `aria2_original` 的内部性能差异化实现。
 它是实现和证据索引，不是完整兼容性结论，也不把 Rust-only 微基准解释为
@@ -18,7 +18,7 @@ Last reviewed: 2026-08-19
 
 | 领域 | `aria2_original` 基线 | `aria2-rust` 差异化实现 | 状态 |
 | --- | --- | --- | --- |
-| 磁盘 I/O | 同步文件写入和简单的后台写入队列，热路径可能在写入队列、锁和条件变量上串行化。 | Positioned I/O、写回缓存、阈值批处理、跨文件 coalescing；阻塞 syscall 移到 Tokio blocking pool，Linux 另有 opt-in `io_uring` backend。 | Implemented with boundary; Measurement pending |
+| 磁盘 I/O | 同步文件写入和简单的后台写入队列，热路径可能在写入队列、锁和条件变量上串行化。 | Positioned I/O、写回缓存、阈值批处理、跨文件 coalescing；阻塞 syscall 移到 Tokio blocking pool，Linux 另有 opt-in `io_uring` backend。 | Implemented with boundary; Windows Rust-only comparison recorded, end-to-end measurement pending |
 | 数据路径和内存 | Socket、协议解码、segment/piece 组装和落盘之间存在多次拥有式缓冲转换。 | 以 `bytes::Bytes` 传递不可变拥有缓冲，缓存和跨文件切片使用 O(1) slice；写入接口可直接消费 `Bytes`。 | Implemented with boundary |
 | Hash 校验 | 大块 Piece 或完整文件校验可能占用当前执行流。 | 有界 hash worker、`spawn_blocking`、分块完整性 dispatcher、协作式让出和可取消生命周期。 | Implemented |
 | BT peer / HAVE | Peer 管理、筛选和 HAVE 广播容易在高 peer 数量下重复遍历和重复编码。 | HashSet/VecDeque peer 生命周期、增量 piece 频率、一次序列化后并发广播 HAVE；endgame/piece pipeline 有界。 | Implemented; Measurement pending |
@@ -289,7 +289,30 @@ mutation gate，但仍按原顺序执行子调用；包含 mutation 的 multical
    [`engine-loop-performance.md`](engine-loop-performance.md) 都属于这一层。
 3. **跨实现性能**：尚未完成与 `aria2_original` C++ binary 的同工作负载、同磁盘、同
    网络条件对比，也没有完成真实 2 GB/s 下载端到端报告。因此当前不能从这些结果
-   推导“整体吞吐优于原版”或固定百分比收益。
+推导“整体吞吐优于原版”或固定百分比收益。
+
+### 2026-08-28 Windows positioned-write measurement
+
+Using the single default Cargo target on the current Windows host:
+
+```text
+cargo bench -j 1 -p aria2-core --all-features --bench positioned_write_bench -- --warm-up-time 1 --measurement-time 2 --sample-size 10
+```
+
+The lifecycle-matched `positioned_write/PositionedDiskWriter_concurrent_4x1MB`
+case measured `1.7509 GiB/s` at the midpoint (`[1.7364, 1.7626] GiB/s`), while
+`OldMutexDirectDiskAdaptor_4x1MB` measured `2.2850 GiB/s` at the midpoint
+(`[2.2126, 2.3525] GiB/s`). Both paths open and pre-size their handles before
+the measured iterations; only the four writes and final flush are measured.
+This is a Rust-internal comparison, not an aria2_original comparison, and it
+does not establish a performance win. On this Windows host the positioned
+path is about 23% slower in this workload, so the result is a real regression
+signal requiring profiling and optimization before any performance claim is
+made.
+
+The fixed 10 MiB/16-segment regression workload separately completed at
+`562.5 MiB/s` (`17.7785 ms`) and remains a correctness/threshold check rather
+than a cross-implementation baseline.
 
 复现已有 Rust-only 微基准：
 

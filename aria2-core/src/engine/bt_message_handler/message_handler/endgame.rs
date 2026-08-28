@@ -156,6 +156,32 @@ impl BtMessageHandler {
         network_activity: Option<&AtomicProgress>,
         request_timeout: Duration,
     ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            network_activity,
+            request_timeout,
+            MAX_RETRIES,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
+        max_attempts: u32,
+    ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -169,6 +195,7 @@ impl BtMessageHandler {
             &mut failed_peers,
             network_activity,
             request_timeout,
+            max_attempts,
         )
         .await?;
         Ok(PieceDownloadResult {
@@ -210,14 +237,17 @@ impl BtMessageHandler {
         failed_peers: &mut Vec<std::net::SocketAddr>,
         network_activity: Option<&AtomicProgress>,
         request_timeout: Duration,
+        max_attempts: u32,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
-        for _retry in 0..MAX_RETRIES {
+        let mut attempts: u32 = 0;
+        loop {
+            attempts = attempts.saturating_add(1);
             peer_bytes.clear();
             failed_peers.clear();
             info!(
                 "[BT] Endgame piece download attempt {} for piece {} ({} peers)",
-                _retry + 1,
+                attempts,
                 piece_index,
                 connections.len()
             );
@@ -326,10 +356,12 @@ impl BtMessageHandler {
 
             warn!(
                 "[BT] Endgame: Incomplete piece {} (attempt {}/{}), retrying...",
-                piece_index,
-                _retry + 1,
-                MAX_RETRIES
+                piece_index, attempts, max_attempts
             );
+
+            if max_attempts != 0 && attempts >= max_attempts {
+                break;
+            }
 
             // Small delay before retry
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -337,7 +369,12 @@ impl BtMessageHandler {
 
         Err(Aria2Error::Fatal(FatalError::Config(format!(
             "Failed to download piece {} in endgame mode after {} attempts",
-            piece_index, MAX_RETRIES
+            piece_index,
+            if max_attempts == 0 {
+                attempts
+            } else {
+                max_attempts
+            }
         ))))
     }
 

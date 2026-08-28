@@ -396,11 +396,23 @@ impl FileAllocationMan {
 
     /// Remove a group from the queue (e.g., when download is cancelled).
     ///
-    /// Returns `true` if the entry was found and removed.
+    /// The removed entry's waiter is notified with the same cancellation
+    /// error used by the manager-wide cancellation paths. Returns `true` if
+    /// at least one entry was found and removed.
     pub fn remove_from_queue(&mut self, gid: u64) -> bool {
-        let before = self.queue.len();
-        self.queue.retain(|e| e.gid != gid);
-        self.queue.len() < before
+        let mut removed = false;
+        self.queue.retain_mut(|entry| {
+            if entry.gid != gid {
+                return true;
+            }
+            removed = true;
+            entry.mark_cancelled();
+            if let Some(tx) = entry.done_tx.take() {
+                let _ = tx.send(Err(cancelled_error()));
+            }
+            false
+        });
+        removed
     }
 
     /// Get progress information for the currently active allocation.
@@ -667,6 +679,9 @@ async fn allocate_single_file(
     entry: &FileAllocationEntry,
     progress_base: u64,
 ) -> Result<()> {
+    if entry.is_cancelled() {
+        return Err(cancelled_error());
+    }
     let offset = current_size(path).await;
     let existing = offset.min(length);
     entry
@@ -716,11 +731,17 @@ async fn allocate_single_file(
                 Ok(())
             }
             AllocationStrategy::Trunc => {
+                if entry.is_cancelled() {
+                    return Err(cancelled_error());
+                }
                 adaptor
                     .as_mut()
                     .expect("open adaptor is present")
                     .truncate(length)
                     .await?;
+                if entry.is_cancelled() {
+                    return Err(cancelled_error());
+                }
                 entry
                     .progress
                     .store(progress_base + length, Ordering::Relaxed);
@@ -729,6 +750,9 @@ async fn allocate_single_file(
             AllocationStrategy::Falloc | AllocationStrategy::Mmap => {
                 // One-shot fallocate; `secure` zero-fills on platforms whose
                 // fallocate does not (macOS / Windows).
+                if entry.is_cancelled() {
+                    return Err(cancelled_error());
+                }
                 file_allocation::allocate_file(
                     adaptor.as_mut().expect("open adaptor is present"),
                     path,
@@ -737,6 +761,9 @@ async fn allocate_single_file(
                     entry.secure_falloc,
                 )
                 .await?;
+                if entry.is_cancelled() {
+                    return Err(cancelled_error());
+                }
                 entry
                     .progress
                     .store(progress_base + length, Ordering::Relaxed);
@@ -934,7 +961,16 @@ mod tests {
     #[test]
     fn test_remove_from_queue() {
         let mut man = FileAllocationMan::new();
-        man.push_entry(make_entry(1));
+        let (tx, rx) = oneshot::channel();
+        man.push_entry(FileAllocationEntry::single(
+            1,
+            PathBuf::from("/tmp/test_1"),
+            1024 * 1024,
+            AllocationStrategy::Trunc,
+            false,
+            FileAllocationProtocol::Http,
+            tx,
+        ));
         man.push_entry(make_entry(2));
         assert_eq!(man.count_in_queue(), 2);
 
@@ -942,9 +978,38 @@ mod tests {
         assert_eq!(man.count_in_queue(), 1);
         assert!(!man.is_queued_gid(1));
         assert!(man.is_queued_gid(2));
+        assert!(rx.blocking_recv().unwrap().is_err());
 
         // Removing non-existent GID returns false
         assert!(!man.remove_from_queue(99));
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_allocation_does_not_modify_file() {
+        let dir =
+            std::env::temp_dir().join(format!("aria2_alloc_cancelled_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cancelled.bin");
+        std::fs::write(&path, [0xA5u8; 4]).unwrap();
+
+        let (tx, _rx) = oneshot::channel();
+        let entry = FileAllocationEntry::single(
+            13,
+            path.clone(),
+            4096,
+            AllocationStrategy::Trunc,
+            false,
+            FileAllocationProtocol::Http,
+            tx,
+        );
+        entry.mark_cancelled();
+
+        let result = allocate_single_file(&path, 4096, &entry, 0).await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), [0xA5u8; 4]);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

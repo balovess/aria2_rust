@@ -162,6 +162,22 @@ impl PieceStorage for UnknownLengthPieceStorage {
             return true;
         }
 
+        // Ignore a late completion for a piece that was cancelled, never
+        // checked out, or belongs to an older checkout. Only the current
+        // active piece may complete this store.
+        if piece.index() != 0
+            || self
+                .piece
+                .as_ref()
+                .is_none_or(|active| active.identity() != piece.identity())
+        {
+            trace!(
+                piece_index = piece.index(),
+                "UnknownLengthPieceStorage: rejected stale piece completion"
+            );
+            return false;
+        }
+
         // Update total length from the completed piece's actual length
         self.total_length = piece.length();
         self.download_finished = true;
@@ -600,5 +616,59 @@ mod tests {
         let result = storage.complete_piece(&piece);
         assert!(result);
         assert_eq!(storage.get_total_length(), 1000);
+    }
+
+    #[test]
+    fn test_rejects_completion_without_active_piece() {
+        let mut storage = UnknownLengthPieceStorage::new(1024 * 1024);
+        let mut stale_piece = Piece::new(0, 1000);
+        stale_piece.reconfigure(1000);
+        stale_piece.set_all_blocks();
+
+        assert!(!storage.complete_piece(&stale_piece));
+        assert!(!storage.download_finished());
+        assert_eq!(storage.get_total_length(), 0);
+        assert!(storage.has_missing_unused_piece());
+    }
+
+    #[test]
+    fn test_rejects_nonzero_piece_index() {
+        let mut storage = UnknownLengthPieceStorage::new(1024 * 1024);
+        let active_piece = storage.get_missing_piece(0, &[], 0, 1).unwrap();
+        let mut wrong_piece = active_piece;
+        wrong_piece.set_index(1);
+        wrong_piece.set_length(1000);
+        wrong_piece.reconfigure(1000);
+        wrong_piece.set_all_blocks();
+
+        assert!(!storage.complete_piece(&wrong_piece));
+        assert!(!storage.download_finished());
+        assert_eq!(storage.get_total_length(), 0);
+        assert!(storage.is_piece_used(0));
+    }
+
+    #[test]
+    fn test_rejects_completion_from_cancelled_checkout_after_recheckout() {
+        let mut storage = UnknownLengthPieceStorage::new(1024 * 1024);
+        let mut old_piece = storage.get_missing_piece(0, &[], 0, 1).unwrap();
+        storage.cancel_piece(&mut old_piece, 1);
+        let new_piece = storage.get_missing_piece(0, &[], 0, 2).unwrap();
+
+        old_piece.set_length(1000);
+        old_piece.reconfigure(1000);
+        old_piece.set_all_blocks();
+
+        assert!(!storage.complete_piece(&old_piece));
+        assert!(!storage.download_finished());
+        assert_eq!(storage.get_total_length(), 0);
+        assert!(storage.is_piece_used(0));
+
+        let mut completed_new_piece = new_piece;
+        completed_new_piece.set_length(2000);
+        completed_new_piece.reconfigure(2000);
+        completed_new_piece.set_all_blocks();
+        assert!(storage.complete_piece(&completed_new_piece));
+        assert!(storage.download_finished());
+        assert_eq!(storage.get_total_length(), 2000);
     }
 }

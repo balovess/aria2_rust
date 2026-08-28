@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-use crate::engine::bt_download_command::{BLOCK_SIZE, BtDownloadCommand, MAX_RETRIES};
+use crate::engine::bt_download_command::{BLOCK_SIZE, BtDownloadCommand};
 use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
@@ -1046,6 +1046,7 @@ impl BtDownloadCommand {
                 actual_piece_len
             );
             let mut piece_ok = false;
+            let max_attempts = self.group.recover().options().max_retries;
 
             // Phase 14 - B1: Use endgame-aware download when in endgame mode
             // A block read can otherwise wait for the full protocol timeout
@@ -1063,7 +1064,7 @@ impl BtDownloadCommand {
                         next_piece_idx,
                         active_connections.len()
                     );
-                    BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout(
+                    BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts(
                         active_connections,
                         next_piece_idx as u32,
                         actual_piece_len,
@@ -1072,10 +1073,11 @@ impl BtDownloadCommand {
                         self.dht_engine.clone(),
                         Some(self.progress.as_ref()),
                         request_timeout,
+                        max_attempts,
                     )
                     .await
                 } else {
-                    BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout(
+                    BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts(
                         active_connections,
                         next_piece_idx as u32,
                         actual_piece_len,
@@ -1083,6 +1085,7 @@ impl BtDownloadCommand {
                         self.dht_engine.clone(),
                         Some(self.progress.as_ref()),
                         request_timeout,
+                        max_attempts,
                     )
                     .await
                 }
@@ -1306,11 +1309,11 @@ impl BtDownloadCommand {
                     tracing::error!(
                         "[BT] Piece {} failed after {} retries (peers and web seeds)",
                         next_piece_idx,
-                        MAX_RETRIES
+                        max_attempts
                     );
                     return Err(Aria2Error::Fatal(FatalError::Config(format!(
                         "Piece {} download failed after {} retries",
-                        next_piece_idx, MAX_RETRIES
+                        next_piece_idx, max_attempts
                     ))));
                 }
             }

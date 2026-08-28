@@ -22,6 +22,7 @@ pub(crate) struct SegmentProgressTracker {
 pub(crate) struct SegmentProgress {
     tracker: Arc<SegmentProgressTracker>,
     reported: AtomicU64,
+    last_activity_nanos: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +59,7 @@ impl SegmentProgressTracker {
         Arc::new(SegmentProgress {
             tracker: Arc::clone(self),
             reported: AtomicU64::new(0),
+            last_activity_nanos: AtomicU64::new(self.elapsed_nanos()),
         })
     }
 
@@ -78,7 +80,16 @@ impl SegmentProgress {
     /// Refresh the group-level I/O inactivity clock for a received range
     /// chunk. This is independent of the coarser display progress threshold.
     pub(crate) fn record_network_activity(&self) {
+        self.last_activity_nanos
+            .store(self.tracker.elapsed_nanos(), Ordering::Release);
         self.tracker.progress.record_network_activity();
+    }
+
+    /// Check this Range independently from the group-level activity clock.
+    pub(crate) fn is_stalled(&self, timeout: std::time::Duration) -> bool {
+        let now = self.tracker.elapsed_nanos();
+        let last = self.last_activity_nanos.load(Ordering::Acquire);
+        now.saturating_sub(last) >= timeout.as_nanos().min(u128::from(u64::MAX)) as u64
     }
 
     /// Record a monotonic byte count relative to this segment's range.
@@ -142,6 +153,16 @@ impl ProgressSpeed {
         if speed > 0 {
             progress.set_download_speed(speed);
         }
+    }
+}
+
+impl SegmentProgressTracker {
+    fn elapsed_nanos(&self) -> u64 {
+        self.speed
+            .started_at
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64
     }
 }
 

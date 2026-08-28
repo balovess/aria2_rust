@@ -54,8 +54,8 @@ pub use segment_man_impl::SegmentMan;
 /// Lightweight tracking entry for in-flight segments.
 ///
 /// Unlike the C++ version which stores `shared_ptr<Segment>`, this Rust
-/// version only stores the CUID and piece index. The actual `SegmentKind`
-/// (with the `Piece`) is owned by the caller (download command).
+/// version stores the CUID, piece index, and fixed-piece checkout identity.
+/// The actual `SegmentKind` (with the `Piece`) is owned by the caller.
 ///
 /// When the caller needs to cancel or complete a segment, they pass the
 /// `SegmentKind` back to `SegmentMan`. For `cancel_segment(cuid)` (which
@@ -67,4 +67,6 @@ pub(crate) struct TrackingEntry {
     pub(crate) cuid: u64,
     /// Piece index of the in-flight segment
     pub(crate) segment_index: usize,
+    /// Checkout identity for fixed pieces; `None` identifies a Grow segment.
+    pub(crate) piece_identity: Option<u64>,
 }

@@ -31,15 +31,8 @@ mod tests {
             selector,
         );
 
-        // Create a new selector for the coordinator
-        let selector2 = Box::new(AdaptiveUriSelector::new_with_uris(
-            Arc::clone(&stat_man),
-            urls.clone(),
-        ));
-
         MirrorCoordinator::with_segment_manager(
             stat_man,
-            selector2,
             segment_manager,
             MirrorConfig::default(),
             urls,
@@ -165,14 +158,8 @@ mod tests {
             selector,
         );
 
-        let selector2 = Box::new(AdaptiveUriSelector::new_with_uris(
-            Arc::clone(&stat_man),
-            urls.clone(),
-        ));
-
         let coord = MirrorCoordinator::with_segment_manager(
             stat_man,
-            selector2,
             segment_manager,
             MirrorConfig::default(),
             urls,
@@ -216,14 +203,8 @@ mod tests {
         segment_manager.set_mirror_max_connections(0, 2);
         segment_manager.set_mirror_max_connections(1, 2);
 
-        let selector2 = Box::new(AdaptiveUriSelector::new_with_uris(
-            Arc::clone(&stat_man),
-            urls.clone(),
-        ));
-
         let mut coord = MirrorCoordinator::with_segment_manager(
             stat_man,
-            selector2,
             segment_manager,
             MirrorConfig::default(),
             urls,
@@ -278,14 +259,8 @@ mod tests {
             selector,
         );
 
-        let selector2 = Box::new(AdaptiveUriSelector::new_with_uris(
-            Arc::clone(&stat_man),
-            urls.clone(),
-        ));
-
         let mut coord = MirrorCoordinator::with_segment_manager(
             stat_man,
-            selector2,
             segment_manager,
             MirrorConfig::default(),
             urls,
@@ -337,14 +312,8 @@ mod tests {
             selector,
         );
 
-        let selector2 = Box::new(AdaptiveUriSelector::new_with_uris(
-            Arc::clone(&stat_man),
-            urls.clone(),
-        ));
-
         let coord = MirrorCoordinator::with_segment_manager(
             stat_man,
-            selector2,
             segment_manager,
             MirrorConfig::default(),
             urls,

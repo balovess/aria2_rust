@@ -25,7 +25,7 @@ def find_aria2_rust_binary() -> Optional[str]:
         if path is not None:
             candidates.append(Path(path))
 
-    for target_dir in ("target/debug", "target-check/debug"):
+    for target_dir in ("target/debug",):
         for name in ("aria2c", "aria2c.exe", "aria2c-rust", "aria2c-rust.exe"):
             candidates.append(project_root / target_dir / name)
 
