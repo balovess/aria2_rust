@@ -14,6 +14,12 @@ pub const MAX_BYTE_STRING_LENGTH: usize = 64 * 1024 * 1024;
 /// and aborts the process on stack overflow, which Rust cannot catch.
 pub const MAX_NESTING_DEPTH: usize = 50;
 
+/// Maximum number of direct elements accepted in one list or dictionary.
+///
+/// The count is based on wire entries, so duplicate dictionary keys still
+/// consume the budget even though the decoded map keeps only the last value.
+pub const MAX_CONTAINER_ELEMENTS: usize = 65_536;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BencodeValue {
     Int(i64),
@@ -125,6 +131,12 @@ impl BencodeValue {
         let mut pos = 1;
         let mut items = Vec::new();
         while pos < bytes.len() && bytes[pos] != b'e' {
+            if items.len() >= MAX_CONTAINER_ELEMENTS {
+                return Err(format!(
+                    "List contains more than maximum {} elements",
+                    MAX_CONTAINER_ELEMENTS
+                ));
+            }
             let (item, consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             items.push(item);
             pos += consumed;
@@ -142,7 +154,14 @@ impl BencodeValue {
         let inner_depth = Self::descend(depth)?;
         let mut pos = 1;
         let mut entries = BTreeMap::new();
+        let mut element_count = 0;
         while pos < bytes.len() && bytes[pos] != b'e' {
+            if element_count >= MAX_CONTAINER_ELEMENTS {
+                return Err(format!(
+                    "Dictionary contains more than maximum {} elements",
+                    MAX_CONTAINER_ELEMENTS
+                ));
+            }
             let (key, key_consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             let key_bytes = match key {
                 BencodeValue::Bytes(b) => b,
@@ -155,6 +174,7 @@ impl BencodeValue {
             }
             let (value, val_consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
             entries.insert(key_bytes, value);
+            element_count += 1;
             pos += val_consumed;
         }
         if pos >= bytes.len() {
@@ -446,6 +466,30 @@ mod tests {
         assert!(err.contains("too deep"), "unexpected error: {err}");
     }
 
+    #[test]
+    fn test_container_element_limit_is_enforced() {
+        let mut list = vec![b'l'];
+        for _ in 0..MAX_CONTAINER_ELEMENTS {
+            list.extend_from_slice(b"i0e");
+        }
+        list.push(b'e');
+        assert!(BencodeValue::decode(&list).is_ok());
+
+        list.insert(1, b'i');
+        list.insert(2, b'0');
+        list.insert(3, b'e');
+        let err = BencodeValue::decode(&list).unwrap_err();
+        assert!(err.contains("maximum"), "unexpected error: {err}");
+
+        let mut dict = b"d".to_vec();
+        for _ in 0..=MAX_CONTAINER_ELEMENTS {
+            dict.extend_from_slice(b"1:ai0e");
+        }
+        dict.push(b'e');
+        let err = BencodeValue::decode(&dict).unwrap_err();
+        assert!(err.contains("maximum"), "unexpected error: {err}");
+    }
+
     /// A hostile torrent used to abort the process via stack overflow here.
     #[test]
     fn test_pathological_nesting_does_not_overflow_stack() {
@@ -461,7 +505,9 @@ mod tests {
         let input = format!("{}:", usize::MAX).into_bytes();
         let err = BencodeValue::decode(&input).unwrap_err();
         assert!(
-            err.contains("overflow") || err.contains("insufficient"),
+            err.contains("exceeds maximum")
+                || err.contains("overflow")
+                || err.contains("insufficient"),
             "unexpected error: {err}"
         );
     }
