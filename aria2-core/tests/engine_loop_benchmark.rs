@@ -17,10 +17,16 @@ use std::time::{Duration, Instant};
 use sysinfo::{Pid, System};
 use tempfile::TempDir;
 
-const DOWNLOAD_COUNT: usize = 48;
 const FILE_SIZE: usize = 512 * 1024;
 const SPLIT_COUNT: u16 = 4;
-const MAX_CONCURRENT: u32 = 16;
+
+fn benchmark_parameter(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&value: &usize| value > 0)
+        .unwrap_or(default)
+}
 
 #[derive(Clone, Copy, Default)]
 struct ProcessSamples {
@@ -106,6 +112,8 @@ fn benchmark_data() -> Vec<u8> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 #[ignore = "host-dependent performance baseline; run explicitly with --ignored --nocapture"]
 async fn rust_engine_loop_high_concurrency_baseline() {
+    let download_count = benchmark_parameter("ARIA2_BENCH_DOWNLOADS", 48);
+    let max_concurrent = benchmark_parameter("ARIA2_BENCH_MAX_CONCURRENT", 16) as u32;
     let server = MockHttpServer::start()
         .await
         .expect("failed to start local benchmark HTTP server");
@@ -114,14 +122,14 @@ async fn rust_engine_loop_high_concurrency_baseline() {
 
     let temp_dir = TempDir::new().expect("failed to create benchmark output directory");
     let group_man = Arc::new(RequestGroupMan::new());
-    group_man.set_max_concurrent(MAX_CONCURRENT);
+    group_man.set_max_concurrent(max_concurrent);
 
     let mut engine = DownloadEngine::new(1);
     engine.set_request_group_man(Arc::clone(&group_man));
     let command_tx = engine.engine_command_sender();
 
-    let mut groups = Vec::with_capacity(DOWNLOAD_COUNT);
-    for index in 0..DOWNLOAD_COUNT {
+    let mut groups = Vec::with_capacity(download_count);
+    for index in 0..download_count {
         let options = DownloadOptions {
             split: Some(SPLIT_COUNT),
             max_connection_per_server: Some(SPLIT_COUNT),
@@ -165,7 +173,7 @@ async fn rust_engine_loop_high_concurrency_baseline() {
         Arc::clone(&lock_samples),
     ));
 
-    let total_bytes = (DOWNLOAD_COUNT * FILE_SIZE) as u64;
+    let total_bytes = (download_count * FILE_SIZE) as u64;
     let start = Instant::now();
     let result = tokio::time::timeout(Duration::from_secs(60), engine.run()).await;
     let elapsed = start.elapsed();
@@ -187,7 +195,7 @@ async fn rust_engine_loop_high_concurrency_baseline() {
         "engine benchmark returned an error"
     );
 
-    for index in 0..DOWNLOAD_COUNT {
+    for index in 0..download_count {
         let path = temp_dir.path().join(format!("engine-loop-{index}.bin"));
         let output = tokio::fs::read(&path)
             .await
@@ -230,7 +238,7 @@ async fn rust_engine_loop_high_concurrency_baseline() {
     let avg_lock_wait_us = lock.total_us.checked_div(lock.samples).unwrap_or(0);
 
     println!(
-        "RUST_ENGINE_BASELINE {{\"downloads\":{DOWNLOAD_COUNT},\"bytes\":{total_bytes},\
+        "RUST_ENGINE_BASELINE {{\"downloads\":{download_count},\"bytes\":{total_bytes},\
 \"elapsed_ms\":{},\"throughput_mib_s\":{throughput_mib_s:.3},\
 \"cpu_avg_percent\":{avg_cpu_percent:.3},\"cpu_max_percent\":{max_cpu_percent:.3},\
 \"rss_before_bytes\":{},\"rss_peak_bytes\":{},\"rss_delta_bytes\":{},\
@@ -257,7 +265,7 @@ async fn rust_engine_loop_high_concurrency_baseline() {
         queue.max_depth
     );
     assert_eq!(queue.wakeups, 1);
-    assert_eq!(queue.dispatch_samples, DOWNLOAD_COUNT as u64);
+    assert_eq!(queue.dispatch_samples, download_count as u64);
 
     server.shutdown().await;
 }

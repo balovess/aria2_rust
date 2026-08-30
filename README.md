@@ -2,6 +2,10 @@
 
 中文：[`README_CN.md`](README_CN.md)
 
+> **Version Notice:** aria2-rust is currently in a period of rapid iteration.
+> Older versions may retain various issues and basic functionality is not
+> guaranteed. Please use the latest version as soon as possible.
+
 ## Documentation
 
 Start with the [documentation index](docs/README-en.md). The main user paths are:

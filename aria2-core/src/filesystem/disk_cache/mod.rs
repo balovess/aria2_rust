@@ -1,3 +1,4 @@
+use bytes::{Bytes, BytesMut};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
@@ -7,6 +8,30 @@ use crate::error::Result;
 
 /// Default maximum cache size: 16 MB
 const DEFAULT_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COALESCED_FLUSH_BYTES: usize = 1024 * 1024;
+
+fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
+    let mut coalesced: Vec<(u64, Bytes)> = Vec::new();
+    for (offset, data, _) in pending {
+        let can_extend = coalesced.last().is_some_and(|(start, current)| {
+            start
+                .checked_add(current.len() as u64)
+                .is_some_and(|end| end == *offset)
+                && current.len() + data.len() <= MAX_COALESCED_FLUSH_BYTES
+        });
+
+        if can_extend {
+            let (start, current) = coalesced.pop().expect("coalesced entry exists");
+            let mut merged = BytesMut::with_capacity(current.len() + data.len());
+            merged.extend_from_slice(&current);
+            merged.extend_from_slice(data);
+            coalesced.push((start, merged.freeze()));
+        } else {
+            coalesced.push((*offset, data.clone()));
+        }
+    }
+    coalesced
+}
 
 // ---------------------------------------------------------------------------
 // Sub-modules implementing write-path and read-path operations
@@ -207,8 +232,12 @@ impl WrDiskCache {
                 .collect()
         };
 
-        for (offset, data, _) in &pending {
-            writer.write_bytes_at(*offset, data.clone()).await?;
+        // Network chunks are commonly adjacent but much smaller than the
+        // blocking-pool and syscall overhead. Coalesce only contiguous ranges
+        // and cap the merged buffer so sparse/out-of-order writes retain their
+        // original semantics and memory remains bounded.
+        for (offset, data) in coalesce_flush_entries(&pending) {
+            writer.write_bytes_at(offset, data).await?;
         }
         writer.flush().await?;
 

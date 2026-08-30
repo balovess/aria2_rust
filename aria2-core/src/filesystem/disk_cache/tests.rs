@@ -83,6 +83,23 @@ async fn test_flush_to_persists_and_marks_only_successful_snapshot_clean() {
     assert_eq!(&data[7..13], b"cached");
 }
 
+#[test]
+fn test_coalesce_flush_entries_only_merges_contiguous_ranges() {
+    let adjacent = vec![
+        (0, bytes::Bytes::from_static(b"ab"), 1),
+        (2, bytes::Bytes::from_static(b"cd"), 2),
+        (10, bytes::Bytes::from_static(b"ef"), 3),
+    ];
+
+    let coalesced = super::coalesce_flush_entries(&adjacent);
+
+    assert_eq!(coalesced.len(), 2);
+    assert_eq!(coalesced[0].0, 0);
+    assert_eq!(&coalesced[0].1[..], b"abcd");
+    assert_eq!(coalesced[1].0, 10);
+    assert_eq!(&coalesced[1].1[..], b"ef");
+}
+
 #[tokio::test]
 async fn test_clear_resets_cache() {
     let cache = make_small_cache(4096);

@@ -155,16 +155,8 @@ where
         }
 
         if data.len() <= self.chunk_size {
-            if per_limited {
-                self.limiter.acquire_download(data.len() as u64).await;
-            }
-            if global_limited {
-                self.global_limiter
-                    .as_ref()
-                    .unwrap()
-                    .acquire_download(data.len() as u64)
-                    .await;
-            }
+            self.acquire_for_write(data.len(), per_limited, global_limited)
+                .await;
             return self.inner.write_at(offset, data).await;
         }
 
@@ -172,19 +164,10 @@ where
         let mut idx = 0usize;
         while idx < data.len() {
             let end = (idx + self.chunk_size).min(data.len());
-            let chunk_len = (end - idx) as u64;
-            if per_limited {
-                self.limiter.acquire_download(chunk_len).await;
-            }
-            if global_limited {
-                self.global_limiter
-                    .as_ref()
-                    .unwrap()
-                    .acquire_download(chunk_len)
-                    .await;
-            }
+            self.acquire_for_write(end - idx, per_limited, global_limited)
+                .await;
             self.inner.write_at(off, &data[idx..end]).await?;
-            off += chunk_len;
+            off += (end - idx) as u64;
             idx = end;
         }
         Ok(())

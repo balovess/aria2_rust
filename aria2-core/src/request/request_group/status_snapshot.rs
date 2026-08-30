@@ -91,15 +91,24 @@ impl super::RequestGroup {
 }
 
 fn count_set_pieces(bitfield: &[u8], num_pieces: u32) -> u32 {
-    (0..num_pieces as usize)
-        .filter(|index| {
-            let byte = *index / 8;
-            let bit = 7 - (*index % 8);
-            bitfield
-                .get(byte)
-                .is_some_and(|value| value & (1 << bit) != 0)
-        })
-        .count() as u32
+    let full_bytes = (num_pieces / 8) as usize;
+    let mut count = bitfield
+        .get(..full_bytes)
+        .unwrap_or_default()
+        .iter()
+        .map(|byte| byte.count_ones())
+        .sum();
+
+    let remaining = (num_pieces % 8) as usize;
+    if remaining > 0
+        && let Some(&byte) = bitfield.get(full_bytes)
+    {
+        // Bitfields are MSB-first. Ignore padding bits after the final piece.
+        let mask = 0xffu8 << (8 - remaining);
+        count += (byte & mask).count_ones();
+    }
+
+    count
 }
 
 #[cfg(test)]
