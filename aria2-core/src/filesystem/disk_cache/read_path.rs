@@ -25,6 +25,11 @@ impl WrDiskCache {
                 "read range exceeds u64 address space".to_string(),
             )
         })?;
+        let length = usize::try_from(length).map_err(|_| {
+            crate::error::Aria2Error::InvalidArgument(
+                "read range does not fit in platform address space".to_string(),
+            )
+        })?;
 
         // Start at the entry containing (or immediately before) the request.
         let Some((&entry_offset, entry)) = entries.range(..=offset).next_back() else {
@@ -32,10 +37,20 @@ impl WrDiskCache {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(None);
         };
-        let entry_end = entry_offset + entry.data.len() as u64;
+        let entry_end = entry_offset
+            .checked_add(entry.data.len() as u64)
+            .ok_or_else(|| {
+                crate::error::Aria2Error::InvalidArgument(
+                    "cached entry exceeds u64 address space".to_string(),
+                )
+            })?;
         if entry_end >= end {
             let start = (offset - entry_offset) as usize;
-            let slice_end = start + length as usize;
+            let slice_end = start.checked_add(length).ok_or_else(|| {
+                crate::error::Aria2Error::InvalidArgument(
+                    "read range does not fit in cached entry".to_string(),
+                )
+            })?;
             self.cache_hits
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(Some(entry.data.slice(start..slice_end)));
@@ -43,10 +58,16 @@ impl WrDiskCache {
 
         // The request spans multiple adjacent fragments. Build the result in
         // one allocation, but reject the range as soon as a gap is observed.
-        let mut result = Vec::with_capacity(length as usize);
+        let mut result = Vec::with_capacity(length);
         let mut cursor = offset;
         for (&fragment_offset, fragment) in entries.range(entry_offset..) {
-            let fragment_end = fragment_offset + fragment.data.len() as u64;
+            let fragment_end = fragment_offset
+                .checked_add(fragment.data.len() as u64)
+                .ok_or_else(|| {
+                    crate::error::Aria2Error::InvalidArgument(
+                        "cached entry exceeds u64 address space".to_string(),
+                    )
+                })?;
             if fragment_end <= cursor {
                 continue;
             }
@@ -91,6 +112,7 @@ impl WrDiskCache {
                 // Clone is O(1): bytes::Bytes is Arc-backed (refcount bump only).
                 flushed.push(entry.clone());
                 entry.dirty = false;
+                self.enqueue_clean(entry.offset, entry.seq);
             }
         }
 

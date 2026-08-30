@@ -73,7 +73,13 @@ impl BencodeValue {
         if end <= 1 {
             return Err("Integer is empty".to_string());
         }
-        let num_str = std::str::from_utf8(&bytes[1..end])
+        let raw = &bytes[1..end];
+        if (raw.len() > 1 && raw.first() == Some(&b'0'))
+            || (raw.first() == Some(&b'-') && raw.get(1) == Some(&b'0'))
+        {
+            return Err("Integer is not canonically encoded".to_string());
+        }
+        let num_str = std::str::from_utf8(raw)
             .map_err(|e| format!("Integer content is not valid UTF-8: {}", e))?;
         let value: i64 = num_str
             .parse()
@@ -173,6 +179,8 @@ impl BencodeValue {
                 return Err("Dict value missing (odd number of elements)".to_string());
             }
             let (value, val_consumed) = Self::decode_at_depth(&bytes[pos..], inner_depth)?;
+            // Preserve the existing compatibility behavior: later duplicate
+            // keys replace earlier values in the decoded map.
             entries.insert(key_bytes, value);
             element_count += 1;
             pos += val_consumed;
@@ -418,6 +426,8 @@ mod tests {
         assert!(BencodeValue::decode(b"l").is_err());
         assert!(BencodeValue::decode(b"d").is_err());
         assert!(BencodeValue::decode(b"d3:key").is_err());
+        assert!(BencodeValue::decode(b"i01e").is_err());
+        assert!(BencodeValue::decode(b"i-0e").is_err());
     }
 
     #[test]

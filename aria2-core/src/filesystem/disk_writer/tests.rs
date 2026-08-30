@@ -213,22 +213,23 @@ async fn test_cached_writer_with_rate_limiter() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_ratelimited.bin");
 
-    // Create a very restrictive limiter (10 bytes/sec, tiny burst)
-    let cfg = RateLimiterConfig::new(Some(10), None).with_burst(Some(20), None);
+    // Use a small burst so this test exercises waiting without making the
+    // focused test suite spend seconds draining a large payload.
+    let cfg = RateLimiterConfig::new(Some(100), None).with_burst(Some(20), None);
     let rl = Arc::new(RateLimiter::new(&cfg));
 
     let mut writer = CachedDiskWriter::new(&path, Some(4096), None).with_rate_limiter(rl.clone());
     writer.open().await.unwrap();
 
-    // Write data - should succeed (try_acquire may fail but we still write)
-    let data = vec![0x42u8; 512];
+    // A configured limiter must still permit the write after waiting for tokens.
+    let data = vec![0x42u8; 64];
     writer.write_at(0, &data).await.unwrap();
     writer.flush().await.unwrap();
 
     let content = tokio::fs::read(&path).await.unwrap();
-    assert!(content.len() >= 512, "file should be at least 512 bytes");
-    assert_eq!(&content[..512], &vec![0x42u8; 512][..]);
-    assert!(content.iter().take(512).all(|&b| b == 0x42));
+    assert!(content.len() >= data.len(), "file should contain the write");
+    assert_eq!(&content[..data.len()], &data);
+    assert!(content.iter().take(data.len()).all(|&b| b == 0x42));
 }
 
 #[tokio::test]

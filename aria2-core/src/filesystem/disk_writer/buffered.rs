@@ -8,7 +8,6 @@ use crate::error::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tracing::debug;
 
 use super::super::disk_cache::{DiskCacheStats, WrDiskCache};
 use super::super::mmap_disk_writer::MmapDiskWriter;
@@ -110,7 +109,6 @@ impl CachedDiskWriter {
     }
 
     /// Attach a rate limiter for write throttling.
-    /// Uses non-blocking try_acquire: if tokens unavailable, writes proceed without blocking.
     pub fn with_rate_limiter(mut self, limiter: Arc<crate::rate_limiter::RateLimiter>) -> Self {
         self.rate_limiter = Some(limiter);
         self
@@ -155,15 +153,10 @@ impl SeekableDiskWriter for CachedDiskWriter {
     async fn write_at(&mut self, offset: u64, data: &[u8]) -> Result<()> {
         self.open().await?;
 
-        // Rate limiting - non-blocking try_acquire
-        if let Some(ref limiter) = self.rate_limiter
-            && !limiter.try_acquire_download(data.len() as u64).await
-        {
-            debug!(
-                "Rate limit exceeded for {} bytes at offset {}, writing without throttling",
-                data.len(),
-                offset
-            );
+        // Match `ThrottledWriter`: a configured limit is a hard ceiling, so
+        // wait for tokens instead of bypassing the limiter under contention.
+        if let Some(ref limiter) = self.rate_limiter {
+            limiter.acquire_download(data.len() as u64).await;
         }
 
         if data.len() >= DIRECT_WRITE_THRESHOLD {
@@ -195,15 +188,9 @@ impl SeekableDiskWriter for CachedDiskWriter {
         self.open().await?;
         let data_len = data.len();
 
-        // Rate limiting - non-blocking try_acquire
-        if let Some(ref limiter) = self.rate_limiter
-            && !limiter.try_acquire_download(data.len() as u64).await
-        {
-            debug!(
-                "Rate limit exceeded for {} bytes at offset {}, writing without throttling",
-                data.len(),
-                offset
-            );
+        // Keep the Bytes path subject to the same hard limit as the slice path.
+        if let Some(ref limiter) = self.rate_limiter {
+            limiter.acquire_download(data.len() as u64).await;
         }
 
         if data.len() >= DIRECT_WRITE_THRESHOLD {

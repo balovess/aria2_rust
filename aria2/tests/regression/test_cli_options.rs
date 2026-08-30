@@ -958,6 +958,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-enable-web-seed",
         "bt-peer-blocklist",
         "bt-tracker-source",
+        "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
         "enable-public-trackers",
         "enable-utp",
@@ -998,7 +999,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        232,
+        233,
         "all-features registry inventory changed"
     );
     assert_eq!(

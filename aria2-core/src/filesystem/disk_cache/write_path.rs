@@ -95,9 +95,15 @@ impl WrDiskCache {
         }
 
         for entry in retained {
+            let offset = entry.offset;
+            let seq = entry.seq;
+            let clean = !entry.dirty;
             self.total_cached_bytes
                 .fetch_add(entry.size_bytes(), Ordering::Relaxed);
-            entries.insert(entry.offset, entry);
+            entries.insert(offset, entry);
+            if clean {
+                self.enqueue_clean(offset, seq);
+            }
         }
 
         entries.insert(
@@ -168,13 +174,10 @@ impl WrDiskCache {
             .saturating_add(needed_size)
             > target
         {
-            // Find the clean entry with the smallest seq (true LRU order).
-            // Iterating all entries is O(n), but eviction is rare.
-            let evict_key = entries
-                .iter()
-                .filter(|(_, e)| !e.dirty)
-                .min_by_key(|(_, e)| e.seq)
-                .map(|(&k, _)| k);
+            // The heap may contain stale nodes after overlap splitting or a
+            // later rewrite. Validate each candidate against the map before
+            // removing it.
+            let evict_key = self.take_clean_lru_candidate(entries);
 
             match evict_key {
                 Some(key) => {

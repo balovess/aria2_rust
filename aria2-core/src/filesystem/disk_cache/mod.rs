@@ -1,5 +1,7 @@
 use bytes::{Bytes, BytesMut};
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -125,6 +127,9 @@ impl CacheEntry {
 pub struct WrDiskCache {
     /// Cache entries keyed by start offset, enabling O(log n) range queries.
     pub(crate) entries: Mutex<BTreeMap<u64, CacheEntry>>,
+    /// Lazy LRU index for clean entries. Stale nodes are discarded during
+    /// eviction after checking the current map entry and sequence number.
+    clean_lru: StdMutex<BinaryHeap<Reverse<(u64, u64)>>>,
     /// Serializes cache mutations with flushes that perform external I/O.
     ///
     /// The entry lock is intentionally released while a caller-provided
@@ -165,7 +170,7 @@ impl WrDiskCache {
     /// let cache = WrDiskCache::new(16); // 16 MB max
     /// `
     pub fn new(max_size_mb: usize) -> Self {
-        let max_size_bytes = max_size_mb * 1024 * 1024;
+        let max_size_bytes = max_size_mb.saturating_mul(1024 * 1024);
 
         debug!(
             "Initializing write-back disk cache, max capacity: {} MB ({} bytes)",
@@ -174,6 +179,7 @@ impl WrDiskCache {
 
         WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
+            clean_lru: StdMutex::new(BinaryHeap::new()),
             flush_gate: Mutex::new(()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
@@ -203,6 +209,7 @@ impl WrDiskCache {
 
         WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
+            clean_lru: StdMutex::new(BinaryHeap::new()),
             flush_gate: Mutex::new(()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
@@ -310,6 +317,7 @@ impl WrDiskCache {
                 && entry.seq == seq
             {
                 entry.dirty = false;
+                self.enqueue_clean(offset, seq);
             }
         }
         Ok(())
@@ -322,11 +330,41 @@ impl WrDiskCache {
 
         let cleared_bytes: usize = entries.values().map(|e| e.size_bytes()).sum();
         entries.clear();
+        self.clean_lru
+            .lock()
+            .expect("clean LRU lock is not poisoned")
+            .clear();
         self.total_cached_bytes
             .fetch_sub(cleared_bytes, Ordering::Relaxed);
 
         debug!("Cleared cache ({} bytes)", cleared_bytes);
         Ok(())
+    }
+
+    pub(crate) fn enqueue_clean(&self, offset: u64, seq: u64) {
+        self.clean_lru
+            .lock()
+            .expect("clean LRU lock is not poisoned")
+            .push(Reverse((seq, offset)));
+    }
+
+    pub(crate) fn take_clean_lru_candidate(
+        &self,
+        entries: &BTreeMap<u64, CacheEntry>,
+    ) -> Option<u64> {
+        let mut lru = self
+            .clean_lru
+            .lock()
+            .expect("clean LRU lock is not poisoned");
+        while let Some(Reverse((seq, offset))) = lru.pop() {
+            if entries
+                .get(&offset)
+                .is_some_and(|entry| !entry.dirty && entry.seq == seq)
+            {
+                return Some(offset);
+            }
+        }
+        None
     }
 
     // The write-path and read-path methods are in their respective sub-modules.
