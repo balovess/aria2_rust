@@ -19,8 +19,7 @@
 //! - **[`bittorrent`]** *(feature: `bittorrent`)* — Full BitTorrent protocol stack:
 //!   bencode codec, .torrent parsing, info_hash computation, BT message protocol (10 types),
 //!   handshake, Tracker communication (HTTP announce/scrape), DHT network (K-buckets/KRPC),
-//!   PEX peer exchange, MSE encryption framework, PeerConnection, choke algorithm,
-//!   PiecePicker (RarestFirst/Sequential/Random/EndGame).
+//!   PEX peer exchange, MSE encryption framework, and PeerConnection.
 //!
 //! - **[`metalink`]** *(feature: `metalink`)* — Metalink V3/V4 XML parser:
 //!   multi-mirror URL priority, hash verification (MD5/SHA1/SHA256/SHA512),

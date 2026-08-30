@@ -75,7 +75,9 @@ aria2c --conf-path=aria2.conf --reset-config
 
 ## 5. 完整选项目录
 
-以下目录覆盖当前 `OptionRegistry` 注册的 canonical 名称。`max-retries`、`enable-lpd`、`dht-message-path`、`server-stat-file`、`max-downloads` 是兼容别名，分别映射到 `max-tries`、`bt-enable-lpd`、`dht-file-path`、`server-stat-of`、`max-concurrent-downloads`。
+以下目录覆盖当前 `OptionRegistry` 注册的 canonical 名称，但“已注册”不等于“已接线”。当前源码明确标记为 `supported: false` 的选项只用于兼容旧配置，解析时会保留并警告，不会改变运行行为。其他选项也应以当前构建的 `aria2c --help` 和实际测试为准。`max-retries`、`enable-lpd`、`dht-message-path`、`server-stat-file`、`max-downloads` 是兼容别名，分别映射到 `max-tries`、`bt-enable-lpd`、`dht-file-path`、`server-stat-of`、`max-concurrent-downloads`。
+
+当前明确未接线的兼容选项：`interface`、`multiple-interface`、`async-dns-server`、`dns-timeout`、`enable-async-dns6`、`event-poll`、`optimize-concurrent-downloads`、`optimize-concurrent-downloads-coeffA`、`optimize-concurrent-downloads-coeffB`、`rlimit-nofile`、`select-least-used-host`、`socket-recv-buffer-size`、`dscp`、`max-http-pipelining`。这些名称可以出现在兼容配置中，但不要依赖它们提供对应功能。
 
 ### General：基础、会话、界面和日志
 
@@ -143,7 +145,7 @@ aria2c --conf-path=aria2.conf --reset-config
 
 `enable-rpc`、`rpc-listen-all`、`rpc-listen-port`（1024..65535，默认 6800）、`rpc-listen-address`（默认 `127.0.0.1`）、`rpc-secret`、`rpc-user`、`rpc-passwd`、`rpc-allow-origin`、`rpc-cors-domain`、`rpc-secure`、`rpc-certificate`、`rpc-private-key`、`rpc-allow-origin-all`、`rpc-max-request-size`（默认 2 MiB）、`rpc-save-upload-metadata`。
 
-RPC 的完整行为和安全配置见 [`rpc-guide.md`](rpc-guide.md)。
+RPC 的完整行为和安全配置见 [`rpc-guide-cn.md`](rpc-guide-cn.md)。
 
 ## 6. 短选项
 

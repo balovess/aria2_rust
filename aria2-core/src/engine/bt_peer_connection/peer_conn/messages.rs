@@ -250,7 +250,7 @@ impl BtPeerConn {
     /// Read and optionally apply torrent-domain validation before dispatch.
     pub async fn read_message_validated(
         &mut self,
-        validator: Option<&aria2_protocol::bittorrent::message::validation::BtMessageValidator>,
+        validator: Option<&crate::engine::bt_message_validation::BtMessageValidator>,
     ) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
         let result = match tokio::time::timeout(self.peer_timeout, async {
             match &mut self.inner {

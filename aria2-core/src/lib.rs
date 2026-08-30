@@ -107,6 +107,16 @@ pub mod validation;
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
 #[cfg(feature = "bittorrent")]
+pub use engine::bt_message_validation::{
+    BtMessageValidationError, BtMessageValidator, MAX_BLOCK_LENGTH,
+};
+#[cfg(feature = "bittorrent")]
+pub use engine::bt_piece::{
+    Bitfield, PeerBitfieldEntry, PeerBitfieldTracker, PeerTrackerStats, PickedPiece, PieceInfo,
+    PieceManager, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
+    PieceSelectionStrategy,
+};
+#[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{
     ChangeableKind, DownloadStatus, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,

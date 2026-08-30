@@ -85,8 +85,3 @@ required-features = ["bittorrent"]
 name = "bitfield_bench"
 harness = false
 required-features = ["bittorrent"]
-
-[[bench]]
-name = "sequential_picker_bench"
-harness = false
-required-features = ["bittorrent"]

@@ -1,5 +1,16 @@
 # aria2-rust
 
+English: [`README.md`](README.md)
+
+## 文档导览
+
+请先查看[文档索引](docs/README-cn.md)。常用入口：
+
+- [快速开始](docs/quickstart-cn.md)
+- [参数配置说明](docs/configuration-guide-cn.md)
+- [RPC 使用说明](docs/rpc-guide-cn.md)
+- [常见问题](docs/troubleshooting-cn.md)
+
 <p align="center">
   <strong>超高速下载工具 —— Rust 语言重写</strong>
 </p>
@@ -17,14 +28,15 @@
 ***
 
 **aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
-实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。支持
-HTTP/HTTPS、FTP/SFTP、BitTorrent、Metalink 协议，并提供
+实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。默认构建支持
+HTTP/HTTPS、FTP、BitTorrent 协议，并提供
 JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
+SFTP 和 Metalink 需要分别启用对应 Cargo feature。
 
 ## 特性
 
-- **多协议下载**: HTTP/HTTPS、FTP/SFTP、BitTorrent (DHT/PEX/MSE)、Metalink V3/V4
+- **多协议下载**: 默认构建支持 HTTP/HTTPS、FTP、BitTorrent；SFTP 和 Metalink 由 feature 控制
 - **多源镜像**: 自动从多个 URI 分段并行下载，最大化带宽利用率
 - **断点续传**: HTTP/HTTPS 等主要路径支持控制文件续传；不同协议、并发控制文件和多 URI 失败回退仍按兼容性矩阵逐项验证
 - **BitTorrent 完整支持**:
@@ -38,7 +50,7 @@ JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
 - **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（按编译 feature 返回原版方法/通知目录：核心 33 个方法和 5 个通知，BitTorrent/Metalink 启用后分别增加对应能力；全 feature 为 36/6）
-- **配置系统**: \~95 个核心选项，支持命令行 / 配置文件 / 环境变量四源合并
+- **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
 - **公共 Tracker 列表**: 自动从 trackerslist.com 更新 BT Peer 发现
@@ -151,7 +163,7 @@ aria2-rust/
 │   │   ├── magnet_download_command.rs # Magnet 链接下载器
 │   │   ├── metalink_download_command.rs # Metalink 下载器
 │   │   └── concurrent_download_command.rs # 多段下载器
-│   ├── src/config/        #   配置系统（~95 个选项）
+│   ├── src/config/        #   类型化参数注册表和解析器
 │   │   ├── option.rs     #     OptionType/Value/Def/Registry
 │   │   ├── parser.rs     #     多源解析器（CLI/文件/环境变量/默认值）
 │   │   ├── netrc.rs      #     NetRC 认证解析器
@@ -196,7 +208,7 @@ aria2-rust/
 │   ├── src/xml_rpc.rs      #   XML-RPC 编解码
 │   ├── src/websocket.rs    #   WebSocket 事件发布
 │   ├── src/server.rs       #   HTTP 服务器（认证/CORS/状态）
-│   └── src/engine.rs       #   RpcEngine 桥接（25 个 RPC 方法）
+│   └── src/engine.rs       #   RpcEngine 请求分发和协议桥接
 └── bindings/               # 语言绑定（~1,200 行）
     ├── python/            #   Python SDK（~600 行）
     └── nodejs/            #   Node.js SDK（~627 行 TS）

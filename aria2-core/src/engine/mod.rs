@@ -68,6 +68,8 @@ pub mod bt_message_receiver;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_message_receiver_tests;
 #[cfg(feature = "bittorrent")]
+pub mod bt_message_validation;
+#[cfg(feature = "bittorrent")]
 pub mod bt_peer_blocklist;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_connection;
@@ -79,6 +81,8 @@ pub mod bt_peer_interaction;
 pub mod bt_peer_listener;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_storage;
+#[cfg(feature = "bittorrent")]
+pub mod bt_piece;
 #[cfg(feature = "bittorrent")]
 pub mod bt_piece_downloader;
 #[cfg(feature = "bittorrent")]

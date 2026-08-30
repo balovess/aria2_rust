@@ -1,5 +1,16 @@
 # aria2-rust
 
+中文：[`README_CN.md`](README_CN.md)
+
+## Documentation
+
+Start with the [documentation index](docs/README-en.md). The main user paths are:
+
+- [Quick Start](docs/quickstart-en.md)
+- [Configuration Guide](docs/configuration-guide-en.md)
+- [RPC Guide](docs/rpc-guide-en.md)
+- [Troubleshooting](docs/troubleshooting-en.md)
+
 <p align="center">
   <strong>The ultra-fast download utility — rewritten in Rust</strong>
 </p>
@@ -19,8 +30,9 @@
 **aria2-rust** is an independent Rust download engine. It provides practical
 compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
 users and tools can migrate easily, while its architecture, safety,
-performance, and product direction are its own. It supports HTTP/HTTPS,
-FTP/SFTP, BitTorrent, Metalink, and JSON-RPC/XML-RPC/WebSocket paths;
+performance, and product direction are its own. The default build supports
+HTTP/HTTPS, FTP, BitTorrent, and JSON-RPC/XML-RPC/WebSocket paths;
+Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
 
@@ -30,7 +42,7 @@ The capability inventory below describes code paths, not a claim that every
 feature has passed the complete cross-platform E2E matrix. See the
 [compatibility status](docs/compatibility-status.md) for the current gate.
 
-- **Multi-Protocol Download**: HTTP/HTTPS, FTP/SFTP, BitTorrent (DHT/PEX/MSE), Metalink V3/V4
+- **Multi-Protocol Download**: HTTP/HTTPS, FTP, and BitTorrent by default; SFTP and Metalink are feature-gated
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
 - **Resume Support**: Breakpoint resume on all protocols with seamless recovery after network interruptions
 - **Full BitTorrent Support**: 
@@ -48,7 +60,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
 - **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (36 all-features methods, 6 notifications; compatibility coverage tracked separately)
-- **Configuration System**: ~95 core options with four-source merging (CLI/file/environment/defaults)
+- **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
 - **Public Tracker List**: Auto-update from trackerslist.com for BT peer discovery
@@ -263,7 +275,7 @@ aria2-rust/
 │   │   ├── magnet_download_command.rs # Magnet link downloader
 │   │   ├── metalink_download_command.rs # Metalink downloader
 │   │   └── concurrent_download_command.rs # Multi-segment downloader
-│   ├── src/config/        #   Configuration system (~95 options)
+│   ├── src/config/        #   Typed configuration registry and parser
 │   │   ├── option.rs     #     OptionType/Value/Def/Registry
 │   │   ├── parser.rs     #     Multi-source parser (CLI/file/env/defaults)
 │   │   ├── netrc.rs      #     NetRC authentication parser

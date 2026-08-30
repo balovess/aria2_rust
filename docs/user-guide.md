@@ -28,6 +28,10 @@ supported.
 
 ## BitTorrent and Metalink
 
+The default binary enables HTTP, BitTorrent, and RPC. Metalink and SFTP are
+optional Cargo features; check the build's `aria2c --help` and
+`aria2.getVersion` output before using them.
+
 ```text
 # Torrent file
 aria2c file.torrent

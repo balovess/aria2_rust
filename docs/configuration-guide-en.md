@@ -75,7 +75,9 @@ aria2c --conf-path=aria2.conf --reset-config
 
 ## 5. Complete option catalog
 
-The following catalog covers all canonical names registered by the current `OptionRegistry`. Compatibility aliases are `max-retries` -> `max-tries`, `enable-lpd` -> `bt-enable-lpd`, `dht-message-path` -> `dht-file-path`, `server-stat-file` -> `server-stat-of`, and `max-downloads` -> `max-concurrent-downloads`.
+The following catalog covers all canonical names registered by the current `OptionRegistry`, but registered does not mean fully wired. Options explicitly marked `supported: false` are retained for old configuration compatibility; they produce a warning and do not change runtime behavior. For all other options, follow the current build's `aria2c --help` output and observed tests. Compatibility aliases are `max-retries` -> `max-tries`, `enable-lpd` -> `bt-enable-lpd`, `dht-message-path` -> `dht-file-path`, `server-stat-file` -> `server-stat-of`, and `max-downloads` -> `max-concurrent-downloads`.
+
+Options currently marked as unsupported compatibility entries are: `interface`, `multiple-interface`, `async-dns-server`, `dns-timeout`, `enable-async-dns6`, `event-poll`, `optimize-concurrent-downloads`, `optimize-concurrent-downloads-coeffA`, `optimize-concurrent-downloads-coeffB`, `rlimit-nofile`, `select-least-used-host`, `socket-recv-buffer-size`, `dscp`, and `max-http-pipelining`. These names may appear in compatible configuration files, but users should not rely on them to provide the corresponding feature.
 
 ### General: basic, session, UI, and logging
 

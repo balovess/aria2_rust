@@ -89,7 +89,7 @@ struct NewPeerConnectionsContext<'a> {
     pex_enabled_peers: &'a mut HashSet<PeerKey>,
     allowed_fast_sent_peers: &'a mut HashMap<PeerKey, HashSet<u32>>,
     suggest_sent_counts: &'a mut HashMap<PeerKey, usize>,
-    peer_tracker: &'a mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+    peer_tracker: &'a mut crate::engine::bt_piece::PeerBitfieldTracker,
     choking_algo: &'a mut Option<crate::engine::choking_algorithm::ChokingAlgorithm>,
 }
 
@@ -251,7 +251,7 @@ impl BtDownloadCommand {
     fn apply_peer_wait_event(
         event: PeerWaitEvent,
         active_connections: &mut Vec<BtPeerConn>,
-        peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        peer_tracker: &mut crate::engine::bt_piece::PeerBitfieldTracker,
         pex_enabled_peers: &mut HashSet<PeerKey>,
         peer_last_data_time: &mut HashMap<PeerKey, Instant>,
         allowed_fast_sent_peers: &mut HashMap<PeerKey, HashSet<u32>>,
@@ -349,7 +349,7 @@ impl BtDownloadCommand {
         allowed_fast_sent_peers: &mut HashMap<PeerKey, std::collections::HashSet<u32>>,
         suggest_sent_counts: &mut HashMap<PeerKey, usize>,
         endgame_state: &mut EndgameState,
-        peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        peer_tracker: &mut crate::engine::bt_piece::PeerBitfieldTracker,
         peer_storage: &std::sync::Arc<
             std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>,
         >,
@@ -599,21 +599,18 @@ impl BtDownloadCommand {
 
         let piece_selector = BtPieceSelector::new(num_pieces);
 
-        let mut piece_manager = aria2_protocol::bittorrent::piece::manager::PieceManager::new(
+        let mut piece_manager = crate::engine::bt_piece::PieceManager::new(
             num_pieces,
             piece_length,
             total_size,
             meta.info.pieces.clone(),
         );
 
-        let mut piece_picker =
-            aria2_protocol::bittorrent::piece::picker::PiecePicker::new(num_pieces);
+        let mut piece_picker = crate::engine::bt_piece::PiecePicker::new(num_pieces);
         // aria2_original uses RarestPieceSelector as the base BitTorrent
         // selector. `bt-prioritize-piece` is an additive wrapper around it,
         // not a replacement for the torrent-wide selection strategy.
-        piece_picker.set_strategy(
-            aria2_protocol::bittorrent::piece::picker::PieceSelectionStrategy::RarestFirst,
-        );
+        piece_picker.set_strategy(crate::engine::bt_piece::PieceSelectionStrategy::RarestFirst);
 
         let allowed_pieces = {
             let group = self.group.recover();
@@ -673,8 +670,7 @@ impl BtDownloadCommand {
             piece_picker.set_priority_pieces(prioritized_pieces);
         }
 
-        let mut peer_tracker =
-            aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker::new(num_pieces);
+        let mut peer_tracker = crate::engine::bt_piece::PeerBitfieldTracker::new(num_pieces);
         BtPeerInteraction::initialize_peer_tracking(
             active_connections,
             num_pieces,
