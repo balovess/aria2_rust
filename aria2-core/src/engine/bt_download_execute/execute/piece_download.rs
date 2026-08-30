@@ -43,6 +43,13 @@ fn progress_snapshot(
     }
 }
 
+fn count_piece_sources(connections: &[BtPeerConn], piece_index: usize) -> usize {
+    connections
+        .iter()
+        .filter(|connection| connection.seeder || connection.has_piece(piece_index))
+        .count()
+}
+
 fn sync_peer_snapshots(
     group: &crate::request::request_group::RequestGroup,
     active_connections: &[BtPeerConn],
@@ -1267,14 +1274,29 @@ impl BtDownloadCommand {
                         let unique_peer = peer_bytes
                             .next()
                             .filter(|first| peer_bytes.all(|peer| peer.peer == first.peer));
-                        if let Some(peer_download) = unique_peer {
-                            let peer_ip = peer_download.peer.ip().to_string();
+                        let bad_peer = unique_peer.map(|peer_download| peer_download.peer);
+                        if let Some(peer) = bad_peer {
+                            let peer_ip = peer.ip().to_string();
                             self.reject_peer_temporarily(&peer_ip);
                             tracing::warn!(
-                                peer = %peer_download.peer,
+                                peer = %peer,
                                 piece = next_piece_idx,
-                                "Rejected peer after a piece hash mismatch"
+                                "Rejected and removed peer after a piece hash mismatch"
                             );
+                            Self::remove_failed_peers(
+                                active_connections,
+                                &[peer],
+                                self.choking_algo.as_mut(),
+                                pex_enabled_peers,
+                                &mut peer_last_data_time,
+                                &mut self.allowed_fast_sent_peers,
+                                &mut self.suggest_sent_counts,
+                                &mut endgame_state,
+                                &mut peer_tracker,
+                                &self.peer_storage,
+                            );
+                            self.update_tracker_peer_state(active_connections.len());
+                            sync_peer_snapshots(&self.group.recover(), active_connections);
                         } else {
                             tracing::debug!(
                                 piece = next_piece_idx,
@@ -1306,15 +1328,34 @@ impl BtDownloadCommand {
                 .await?;
 
                 if !piece_ok {
-                    tracing::error!(
-                        "[BT] Piece {} failed after {} retries (peers and web seeds)",
-                        next_piece_idx,
-                        max_attempts
+                    let source_count = count_piece_sources(active_connections, next_piece_idx);
+                    let failure_message = if source_count == 0 {
+                        format!(
+                            "Piece {} has no source among {} connected peers",
+                            next_piece_idx,
+                            active_connections.len()
+                        )
+                    } else {
+                        format!(
+                            "Piece {} failed after {} retries; {} connected peer(s) advertise it",
+                            next_piece_idx, max_attempts, source_count
+                        )
+                    };
+                    self.group
+                        .recover()
+                        .set_last_error(DownloadResultCode::NetworkProblem, &failure_message);
+                    tracing::warn!(
+                        "[BT] {} (peers and web seeds); waiting for discovery",
+                        failure_message
                     );
-                    return Err(Aria2Error::Fatal(FatalError::Config(format!(
-                        "Piece {} download failed after {} retries",
-                        next_piece_idx, max_attempts
-                    ))));
+                    if source_count == 0 {
+                        // A peer snapshot is not a swarm-wide availability proof. The
+                        // missing piece may become available after the next tracker,
+                        // DHT, PEX, or incoming-peer event, so keep the download
+                        // resumable and let bt-stop-timeout provide the final bound.
+                        continue;
+                    }
+                    return Err(Aria2Error::Fatal(FatalError::Config(failure_message)));
                 }
             }
 

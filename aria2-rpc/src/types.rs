@@ -220,6 +220,22 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub num_pieces: Option<u32>,
+    /// Number of locally verified pieces (BitTorrent only).
+    #[serde(
+        default,
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub completed_pieces: Option<u32>,
+    /// Number of pieces still missing locally (BitTorrent only).
+    #[serde(
+        default,
+        serialize_with = "wire::serialize_option_display_as_string",
+        deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub missing_pieces: Option<u32>,
     /// List of GIDs that follow (chained downloads)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followed_by: Option<Vec<String>>,
@@ -271,6 +287,8 @@ impl Default for StatusInfo {
             bitfield: None,
             piece_length: None,
             num_pieces: None,
+            completed_pieces: None,
+            missing_pieces: None,
             followed_by: None,
             belongs_to: None,
             info_hash: None,
@@ -355,6 +373,14 @@ impl StatusInfo {
     }
     pub fn with_num_pieces(mut self, v: u32) -> Self {
         self.num_pieces = Some(v);
+        self
+    }
+    pub fn with_completed_pieces(mut self, v: u32) -> Self {
+        self.completed_pieces = Some(v);
+        self
+    }
+    pub fn with_missing_pieces(mut self, v: u32) -> Self {
+        self.missing_pieces = Some(v);
         self
     }
     pub fn with_followed_by(mut self, v: Vec<String>) -> Self {
@@ -1691,6 +1717,23 @@ mod tests {
         let roundtrip: StatusInfo = serde_json::from_value(json.clone()).unwrap();
         assert_eq!(roundtrip.total_length, Some(104857600));
         assert_eq!(roundtrip.completed_length, Some(0));
+    }
+
+    #[test]
+    fn test_status_info_piece_counts_use_wire_strings() {
+        let info = StatusInfo::new("bt-test")
+            .with_num_pieces(10)
+            .with_completed_pieces(9)
+            .with_missing_pieces(1);
+
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["numPieces"].as_str(), Some("10"));
+        assert_eq!(json["completedPieces"].as_str(), Some("9"));
+        assert_eq!(json["missingPieces"].as_str(), Some("1"));
+
+        let roundtrip: StatusInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(roundtrip.completed_pieces, Some(9));
+        assert_eq!(roundtrip.missing_pieces, Some(1));
     }
 
     #[test]

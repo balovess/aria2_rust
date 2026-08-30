@@ -77,10 +77,11 @@ impl EndgameState {
     pub fn exit_endgame(&mut self) {
         if self.active {
             self.active = false;
+            let cleared = self.active_duplicate_requests.len();
             self.active_duplicate_requests.clear();
             debug!(
                 "[BT] Exiting endgame mode, cleared {} tracked requests",
-                self.active_duplicate_requests.len()
+                cleared
             );
         }
     }

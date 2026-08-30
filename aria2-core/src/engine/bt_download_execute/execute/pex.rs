@@ -256,17 +256,23 @@ impl BtDownloadCommand {
         // aborting the remaining connection attempts in this batch.
         let mut connected = Vec::with_capacity(peers_to_connect.len());
         for peer in &peers_to_connect {
-            match BtPeerInteraction::connect_peer_ready(
-                peer,
-                info_hash_raw,
-                &connection_options,
-                num_pieces,
-                piece_length,
-                total_size,
-                self.utp_socket.clone(),
-            )
-            .await
-            {
+            if self.group.recover().is_halt_requested() {
+                break;
+            }
+            let Some(result) = self
+                .connect_peer_ready_unless_halted(
+                    peer,
+                    info_hash_raw,
+                    &connection_options,
+                    num_pieces,
+                    piece_length,
+                    total_size,
+                )
+                .await
+            else {
+                break;
+            };
+            match result {
                 Ok(mut conn) => {
                     debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
                     self.apply_peer_exchange_policy(&mut conn);
@@ -283,6 +289,41 @@ impl BtDownloadCommand {
 
         // Return only connections that were established successfully.
         connected
+    }
+
+    async fn connect_peer_ready_unless_halted(
+        &self,
+        peer: &PeerAddr,
+        info_hash_raw: &[u8; 20],
+        connection_options: &BtPeerConnectionOptions,
+        num_pieces: u32,
+        piece_length: u32,
+        total_size: u64,
+    ) -> Option<Result<BtPeerConn>> {
+        let lifecycle_notify = self.group.recover().lifecycle_notifier();
+        let lifecycle_wait = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_wait);
+        let mut connect_future = Box::pin(BtPeerInteraction::connect_peer_ready(
+            peer,
+            info_hash_raw,
+            connection_options,
+            num_pieces,
+            piece_length,
+            total_size,
+            self.utp_socket.clone(),
+        ));
+
+        loop {
+            tokio::select! {
+                result = &mut connect_future => return Some(result),
+                _ = &mut lifecycle_wait => {
+                    if self.group.recover().is_halt_requested() {
+                        return None;
+                    }
+                    lifecycle_wait.set(lifecycle_notify.notified());
+                }
+            }
+        }
     }
 }
 

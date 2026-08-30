@@ -192,9 +192,16 @@ impl MockBtSeeder {
 
         // Send the server bitfield immediately after the handshake. A client
         // with no locally available pieces has no bitfield to send first.
-        let num_pieces = pieces.len().max(1);
-        let bf_size = num_pieces.div_ceil(8);
-        let bitfield: Vec<u8> = vec![0xFF; bf_size];
+        let num_pieces = pieces.keys().copied().max().unwrap_or(0).saturating_add(1);
+        let bf_size = num_pieces.div_ceil(8) as usize;
+        let mut bitfield = vec![0u8; bf_size];
+        for &piece_index in pieces.keys() {
+            let byte = piece_index as usize / 8;
+            let bit = 7 - (piece_index as usize % 8);
+            if let Some(value) = bitfield.get_mut(byte) {
+                *value |= 1 << bit;
+            }
+        }
         let mut bf_msg = Vec::with_capacity(5 + bitfield.len());
         bf_msg.extend_from_slice(&(1 + bitfield.len() as u32).to_be_bytes());
         bf_msg.push(MSG_BITFIELD);
