@@ -754,6 +754,94 @@ async fn test_write_strategy_throughput_comparison() {
     }
 }
 
+/// Isolate the compatibility-slice copy from the Bytes-based download path.
+/// Both cases use the same 4 KiB workload and cache capacity.
+#[tokio::test]
+async fn test_cached_bytes_write_path_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let total_size = 20 * 1024 * 1024;
+    let block_size = 4 * 1024;
+    let blocks: Vec<bytes::Bytes> = (0..total_size / block_size)
+        .map(|i| bytes::Bytes::from(vec![i as u8; block_size]))
+        .collect();
+
+    let slice_path = dir.path().join("cached_slice.bin");
+    let mut slice_writer = CachedDiskWriter::new(&slice_path, None, Some(4));
+    slice_writer.open().await.unwrap();
+    let start = Instant::now();
+    for (i, data) in blocks.iter().enumerate() {
+        slice_writer
+            .write_at((i * block_size) as u64, data)
+            .await
+            .unwrap();
+    }
+    slice_writer.close().await.unwrap();
+    let slice_duration = start.elapsed();
+
+    let bytes_path = dir.path().join("cached_bytes.bin");
+    let mut bytes_writer = CachedDiskWriter::new(&bytes_path, None, Some(4));
+    bytes_writer.open().await.unwrap();
+    let start = Instant::now();
+    for (i, data) in blocks.iter().enumerate() {
+        bytes_writer
+            .write_bytes_at((i * block_size) as u64, data.clone())
+            .await
+            .unwrap();
+    }
+    bytes_writer.close().await.unwrap();
+    let bytes_duration = start.elapsed();
+
+    println!(
+        "\n=== Cached &[u8] vs Bytes (20 MiB, 4 KiB blocks) ===\nslice path: {:?}\nBytes path: {:?}",
+        slice_duration, bytes_duration
+    );
+    assert_eq!(
+        tokio::fs::metadata(&slice_path).await.unwrap().len(),
+        total_size as u64
+    );
+    assert_eq!(
+        tokio::fs::metadata(&bytes_path).await.unwrap().len(),
+        total_size as u64
+    );
+}
+
+/// Measure cache capacity sensitivity without changing the production default.
+#[tokio::test]
+async fn test_cached_write_cache_capacity_comparison() {
+    let dir = tempfile::tempdir().unwrap();
+    let total_size = 20 * 1024 * 1024;
+    let block_size = 4 * 1024;
+    let blocks: Vec<bytes::Bytes> = (0..total_size / block_size)
+        .map(|i| bytes::Bytes::from(vec![i as u8; block_size]))
+        .collect();
+
+    println!("\n=== Cached write capacity comparison (20 MiB, 4 KiB blocks) ===");
+    for cache_size_mb in [1usize, 4, 16, 64] {
+        let path = dir.path().join(format!("cached-{cache_size_mb}mb.bin"));
+        let mut writer = CachedDiskWriter::new(&path, None, Some(cache_size_mb));
+        writer.open().await.unwrap();
+
+        let start = Instant::now();
+        for (i, data) in blocks.iter().enumerate() {
+            writer
+                .write_bytes_at((i * block_size) as u64, data.clone())
+                .await
+                .unwrap();
+        }
+        writer.close().await.unwrap();
+
+        let duration = start.elapsed();
+        println!(
+            "cache: {cache_size_mb:>2} MiB, time: {duration:?}, throughput: {:.2} MB/s",
+            total_size as f64 / duration.as_secs_f64() / 1_000_000.0
+        );
+        assert_eq!(
+            tokio::fs::metadata(&path).await.unwrap().len(),
+            total_size as u64
+        );
+    }
+}
+
 /// Test fixed threshold behavior
 #[tokio::test]
 async fn test_fixed_threshold_behavior() {

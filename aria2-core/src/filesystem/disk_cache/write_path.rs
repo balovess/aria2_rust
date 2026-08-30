@@ -42,16 +42,28 @@ impl WrDiskCache {
         // remain visible. The map invariant after this block is that entries
         // are pairwise disjoint, so one predecessor lookup is sufficient for
         // a complete range read.
-        let overlapping_keys: Vec<u64> = entries
-            .range(..end)
-            .filter(|(_, entry)| {
-                entry
-                    .offset
-                    .checked_add(entry.data.len() as u64)
-                    .is_some_and(|entry_end| entry_end > offset)
-            })
-            .map(|(&key, _)| key)
-            .collect();
+        // Cache entries are kept pairwise disjoint. Only the predecessor of
+        // `offset` can overlap from the left; subsequent overlaps must start
+        // inside the new range. Avoid scanning every older entry here: that
+        // turns sequential small writes into an O(n^2) workload.
+        let mut overlapping_keys = Vec::new();
+        if let Some((&key, entry)) = entries.range(..=offset).next_back()
+            && entry
+                .offset
+                .checked_add(entry.data.len() as u64)
+                .is_some_and(|entry_end| entry_end > offset)
+        {
+            overlapping_keys.push(key);
+        }
+        overlapping_keys.extend(
+            entries
+                .range((
+                    std::ops::Bound::Excluded(offset),
+                    std::ops::Bound::Unbounded,
+                ))
+                .take_while(|(key, _)| **key < end)
+                .map(|(&key, _)| key),
+        );
 
         let mut retained = Vec::with_capacity(overlapping_keys.len() * 2);
         for key in overlapping_keys {

@@ -11,7 +11,7 @@ const DEFAULT_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COALESCED_FLUSH_BYTES: usize = 1024 * 1024;
 
 fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
-    let mut coalesced: Vec<(u64, Bytes)> = Vec::new();
+    let mut coalesced: Vec<(u64, BytesMut)> = Vec::new();
     for (offset, data, _) in pending {
         let can_extend = coalesced.last().is_some_and(|(start, current)| {
             start
@@ -21,16 +21,21 @@ fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
         });
 
         if can_extend {
-            let (start, current) = coalesced.pop().expect("coalesced entry exists");
-            let mut merged = BytesMut::with_capacity(current.len() + data.len());
-            merged.extend_from_slice(&current);
-            merged.extend_from_slice(data);
-            coalesced.push((start, merged.freeze()));
+            coalesced
+                .last_mut()
+                .expect("coalesced entry exists")
+                .1
+                .extend_from_slice(data);
         } else {
-            coalesced.push((*offset, data.clone()));
+            let mut merged = BytesMut::with_capacity(data.len());
+            merged.extend_from_slice(data);
+            coalesced.push((*offset, merged));
         }
     }
     coalesced
+        .into_iter()
+        .map(|(offset, data)| (offset, data.freeze()))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
