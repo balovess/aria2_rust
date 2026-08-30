@@ -44,5 +44,5 @@ mod tests;
 pub use tracker::ConnectionStallTracker;
 pub use types::{
     DEFAULT_MIN_TAIL_LENGTH, DEFAULT_STALL_TIMEOUT_SECS, DEFAULT_TAIL_RECLAIM_ENABLED,
-    TailReclaimConfig, TailReclaimResult,
+    TailReclaimConfig, TailReclaimConnectionState, TailReclaimResult,
 };

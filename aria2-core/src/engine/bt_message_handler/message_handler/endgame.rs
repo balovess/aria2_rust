@@ -319,6 +319,7 @@ impl BtMessageHandler {
                                 piece_index,
                                 offset,
                                 len,
+                                result.peer_index,
                                 endgame_state,
                             )
                             .await;
@@ -480,6 +481,10 @@ impl BtMessageHandler {
             }
         }
 
+        // No peer won this round. Drop all ownership before retrying so a
+        // later response from a cancelled/late peer cannot affect the retry.
+        endgame_state.remove_request(piece_index, block_offset, block_length);
+
         // All peers failed or timed out
         warn!("[BT] Endgame: Failed to get block from any peer");
         Ok(BlockDownloadResult {
@@ -544,10 +549,20 @@ impl BtMessageHandler {
         piece_index: u32,
         offset: u32,
         len: u32,
+        winner_index: Option<usize>,
         endgame_state: &mut EndgameState,
     ) {
-        // Get list of peers that have pending requests for this block
-        let targets = endgame_state.get_cancel_targets(piece_index, offset, len);
+        let winner = winner_index
+            .and_then(|index| connections.get(index))
+            .and_then(|conn| {
+                format!("{}:{}", conn.ip_addr, conn.port)
+                    .parse()
+                    .ok()
+                    .map(crate::engine::bt_download_execute::types::PeerKey::new)
+            });
+        let targets = winner
+            .map(|winner| endgame_state.take_cancel_targets(piece_index, offset, len, winner))
+            .unwrap_or_else(|| endgame_state.get_cancel_targets(piece_index, offset, len));
 
         if targets.is_empty() {
             debug!(
@@ -602,7 +617,8 @@ impl BtMessageHandler {
             }
         }
 
-        // Remove the tracked request since we've handled it
-        endgame_state.remove_request(piece_index, offset, len);
+        if winner.is_none() {
+            endgame_state.remove_request(piece_index, offset, len);
+        }
     }
 }

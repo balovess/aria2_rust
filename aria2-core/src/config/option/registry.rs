@@ -338,6 +338,7 @@ impl OptionRegistry {
             | "bt-tracker-connect-timeout"
             | "bt-tracker-interval"
             | "bt-tracker-timeout"
+            | "bt-tracker-stopped-timeout"
             | "dht-message-timeout"
             | "enable-dht6"
             | "dht-listen-addr6"

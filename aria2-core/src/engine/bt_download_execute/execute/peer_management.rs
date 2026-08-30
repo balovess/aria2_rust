@@ -179,6 +179,7 @@ impl BtDownloadCommand {
             excluded_trackers,
             tracker_timeout,
             tracker_connect_timeout,
+            tracker_stopped_timeout,
             tracker_interval,
             external_ip,
             force_encryption,
@@ -189,6 +190,7 @@ impl BtDownloadCommand {
                 g.options().bt_exclude_tracker.clone().unwrap_or_default(),
                 g.options().bt_tracker_timeout,
                 g.options().bt_tracker_connect_timeout,
+                g.options().bt_tracker_stopped_timeout,
                 g.options().bt_tracker_interval,
                 g.options().bt_external_ip.clone(),
                 g.options().bt_force_encrypt || g.options().bt_require_crypto,
@@ -237,6 +239,7 @@ impl BtDownloadCommand {
             Duration::from_secs(tracker_timeout),
             Duration::from_secs(tracker_connect_timeout),
         );
+        announcer.set_stopped_timeout(Duration::from_secs(tracker_stopped_timeout));
         announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
         announcer.set_announce_options(force_encryption, external_ip);
         if let Some(catalog) = public_tracker_catalog {

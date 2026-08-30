@@ -103,6 +103,8 @@ impl std::error::Error for BtMessageValidationError {}
 ///
 /// Construct with the torrent metadata (`num_pieces`, `piece_length`) and
 /// optionally configure an expected info-hash or metadata-get mode.
+/// This is a core-layer validator: it checks a parsed protocol message against
+/// the active torrent, rather than parsing wire bytes.
 ///
 /// # Example
 ///

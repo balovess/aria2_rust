@@ -14,7 +14,7 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 use super::bt_announce::{BtAnnounce, is_udp_tracker};
@@ -75,6 +75,8 @@ pub struct TrackerAnnouncer {
     tracker_timeout_secs: u64,
     /// Per-download tracker connection timeout.
     tracker_connect_timeout_secs: u64,
+    /// Total shutdown budget for all stopped announce attempts.
+    stopped_timeout: Duration,
 }
 
 impl TrackerAnnouncer {
@@ -92,6 +94,7 @@ impl TrackerAnnouncer {
             http_tls: ClientTlsConfig::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
+            stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
         }
     }
 
@@ -109,6 +112,7 @@ impl TrackerAnnouncer {
             http_tls: ClientTlsConfig::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
+            stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
         }
     }
 
@@ -126,6 +130,11 @@ impl TrackerAnnouncer {
     pub fn set_timeouts(&mut self, request: Duration, connect: Duration) {
         self.tracker_timeout_secs = request.as_secs().max(1);
         self.tracker_connect_timeout_secs = connect.as_secs().max(1);
+    }
+
+    /// Set the total time allowed for stopped announce cleanup.
+    pub fn set_stopped_timeout(&mut self, timeout: Duration) {
+        self.stopped_timeout = timeout.max(Duration::from_millis(1));
     }
 
     /// Apply the user-defined announce interval from `bt-tracker-interval`.
@@ -518,11 +527,32 @@ impl TrackerAnnouncer {
         const MAX_STOPPED_ATTEMPTS: usize = 5;
         let mut sent_successfully = false;
 
+        let deadline = Instant::now() + self.stopped_timeout;
         while self.announce.is_stopped_announce_ready() && attempts < MAX_STOPPED_ATTEMPTS {
-            if let Some(result) = self
-                .announce(info_hash, peer_id, downloaded, left, uploaded)
-                .await
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                warn!(
+                    "[BT] Stopped announce budget exhausted after {} attempts",
+                    attempts
+                );
+                break;
+            }
+            let result = match tokio::time::timeout(
+                remaining,
+                self.announce(info_hash, peer_id, downloaded, left, uploaded),
+            )
+            .await
             {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        "[BT] Stopped announce timed out after {:?}",
+                        self.stopped_timeout
+                    );
+                    break;
+                }
+            };
+            if let Some(result) = result {
                 info!(
                     "[BT] Sent stopped event to {} ({} peers in response)",
                     result.tracker_url,
@@ -628,6 +658,50 @@ mod tests {
 
         assert_eq!(announcer.tracker_timeout_secs, 7);
         assert_eq!(announcer.tracker_connect_timeout_secs, 11);
+    }
+
+    #[test]
+    fn stopped_timeout_has_a_clear_default_and_can_be_configured() {
+        let mut announcer = TrackerAnnouncer::new(&[], &None);
+        assert_eq!(
+            announcer.stopped_timeout,
+            Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS)
+        );
+        announcer.set_stopped_timeout(Duration::ZERO);
+        assert_eq!(announcer.stopped_timeout, Duration::from_millis(1));
+    }
+
+    #[tokio::test]
+    async fn stopped_announce_respects_total_shutdown_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local tracker test listener");
+        let address = listener.local_addr().expect("local tracker address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept tracker request");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            use tokio::io::AsyncWriteExt;
+            let _ = socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+
+        let url = format!("http://{address}/announce");
+        let mut announcer = TrackerAnnouncer::new(&[vec![url]], &None);
+        announcer.set_timeouts(Duration::from_secs(10), Duration::from_secs(10));
+        announcer.set_stopped_timeout(Duration::from_millis(100));
+        announcer.announce.set_runtime_halted(true);
+        announcer.announce.announce_list_mut().tiers[0].event = AnnounceEvent::Downloading;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            announcer.announce_stopped(&[0u8; 20], &[1u8; 20], 0, 1, 0),
+        )
+        .await;
+        assert!(result.is_ok(), "stopped announce exceeded shutdown budget");
+        assert!(!announcer.stopped_sent);
+
+        server.await.expect("tracker test server should exit");
     }
 
     #[tokio::test]

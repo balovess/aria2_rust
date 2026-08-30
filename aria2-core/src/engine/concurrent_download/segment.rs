@@ -574,14 +574,19 @@ pub async fn execute(
                 {
                     connection_guard.set(executor.in_flight());
                     active_segs.remove(&seg_idx);
-                    if let Some(progress) = segment_progress.remove(&seg_idx) {
+                    let last_throughput_bps = if let Some(progress) = segment_progress.remove(&seg_idx) {
+                        let throughput = progress.recent_throughput_bps();
                         progress.rollback();
-                    }
+                        throughput
+                    } else {
+                        0
+                    };
                     manager.fail_segment(seg_idx);
                     tracing::warn!(
                         seg_idx,
                         stall_timeout_secs = segment_stall_timeout.as_secs(),
-                        "Reclaimed stalled HTTP Range request"
+                        last_throughput_bps,
+                        "Reclaimed fully stalled HTTP Range request"
                     );
                 }
             }

@@ -3,6 +3,9 @@
 //! This module owns task-facing piece state: selection, availability tracking,
 //! completion accounting, and piece hash verification. Wire representations
 //! such as [`Bitfield`] remain in `aria2-protocol`.
+//!
+//! The module is public for advanced integrations, but the preferred library
+//! interface is the root-level re-exports from this crate.
 
 pub mod manager;
 pub mod peer_tracker;

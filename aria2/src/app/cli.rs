@@ -1691,6 +1691,10 @@ pub struct BitTorrentArgs {
     #[arg(long = "bt-tracker-timeout")]
     pub bt_tracker_timeout: Option<u64>,
 
+    /// Total timeout for stopped tracker announces in seconds
+    #[arg(long = "bt-tracker-stopped-timeout")]
+    pub bt_tracker_stopped_timeout: Option<u64>,
+
     /// DHT message timeout in seconds
     #[arg(long = "dht-message-timeout")]
     pub dht_message_timeout: Option<u64>,

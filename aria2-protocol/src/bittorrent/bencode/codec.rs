@@ -1,5 +1,11 @@
 use std::collections::BTreeMap;
 
+/// Maximum byte-string payload accepted by the bencode decoder.
+///
+/// This bounds allocations for untrusted torrent and extension metadata while
+/// remaining well above normal torrent metadata sizes.
+pub const MAX_BYTE_STRING_LENGTH: usize = 64 * 1024 * 1024;
+
 /// Maximum nesting depth accepted by the decoder.
 ///
 /// Mirrors the C++ `BencodeParser::pushState` guard (`stateStack_.size() >= 50`
@@ -82,6 +88,12 @@ impl BencodeValue {
         let length: usize = len_str
             .parse()
             .map_err(|e| format!("Failed to parse byte string length: {}", e))?;
+        if length > MAX_BYTE_STRING_LENGTH {
+            return Err(format!(
+                "Byte string length {} exceeds maximum {}",
+                length, MAX_BYTE_STRING_LENGTH
+            ));
+        }
         let data_start = colon_pos + 1;
         // `length` comes straight off the wire; a value near `usize::MAX` would
         // wrap on a plain add and make the bounds check below pass, then panic
@@ -452,5 +464,12 @@ mod tests {
             err.contains("overflow") || err.contains("insufficient"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_byte_string_above_allocation_limit_is_rejected() {
+        let input = format!("{}:", MAX_BYTE_STRING_LENGTH + 1);
+        let err = BencodeValue::decode(input.as_bytes()).unwrap_err();
+        assert!(err.contains("exceeds maximum"), "unexpected error: {err}");
     }
 }

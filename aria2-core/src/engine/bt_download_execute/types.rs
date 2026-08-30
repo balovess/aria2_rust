@@ -98,10 +98,11 @@ impl EndgameState {
         peer_key: K,
     ) {
         let key = (piece, offset, len);
-        self.active_duplicate_requests
-            .entry(key)
-            .or_default()
-            .push(peer_key.into());
+        let peer_key = peer_key.into();
+        let peers = self.active_duplicate_requests.entry(key).or_default();
+        if !peers.contains(&peer_key) {
+            peers.push(peer_key);
+        }
     }
 
     /// When a block arrives, find other peers that have pending requests for the same block
@@ -122,6 +123,27 @@ impl EndgameState {
     pub fn remove_request(&mut self, piece: u32, offset: u32, len: u32) {
         let key = (piece, offset, len);
         self.active_duplicate_requests.remove(&key);
+    }
+
+    /// Atomically finish a duplicate request and return only losing peers.
+    ///
+    /// Removing the ownership record before sending cancels prevents a late
+    /// response or a concurrent cleanup path from cancelling the winner or
+    /// retaining stale pending state.
+    pub fn take_cancel_targets<K: Into<PeerKey>>(
+        &mut self,
+        piece: u32,
+        offset: u32,
+        len: u32,
+        winner: K,
+    ) -> Vec<PeerKey> {
+        let winner = winner.into();
+        self.active_duplicate_requests
+            .remove(&(piece, offset, len))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|peer| *peer != winner)
+            .collect()
     }
 
     /// Check if endgame mode is currently active

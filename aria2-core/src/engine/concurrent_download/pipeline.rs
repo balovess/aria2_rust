@@ -624,14 +624,19 @@ pub async fn execute_with_coordinator(
                     let Some((mirror_idx, _, _)) = active.remove(&seg_idx) else {
                         continue;
                     };
-                    if let Some(progress) = segment_progress.remove(&seg_idx) {
+                    let last_throughput_bps = if let Some(progress) = segment_progress.remove(&seg_idx) {
+                        let throughput = progress.recent_throughput_bps();
                         progress.rollback();
-                    }
+                        throughput
+                    } else {
+                        0
+                    };
                     coordinator.on_segment_failed(mirror_idx, seg_idx, 408);
                     tracing::warn!(
                         seg_idx,
                         stall_timeout_secs = segment_stall_timeout.as_secs(),
-                        "Reclaimed stalled HTTP Range request"
+                        last_throughput_bps,
+                        "Reclaimed fully stalled HTTP Range request"
                     );
                 }
             }

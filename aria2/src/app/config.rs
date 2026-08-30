@@ -381,6 +381,7 @@ impl App {
         set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
         set_u64!("bt-tracker-interval", b.bt_tracker_interval);
         set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);
+        set_u64!("bt-tracker-stopped-timeout", b.bt_tracker_stopped_timeout);
         set_u64!("dht-message-timeout", b.dht_message_timeout);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
