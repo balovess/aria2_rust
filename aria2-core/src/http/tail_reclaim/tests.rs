@@ -446,7 +446,7 @@ fn test_safe_tail_requires_range_support_and_matching_content_range() {
     let base = TailReclaimConnectionState {
         range_supported: true,
         response_range: Some((0, 4095, 4096)),
-        written_ranges: vec![0..=1023],
+        written_ranges: std::iter::once(0..=1023).collect(),
         ..Default::default()
     };
 
@@ -483,9 +483,9 @@ fn test_safe_tail_does_not_duplicate_written_verified_or_in_flight_suffix() {
     let state = TailReclaimConnectionState {
         range_supported: true,
         response_range: Some((0, 4095, 4096)),
-        written_ranges: vec![0..=1023],
-        verified_ranges: vec![1500..=1799],
-        in_flight_ranges: vec![2500..=2999],
+        written_ranges: std::iter::once(0..=1023).collect(),
+        verified_ranges: std::iter::once(1500..=1799).collect(),
+        in_flight_ranges: std::iter::once(2500..=2999).collect(),
     };
 
     let result = config
@@ -506,7 +506,7 @@ fn test_safe_tail_rejects_duplicate_tail_and_missing_ownership() {
     let state = TailReclaimConnectionState {
         range_supported: true,
         response_range: Some((0, 4095, 4096)),
-        written_ranges: vec![0..=3599],
+        written_ranges: std::iter::once(0..=3599).collect(),
         ..Default::default()
     };
     assert!(config.calculate_safe_tail(0, 4095, 4096, &state).is_none());
