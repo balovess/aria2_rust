@@ -63,6 +63,8 @@ pub struct App {
     /// The registry keeps the HTTP/FTP-compatible default at 60 seconds, but
     /// an omitted generic timeout must not impose a BT-wide inactivity halt.
     explicit_timeout: bool,
+    /// Whether `--enable-rpc` was explicitly supplied for this invocation.
+    explicit_rpc: bool,
 }
 
 fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
@@ -86,6 +88,7 @@ impl App {
             request_man,
             detected_inputs: Vec::new(),
             explicit_timeout: false,
+            explicit_rpc: false,
         }
     }
 
@@ -136,6 +139,7 @@ impl App {
             return 1;
         }
 
+        self.explicit_rpc = cli.rpc.enable_rpc.is_some();
         if let Err(e) = self.load_cli_args(cli).await {
             eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
@@ -356,9 +360,10 @@ impl App {
         // through RPC startup and the engine lifetime, so retaining it here
         // would starve the first RPC write lock indefinitely.
         let has_restored_tasks = { self.request_man.count() > 0 };
-
-        // In daemon mode, we need RPC enabled to control the daemon
-        let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
+        let configured_rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
+        let has_explicit_download_input = !self.detected_inputs.is_empty();
+        let rpc_enabled =
+            configured_rpc_enabled && (!has_explicit_download_input || self.explicit_rpc);
 
         if !has_restored_tasks && self.detected_inputs.is_empty() {
             if rpc_enabled {

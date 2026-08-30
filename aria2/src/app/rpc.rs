@@ -193,6 +193,12 @@ impl App {
             .get_opt_str("rpc-listen-address")
             .await
             .unwrap_or_else(|| crate::constants::DEFAULT_RPC_HOST.to_string());
+        let listen_all = self.get_opt_bool("rpc-listen-all").await.unwrap_or(false);
+        let host = if listen_all {
+            "0.0.0.0".to_string()
+        } else {
+            host
+        };
 
         // Build authentication config
         let secret = self.get_opt_str("rpc-secret").await.unwrap_or_default();
@@ -302,13 +308,32 @@ impl App {
                 .map_err(|e| format!("Failed to create RPC server: {}", e))?
         };
 
-        // Bind before registering process-wide hooks or spawning the server.
-        // A failed bind must fail CLI startup; otherwise RPC-only mode would
-        // keep the engine alive with no reachable endpoint.
-        let listener = server
-            .bind_listener()
-            .await
-            .map_err(|e| format!("Failed to bind RPC server on {}: {}", server.addr(), e))?;
+        // Keep the user-requested one-shot CLI separate from RPC startup, but
+        // retain aria2_original's address-family fallback when RPC is wanted.
+        let bind_hosts: Vec<&str> = if listen_all {
+            vec!["0.0.0.0", "::"]
+        } else {
+            match host.as_str() {
+                "127.0.0.1" => vec!["127.0.0.1", "::1"],
+                "0.0.0.0" => vec!["0.0.0.0", "::"],
+                _ => vec![host.as_str()],
+            }
+        };
+        let mut listeners = Vec::new();
+        let mut bind_errors = Vec::new();
+        for bind_host in bind_hosts {
+            match server.bind_listener_on(bind_host).await {
+                Ok(listener) => listeners.push(listener),
+                Err(error) => bind_errors.push(format!("{bind_host}: {error}")),
+            }
+        }
+        if listeners.is_empty() {
+            return Err(format!(
+                "Failed to bind RPC server on {}: {}",
+                server.addr(),
+                bind_errors.join("; ")
+            ));
+        }
 
         let rpc_url = server.rpc_url();
         info!("RPC server listening at {}", rpc_url);
@@ -320,9 +345,19 @@ impl App {
         }
 
         // Spawn server in background
+        let server = Arc::new(server);
         let handle = tokio::spawn(async move {
-            if let Err(e) = server.serve_on_listener(listener).await {
-                error!("RPC server error: {}", e);
+            let mut tasks = Vec::with_capacity(listeners.len());
+            for listener in listeners {
+                let server = Arc::clone(&server);
+                tasks.push(tokio::spawn(async move {
+                    if let Err(e) = server.serve_on_listener(listener).await {
+                        error!("RPC server error: {}", e);
+                    }
+                }));
+            }
+            for task in tasks {
+                let _ = task.await;
             }
         });
 
@@ -439,7 +474,7 @@ mod bridge_tests {
 
     #[tokio::test]
     async fn rejects_an_occupied_rpc_port_before_startup() {
-        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        let occupied = tokio::net::TcpListener::bind("127.0.0.2:0")
             .await
             .expect("test listener should bind");
         let port = occupied
@@ -458,6 +493,13 @@ mod bridge_tests {
                 .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
                 .await
                 .expect("rpc-listen-port should be valid");
+            config
+                .set_global_option(
+                    "rpc-listen-address",
+                    OptionValue::Str("127.0.0.2".to_string()),
+                )
+                .await
+                .expect("rpc-listen-address should be valid");
         }
 
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();

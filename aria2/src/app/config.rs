@@ -471,9 +471,13 @@ impl App {
             }
         }
 
-        // Append URIs from --input-file
+        // `input-file` is also the session restore path in this application.
+        // A saved session starts with a URI, so treating it as a URI list here
+        // would add every restored task twice.
         let input_file = self.get_opt_str("input-file").await;
-        if let Some(path) = input_file {
+        if let Some(path) = input_file
+            && !Self::looks_like_session_file(&path)
+        {
             match UriListFile::from_file(&path) {
                 Ok(uri_list) => {
                     for entry in uri_list.entries() {
@@ -504,6 +508,24 @@ impl App {
             })
             .collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(())
+    }
+
+    pub(super) fn looks_like_session_file(path: &str) -> bool {
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+
+        // save-session may use gzip compression; ActiveSessionManager owns
+        // decompression, so the magic header is enough for classification.
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            return true;
+        }
+        let content = String::from_utf8_lossy(&bytes);
+
+        content.lines().any(|line| {
+            let property = line.trim_start();
+            line.starts_with([' ', '\t']) && property.starts_with("GID=")
+        })
     }
 
     /// Load configuration from environment variables.
