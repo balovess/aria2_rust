@@ -132,6 +132,35 @@ The session file is not a URI list. Do not edit it while aria2-rust is
 running. The `.aria2` control files next to downloaded files are separate
 resume metadata.
 
+## Update Checks
+
+aria2-rust performs at most one lightweight release check every seven days in
+an interactive, non-quiet session. The check runs in the background, uses a
+two-second timeout, and does not affect downloads. Failed checks also wait for
+the next interval, so an offline machine is not probed repeatedly.
+
+Disable the automatic check or change the interval:
+
+```text
+aria2c --update-check=false https://example.com/file.zip
+aria2c --update-check-interval-days=14 https://example.com/file.zip
+```
+
+The same settings can be placed in `aria2.conf`:
+
+```ini
+update-check=true
+update-check-interval-days=14
+```
+
+To check immediately, without starting the download engine:
+
+```text
+aria2c check-update
+```
+
+The automatic check is skipped for quiet, daemon, and non-interactive runs.
+
 ## Check, Repair, and Reset
 
 Check a configuration without starting a download engine:

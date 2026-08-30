@@ -398,6 +398,8 @@ impl OptionRegistry {
             // CLI, session, terminal, and process lifecycle settings.
             "conf-path"
             | "no-conf"
+            | "update-check"
+            | "update-check-interval-days"
             | "input-file"
             | "save-session"
             | "save-session-interval"

@@ -7,6 +7,7 @@
 
 use aria2::app::App;
 use aria2::app::cli::{CliArgs, Commands, render_help};
+use aria2::app::update_check;
 use clap::CommandFactory;
 use clap::error::ErrorKind;
 
@@ -39,10 +40,22 @@ async fn main() {
 
     // Handle `completions <SHELL>` subcommand early — print completion script
     // to stdout and exit 0 without starting the download engine.
-    if let Some(Commands::Completions { shell }) = cli.command {
+    if let Some(Commands::Completions { shell }) = &cli.command {
         let mut cmd = CliArgs::command();
         let bin_name = "aria2c";
-        clap_complete::generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+        clap_complete::generate(*shell, &mut cmd, bin_name, &mut std::io::stdout());
+        std::process::exit(0);
+    }
+
+    if matches!(cli.command, Some(Commands::CheckUpdate)) {
+        match update_check::check_now().await {
+            Ok(Some(version)) => println!("A newer aria2-rust release is available: {version}"),
+            Ok(None) => println!("aria2-rust is up to date."),
+            Err(error) => {
+                eprintln!("Update check failed: {error}");
+                std::process::exit(1);
+            }
+        }
         std::process::exit(0);
     }
 

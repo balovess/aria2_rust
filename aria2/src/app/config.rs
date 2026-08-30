@@ -180,6 +180,8 @@ impl App {
         set_bool_true!("dry-run", g.dry_run);
         set_bool_true!("daemon", g.daemon);
         set_path!("pid-file", g.pid_file);
+        set_bool_true!("update-check", g.update_check);
+        set_u64!("update-check-interval-days", g.update_check_interval_days);
         set_bool_true!("allow-piece-length-change", g.allow_piece_length_change);
         set_bool_true!("always-resume", g.always_resume);
         set_bool_true!("check-integrity", g.check_integrity);

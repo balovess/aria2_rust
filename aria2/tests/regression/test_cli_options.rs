@@ -778,6 +778,7 @@ fn regression_completions_subcommand() {
             assert_eq!(shell, clap_complete::Shell::Bash);
         }
         None => panic!("expected Completions subcommand"),
+        Some(Commands::CheckUpdate) => panic!("expected Completions subcommand"),
     }
 }
 
@@ -789,8 +790,22 @@ fn regression_completions_all_shells() {
         match cli.command {
             Some(Commands::Completions { .. }) => {}
             None => panic!("expected Completions subcommand for {}", shell),
+            Some(Commands::CheckUpdate) => {
+                panic!("expected Completions subcommand for {}", shell)
+            }
         }
     }
+}
+
+/// Test: update checks expose an explicit opt-out, interval, and command.
+#[test]
+fn regression_update_check_options() {
+    let cli = parse(&["--update-check=false", "--update-check-interval-days=14"]);
+    assert_eq!(cli.general.update_check, Some(false));
+    assert_eq!(cli.general.update_check_interval_days, Some(14));
+
+    let cli = parse(&["check-update"]);
+    assert!(matches!(cli.command, Some(Commands::CheckUpdate)));
 }
 
 // =========================================================================
@@ -959,6 +974,8 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "save-server-stat-interval",
         "secure-falloc",
         "utp-listen-port",
+        "update-check",
+        "update-check-interval-days",
     ];
 
     let baseline = COMPATIBILITY_OPTION_INVENTORY
@@ -981,7 +998,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        230,
+        232,
         "all-features registry inventory changed"
     );
     assert_eq!(

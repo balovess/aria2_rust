@@ -45,6 +45,7 @@ mod config_maintenance;
 mod engine;
 mod metadata;
 pub mod rpc_backend;
+pub mod update_check;
 // Public so integration tests can exercise the core → RPC notification bridge
 // (`rpc::CoreEventBridge`) without spinning up a real RPC server.
 pub mod rpc;
@@ -299,6 +300,20 @@ impl App {
 
         let quiet = self.get_opt_bool("quiet").await.unwrap_or(false);
         let output_to_stderr = self.get_opt_bool("stderr").await.unwrap_or(false);
+
+        if !quiet
+            && !daemon_mode
+            && std::io::stdout().is_terminal()
+            && self.get_opt_bool("update-check").await.unwrap_or(true)
+        {
+            let interval_days = self
+                .get_opt_i64("update-check-interval-days")
+                .await
+                .and_then(|days| u64::try_from(days).ok())
+                .unwrap_or(update_check::DEFAULT_INTERVAL_DAYS);
+            update_check::spawn(interval_days);
+        }
+
         if !quiet {
             self.print_banner(output_to_stderr);
         }

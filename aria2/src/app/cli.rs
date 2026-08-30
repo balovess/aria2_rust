@@ -429,6 +429,8 @@ const BASIC_HELP_OPTIONS: &[&str] = &[
     "timeout",
     "torrent-file",
     "metalink-file",
+    "update-check",
+    "update-check-interval-days",
     "http-passwd",
     "http-user",
     "user-agent",
@@ -443,6 +445,9 @@ pub enum Commands {
         /// Shell type (bash, zsh, fish, elvish, powershell)
         shell: clap_complete::Shell,
     },
+
+    /// Check for a newer aria2-rust release and exit
+    CheckUpdate,
 }
 
 // =========================================================================
@@ -494,6 +499,20 @@ pub struct GeneralArgs {
         value_name = "true|false"
     )]
     pub no_conf: Option<bool>,
+
+    /// Enable the low-frequency background update check
+    #[arg(
+        long = "update-check",
+        num_args(0..=1),
+        require_equals = true,
+        default_missing_value = "true",
+        value_name = "true|false"
+    )]
+    pub update_check: Option<bool>,
+
+    /// Minimum number of days between update checks (1-365)
+    #[arg(long = "update-check-interval-days", value_name = "DAYS")]
+    pub update_check_interval_days: Option<u64>,
 
     /// Validate configuration and exit without starting downloads
     #[arg(
