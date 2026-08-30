@@ -182,6 +182,7 @@ impl WrDiskCache {
                         let entry_size = entry.size_bytes();
                         self.total_cached_bytes
                             .fetch_sub(entry_size, Ordering::Relaxed);
+                        self.clean_eviction_count.fetch_add(1, Ordering::Relaxed);
                         evicted_bytes += entry_size;
                         evicted_count += 1;
 

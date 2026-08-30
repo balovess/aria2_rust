@@ -83,6 +83,36 @@ async fn test_flush_to_persists_and_marks_only_successful_snapshot_clean() {
     assert_eq!(&data[7..13], b"cached");
 }
 
+#[tokio::test]
+async fn test_stats_track_hits_flushes_and_safe_eviction() {
+    let cache = make_small_cache(100);
+    cache
+        .write(0, bytes::Bytes::from_static(b"abcd"))
+        .await
+        .unwrap();
+
+    assert!(cache.read(0, 4).await.unwrap().is_some());
+    assert!(cache.read(10, 1).await.unwrap().is_none());
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stats.bin");
+    let mut writer = crate::filesystem::disk_writer::CachedDiskWriter::new(&path, None, None);
+    writer.open().await.unwrap();
+    cache.flush_to(&mut writer).await.unwrap();
+
+    let stats = cache.stats();
+    assert_eq!(stats.cache_hits, 1);
+    assert_eq!(stats.cache_misses, 1);
+    assert_eq!(stats.flush_count, 1);
+    assert_eq!(stats.flush_pending_write_count, 1);
+    assert_eq!(stats.flush_write_count, 1);
+    assert_eq!(stats.flush_write_bytes, 4);
+    assert_eq!(stats.clean_eviction_count, 0);
+    assert_eq!(stats.dirty_eviction_count, 0);
+
+    writer.close().await.unwrap();
+}
+
 #[test]
 fn test_coalesce_flush_entries_only_merges_contiguous_ranges() {
     let adjacent = vec![

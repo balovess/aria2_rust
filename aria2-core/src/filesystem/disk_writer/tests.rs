@@ -516,6 +516,34 @@ async fn test_large_bytes_write_flushes_pending_cache_before_bypass() {
     assert_eq!(&content[..5], b"CCCCC");
 }
 
+#[tokio::test]
+async fn test_cached_writer_stats_separate_cache_and_direct_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stats.bin");
+    let large_len = 1024 * 1024;
+
+    let mut writer = CachedDiskWriter::new(&path, Some(large_len as u64), Some(4));
+    writer.open().await.unwrap();
+    writer
+        .write_bytes_at(0, bytes::Bytes::from_static(b"small"))
+        .await
+        .unwrap();
+    writer
+        .write_bytes_at(0, bytes::Bytes::from(vec![b'X'; large_len]))
+        .await
+        .unwrap();
+
+    let stats = writer.stats();
+    assert_eq!(stats.cache.flush_pending_write_count, 1);
+    assert_eq!(stats.cache.flush_write_count, 1);
+    assert_eq!(stats.cache.flush_write_bytes, 5);
+    assert_eq!(stats.direct_write_count, 1);
+    assert_eq!(stats.direct_write_bytes, large_len as u64);
+    assert_eq!(stats.cache.flush_write_count + stats.direct_write_count, 2);
+
+    writer.close().await.unwrap();
+}
+
 /// Sequential DefaultDiskWriter is the control: appending out of order
 /// corrupts the file — this documents why BT must not use it.
 #[tokio::test]

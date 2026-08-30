@@ -28,12 +28,16 @@ impl WrDiskCache {
 
         // Start at the entry containing (or immediately before) the request.
         let Some((&entry_offset, entry)) = entries.range(..=offset).next_back() else {
+            self.cache_misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(None);
         };
         let entry_end = entry_offset + entry.data.len() as u64;
         if entry_end >= end {
             let start = (offset - entry_offset) as usize;
             let slice_end = start + length as usize;
+            self.cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return Ok(Some(entry.data.slice(start..slice_end)));
         }
 
@@ -47,6 +51,8 @@ impl WrDiskCache {
                 continue;
             }
             if fragment_offset > cursor {
+                self.cache_misses
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(None);
             }
 
@@ -55,10 +61,14 @@ impl WrDiskCache {
             result.extend_from_slice(&fragment.data[copy_start..copy_end]);
             cursor = end.min(fragment_end);
             if cursor == end {
+                self.cache_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return Ok(Some(bytes::Bytes::from(result)));
             }
         }
 
+        self.cache_misses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(None)
     }
 

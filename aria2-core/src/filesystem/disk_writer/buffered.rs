@@ -10,13 +10,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::debug;
 
-use super::super::disk_cache::WrDiskCache;
+use super::super::disk_cache::{DiskCacheStats, WrDiskCache};
 use super::super::mmap_disk_writer::MmapDiskWriter;
 use super::super::positioned_disk_writer::PositionedDiskWriter;
 use super::SeekableDiskWriter;
 
 /// Fixed threshold: writes >= 1MB bypass the cache and go directly to disk.
 const DIRECT_WRITE_THRESHOLD: usize = 1024 * 1024;
+
+/// Write counters for one [`CachedDiskWriter`] instance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CachedDiskWriterStats {
+    pub cache: DiskCacheStats,
+    pub direct_write_count: u64,
+    pub direct_write_bytes: u64,
+}
 
 pub struct CachedDiskWriter {
     /// The underlying positioned/mmap writer. Held as a trait object so the
@@ -31,6 +39,8 @@ pub struct CachedDiskWriter {
     opened: bool,
     // Rate limiter for write throttling
     rate_limiter: Option<Arc<crate::rate_limiter::RateLimiter>>,
+    direct_write_count: u64,
+    direct_write_bytes: u64,
 }
 
 impl CachedDiskWriter {
@@ -88,6 +98,8 @@ impl CachedDiskWriter {
             total_size,
             opened: false,
             rate_limiter: None,
+            direct_write_count: 0,
+            direct_write_bytes: 0,
         }
     }
 
@@ -106,6 +118,23 @@ impl CachedDiskWriter {
 
     pub fn is_opened(&self) -> bool {
         self.opened
+    }
+
+    /// Return cache and direct-write counters for this writer.
+    pub fn stats(&self) -> CachedDiskWriterStats {
+        CachedDiskWriterStats {
+            cache: self
+                .cache
+                .as_ref()
+                .map_or_else(DiskCacheStats::default, |cache| cache.stats()),
+            direct_write_count: self.direct_write_count,
+            direct_write_bytes: self.direct_write_bytes,
+        }
+    }
+
+    fn record_direct_write(&mut self, bytes: usize) {
+        self.direct_write_count += 1;
+        self.direct_write_bytes += bytes as u64;
     }
 }
 
@@ -142,6 +171,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
             // overwrite this newer direct write with stale bytes.
             self.flush_cache().await?;
             self.writer.write_at(offset, data).await?;
+            self.record_direct_write(data.len());
         } else if let Some(ref cache) = self.cache {
             // Small writes go to the write-back cache.
             // copy_from_slice is unavoidable here: we only have a &[u8],
@@ -152,6 +182,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
         } else {
             // No cache configured - write directly.
             self.writer.write_at(offset, data).await?;
+            self.record_direct_write(data.len());
         }
 
         Ok(())
@@ -162,6 +193,7 @@ impl SeekableDiskWriter for CachedDiskWriter {
     /// Bytes is passed by reference to pwrite (no copy).
     async fn write_bytes_at(&mut self, offset: u64, data: bytes::Bytes) -> Result<()> {
         self.open().await?;
+        let data_len = data.len();
 
         // Rate limiting - non-blocking try_acquire
         if let Some(ref limiter) = self.rate_limiter
@@ -179,12 +211,14 @@ impl SeekableDiskWriter for CachedDiskWriter {
             // overwrite this newer direct write with stale bytes.
             self.flush_cache().await?;
             self.writer.write_bytes_at(offset, data).await?;
+            self.record_direct_write(data_len);
         } else if let Some(ref cache) = self.cache {
             // Small writes go to the cache - zero-copy (move Bytes).
             cache.write(offset, data).await?;
         } else {
             // No cache configured - zero-copy to pwrite.
             self.writer.write_bytes_at(offset, data).await?;
+            self.record_direct_write(data_len);
         }
 
         Ok(())

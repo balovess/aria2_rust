@@ -10,6 +10,19 @@ use crate::error::Result;
 const DEFAULT_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COALESCED_FLUSH_BYTES: usize = 1024 * 1024;
 
+/// Runtime counters for observing write-back cache behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskCacheStats {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub flush_count: u64,
+    pub flush_pending_write_count: u64,
+    pub flush_write_count: u64,
+    pub flush_write_bytes: u64,
+    pub clean_eviction_count: u64,
+    pub dirty_eviction_count: u64,
+}
+
 fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
     let mut coalesced: Vec<(u64, BytesMut)> = Vec::new();
     for (offset, data, _) in pending {
@@ -125,6 +138,14 @@ pub struct WrDiskCache {
     pub(crate) total_cached_bytes: AtomicUsize,
     /// Monotonic counter assigning insertion sequence numbers for LRU ordering.
     pub(crate) next_seq: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    flush_count: AtomicU64,
+    flush_pending_write_count: AtomicU64,
+    flush_write_count: AtomicU64,
+    flush_write_bytes: AtomicU64,
+    clean_eviction_count: AtomicU64,
+    dirty_eviction_count: AtomicU64,
 }
 
 impl Default for WrDiskCache {
@@ -157,6 +178,14 @@ impl WrDiskCache {
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            flush_count: AtomicU64::new(0),
+            flush_pending_write_count: AtomicU64::new(0),
+            flush_write_count: AtomicU64::new(0),
+            flush_write_bytes: AtomicU64::new(0),
+            clean_eviction_count: AtomicU64::new(0),
+            dirty_eviction_count: AtomicU64::new(0),
         }
     }
 
@@ -178,6 +207,14 @@ impl WrDiskCache {
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            flush_count: AtomicU64::new(0),
+            flush_pending_write_count: AtomicU64::new(0),
+            flush_write_count: AtomicU64::new(0),
+            flush_write_bytes: AtomicU64::new(0),
+            clean_eviction_count: AtomicU64::new(0),
+            dirty_eviction_count: AtomicU64::new(0),
         }
     }
 
@@ -219,6 +256,20 @@ impl WrDiskCache {
             .count()
     }
 
+    /// Return a point-in-time snapshot of cache and write-back counters.
+    pub fn stats(&self) -> DiskCacheStats {
+        DiskCacheStats {
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            flush_count: self.flush_count.load(Ordering::Relaxed),
+            flush_pending_write_count: self.flush_pending_write_count.load(Ordering::Relaxed),
+            flush_write_count: self.flush_write_count.load(Ordering::Relaxed),
+            flush_write_bytes: self.flush_write_bytes.load(Ordering::Relaxed),
+            clean_eviction_count: self.clean_eviction_count.load(Ordering::Relaxed),
+            dirty_eviction_count: self.dirty_eviction_count.load(Ordering::Relaxed),
+        }
+    }
+
     /// Flush dirty entries through a caller-provided positioned writer.
     ///
     /// Entries are marked clean only after the writer reports success, so a
@@ -241,10 +292,17 @@ impl WrDiskCache {
         // blocking-pool and syscall overhead. Coalesce only contiguous ranges
         // and cap the merged buffer so sparse/out-of-order writes retain their
         // original semantics and memory remains bounded.
+        self.flush_pending_write_count
+            .fetch_add(pending.len() as u64, Ordering::Relaxed);
         for (offset, data) in coalesce_flush_entries(&pending) {
+            let data_len = data.len() as u64;
             writer.write_bytes_at(offset, data).await?;
+            self.flush_write_count.fetch_add(1, Ordering::Relaxed);
+            self.flush_write_bytes
+                .fetch_add(data_len, Ordering::Relaxed);
         }
         writer.flush().await?;
+        self.flush_count.fetch_add(1, Ordering::Relaxed);
 
         let mut entries = self.entries.lock().await;
         for (offset, _, seq) in pending {
