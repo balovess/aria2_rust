@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version = "0.3.4"
+version = "0.3.5"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -187,5 +187,10 @@ harness = false
 # F5: PieceStatMan and BitfieldMan full-piece scans and temporary bitfield queries.
 [[bench]]
 name = "segment_scan_bench"
+harness = false
+required-features = ["bittorrent"]
+
+[[bench]]
+name = "sequential_picker_bench"
 harness = false
 required-features = ["bittorrent"]

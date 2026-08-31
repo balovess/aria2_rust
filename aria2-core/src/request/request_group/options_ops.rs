@@ -263,12 +263,16 @@ fn apply_rpc_option(
             opts.bt_request_peer_speed_limit = rpc_option_size(value, key)?;
             Ok(true)
         }
-        "bt-tracker-connect-timeout" | "bt-tracker-interval" | "bt-tracker-timeout" => {
+        "bt-tracker-connect-timeout"
+        | "bt-tracker-interval"
+        | "bt-tracker-timeout"
+        | "bt-tracker-stopped-timeout" => {
             let value = rpc_option_u64(value, key)?;
             match key {
                 "bt-tracker-connect-timeout" => opts.bt_tracker_connect_timeout = value,
                 "bt-tracker-interval" => opts.bt_tracker_interval = value,
                 "bt-tracker-timeout" => opts.bt_tracker_timeout = value,
+                "bt-tracker-stopped-timeout" => opts.bt_tracker_stopped_timeout = value,
                 _ => unreachable!("tracker duration option handled above"),
             }
             Ok(true)

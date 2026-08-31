@@ -137,9 +137,15 @@ impl BtCheckpoint {
                 "BitTorrent checkpoint piece length mismatch".into(),
             ));
         }
-        control_file.set_bitfield(bitfield.to_vec());
-        control_file.update_completed_length(completed_length.min(self.total_length));
-        control_file.save().await
+        // Keep the in-memory snapshot unchanged until the durable replacement
+        // succeeds. A failed disk write must not make this instance appear
+        // newer than the checkpoint that can actually be restored.
+        let mut next = control_file.clone();
+        next.set_bitfield(bitfield.to_vec());
+        next.update_completed_length(completed_length.min(self.total_length));
+        next.save().await?;
+        *control_file = next;
+        Ok(())
     }
 
     pub(crate) async fn save_verified_pieces<I>(
@@ -323,5 +329,67 @@ mod tests {
             .unwrap();
         assert_eq!(restored.bitfield(), Some([0u8].as_slice()));
         assert_eq!(restored.completed_length(), 0);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_ignores_stale_temporary_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        std::fs::write(&output, [0u8; 8]).unwrap();
+        let info_hash = [0x77; 20];
+        let path = ControlFile::control_path_for(&output);
+
+        let mut checkpoint = BtCheckpoint::open(&output, true, 8, 4, 2, info_hash)
+            .await
+            .unwrap();
+        checkpoint.save(&[0x80], 4).await.unwrap();
+        tokio::fs::write(path.with_extension("aria2.tmp"), b"truncated")
+            .await
+            .unwrap();
+
+        let restored = BtCheckpoint::open(&output, true, 8, 4, 2, info_hash)
+            .await
+            .unwrap();
+        assert_eq!(restored.bitfield(), Some([0x80].as_slice()));
+        assert!(path.with_extension("aria2.tmp").exists());
+    }
+
+    #[tokio::test]
+    async fn checkpoint_discards_truncated_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        std::fs::write(&output, [0u8; 8]).unwrap();
+        let info_hash = [0x88; 20];
+        let path = ControlFile::control_path_for(&output);
+        tokio::fs::write(&path, b"A2CF\x01\x00").await.unwrap();
+
+        let restored = BtCheckpoint::open(&output, true, 8, 4, 2, info_hash)
+            .await
+            .unwrap();
+        assert_eq!(restored.bitfield(), Some([0u8].as_slice()));
+        assert!(
+            !path.exists(),
+            "stale truncated checkpoint should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_save_failure_does_not_advance_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("payload.bin");
+        std::fs::write(&output, [0u8; 8]).unwrap();
+        let info_hash = [0x99; 20];
+        let path = ControlFile::control_path_for(&output);
+        let mut checkpoint = BtCheckpoint::open(&output, true, 8, 4, 2, info_hash)
+            .await
+            .unwrap();
+        checkpoint.save(&[0x80], 4).await.unwrap();
+
+        std::fs::remove_file(&output).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(dir.path()).unwrap();
+        assert!(checkpoint.save(&[0xC0], 8).await.is_err());
+        assert_eq!(checkpoint.bitfield(), Some([0x80].as_slice()));
+        assert_eq!(checkpoint.completed_length(), 4);
     }
 }

@@ -565,7 +565,18 @@ async fn application_rpc_does_not_enable_cors_by_default() {
 
     let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let server = app
-        .start_rpc_server(app.request_man.clone(), cmd_tx)
+        .start_rpc_server(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: false,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: true,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            app.request_man.clone(),
+            cmd_tx,
+        )
         .await
         .expect("RPC server should start");
 
@@ -601,6 +612,8 @@ async fn application_run_fails_when_rpc_bind_fails() {
         "aria2c",
         "--no-conf=true",
         "--enable-rpc=true",
+        "--rpc-listen-address=127.0.0.1",
+        "--disable-ipv6=true",
         "--quiet=true",
         port_argument.as_str(),
     ])
@@ -612,6 +625,77 @@ async fn application_run_fails_when_rpc_bind_fails() {
         .expect("startup must fail instead of hanging after RPC bind failure");
 
     assert_eq!(result, 1);
+}
+
+#[tokio::test]
+async fn application_run_ignores_config_rpc_for_cli_download() {
+    let occupied_rpc = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let rpc_port = occupied_rpc
+        .local_addr()
+        .expect("test listener should expose an address")
+        .port();
+
+    let download_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("download listener should bind");
+    let download_port = download_listener
+        .local_addr()
+        .expect("download listener should expose an address")
+        .port();
+    let download_server = tokio::spawn(async move {
+        let (mut stream, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            download_listener.accept(),
+        )
+        .await
+        .expect("download request should arrive")
+        .expect("download listener should accept");
+        let mut request = [0u8; 2048];
+        let bytes_read = stream
+            .read(&mut request)
+            .await
+            .expect("download request should be readable");
+        assert!(bytes_read > 0, "download request should not be empty");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ntest")
+            .await
+            .expect("download response should be writable");
+    });
+
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    let download_uri = format!("http://127.0.0.1:{download_port}/file");
+    tokio::fs::write(
+        &config_path,
+        format!(
+            "enable-rpc=true\ndisable-ipv6=true\nrpc-listen-port={rpc_port}\nstop=1\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=1\n",
+            temp_dir.path().display()
+        ),
+    )
+    .await
+    .expect("test config should be written");
+    let config_argument = config_path.to_str().expect("config path is UTF-8");
+    let cli = CliArgs::try_parse_from([
+        "aria2c",
+        "--conf-path",
+        config_argument,
+        download_uri.as_str(),
+    ])
+    .expect("download CLI arguments should parse");
+
+    let mut app = App::new();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(2), app.run(cli))
+        .await
+        .expect("download should not hang");
+    download_server
+        .await
+        .expect("download server task should finish");
+    assert_eq!(
+        result, 0,
+        "a CLI download must ignore enable-rpc from the shared config"
+    );
 }
 
 #[tokio::test]
@@ -694,6 +778,68 @@ async fn test_torrent_and_metalink_file_options_enter_input_detection() {
 }
 
 #[tokio::test]
+async fn test_input_file_session_is_not_added_as_a_duplicate_uri_input() {
+    let temp_dir = TempDir::new().expect("temporary session directory");
+    let session_path = temp_dir.path().join("aria2.session");
+    let entry = aria2_core::session::session_entry::SessionEntry::new(
+        0x42,
+        vec!["https://example.test/file.bin".to_string()],
+    );
+    tokio::fs::write(&session_path, entry.serialize())
+        .await
+        .expect("session file should be written");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2c",
+        "--input-file",
+        session_path.to_str().expect("session path is UTF-8"),
+    ])
+    .expect("session CLI arguments should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("session input should load");
+
+    assert!(
+        app.detected_inputs.is_empty(),
+        "a session file must not also become a new URI download"
+    );
+    assert_eq!(
+        app.restore_session().await.expect("session should restore"),
+        1
+    );
+    assert_eq!(app.request_man.list_groups().len(), 1);
+}
+
+#[tokio::test]
+async fn test_input_file_uri_list_remains_a_download_input() {
+    let temp_dir = TempDir::new().expect("temporary URI list directory");
+    let input_path = temp_dir.path().join("urls.txt");
+    tokio::fs::write(&input_path, "https://example.test/file.bin\n")
+        .await
+        .expect("URI list should be written");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2c",
+        "--input-file",
+        input_path.to_str().expect("URI list path is UTF-8"),
+    ])
+    .expect("URI list arguments should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("URI list input should load");
+
+    assert_eq!(app.detected_inputs.len(), 1);
+    assert_eq!(
+        app.restore_session()
+            .await
+            .expect("URI list is not a session"),
+        0
+    );
+}
+
+#[tokio::test]
 async fn test_no_conf_skips_explicit_config_file() {
     let temp_dir = TempDir::new().expect("temporary config directory");
     let config_path = temp_dir.path().join("aria2.conf");
@@ -707,6 +853,52 @@ async fn test_no_conf_skips_explicit_config_file() {
         .expect("--no-conf should not attempt to read the file");
 
     assert_eq!(app.get_opt_i64("split").await, Some(16));
+}
+
+#[tokio::test]
+async fn test_config_file_error_reports_invalid_option() {
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, "split=not-a-number\n")
+        .await
+        .expect("write config file");
+
+    let mut app = App::new();
+    let error = app
+        .load_startup_config(false, config_path.to_str())
+        .await
+        .expect_err("invalid config value should fail startup");
+
+    assert!(
+        error.contains("split"),
+        "error should name the option: {error}"
+    );
+    assert!(
+        error.contains("invalid integer"),
+        "error should explain the invalid value: {error}"
+    );
+    assert!(
+        error.contains(":1:"),
+        "error should include the line: {error}"
+    );
+    assert!(
+        error.contains("split=not-a-number"),
+        "error should include the source line: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_check_config_validates_without_starting_downloads() {
+    let temp_dir = TempDir::new().expect("temporary config directory");
+    let config_path = temp_dir.path().join("aria2.conf");
+    tokio::fs::write(&config_path, "split=4\nfile-allocation=none\n")
+        .await
+        .expect("write config file");
+
+    let mut app = App::new();
+    app.check_config(false, config_path.to_str())
+        .await
+        .expect("valid config should pass checking");
 }
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -1000,7 +1192,17 @@ async fn test_process_restart_executes_restored_metalink_graph() {
     );
 
     restarted
-        .run_engine(false, false)
+        .run_engine(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: true,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: false,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            false,
+        )
         .await
         .expect("restored Metalink graph should execute to completion");
     metadata_server
@@ -1148,7 +1350,17 @@ async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() 
     );
 
     restarted
-        .run_engine(false, false)
+        .run_engine(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: true,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: false,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            false,
+        )
         .await
         .expect("restored nonzero Metalink graph should execute to completion");
     metadata_server
@@ -1304,7 +1516,17 @@ async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
     );
 
     restarted
-        .run_engine(false, false)
+        .run_engine(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: true,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: false,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            false,
+        )
         .await
         .expect("unpaused restored Metalink graph should execute to completion");
     metadata_server

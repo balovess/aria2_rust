@@ -327,6 +327,12 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
             opts.bt_tracker_timeout.to_string(),
         );
     }
+    if opts.bt_tracker_stopped_timeout != crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS {
+        map.insert(
+            "bt-tracker-stopped-timeout".to_string(),
+            opts.bt_tracker_stopped_timeout.to_string(),
+        );
+    }
     if !opts.enable_peer_exchange {
         map.insert("enable-peer-exchange".to_string(), "false".to_string());
     }

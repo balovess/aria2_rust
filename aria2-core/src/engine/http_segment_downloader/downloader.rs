@@ -782,6 +782,92 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), server_handle).await;
     }
 
+    #[tokio::test]
+    async fn test_download_range_rejects_server_that_ignores_range() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut request = [0u8; 2048];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read should succeed");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\n0123456789",
+                )
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{addr}/no-range");
+
+        let result = dl.download_range(&url, 5, 5, None, &[], None, 10).await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Recoverable(RecoverableError::CannotResume))
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), server_handle)
+            .await
+            .expect("fixture should finish")
+            .expect("fixture task should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_download_range_rejects_mismatched_content_range() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind should succeed");
+        let addr = listener.local_addr().expect("local_addr should succeed");
+        let server_handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept should succeed");
+            let mut request = [0u8; 2048];
+            let _ = stream
+                .read(&mut request)
+                .await
+                .expect("read should succeed");
+            stream
+                .write_all(
+                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-4/10\r\nContent-Length: 5\r\nConnection: close\r\n\r\n01234",
+                )
+                .await
+                .expect("write should succeed");
+        });
+
+        ensure_rustls_provider();
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("client build should succeed");
+        let dl = HttpSegmentDownloader::new(&client);
+        let url = format!("http://{addr}/wrong-range");
+
+        let result = dl.download_range(&url, 5, 5, None, &[], None, 10).await;
+        assert!(matches!(
+            result,
+            Err(Aria2Error::Recoverable(RecoverableError::CannotResume))
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), server_handle)
+            .await
+            .expect("fixture should finish")
+            .expect("fixture task should succeed");
+    }
+
     #[test]
     fn test_classify_range_status_keeps_terminal_and_retryable_http_errors_distinct() {
         assert!(matches!(

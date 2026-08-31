@@ -589,6 +589,73 @@ fn regression_help_rendering_filters_options() {
     assert!(!http_help.contains("--rpc-listen-port"));
 }
 
+#[test]
+fn regression_basic_help_includes_copyable_examples() {
+    let help = render_help(&HelpRequest::Basic);
+
+    assert!(help.contains("https://example.com/file.zip"));
+    assert!(help.contains("C:\\Downloads"));
+    assert!(help.contains("--option=true"));
+}
+
+#[test]
+fn regression_help_shows_registry_defaults_without_changing_cli_merge() {
+    let help = render_help(&HelpRequest::Basic);
+
+    assert!(help.contains("--dir") && help.contains("[default: .]"));
+    assert!(help.contains("--split") && help.contains("[default: 16]"));
+    assert!(help.contains("--quiet") && help.contains("[default: false]"));
+
+    let cli = parse(&["--split=4"]);
+    assert_eq!(cli.http_ftp.split, Some(4));
+}
+
+#[test]
+fn regression_help_shows_enum_values() {
+    let help = render_help(&HelpRequest::Filter("file-allocation".to_string()));
+
+    for value in ["none", "prealloc", "falloc", "trunc", "mmap"] {
+        assert!(
+            help.contains(value),
+            "help should list file-allocation value {value}: {help}"
+        );
+    }
+    assert!(help.contains("default: prealloc"));
+}
+
+#[test]
+fn regression_help_shows_ranges_and_units() {
+    let timeout_help = render_help(&HelpRequest::Filter("timeout".to_string()));
+    assert!(timeout_help.contains("unit: seconds"));
+    assert!(timeout_help.contains("range: >=0"));
+
+    let cache_help = render_help(&HelpRequest::Filter("disk-cache".to_string()));
+    assert!(cache_help.contains("unit: bytes"));
+    assert!(cache_help.contains("K/M/G/T suffixes"));
+}
+
+#[test]
+fn regression_basic_and_advanced_help_filters_keep_their_groups() {
+    let basic_help = render_help(&HelpRequest::Filter("#basic".to_string()));
+    assert!(basic_help.contains("--split"));
+    assert!(!basic_help.contains("--rpc-listen-port"));
+    assert!(!basic_help.contains("--disk-cache"));
+
+    let advanced_help = render_help(&HelpRequest::Filter("#advanced".to_string()));
+    assert!(advanced_help.contains("--disk-cache"));
+    assert!(!advanced_help.contains("--split"));
+    assert!(!advanced_help.contains("--rpc-listen-port"));
+}
+
+#[test]
+fn regression_check_config_is_an_optional_boolean_action() {
+    let cli = parse(&["--check-config"]);
+    assert_eq!(cli.general.check_config, Some(true));
+
+    let cli = parse(&["--check-config=false"]);
+    assert_eq!(cli.general.check_config, Some(false));
+}
+
 /// Test: original public options added from the registry remain reachable
 /// through the CLI, including the original short file selectors.
 #[test]
@@ -711,6 +778,7 @@ fn regression_completions_subcommand() {
             assert_eq!(shell, clap_complete::Shell::Bash);
         }
         None => panic!("expected Completions subcommand"),
+        Some(Commands::CheckUpdate) => panic!("expected Completions subcommand"),
     }
 }
 
@@ -722,8 +790,22 @@ fn regression_completions_all_shells() {
         match cli.command {
             Some(Commands::Completions { .. }) => {}
             None => panic!("expected Completions subcommand for {}", shell),
+            Some(Commands::CheckUpdate) => {
+                panic!("expected Completions subcommand for {}", shell)
+            }
         }
     }
+}
+
+/// Test: update checks expose an explicit opt-out, interval, and command.
+#[test]
+fn regression_update_check_options() {
+    let cli = parse(&["--update-check=false", "--update-check-interval-days=14"]);
+    assert_eq!(cli.general.update_check, Some(false));
+    assert_eq!(cli.general.update_check_interval_days, Some(14));
+
+    let cli = parse(&["check-update"]);
+    assert!(matches!(cli.command, Some(Commands::CheckUpdate)));
 }
 
 // =========================================================================
@@ -876,6 +958,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-enable-web-seed",
         "bt-peer-blocklist",
         "bt-tracker-source",
+        "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
         "enable-public-trackers",
         "enable-utp",
@@ -892,6 +975,8 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "save-server-stat-interval",
         "secure-falloc",
         "utp-listen-port",
+        "update-check",
+        "update-check-interval-days",
     ];
 
     let baseline = COMPATIBILITY_OPTION_INVENTORY
@@ -914,7 +999,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        230,
+        233,
         "all-features registry inventory changed"
     );
     assert_eq!(

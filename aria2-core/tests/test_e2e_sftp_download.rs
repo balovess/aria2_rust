@@ -568,7 +568,7 @@ async fn e2e_engine_sftp_pause_unpause_preserves_control_file() {
         vec![uri],
         options.clone(),
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -693,7 +693,7 @@ async fn e2e_engine_sftp_remove_preserves_partial_control_file() {
         vec![uri],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -750,7 +750,7 @@ async fn e2e_engine_sftp_force_remove_preserves_partial_control_file() {
         vec![uri],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -811,7 +811,7 @@ async fn e2e_engine_sftp_shutdown_halt_preserves_resume_state() {
         vec![uri],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -882,7 +882,7 @@ async fn e2e_engine_sftp_force_halt_preserves_resume_state() {
         vec![uri],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx

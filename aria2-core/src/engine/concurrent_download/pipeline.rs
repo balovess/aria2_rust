@@ -22,6 +22,7 @@ use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
 use crate::filesystem::resume_helper::ResumeState;
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -97,6 +98,16 @@ pub async fn execute_with_coordinator(
         disk_cache,
         use_mmap,
     );
+    let limiter = dl
+        .group
+        .recover()
+        .options()
+        .max_download_limit
+        .filter(|&rate| rate > 0)
+        .map(|rate| RateLimiter::new(&RateLimiterConfig::new(Some(rate), None)));
+    if let Some(ref limiter) = limiter {
+        dl.group.recover().set_rate_limiter(limiter.clone());
+    }
 
     let num_pieces = coordinator.num_segments().max(1);
     let ctrl_path = ControlFile::control_path_for(&dl.output_path);
@@ -276,7 +287,7 @@ pub async fn execute_with_coordinator(
                 executor,
                 &mut write_rx,
                 &mut writer,
-                None,
+                limiter.as_ref(),
                 dl.global_limiter.as_ref(),
                 &mut ctrl_file,
                 coordinator.completed_bytes(),
@@ -353,6 +364,12 @@ pub async fn execute_with_coordinator(
         }
 
         while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+            super::acquire_download_tokens(
+                limiter.as_ref(),
+                dl.global_limiter.as_ref(),
+                data.len(),
+            )
+            .await;
             writer.write_bytes_at(offset, data).await.map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                     "Write failed: {}",
@@ -478,7 +495,7 @@ pub async fn execute_with_coordinator(
                                 executor,
                                 &mut write_rx,
                                 &mut writer,
-                                None,
+                                limiter.as_ref(),
                                 dl.global_limiter.as_ref(),
                                 &mut ctrl_file,
                                 coordinator.completed_bytes(),
@@ -532,7 +549,7 @@ pub async fn execute_with_coordinator(
                                     executor,
                                     &mut write_rx,
                                     &mut writer,
-                                    None,
+                                    limiter.as_ref(),
                                     dl.global_limiter.as_ref(),
                                     &mut ctrl_file,
                                     coordinator.completed_bytes(),
@@ -574,6 +591,12 @@ pub async fn execute_with_coordinator(
                 .await?;
             }
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
+                super::acquire_download_tokens(
+                    limiter.as_ref(),
+                    dl.global_limiter.as_ref(),
+                    data.len(),
+                )
+                .await;
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Write failed: {}",
@@ -601,7 +624,7 @@ pub async fn execute_with_coordinator(
                         executor,
                         &mut write_rx,
                         &mut writer,
-                        None,
+                        limiter.as_ref(),
                         dl.global_limiter.as_ref(),
                         &mut ctrl_file,
                         coordinator.completed_bytes(),
@@ -624,14 +647,19 @@ pub async fn execute_with_coordinator(
                     let Some((mirror_idx, _, _)) = active.remove(&seg_idx) else {
                         continue;
                     };
-                    if let Some(progress) = segment_progress.remove(&seg_idx) {
+                    let last_throughput_bps = if let Some(progress) = segment_progress.remove(&seg_idx) {
+                        let throughput = progress.recent_throughput_bps();
                         progress.rollback();
-                    }
+                        throughput
+                    } else {
+                        0
+                    };
                     coordinator.on_segment_failed(mirror_idx, seg_idx, 408);
                     tracing::warn!(
                         seg_idx,
                         stall_timeout_secs = segment_stall_timeout.as_secs(),
-                        "Reclaimed stalled HTTP Range request"
+                        last_throughput_bps,
+                        "Reclaimed fully stalled HTTP Range request"
                     );
                 }
             }
@@ -647,7 +675,7 @@ pub async fn execute_with_coordinator(
             executor,
             &mut write_rx,
             &mut writer,
-            None,
+            limiter.as_ref(),
             dl.global_limiter.as_ref(),
             &mut ctrl_file,
             coordinator.completed_bytes(),
@@ -657,6 +685,8 @@ pub async fn execute_with_coordinator(
         executor.shutdown().await;
     }
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
+        super::acquire_download_tokens(limiter.as_ref(), dl.global_limiter.as_ref(), data.len())
+            .await;
         writer.write_bytes_at(offset, data).await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                 "Write failed: {}",

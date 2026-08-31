@@ -78,6 +78,33 @@ fn test_endgame_track_request() {
 }
 
 #[test]
+fn test_endgame_request_ownership_is_unique_and_excludes_winner() {
+    let mut es = EndgameState::new();
+    es.enter_endgame();
+    let winner = PeerKey::from(0);
+    es.track_request(0, 0, 16384, winner);
+    es.track_request(0, 0, 16384, winner);
+    es.track_request(0, 0, 16384, PeerKey::from(1));
+
+    assert_eq!(es.tracked_count(), 1);
+    assert_eq!(
+        es.take_cancel_targets(0, 0, 16384, winner),
+        vec![PeerKey::from(1)]
+    );
+    assert_eq!(es.tracked_count(), 0);
+}
+
+#[test]
+fn test_endgame_timeout_cleanup_drops_pending_ownership() {
+    let mut es = EndgameState::new();
+    es.enter_endgame();
+    es.track_request(2, 0, 8192, PeerKey::from(0));
+    es.track_request(2, 0, 8192, PeerKey::from(1));
+    es.remove_request(2, 0, 8192);
+    assert!(es.get_cancel_targets(2, 0, 8192).is_empty());
+}
+
+#[test]
 fn test_endgame_cancel_removes_on_arrival() {
     let mut es = EndgameState::new();
     es.enter_endgame();

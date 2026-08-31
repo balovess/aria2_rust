@@ -252,14 +252,12 @@ pub async fn execute(
         if executor.in_flight() == 0 {
             // Drain any remaining write chunks before checking completion
             while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-                if let Some(ref lim) = limiter {
-                    lim.acquire_download(data.len() as u64).await;
-                }
-                if let Some(ref gl) = dl.global_limiter
-                    && gl.is_download_limited()
-                {
-                    gl.acquire_download(data.len() as u64).await;
-                }
+                super::acquire_download_tokens(
+                    limiter.as_ref(),
+                    dl.global_limiter.as_ref(),
+                    data.len(),
+                )
+                .await;
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Write failed: {}",
@@ -298,14 +296,12 @@ pub async fn execute(
 
         // Drain any pending writes first (non-blocking)
         while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-            if let Some(ref lim) = limiter {
-                lim.acquire_download(data.len() as u64).await;
-            }
-            if let Some(ref gl) = dl.global_limiter
-                && gl.is_download_limited()
-            {
-                gl.acquire_download(data.len() as u64).await;
-            }
+            super::acquire_download_tokens(
+                limiter.as_ref(),
+                dl.global_limiter.as_ref(),
+                data.len(),
+            )
+            .await;
             writer.write_bytes_at(offset, data).await.map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                     "Write failed: {}",
@@ -346,13 +342,12 @@ pub async fn execute(
                     }
                 // Drain writes again after a segment completes
                 while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-                    if let Some(ref lim) = limiter {
-                        lim.acquire_download(data.len() as u64).await;
-                    }
-                    if let Some(ref gl) = dl.global_limiter
-                        && gl.is_download_limited() {
-                            gl.acquire_download(data.len() as u64).await;
-                        }
+                    super::acquire_download_tokens(
+                        limiter.as_ref(),
+                        dl.global_limiter.as_ref(),
+                        data.len(),
+                    )
+                    .await;
                     writer.write_bytes_at(offset, data).await.map_err(|e| {
                         Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                             "Write failed: {}",
@@ -517,13 +512,12 @@ pub async fn execute(
             }
             // A write chunk arrived while segments are still running
             Some(WriteChunk { offset, data }) = write_rx.recv() => {
-                if let Some(ref lim) = limiter {
-                    lim.acquire_download(data.len() as u64).await;
-                }
-                if let Some(ref gl) = dl.global_limiter
-                    && gl.is_download_limited() {
-                        gl.acquire_download(data.len() as u64).await;
-                    }
+                super::acquire_download_tokens(
+                    limiter.as_ref(),
+                    dl.global_limiter.as_ref(),
+                    data.len(),
+                )
+                .await;
                 writer.write_bytes_at(offset, data).await.map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Write failed: {}",
@@ -574,14 +568,19 @@ pub async fn execute(
                 {
                     connection_guard.set(executor.in_flight());
                     active_segs.remove(&seg_idx);
-                    if let Some(progress) = segment_progress.remove(&seg_idx) {
+                    let last_throughput_bps = if let Some(progress) = segment_progress.remove(&seg_idx) {
+                        let throughput = progress.recent_throughput_bps();
                         progress.rollback();
-                    }
+                        throughput
+                    } else {
+                        0
+                    };
                     manager.fail_segment(seg_idx);
                     tracing::warn!(
                         seg_idx,
                         stall_timeout_secs = segment_stall_timeout.as_secs(),
-                        "Reclaimed stalled HTTP Range request"
+                        last_throughput_bps,
+                        "Reclaimed fully stalled HTTP Range request"
                     );
                 }
             }
@@ -598,14 +597,8 @@ pub async fn execute(
 
     // Final drain: ensure all pending write chunks are flushed to disk
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-        if let Some(ref lim) = limiter {
-            lim.acquire_download(data.len() as u64).await;
-        }
-        if let Some(ref gl) = dl.global_limiter
-            && gl.is_download_limited()
-        {
-            gl.acquire_download(data.len() as u64).await;
-        }
+        super::acquire_download_tokens(limiter.as_ref(), dl.global_limiter.as_ref(), data.len())
+            .await;
         writer.write_bytes_at(offset, data).await.map_err(|e| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                 "Write failed: {}",
@@ -693,14 +686,7 @@ pub(super) async fn cancel_and_persist(
     executor.cancel().await;
 
     while let Ok(WriteChunk { offset, data }) = write_rx.try_recv() {
-        if let Some(limiter) = limiter {
-            limiter.acquire_download(data.len() as u64).await;
-        }
-        if let Some(global_limiter) = global_limiter
-            && global_limiter.is_download_limited()
-        {
-            global_limiter.acquire_download(data.len() as u64).await;
-        }
+        super::acquire_download_tokens(limiter, global_limiter, data.len()).await;
         writer.write_bytes_at(offset, data).await.map_err(|error| {
             Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                 "Write failed while cancelling: {error}"

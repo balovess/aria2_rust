@@ -544,6 +544,12 @@ async fn test_lpd_manager_register_unregister() {
         !active.contains(test_info_hash()),
         "Torrent should be unregistered"
     );
+    drop(active);
+
+    assert!(
+        !manager.peers.read().await.contains_key(test_info_hash()),
+        "Peer registry entry should be removed with the torrent"
+    );
 }
 
 #[tokio::test]

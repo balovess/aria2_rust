@@ -16,7 +16,7 @@ mod buffered;
 mod tests;
 
 pub use atomic::{ByteArrayDiskWriter, DefaultDiskWriter};
-pub use buffered::CachedDiskWriter;
+pub use buffered::{CachedDiskWriter, CachedDiskWriterStats};
 
 use crate::error::Result;
 use async_trait::async_trait;

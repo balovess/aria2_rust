@@ -9,6 +9,7 @@
 //!   WebSocket notification publisher ([`CoreEventBridge`])
 
 use super::App;
+use super::startup::StartupPlan;
 #[cfg(test)]
 use aria2_core::config::OptionValue;
 use aria2_core::engine::download_event_hooks::{
@@ -22,6 +23,29 @@ use aria2_rpc::server::{
 use aria2_rpc::websocket::{DownloadEvent as RpcDownloadEvent, EventType};
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info};
+
+fn rpc_bind_hosts(host: &str, listen_all: bool, disable_ipv6: bool) -> Result<Vec<String>, String> {
+    if disable_ipv6 && host.contains(':') {
+        return Err(format!(
+            "RPC listen address '{}' is IPv6, but IPv6 is disabled",
+            host
+        ));
+    }
+
+    if listen_all {
+        return Ok(if disable_ipv6 {
+            vec!["0.0.0.0".to_string()]
+        } else {
+            vec!["0.0.0.0".to_string(), "::".to_string()]
+        });
+    }
+
+    Ok(match host {
+        "127.0.0.1" if !disable_ipv6 => vec!["127.0.0.1".to_string(), "::1".to_string()],
+        "0.0.0.0" if !disable_ipv6 => vec!["0.0.0.0".to_string(), "::".to_string()],
+        _ => vec![host.to_string()],
+    })
+}
 
 // ============================================================================
 // Core → RPC download event bridge
@@ -161,8 +185,12 @@ impl App {
     /// `run()` is called, so RPC handlers can start real downloads and query
     /// live progress.
     ///
-    /// Reads RPC configuration options and creates a server instance:
-    /// - `enable-rpc` — Enable/disable RPC server
+    /// Reads RPC configuration options and creates a server instance. The
+    /// caller supplies the resolved startup plan, so this method cannot
+    /// accidentally restart RPC from a config-only flag during a one-shot
+    /// download.
+    ///
+    /// Other options include:
     /// - `rpc-listen-port` — Port to listen on (default: 6800)
     /// - `rpc-listen-address` — Address to bind (default: 127.0.0.1)
     /// - `rpc-secret` — Secret token for authentication
@@ -172,17 +200,16 @@ impl App {
     /// - `rpc-cors-domain` — CORS allowed origins
     ///
     /// Returns a handle to the server task on success.
-    pub async fn start_rpc_server<
+    pub(super) async fn start_rpc_server<
         T: Into<aria2_core::engine::engine_command::EngineCommandSender>,
     >(
         &self,
+        startup_plan: StartupPlan,
         group_man: Arc<RequestGroupMan>,
         engine_cmd_tx: T,
     ) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
-        // Read RPC configuration
-        let rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
-        if !rpc_enabled {
-            return Err("RPC is not enabled".to_string());
+        if !startup_plan.starts_rpc() {
+            return Err("The startup plan does not include an RPC server".to_string());
         }
 
         let port = self
@@ -193,6 +220,12 @@ impl App {
             .get_opt_str("rpc-listen-address")
             .await
             .unwrap_or_else(|| crate::constants::DEFAULT_RPC_HOST.to_string());
+        let listen_all = self.get_opt_bool("rpc-listen-all").await.unwrap_or(false);
+        let host = if listen_all {
+            "0.0.0.0".to_string()
+        } else {
+            host
+        };
 
         // Build authentication config
         let secret = self.get_opt_str("rpc-secret").await.unwrap_or_default();
@@ -302,13 +335,25 @@ impl App {
                 .map_err(|e| format!("Failed to create RPC server: {}", e))?
         };
 
-        // Bind before registering process-wide hooks or spawning the server.
-        // A failed bind must fail CLI startup; otherwise RPC-only mode would
-        // keep the engine alive with no reachable endpoint.
-        let listener = server
-            .bind_listener()
-            .await
-            .map_err(|e| format!("Failed to bind RPC server on {}: {}", server.addr(), e))?;
+        // Keep the user-requested one-shot CLI separate from RPC startup, but
+        // retain aria2_original's address-family fallback when RPC is wanted.
+        let disable_ipv6 = self.get_opt_bool("disable-ipv6").await.unwrap_or(false);
+        let bind_hosts = rpc_bind_hosts(&host, listen_all, disable_ipv6)?;
+        let mut listeners = Vec::new();
+        let mut bind_errors = Vec::new();
+        for bind_host in bind_hosts {
+            match server.bind_listener_on(&bind_host).await {
+                Ok(listener) => listeners.push(listener),
+                Err(error) => bind_errors.push(format!("{bind_host}: {error}")),
+            }
+        }
+        if listeners.is_empty() {
+            return Err(format!(
+                "Failed to bind RPC server on {}: {}",
+                server.addr(),
+                bind_errors.join("; ")
+            ));
+        }
 
         let rpc_url = server.rpc_url();
         info!("RPC server listening at {}", rpc_url);
@@ -320,9 +365,19 @@ impl App {
         }
 
         // Spawn server in background
+        let server = Arc::new(server);
         let handle = tokio::spawn(async move {
-            if let Err(e) = server.serve_on_listener(listener).await {
-                error!("RPC server error: {}", e);
+            let mut tasks = Vec::with_capacity(listeners.len());
+            for listener in listeners {
+                let server = Arc::clone(&server);
+                tasks.push(tokio::spawn(async move {
+                    if let Err(e) = server.serve_on_listener(listener).await {
+                        error!("RPC server error: {}", e);
+                    }
+                }));
+            }
+            for task in tasks {
+                let _ = task.await;
             }
         });
 
@@ -339,6 +394,31 @@ mod bridge_tests {
     use tokio::sync::mpsc;
 
     const GID: &str = "2089b05ecca3d829";
+
+    #[test]
+    fn rpc_binding_policy_keeps_dual_stack_by_default() {
+        assert_eq!(
+            rpc_bind_hosts("127.0.0.1", false, false).unwrap(),
+            vec!["127.0.0.1", "::1"]
+        );
+        assert_eq!(
+            rpc_bind_hosts("0.0.0.0", true, false).unwrap(),
+            vec!["0.0.0.0", "::"]
+        );
+    }
+
+    #[test]
+    fn rpc_binding_policy_honors_disabled_ipv6() {
+        assert_eq!(
+            rpc_bind_hosts("127.0.0.1", false, true).unwrap(),
+            vec!["127.0.0.1"]
+        );
+        assert_eq!(
+            rpc_bind_hosts("0.0.0.0", true, true).unwrap(),
+            vec!["0.0.0.0"]
+        );
+        assert!(rpc_bind_hosts("::1", false, true).is_err());
+    }
 
     /// The three terminal events must map to the C++-compatible
     /// `aria2.on*` notification methods.
@@ -400,14 +480,19 @@ mod bridge_tests {
 
         bridge.on_download_event(CoreDownloadEvent::Complete, GID);
 
-        let (event_type, notification) = rx.try_recv().expect("notification must be published");
+        let (event_type, notification) = rx.recv().await.expect("notification must be published");
         assert_eq!(event_type, EventType::DownloadComplete);
         assert_eq!(notification.method(), "aria2.onDownloadComplete");
         assert_eq!(notification.gid(), GID);
 
         // Start must stay silent on this path.
         bridge.on_download_event(CoreDownloadEvent::Start, GID);
-        assert!(rx.try_recv().is_err(), "Start must not be re-published");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "Start must not be re-published"
+        );
     }
 
     /// The bridge holds a `Weak`, so it must degrade to a no-op (never panic,
@@ -458,11 +543,33 @@ mod bridge_tests {
                 .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
                 .await
                 .expect("rpc-listen-port should be valid");
+            config
+                .set_global_option("disable-ipv6", OptionValue::Bool(true))
+                .await
+                .expect("disable-ipv6 should be valid");
+            config
+                .set_global_option(
+                    "rpc-listen-address",
+                    OptionValue::Str("127.0.0.1".to_string()),
+                )
+                .await
+                .expect("rpc-listen-address should be valid");
         }
 
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let error = app
-            .start_rpc_server(app.request_man.clone(), cmd_tx)
+            .start_rpc_server(
+                StartupPlan::resolve(crate::app::startup::StartupInputs {
+                    has_initial_downloads: false,
+                    has_input_file: false,
+                    restored_tasks: 0,
+                    configured_rpc: true,
+                    explicit_rpc: None,
+                })
+                .unwrap(),
+                app.request_man.clone(),
+                cmd_tx,
+            )
             .await
             .expect_err("occupied port must fail RPC startup");
         assert!(error.contains("Failed to bind RPC server"));

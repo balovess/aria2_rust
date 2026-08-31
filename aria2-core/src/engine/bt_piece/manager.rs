@@ -1,6 +1,6 @@
 use sha1::Digest;
 
-use super::bitfield::Bitfield;
+use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 
 pub struct PieceManager {
     num_pieces: u32,

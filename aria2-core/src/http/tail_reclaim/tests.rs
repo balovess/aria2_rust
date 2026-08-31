@@ -441,6 +441,89 @@ fn test_tail_reclaim_with_large_in_flight() {
 }
 
 #[test]
+fn test_safe_tail_requires_range_support_and_matching_content_range() {
+    let config = TailReclaimConfig::new().with_min_tail_length(1024);
+    let base = TailReclaimConnectionState {
+        range_supported: true,
+        response_range: Some((0, 4095, 4096)),
+        written_ranges: std::iter::once(0..=1023).collect(),
+        ..Default::default()
+    };
+
+    assert!(config.calculate_safe_tail(0, 4095, 4096, &base).is_some());
+
+    let mut no_range = base.clone();
+    no_range.range_supported = false;
+    assert!(
+        config
+            .calculate_safe_tail(0, 4095, 4096, &no_range)
+            .is_none()
+    );
+
+    let mut wrong_range = base.clone();
+    wrong_range.response_range = Some((1, 4095, 4096));
+    assert!(
+        config
+            .calculate_safe_tail(0, 4095, 4096, &wrong_range)
+            .is_none()
+    );
+
+    let mut wrong_total = base;
+    wrong_total.response_range = Some((0, 4095, 4097));
+    assert!(
+        config
+            .calculate_safe_tail(0, 4095, 4096, &wrong_total)
+            .is_none()
+    );
+}
+
+#[test]
+fn test_safe_tail_does_not_duplicate_written_verified_or_in_flight_suffix() {
+    let config = TailReclaimConfig::new().with_min_tail_length(512);
+    let state = TailReclaimConnectionState {
+        range_supported: true,
+        response_range: Some((0, 4095, 4096)),
+        written_ranges: std::iter::once(0..=1023).collect(),
+        verified_ranges: std::iter::once(1500..=1799).collect(),
+        in_flight_ranges: std::iter::once(2500..=2999).collect(),
+    };
+
+    let result = config
+        .calculate_safe_tail(0, 4095, 4096, &state)
+        .expect("the unowned suffix is large enough");
+    assert_eq!(
+        result,
+        TailReclaimResult {
+            tail_start: 3000,
+            tail_end: 4095
+        }
+    );
+}
+
+#[test]
+fn test_safe_tail_rejects_duplicate_tail_and_missing_ownership() {
+    let config = TailReclaimConfig::new().with_min_tail_length(512);
+    let state = TailReclaimConnectionState {
+        range_supported: true,
+        response_range: Some((0, 4095, 4096)),
+        written_ranges: std::iter::once(0..=3599).collect(),
+        ..Default::default()
+    };
+    assert!(config.calculate_safe_tail(0, 4095, 4096, &state).is_none());
+
+    let no_ownership = TailReclaimConnectionState {
+        range_supported: true,
+        response_range: Some((0, 4095, 4096)),
+        ..Default::default()
+    };
+    assert!(
+        config
+            .calculate_safe_tail(0, 4095, 4096, &no_ownership)
+            .is_none()
+    );
+}
+
+#[test]
 fn test_tail_reclaim_saturating_add_no_overflow() {
     let config = TailReclaimConfig::new().with_min_tail_length(1024);
     // bytes_received + bytes_in_flight would overflow u64 individually

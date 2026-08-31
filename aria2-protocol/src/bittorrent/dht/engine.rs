@@ -19,12 +19,13 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use super::lookup::{announce_to_token_nodes, iterative_get_peers};
-use super::message::{DhtMessage, DhtMessageBuilder};
 use super::node::DhtNode;
 use super::peer_storage::DhtPeerStorage;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
+use super::task::DhtTaskQueue;
+use super::task_impl::DhtTaskContext;
+use super::task_peer::DhtTaskFactory;
 use super::token_tracker::TokenTracker;
 use super::tracker::TransactionTracker;
 
@@ -168,7 +169,6 @@ pub enum DhtEngineEvent {
 /// Shared mutable state behind `Arc<RwLock<>>`.
 pub(super) struct DhtEngineInner {
     pub(super) state: DhtEngineState,
-    pub(super) routing_table: RoutingTable,
     pub(super) self_id: [u8; 20],
 }
 
@@ -179,6 +179,10 @@ pub(super) struct DhtEngineInner {
 /// from forming a reference cycle with the engine's own `JoinHandle` list.
 pub(super) struct DhtEngineContext {
     pub(super) inner: Arc<RwLock<DhtEngineInner>>,
+    pub(super) routing_table: Arc<RwLock<RoutingTable>>,
+    /// Serializes snapshots written to the same persistence file without
+    /// blocking an async runtime worker.
+    pub(super) routing_table_save_lock: Arc<tokio::sync::Mutex<()>>,
     pub(super) config: DhtEngineConfig,
     pub(super) socket: DhtSocket,
     pub(super) token_tracker: Arc<std::sync::Mutex<TokenTracker>>,
@@ -186,6 +190,7 @@ pub(super) struct DhtEngineContext {
     pub(super) tracker: Arc<TransactionTracker>,
     pub(super) handler_self_id: [u8; 20],
     pub(super) shutdown_requested: Arc<AtomicBool>,
+    pub(super) task_factory: DhtTaskFactory,
 }
 
 // ==================== DhtEngine ====================
@@ -202,6 +207,8 @@ pub struct DhtEngine {
     pub(super) shutdown_tx: tokio::sync::watch::Sender<bool>,
     /// Handles for background tasks owned by this engine.
     pub(super) background_tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Scheduler owned by the engine rather than by task contexts.
+    pub(super) task_queue: Arc<DhtTaskQueue>,
 }
 
 impl DhtEngine {
@@ -275,9 +282,9 @@ impl DhtEngine {
         // Load routing table from disk or start empty
         let mut routing_table = RoutingTable::new(self_id);
         if let Some(ref path) = config.dht_file_path
-            && path.exists()
+            && tokio::fs::try_exists(path).await.unwrap_or(false)
         {
-            match super::persistence::DhtPersistence::load_from_file_sync(path) {
+            match super::persistence::DhtPersistence::load_from_file(path).await {
                 Ok(data) => {
                     info!(
                         count = data.nodes.len(),
@@ -294,9 +301,9 @@ impl DhtEngine {
             }
         }
 
+        let routing_table = Arc::new(RwLock::new(routing_table));
         let inner = Arc::new(RwLock::new(DhtEngineInner {
             state: DhtEngineState::Bootstrapping,
-            routing_table,
             self_id,
         }));
 
@@ -306,8 +313,21 @@ impl DhtEngine {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let shutdown_requested = Arc::new(AtomicBool::new(false));
+        let routing_table_save_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let task_context = DhtTaskContext {
+            self_id,
+            routing_table: Arc::clone(&routing_table),
+            socket: socket.clone(),
+            tracker: Arc::clone(&tracker),
+            query_timeout: config.query_timeout,
+        };
+        let task_queue = Arc::new(DhtTaskQueue::with_concurrency(
+            config.max_concurrent_lookups,
+        ));
         let task_context = Arc::new(DhtEngineContext {
             inner: Arc::clone(&inner),
+            routing_table,
+            routing_table_save_lock,
             config: config.clone(),
             socket: socket.clone(),
             token_tracker: Arc::clone(&token_tracker),
@@ -315,12 +335,14 @@ impl DhtEngine {
             tracker: Arc::clone(&tracker),
             handler_self_id: self_id,
             shutdown_requested: Arc::clone(&shutdown_requested),
+            task_factory: DhtTaskFactory::new(task_context),
         });
 
         let engine = Arc::new(Self {
             context: task_context,
             shutdown_tx,
             background_tasks: std::sync::Mutex::new(Vec::new()),
+            task_queue,
         });
 
         // Spawn the background receive loop
@@ -353,11 +375,12 @@ impl DhtEngine {
         }
 
         let context = Arc::clone(&self.context);
+        let task_queue = Arc::clone(&self.task_queue);
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let limit = context.config.bootstrap_timeout;
         let handle = tokio::spawn(async move {
             let bootstrap = async {
-                if tokio::time::timeout(limit, context.bootstrap())
+                if tokio::time::timeout(limit, context.bootstrap(&task_queue))
                     .await
                     .is_err()
                     && !context.shutdown_requested.load(Ordering::Acquire)
@@ -401,31 +424,29 @@ impl DhtEngine {
             });
         }
 
-        let rt = Arc::new(RwLock::new(
-            self.context.inner.read().await.routing_table.clone(),
-        ));
-        let self_id = self.context.inner.read().await.self_id;
-
         debug!(info_hash = %hex::encode(info_hash), "Starting DHT get_peers lookup");
 
-        let result = iterative_get_peers(
-            info_hash,
-            &self_id,
-            &rt,
-            &self.context.socket,
-            &self.context.tracker,
-            self.context.config.query_timeout,
-        )
-        .await;
-
-        // Merge discovered nodes back into the main routing table
-        {
-            let mut inner = self.context.inner.write().await;
-            let discovered_rt = rt.read().await;
-            for node in discovered_rt.all_nodes() {
-                inner.routing_table.insert(node.clone());
-            }
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let accepted = self
+            .task_queue
+            .add_immediate_task(self.context.task_factory.create_peer_lookup_task(
+                *info_hash,
+                0,
+                Some(result_tx),
+            ))
+            .await;
+        if !accepted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "DHT peer lookup task was cancelled",
+            ));
         }
+        let result = result_rx.await.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "DHT peer lookup task was cancelled",
+            )
+        })?;
 
         Ok(FindPeersResult {
             peers: result.peers,
@@ -443,49 +464,33 @@ impl DhtEngine {
             return Ok(());
         }
 
-        let rt = Arc::new(RwLock::new(
-            self.context.inner.read().await.routing_table.clone(),
-        ));
-        let self_id = self.context.inner.read().await.self_id;
-
         debug!(
             info_hash = %hex::encode(info_hash),
             port,
             "Starting DHT announce_peer"
         );
 
-        // First, do a get_peers lookup to obtain tokens
-        let result = iterative_get_peers(
-            info_hash,
-            &self_id,
-            &rt,
-            &self.context.socket,
-            &self.context.tracker,
-            self.context.config.query_timeout,
-        )
-        .await;
-
-        // Merge discovered nodes back
-        {
-            let mut inner = self.context.inner.write().await;
-            let discovered_rt = rt.read().await;
-            for node in discovered_rt.all_nodes() {
-                inner.routing_table.insert(node.clone());
-            }
-        }
-
-        // Announce to nodes that provided tokens
-        if !result.token_nodes.is_empty() {
-            announce_to_token_nodes(
-                info_hash,
-                &self_id,
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let accepted = self
+            .task_queue
+            .add_immediate_task(self.context.task_factory.create_peer_lookup_task(
+                *info_hash,
                 port,
-                &result.token_nodes,
-                &self.context.socket,
-                &self.context.tracker,
-            )
+                Some(result_tx),
+            ))
             .await;
+        if !accepted {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "DHT announce task was cancelled",
+            ));
         }
+        result_rx.await.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "DHT announce task was cancelled",
+            )
+        })?;
 
         Ok(())
     }
@@ -495,44 +500,25 @@ impl DhtEngine {
     /// Sends a `ping` to `addr` and inserts it into the appropriate k-bucket
     /// once a response is received.
     pub async fn add_node(&self, addr: SocketAddr) {
-        let self_id = self.context.inner.read().await.self_id;
-        let msg = DhtMessageBuilder::ping(0, &self_id);
-        let encoded = match msg.encode() {
-            Ok(e) => e,
-            Err(e) => {
-                debug!("Failed to encode ping for add_node: {}", e);
-                return;
-            }
-        };
-
-        if let Err(e) = self.context.socket.send_to(addr, &encoded).await {
-            debug!(addr = %addr, "Failed to send ping: {}", e);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let accepted = self
+            .task_queue
+            .add_immediate_task(self.context.task_factory.create_ping_task_with_result(
+                DhtNode::new([0u8; 20], addr),
+                0,
+                result_tx,
+            ))
+            .await;
+        if !accepted {
             return;
         }
 
-        // Wait briefly for a response
-        let mut buf = [0u8; 4096];
-        if let Ok((len, _from)) = self
-            .context
-            .socket
-            .recv_with_timeout(&mut buf, self.context.config.query_timeout)
-            .await
-            && len > 0
-            && let Ok(response) = DhtMessage::decode(&buf[..len])
-            && response.is_response()
-        {
-            // Extract node ID from response
-            if let Some(r) = &response.r
-                && let Some(id_bytes) = r.dict_get(b"id").and_then(|v| v.as_bytes())
-                && id_bytes.len() == 20
-            {
-                let mut node_id = [0u8; 20];
-                node_id.copy_from_slice(id_bytes);
-                let node = DhtNode::new(node_id, addr);
-                let mut inner = self.context.inner.write().await;
-                inner.routing_table.insert(node);
-                debug!(addr = %addr, id = %hex::encode(node_id), "Added DHT node via add_node");
-            }
+        if let Ok(Some(node)) = result_rx.await {
+            debug!(
+                addr = %addr,
+                id = %hex::encode(node.id),
+                "Added DHT node via add_node"
+            );
         }
     }
 
@@ -569,6 +555,8 @@ impl DhtEngine {
     pub async fn shutdown_async(&self) {
         self.shutdown();
 
+        self.task_queue.shutdown().await;
+
         let tasks = {
             let mut background_tasks = self
                 .background_tasks
@@ -601,16 +589,30 @@ impl DhtEngine {
 
         // Save routing table to disk
         if let Some(ref path) = self.context.config.dht_file_path {
-            let inner = self.context.inner.read().await;
-            let self_id = inner.self_id;
-            let nodes: Vec<DhtNode> = inner.routing_table.collect_good_nodes();
-            drop(inner);
+            let path = path.clone();
+            // Serialize before taking the snapshot so an older automatic
+            // snapshot cannot overwrite this final shutdown snapshot later.
+            let save_guard = Arc::clone(&self.context.routing_table_save_lock)
+                .lock_owned()
+                .await;
+            let self_id = self.context.inner.read().await.self_id;
+            let nodes: Vec<DhtNode> = self.context.routing_table.read().await.collect_good_nodes();
+            let count = nodes.len();
 
-            match super::persistence::DhtPersistence::save_to_file_sync(path, &self_id, &nodes) {
-                Ok(_) => {
-                    info!(path = %path.display(), count = nodes.len(), "Saved DHT routing table")
+            let save_path = path.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let _save_guard = save_guard;
+                super::persistence::DhtPersistence::save_to_file_sync(&save_path, &self_id, &nodes)
+            })
+            .await;
+            match result {
+                Ok(Ok(_)) => info!(path = %path.display(), count, "Saved DHT routing table"),
+                Ok(Err(e)) => {
+                    warn!(path = %path.display(), "Failed to save DHT routing table: {}", e)
                 }
-                Err(e) => warn!("Failed to save DHT routing table: {}", e),
+                Err(e) => {
+                    warn!(path = %path.display(), "DHT routing table save task failed: {}", e)
+                }
             }
         }
 
@@ -620,14 +622,15 @@ impl DhtEngine {
     /// Return a snapshot of DHT engine statistics.
     pub async fn stats(&self) -> DhtEngineStats {
         let inner = self.context.inner.read().await;
+        let routing_table = self.context.routing_table.read().await;
         let state = if self.context.shutdown_requested.load(Ordering::Acquire) {
             DhtEngineState::ShuttingDown
         } else {
             inner.state
         };
         DhtEngineStats {
-            total_nodes: inner.routing_table.total_node_count(),
-            good_nodes: inner.routing_table.good_node_count(),
+            total_nodes: routing_table.total_node_count(),
+            good_nodes: routing_table.good_node_count(),
             pending_transactions: self.context.tracker.pending_count(),
             state,
         }
@@ -649,6 +652,7 @@ impl DhtEngine {
 
 impl Drop for DhtEngine {
     fn drop(&mut self) {
+        self.task_queue.cancel();
         let mut background_tasks = self
             .background_tasks
             .lock()
@@ -660,13 +664,18 @@ impl Drop for DhtEngine {
 }
 
 // Internal methods (spawn_receive_loop, spawn_periodic_tasks, bootstrap,
-// process_inbound_message, handle_timeout, refresh_buckets, contact_nodes,
+// process_inbound_message, handle_timeout, contact_nodes,
 // evict_and_replace_nodes, save_routing_table) are defined in
 // engine_inner.rs to keep this file under 600 lines.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bittorrent::dht::message::{DhtMessage, DhtMessageBuilder};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::net::UdpSocket;
+    use tokio::sync::Barrier;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn test_dht_engine_config_default() {
@@ -784,5 +793,189 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         let result = engine.find_peers(&[0u8; 20]).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_real_udp_dht_pressure_across_concurrency_levels() {
+        const REQUESTS: usize = 64;
+        const RESPONDER_WORKERS: usize = 8;
+        const RESPONDER_DELAY: Duration = Duration::from_millis(2);
+        const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+
+        let responder = Arc::new(
+            UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("local UDP responder should bind"),
+        );
+        let responder_addr = responder.local_addr().expect("responder address");
+        let responder_id = [0xA5; 20];
+        let responder_requests: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..=16).map(|_| AtomicUsize::new(0)).collect());
+        let responder_responses: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..=16).map(|_| AtomicUsize::new(0)).collect());
+        let responder_stop = CancellationToken::new();
+        let mut responder_workers = tokio::task::JoinSet::new();
+
+        for _ in 0..RESPONDER_WORKERS {
+            let responder = Arc::clone(&responder);
+            let responder_stop = responder_stop.clone();
+            let responder_requests = Arc::clone(&responder_requests);
+            let responder_responses = Arc::clone(&responder_responses);
+            responder_workers.spawn(async move {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let (len, from) = tokio::select! {
+                        _ = responder_stop.cancelled() => break,
+                        result = responder.recv_from(&mut buf) => {
+                            let Ok(packet) = result else { break };
+                            packet
+                        }
+                    };
+                    let Ok(query) = DhtMessage::decode(&buf[..len]) else {
+                        continue;
+                    };
+                    if !query.is_query() {
+                        continue;
+                    }
+                    let query_level = if query
+                        .q
+                        .as_ref()
+                        .is_some_and(|method| method.0 == "get_peers")
+                    {
+                        query
+                            .a
+                            .as_ref()
+                            .and_then(|args| args.dict_get(b"info_hash"))
+                            .and_then(|value| value.as_bytes())
+                            .and_then(|info_hash| info_hash.first().copied())
+                            .filter(|level| (1..=16).contains(level))
+                            .map(usize::from)
+                    } else {
+                        None
+                    };
+                    if let Some(level) = query_level {
+                        responder_requests[level].fetch_add(1, Ordering::Relaxed);
+                    }
+                    tokio::select! {
+                        _ = responder_stop.cancelled() => break,
+                        _ = tokio::time::sleep(RESPONDER_DELAY) => {}
+                    }
+
+                    let response = match query.q.as_ref().map(|method| method.0.as_str()) {
+                        Some("ping") => DhtMessageBuilder::ping_response(&query.t, &responder_id),
+                        Some("get_peers") => DhtMessageBuilder::get_peers_response_with_peers(
+                            &query.t,
+                            &responder_id,
+                            b"local-token",
+                            &[],
+                        ),
+                        _ => continue,
+                    };
+                    let Ok(encoded) = response.encode() else {
+                        continue;
+                    };
+                    if responder.send_to(&encoded, from).await.is_ok()
+                        && let Some(level) = query_level
+                    {
+                        responder_responses[level].fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+
+        let responder_task =
+            tokio::spawn(async move { while responder_workers.join_next().await.is_some() {} });
+
+        for max_concurrent_lookups in [1, 2, 4, 8, 16] {
+            let config = DhtEngineConfig {
+                query_timeout: QUERY_TIMEOUT,
+                max_concurrent_lookups,
+                ..DhtEngineConfig::local()
+            };
+            let engine = DhtEngine::start(config)
+                .await
+                .expect("DHT engine should start");
+            engine.add_node(responder_addr).await;
+
+            let node_ready = tokio::time::timeout(Duration::from_millis(200), async {
+                loop {
+                    if engine.stats().await.good_nodes > 0 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await;
+            assert!(node_ready.is_ok(), "local responder was not added");
+
+            let start_barrier = Arc::new(Barrier::new(REQUESTS + 1));
+
+            let mut tasks = Vec::with_capacity(REQUESTS);
+            for _ in 0..REQUESTS {
+                let engine = Arc::clone(&engine);
+                let barrier = Arc::clone(&start_barrier);
+                tasks.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    let started = std::time::Instant::now();
+                    let result = engine.find_peers(&[max_concurrent_lookups as u8; 20]).await;
+                    (
+                        started.elapsed(),
+                        result.map(|result| result.nodes_contacted > 0),
+                    )
+                }));
+            }
+
+            start_barrier.wait().await;
+            let started_at = std::time::Instant::now();
+            let mut latencies = Vec::with_capacity(REQUESTS);
+            let mut successful = 0usize;
+            for task in tasks {
+                let (latency, result) = task.await.expect("lookup task should join");
+                latencies.push(latency);
+                if result.expect("lookup should not be cancelled") {
+                    successful += 1;
+                }
+            }
+            let elapsed = started_at.elapsed();
+
+            latencies.sort_unstable();
+            let p50 = latencies[REQUESTS / 2];
+            let p95 = latencies[(REQUESTS * 95 / 100).min(REQUESTS - 1)];
+            let max = latencies[REQUESTS - 1];
+            let received = responder_requests[max_concurrent_lookups].load(Ordering::Relaxed);
+            let responses = responder_responses[max_concurrent_lookups].load(Ordering::Relaxed);
+            let expected_packets = REQUESTS;
+            let request_loss = expected_packets.saturating_sub(received);
+            let response_loss = expected_packets.saturating_sub(responses);
+            let throughput = successful as f64 / elapsed.as_secs_f64();
+
+            println!(
+                "DHT UDP pressure: concurrency={max_concurrent_lookups}, requests={REQUESTS}, successful={successful}, responder_requests={received}, responder_responses={responses}, request_loss={:.2}%, response_loss={:.2}%, p50={:?}, p95={:?}, max={:?}, throughput={throughput:.1}/s, immediate_queue_peak={}",
+                request_loss as f64 * 100.0 / expected_packets as f64,
+                response_loss as f64 * 100.0 / expected_packets as f64,
+                p50,
+                p95,
+                max,
+                engine
+                    .task_queue
+                    .immediate_executor()
+                    .peak_queue_size()
+                    .await,
+            );
+
+            assert_eq!(successful, REQUESTS, "local UDP pressure test lost lookups");
+            assert!(
+                received >= expected_packets,
+                "local UDP responder received fewer packets than expected"
+            );
+            assert!(
+                responses >= expected_packets,
+                "local UDP responder sent fewer responses than expected"
+            );
+            engine.shutdown_async().await;
+        }
+
+        responder_stop.cancel();
+        responder_task.await.expect("responder task should join");
     }
 }

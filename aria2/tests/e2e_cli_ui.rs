@@ -118,7 +118,7 @@ fn cli_success_error_quiet_and_plain_output_are_stable() {
         String::from_utf8_lossy(&success.stderr)
     );
     let success_stdout = String::from_utf8_lossy(&success.stdout);
-    assert!(success_stdout.contains("[COMPLETE]"));
+    assert!(success_stdout.contains("OK"));
     assert!(success_stdout.contains("Download results:"));
     assert!(success_stdout.contains("1 complete, 0 failed"));
     assert!(!success_stdout.contains('\x1b'));
@@ -147,7 +147,7 @@ fn cli_success_error_quiet_and_plain_output_are_stable() {
         .expect("error CLI process must start");
     assert_eq!(error.status.code(), Some(1));
     let error_stdout = String::from_utf8_lossy(&error.stdout);
-    assert!(error_stdout.contains("[ERROR]"));
+    assert!(error_stdout.contains("ERR"));
     assert!(error_stdout.contains("0 complete, 1 failed"));
     assert!(String::from_utf8_lossy(&error.stderr).contains("Download failed"));
 
@@ -230,7 +230,7 @@ fn cli_success_error_quiet_and_plain_output_are_stable() {
     );
     assert!(stderr_progress.stdout.is_empty());
     let stderr_output = String::from_utf8_lossy(&stderr_progress.stderr);
-    assert!(stderr_output.contains("[COMPLETE]"));
+    assert!(stderr_output.contains("OK"));
     assert!(stderr_output.contains("Download results:"));
 
     let log_path = output_dir.path().join("aria2.log");

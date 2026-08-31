@@ -209,7 +209,7 @@ impl BtDownloadCommand {
     pub async fn send_suggest_to_peer(
         &mut self,
         peer_key: PeerKey,
-        piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        piece_picker: &crate::engine::bt_piece::PiecePicker,
         conn: &mut BtPeerConn,
     ) -> Result<usize> {
         // Check if we've already sent too many suggests to this peer

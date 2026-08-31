@@ -257,6 +257,13 @@ impl EncryptedConnection {
             if self.read_buffer.len() >= 4 {
                 let msg_len =
                     u32::from_be_bytes(self.read_buffer[..4].try_into().unwrap()) as usize;
+                if msg_len > crate::bittorrent::message::MAX_BT_MESSAGE_LENGTH {
+                    return Err(format!(
+                        "BitTorrent message length {} exceeds maximum {}",
+                        msg_len,
+                        crate::bittorrent::message::MAX_BT_MESSAGE_LENGTH
+                    ));
+                }
                 let frame_len = 4 + msg_len;
                 if self.read_buffer.len() >= frame_len {
                     let frame = self.read_buffer.split_to(frame_len).freeze();

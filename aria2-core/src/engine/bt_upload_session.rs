@@ -4,8 +4,8 @@ use crate::error::Result;
 use crate::rate_limiter::RateLimiter;
 use crate::rate_limiter::RateLimiterConfig;
 
+use crate::engine::bt_message_validation::BtMessageValidator;
 use aria2_protocol::bittorrent::message::types::BtMessage;
-use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 use aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection;
 

@@ -31,7 +31,7 @@ pub const ENDGAME_THRESHOLD: u32 = constants::BT_ENDGAME_THRESHOLD as u32;
 ///
 /// Each file contributes the pieces intersecting its first or last `SIZE`
 /// bytes. The result is sorted and deduplicated, matching
-/// `aria2_original::parsePrioritizePieceRange`; the protocol picker shuffles
+/// `aria2_original::parsePrioritizePieceRange`; the core picker shuffles
 /// the final set when it installs it.
 pub fn prioritized_piece_indices(
     rules: &[PiecePriorityRule],
@@ -170,7 +170,7 @@ pub struct PieceSelectionResult {
 
 /// BT Piece Selector - Manages which piece to download next
 ///
-/// Wraps the underlying PiecePicker from aria2-protocol and adds
+/// Integrates the core PiecePicker with download-specific file priorities and
 /// higher-level strategy logic including endgame mode detection.
 pub struct BtPieceSelector {
     config: PieceSelectorConfig,
@@ -206,7 +206,7 @@ impl BtPieceSelector {
     /// * `PieceSelectionResult` containing the selected piece and state info
     pub fn select_next_piece(
         &self,
-        piece_picker: &mut aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        piece_picker: &mut crate::engine::bt_piece::PiecePicker,
         remaining: usize,
     ) -> PieceSelectionResult {
         let is_endgame = remaining > 0 && remaining <= self.config.endgame_threshold as usize;
@@ -253,7 +253,7 @@ impl BtPieceSelector {
     /// * `PieceSelectionResult` with the optimal piece for this peer
     pub fn select_next_piece_for_peer(
         &self,
-        piece_picker: &mut aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        piece_picker: &mut crate::engine::bt_piece::PiecePicker,
         peer_conn: &crate::engine::bt_peer_connection::BtPeerConn,
         peer_bitfield: &[u8],
         is_choked: bool,
@@ -350,8 +350,8 @@ impl BtPieceSelector {
     /// * `peer_tracker` - Peer bitfield tracker with frequency data
     pub fn initialize_frequencies(
         &self,
-        piece_picker: &mut aria2_protocol::bittorrent::piece::picker::PiecePicker,
-        peer_tracker: &aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        piece_picker: &mut crate::engine::bt_piece::PiecePicker,
+        peer_tracker: &crate::engine::bt_piece::PeerBitfieldTracker,
     ) {
         piece_picker.set_frequencies_from_peers(&peer_tracker.piece_frequencies());
 
@@ -369,9 +369,7 @@ impl BtPieceSelector {
     ///
     /// # Returns
     /// * `true` if all pieces are marked complete
-    pub fn is_complete(
-        piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
-    ) -> bool {
+    pub fn is_complete(piece_picker: &crate::engine::bt_piece::PiecePicker) -> bool {
         piece_picker.is_complete()
     }
 

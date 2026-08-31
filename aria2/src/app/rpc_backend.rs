@@ -396,7 +396,9 @@ impl CoreRpcBackend {
                 .with_info_hash(bt.info_hash.clone())
                 .with_num_seeders(bt.seeder_count() as u32)
                 .with_num_pieces(bt.num_pieces)
-                .with_piece_length(bt.piece_length as u64);
+                .with_piece_length(bt.piece_length as u64)
+                .with_completed_pieces(bt.completed_pieces)
+                .with_missing_pieces(bt.missing_pieces);
             if let Some(bitfield) = &bt.bitfield {
                 info = info.with_bitfield(
                     bitfield

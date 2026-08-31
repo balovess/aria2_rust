@@ -213,22 +213,23 @@ async fn test_cached_writer_with_rate_limiter() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_ratelimited.bin");
 
-    // Create a very restrictive limiter (10 bytes/sec, tiny burst)
-    let cfg = RateLimiterConfig::new(Some(10), None).with_burst(Some(20), None);
+    // Use a small burst so this test exercises waiting without making the
+    // focused test suite spend seconds draining a large payload.
+    let cfg = RateLimiterConfig::new(Some(100), None).with_burst(Some(20), None);
     let rl = Arc::new(RateLimiter::new(&cfg));
 
     let mut writer = CachedDiskWriter::new(&path, Some(4096), None).with_rate_limiter(rl.clone());
     writer.open().await.unwrap();
 
-    // Write data - should succeed (try_acquire may fail but we still write)
-    let data = vec![0x42u8; 512];
+    // A configured limiter must still permit the write after waiting for tokens.
+    let data = vec![0x42u8; 64];
     writer.write_at(0, &data).await.unwrap();
     writer.flush().await.unwrap();
 
     let content = tokio::fs::read(&path).await.unwrap();
-    assert!(content.len() >= 512, "file should be at least 512 bytes");
-    assert_eq!(&content[..512], &vec![0x42u8; 512][..]);
-    assert!(content.iter().take(512).all(|&b| b == 0x42));
+    assert!(content.len() >= data.len(), "file should contain the write");
+    assert_eq!(&content[..data.len()], &data);
+    assert!(content.iter().take(data.len()).all(|&b| b == 0x42));
 }
 
 #[tokio::test]
@@ -514,6 +515,34 @@ async fn test_large_bytes_write_flushes_pending_cache_before_bypass() {
 
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(&content[..5], b"CCCCC");
+}
+
+#[tokio::test]
+async fn test_cached_writer_stats_separate_cache_and_direct_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stats.bin");
+    let large_len = 1024 * 1024;
+
+    let mut writer = CachedDiskWriter::new(&path, Some(large_len as u64), Some(4));
+    writer.open().await.unwrap();
+    writer
+        .write_bytes_at(0, bytes::Bytes::from_static(b"small"))
+        .await
+        .unwrap();
+    writer
+        .write_bytes_at(0, bytes::Bytes::from(vec![b'X'; large_len]))
+        .await
+        .unwrap();
+
+    let stats = writer.stats();
+    assert_eq!(stats.cache.flush_pending_write_count, 1);
+    assert_eq!(stats.cache.flush_write_count, 1);
+    assert_eq!(stats.cache.flush_write_bytes, 5);
+    assert_eq!(stats.direct_write_count, 1);
+    assert_eq!(stats.direct_write_bytes, large_len as u64);
+    assert_eq!(stats.cache.flush_write_count + stats.direct_write_count, 2);
+
+    writer.close().await.unwrap();
 }
 
 /// Sequential DefaultDiskWriter is the control: appending out of order

@@ -238,6 +238,7 @@ impl super::RequestGroup {
         self.connection_state.set_bt(0);
     }
 
+    #[cfg(feature = "bittorrent")]
     pub(crate) fn bt_peer_snapshot_store(
         &self,
     ) -> std::sync::Arc<std::sync::RwLock<Vec<super::BtPeerSnapshot>>> {

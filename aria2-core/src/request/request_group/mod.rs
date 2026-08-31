@@ -33,7 +33,11 @@ pub use crate::config::runtime::{
 };
 pub use activity::ActivitySignal;
 pub use bt_peer_snapshot::BtPeerSnapshot;
-pub(crate) use connection_state::{ActiveConnectionGuard, BtConnectionGuard, ConnectionState};
+pub(crate) use connection_state::ActiveConnectionGuard;
+#[cfg(feature = "bittorrent")]
+pub(crate) use connection_state::BtConnectionGuard;
+#[cfg(feature = "bittorrent")]
+pub(crate) use connection_state::ConnectionState;
 #[cfg(feature = "bittorrent")]
 pub use dependency::BtDependencyResolution;
 #[cfg(feature = "bittorrent")]

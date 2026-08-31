@@ -142,9 +142,21 @@ impl RpcServer {
     pub async fn bind_listener(
         &self,
     ) -> Result<tokio::net::TcpListener, Box<dyn std::error::Error + Send + Sync>> {
+        self.bind_listener_on(&self.config.host).await
+    }
+
+    /// Bind on a specific host while reusing this server's shared engine.
+    pub async fn bind_listener_on(
+        &self,
+        host: &str,
+    ) -> Result<tokio::net::TcpListener, Box<dyn std::error::Error + Send + Sync>> {
         use std::net::SocketAddr;
 
-        let addr: SocketAddr = self.addr().parse()?;
+        let addr: SocketAddr = if host.contains(':') {
+            format!("[{host}]:{}", self.config.port).parse()?
+        } else {
+            format!("{host}:{}", self.config.port).parse()?
+        };
         let listener = tokio::net::TcpListener::bind(addr).await?;
         tracing::info!("RPC server listening on {}://{}", self.scheme(), addr);
         Ok(listener)

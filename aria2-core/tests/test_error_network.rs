@@ -53,24 +53,11 @@ async fn test_connection_interrupt_partial_serve() {
     )
     .expect("Failed to create DownloadCommand");
 
-    // This should fail or return an error due to incomplete transfer
     let result = cmd.execute().await;
-
-    // The download should either fail or we should detect the incomplete transfer
-    // The exact behavior depends on how the download engine handles partial content
-    if let Err(e) = result {
-        // Verify error is network-related
-        let err_str = e.to_string();
-        assert!(
-            err_str.contains("Network")
-                || err_str.contains("IO")
-                || err_str.contains("timeout")
-                || err_str.contains("connection")
-                || err_str.contains("failed"),
-            "Error should be network-related: {}",
-            err_str
-        );
-    }
+    assert!(
+        result.is_err(),
+        "a partial response must not be reported as a successful download"
+    );
 
     server.shutdown().await;
 }
@@ -108,22 +95,10 @@ async fn test_connection_reset_error_handling() {
     .expect("Failed to create DownloadCommand");
 
     let result = cmd.execute().await;
-
-    // The download behavior depends on how the engine handles incomplete body
-    // It may fail or succeed with partial data - both are acceptable
-    if result.is_ok() {
-        // If download succeeded, verify file exists (may be empty or partial)
-        let output_path = dir.path().join("reset.bin");
-        if output_path.exists() {
-            let content = std::fs::read(&output_path).unwrap();
-            // File should be smaller than claimed 1MB
-            assert!(
-                content.len() < 1000000,
-                "File should be smaller than claimed size"
-            );
-        }
-    }
-    // If it fails, that's also acceptable behavior
+    assert!(
+        result.is_err(),
+        "a premature EOF must not be reported as a successful download"
+    );
 
     server.shutdown().await;
 }

@@ -30,7 +30,7 @@ impl BtDownloadCommand {
     /// Returns Ok(true) if seeding was started, Ok(false) if not.
     pub fn check_and_start_seeding(
         &mut self,
-        piece_picker: &aria2_protocol::bittorrent::piece::picker::PiecePicker,
+        piece_picker: &crate::engine::bt_piece::PiecePicker,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
         piece_provider: std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,

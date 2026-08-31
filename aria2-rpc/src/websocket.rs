@@ -178,25 +178,21 @@ impl DownloadEvent {
 }
 
 struct Subscriber {
-    #[allow(dead_code)] // Subscriber ID for debugging and connection management
+    #[allow(dead_code)]
     id: String,
-    #[allow(dead_code)] // Event filter; stored for per-subscriber event filtering
+    #[allow(dead_code)]
     filter: Option<Vec<EventType>>,
 }
 
-/// Receiver registration that removes its bookkeeping entry when dropped.
-///
-/// The broadcast receiver itself already releases its channel slot on drop;
-/// this companion guard keeps `EventPublisher::subscriber_count` aligned with
-/// the active WebSocket session lifecycle as well.
-pub(crate) struct ScopedSubscription {
+/// Receiver registration whose lifetime is tied to the broadcast receiver.
+pub struct ScopedSubscription {
     id: String,
     receiver: broadcast::Receiver<(EventType, DownloadEvent)>,
     subscribers: Arc<RwLock<HashMap<String, Subscriber>>>,
 }
 
 impl ScopedSubscription {
-    pub(crate) async fn recv(
+    pub async fn recv(
         &mut self,
     ) -> Result<(EventType, DownloadEvent), broadcast::error::RecvError> {
         self.receiver.recv().await
@@ -205,9 +201,6 @@ impl ScopedSubscription {
 
 impl Drop for ScopedSubscription {
     fn drop(&mut self) {
-        // Never panic while tearing down a WebSocket task. A poisoned lock can
-        // only result from an earlier internal panic, and must not prevent the
-        // receiver itself from being released.
         if let Ok(mut subscribers) = self.subscribers.write() {
             subscribers.remove(&self.id);
         }
@@ -240,10 +233,14 @@ impl EventPublisher {
         &self,
         sub_id: impl Into<String>,
         filter: Option<Vec<EventType>>,
-    ) -> broadcast::Receiver<(EventType, DownloadEvent)> {
+    ) -> ScopedSubscription {
         let id = sub_id.into();
-        self.register(id, filter);
-        self.tx.subscribe()
+        self.register(id.clone(), filter);
+        ScopedSubscription {
+            id,
+            receiver: self.tx.subscribe(),
+            subscribers: Arc::clone(&self.subscribers),
+        }
     }
 
     /// Subscribe a connection whose bookkeeping must end with its receiver.
@@ -336,7 +333,7 @@ pub struct NotificationBatcher {
     /// Time-based flush interval in milliseconds
     flush_interval_ms: u64,
     /// Accumulated notifications waiting to be flushed
-    pending: VecDeque<DownloadEvent>,
+    pending: VecDeque<String>,
     /// Tracks the latest event per (GID:event_type) key for deduplication
     latest_per_gid: HashMap<String, (DownloadEvent, Instant)>,
     /// Timestamp of last flush operation
@@ -382,21 +379,20 @@ impl NotificationBatcher {
     /// Returns `true` if the push triggered an auto-flush (batch full).
     pub fn push(&mut self, notification: DownloadEvent) -> bool {
         let gid = notification.gid();
-        let event_type = notification.event_type_str();
 
         // Build dedup key from GID + event type combination
-        let key = format!("{}:{}", gid, event_type);
+        let key = format!("{}:{}", gid, notification.method());
 
         if let Some(existing) = self.latest_per_gid.get_mut(&key) {
             // Replace with newer version (updated progress/speed/etc.)
             *existing = (notification, Instant::now());
             self.total_deduped += 1;
-            tracing::debug!("Deduped notification for {}: {}", gid, event_type);
+            tracing::debug!("Deduped notification for {}: {}", gid, key);
         } else {
             // New event: store in both the dedup map and pending queue
             self.latest_per_gid
-                .insert(key.clone(), (notification.clone(), Instant::now()));
-            self.pending.push_back(notification);
+                .insert(key.clone(), (notification, Instant::now()));
+            self.pending.push_back(key);
         }
 
         // Auto-flush if over batch size limit
@@ -429,9 +425,12 @@ impl NotificationBatcher {
             return None;
         }
 
-        let batch: Vec<DownloadEvent> = self.pending.drain(..).collect();
+        let batch: Vec<DownloadEvent> = self
+            .pending
+            .drain(..)
+            .filter_map(|key| self.latest_per_gid.remove(&key).map(|(event, _)| event))
+            .collect();
         self.total_sent += batch.len() as u64;
-        self.latest_per_gid.clear();
         self.last_flush = Instant::now();
         Some(batch)
     }
@@ -734,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn test_publisher_unsubscribe() {
         let publisher = EventPublisher::new(16);
-        publisher.subscribe("client-1", None).await;
+        let _subscription = publisher.subscribe("client-1", None).await;
         assert_eq!(publisher.subscriber_count().await, 1);
 
         publisher.unsubscribe("client-1").await;
@@ -836,6 +835,28 @@ mod tests {
         // The maybe_flush won't trigger immediately if interval hasn't passed,
         // so let's just check pending count and stats.
         assert_eq!(batcher.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_dedup_flushes_latest_event_without_cloning_it() {
+        let mut batcher = NotificationBatcher::new().with_max_batch_size(100);
+
+        batcher.push(DownloadEvent::new(
+            EventType::DownloadComplete,
+            vec![serde_json::json!({"gid": "gid-same", "marker": "old"})],
+        ));
+        batcher.push(DownloadEvent::new(
+            EventType::DownloadComplete,
+            vec![serde_json::json!({"gid": "gid-same", "marker": "new"})],
+        ));
+
+        let batch = batcher
+            .flush_internal()
+            .expect("pending event should flush");
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].gid(), "gid-same");
+        assert_eq!(batch[0].params()[0]["marker"], "new");
+        assert_eq!(batcher.pending_count(), 0);
     }
 
     /// Test: onComplete + onError for same GID → both kept (different event types)

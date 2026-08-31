@@ -621,26 +621,22 @@ impl From<russh::Error> for SshError {
 // Connection Pool (conceptual implementation for reuse)
 // =============================================================================
 
-/// A simple connection pool for reusing SSH connections across multiple operations.
-///
-/// **Note**: This is a basic pool implementation. For production use, consider
-/// adding connection health checks, max idle time limits, and eviction policies.
+/// A bounded connection pool for reusing SSH connections across operations.
 pub struct SshConnectionPool {
     /// Available connections keyed by target string
     connections: std::collections::HashMap<String, Arc<tokio::sync::Mutex<SshConnection>>>,
-    /// Maximum number of connections per target
-    #[allow(dead_code)] // Pool limit; stored for future connection cap enforcement
-    max_per_target: usize,
+    /// Maximum number of targets retained by the pool.
+    max_targets: usize,
     /// Maximum idle time before eviction
     max_idle: Duration,
 }
 
 impl SshConnectionPool {
     /// Create a new connection pool with specified limits
-    pub fn new(max_per_target: usize, max_idle: Duration) -> Self {
+    pub fn new(max_targets: usize, max_idle: Duration) -> Self {
         Self {
             connections: std::collections::HashMap::new(),
-            max_per_target,
+            max_targets: max_targets.max(1),
             max_idle,
         }
     }
@@ -650,6 +646,7 @@ impl SshConnectionPool {
         &mut self,
         options: &SshOptions,
     ) -> Result<Arc<tokio::sync::Mutex<SshConnection>>, SshError> {
+        self.cleanup_stale().await;
         let target = options.target();
 
         // Check for existing reusable connection
@@ -667,8 +664,34 @@ impl SshConnectionPool {
         let conn = SshConnection::connect(options.clone()).await?;
         let wrapped = Arc::new(tokio::sync::Mutex::new(conn));
 
+        if self.connections.len() >= self.max_targets {
+            // The pool owns only its reference; an in-use connection remains
+            // alive until its caller releases the returned Arc.
+            if let Some(evicted) = self.connections.keys().next().cloned() {
+                self.connections.remove(&evicted);
+            }
+        }
         self.connections.insert(target, Arc::clone(&wrapped));
         Ok(wrapped)
+    }
+
+    /// Remove pooled connections that have exceeded the idle lifetime.
+    pub async fn cleanup_stale(&mut self) -> usize {
+        let targets: Vec<String> = self.connections.keys().cloned().collect();
+        let mut removed = 0;
+        for target in targets {
+            let Some(conn) = self.connections.get(&target).cloned() else {
+                continue;
+            };
+            let stale = {
+                let guard = conn.lock().await;
+                guard.age() >= self.max_idle || !guard.is_alive()
+            };
+            if stale && self.connections.remove(&target).is_some() {
+                removed += 1;
+            }
+        }
+        removed
     }
 
     /// Remove and close a specific connection from the pool

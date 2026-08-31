@@ -20,9 +20,9 @@ use std::time::Instant;
 
 use crate::engine::bt_message_dispatcher::{ActiveInteractionChecker, FloodingStat};
 use crate::engine::bt_message_handler::BtPeerMessageHandler;
+use crate::engine::bt_message_validation::BtMessageValidator;
 use crate::engine::bt_request_factory::BtRequestFactory;
 use crate::engine::extension_registry::ExtensionRegistry;
-use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
 
 use super::types::*;
 

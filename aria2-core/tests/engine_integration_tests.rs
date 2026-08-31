@@ -917,7 +917,7 @@ async fn engine_multi_task_parallel() {
 
     let group_man =
         std::sync::Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(50);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(group_man.clone());
 
     let url_a = format!("{}/file_a.bin", server.base_url());

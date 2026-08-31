@@ -29,6 +29,13 @@ pub struct ConfigError {
     pub message: String,
 }
 
+/// Source location for an error found while parsing a configuration file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigErrorContext {
+    pub line: usize,
+    pub content: String,
+}
+
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}] {}: {}", self.source, self.option, self.message)
@@ -40,6 +47,7 @@ pub struct ConfigParser {
     option_sources: HashMap<String, ConfigSource>,
     sources: Vec<ConfigSource>,
     errors: Vec<ConfigError>,
+    error_contexts: HashMap<usize, ConfigErrorContext>,
     registry: OptionRegistry,
 }
 
@@ -50,6 +58,7 @@ impl ConfigParser {
             option_sources: HashMap::new(),
             sources: Vec::new(),
             errors: Vec::new(),
+            error_contexts: HashMap::new(),
             registry: OptionRegistry::new(),
         }
     }
@@ -259,8 +268,10 @@ impl ConfigParser {
     pub fn parse_file(&mut self, path: &str) {
         self.sources.push(ConfigSource::ConfigFile);
         if let Ok(content) = std::fs::read_to_string(path) {
-            for line in content.lines() {
-                let line = line.trim();
+            for (line_index, source_line) in content.lines().enumerate() {
+                let line_number = line_index + 1;
+                let source_content = source_line.trim().to_string();
+                let line = source_content.as_str();
                 if line.is_empty()
                     || line.starts_with('#')
                     || line.starts_with('[')
@@ -268,13 +279,47 @@ impl ConfigParser {
                 {
                     continue;
                 }
-                if let Some(eq_pos) = line.find('=') {
-                    let name = line[..eq_pos].trim();
-                    let value = line[eq_pos + 1..].trim();
-                    if !name.is_empty() {
-                        if !self.registry.contains(name) {
-                            tracing::warn!("Unknown option '{}' in config file '{}'", name, path);
-                        }
+                let (name, value) = match line.find('=') {
+                    Some(eq_pos) => (line[..eq_pos].trim(), line[eq_pos + 1..].trim()),
+                    None => (line, ""),
+                };
+                if name.is_empty() {
+                    continue;
+                }
+
+                let definition = self.registry.get(name);
+                if let Some(definition) = definition {
+                    if !definition.is_supported() {
+                        tracing::warn!(
+                            "Ignoring unsupported option '{}' in config file '{}'",
+                            name,
+                            path
+                        );
+                        continue;
+                    }
+                    // aria2 config files allow boolean flags without `=true`.
+                    // Keep this compatibility at the file boundary only; CLI
+                    // and RPC inputs retain their stricter value contracts.
+                    let value =
+                        if !line.contains('=') && definition.opt_type() == OptionType::Boolean {
+                            "true"
+                        } else {
+                            value
+                        };
+                    let error_start = self.errors.len();
+                    self.set_raw_from(name, value, ConfigSource::ConfigFile);
+                    for error_index in error_start..self.errors.len() {
+                        self.error_contexts.insert(
+                            error_index,
+                            ConfigErrorContext {
+                                line: line_number,
+                                content: source_content.clone(),
+                            },
+                        );
+                    }
+                } else {
+                    tracing::warn!("Unknown option '{}' in config file '{}'", name, path);
+                    if line.contains('=') {
                         self.set_raw_from(name, value, ConfigSource::ConfigFile);
                     }
                 }
@@ -359,6 +404,10 @@ impl ConfigParser {
     }
     pub fn errors(&self) -> &[ConfigError] {
         &self.errors
+    }
+
+    pub fn error_context(&self, index: usize) -> Option<&ConfigErrorContext> {
+        self.error_contexts.get(&index)
     }
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()

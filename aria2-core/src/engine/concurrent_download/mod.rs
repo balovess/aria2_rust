@@ -87,6 +87,28 @@ pub enum ConcurrentDownloadResult {
     Fallback { completed_ranges: Vec<(u64, u64)> },
 }
 
+/// Acquire the download limits for one HTTP write chunk.
+///
+/// Concurrent HTTP writes are owned by this module rather than by a
+/// `ThrottledWriter`, so keep the per-download and process-wide checks in one
+/// place. The global limiter is checked on every chunk to preserve live
+/// `changeOption` updates while avoiding duplicated call-site logic.
+pub(crate) async fn acquire_download_tokens(
+    limiter: Option<&RateLimiter>,
+    global_limiter: Option<&RateLimiter>,
+    bytes: usize,
+) {
+    let bytes = bytes as u64;
+    if let Some(limiter) = limiter {
+        limiter.acquire_download(bytes).await;
+    }
+    if let Some(global_limiter) = global_limiter
+        && global_limiter.is_download_limited()
+    {
+        global_limiter.acquire_download(bytes).await;
+    }
+}
+
 /// Orchestrates concurrent (multi-segment / multi-mirror) HTTP downloads.
 ///
 /// Fields are pub(crate) so that the sibling modules segment and

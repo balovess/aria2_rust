@@ -589,7 +589,7 @@ impl MockHttpServer {
                 Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Length", full_body_bytes.len())
-                    .body(full_body(partial.clone()))
+                    .body(partial_body(partial.clone()))
                     .unwrap()
             },
         );

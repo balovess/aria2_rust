@@ -137,6 +137,21 @@ impl RoutingTable {
         bucket.drop_node(node_id)
     }
 
+    /// Replace a specific node in its bucket with a verified candidate.
+    pub fn replace_node(&mut self, node_id: &[u8; 20], replacement: DhtNode) -> bool {
+        let bucket = find_bucket_for_mut(&mut self.root, node_id);
+        if !bucket.nodes().iter().any(|node| &node.id == node_id)
+            || !bucket
+                .cached_nodes()
+                .iter()
+                .any(|node| node.id == replacement.id)
+        {
+            return false;
+        }
+        bucket.remove_cached_node(&replacement.id);
+        bucket.replace_node(node_id, replacement)
+    }
+
     /// Find the K closest nodes to the given target ID.
     ///
     /// Uses tree-based traversal to efficiently locate the closest nodes.

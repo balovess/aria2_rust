@@ -9,9 +9,13 @@ use aria2_rpc::xml_rpc::{XmlRpcRequest, XmlRpcResponse};
 use async_trait::async_trait;
 use base64::Engine;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
+use futures::future::join_all;
 use std::sync::Arc;
+use std::time::Duration;
 
-struct BenchBackend;
+struct BenchBackend {
+    mutation_delay: Duration,
+}
 
 #[async_trait]
 impl RpcBackend for BenchBackend {
@@ -21,6 +25,12 @@ impl RpcBackend for BenchBackend {
 
     async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
         match request {
+            BackendRequest::ChangeGlobalOption { .. } => {
+                if !self.mutation_delay.is_zero() {
+                    tokio::time::sleep(self.mutation_delay).await;
+                }
+                Ok(BackendResult::response(BackendResponse::Ok))
+            }
             BackendRequest::AddUri { .. } => Ok(BackendResult::response(BackendResponse::Gid(
                 "0123456789abcdef".into(),
             ))),
@@ -40,7 +50,15 @@ impl RpcBackend for BenchBackend {
 }
 
 fn benchmark_engine() -> RpcEngine {
-    RpcEngine::with_backend(Arc::new(BenchBackend))
+    RpcEngine::with_backend(Arc::new(BenchBackend {
+        mutation_delay: Duration::ZERO,
+    }))
+}
+
+fn benchmark_mutation_engine() -> RpcEngine {
+    RpcEngine::with_backend(Arc::new(BenchBackend {
+        mutation_delay: Duration::from_micros(100),
+    }))
 }
 
 fn make_add_req(id: &str, uri: &str) -> JsonRpcRequest {
@@ -59,6 +77,68 @@ fn make_generic_req(id: &str, method: &str) -> JsonRpcRequest {
         params: serde_json::json!([]),
         id: Some(serde_json::Value::String(id.into())),
     }
+}
+
+fn make_change_global_option_req(id: &str) -> JsonRpcRequest {
+    JsonRpcRequest {
+        version: Some("2.0".into()),
+        method: "aria2.changeGlobalOption".into(),
+        params: serde_json::json!([{"max-overall-download-limit": "1M"}]),
+        id: Some(serde_json::Value::String(id.into())),
+    }
+}
+
+fn bench_mutation_gate_queue(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rpc_mutation_gate");
+    for count in [8usize, 32, 64] {
+        group.bench_with_input(
+            BenchmarkId::new("sequential", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let engine = benchmark_mutation_engine();
+                    rt.block_on(async {
+                        for index in 0..count {
+                            let response = engine
+                                .handle_request(&make_change_global_option_req(&index.to_string()))
+                                .await;
+                            assert!(response.is_success());
+                        }
+                    });
+                });
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("concurrent", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let rt = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    let engine = benchmark_mutation_engine();
+                    rt.block_on(async {
+                        let requests = (0..count)
+                            .map(|index| make_change_global_option_req(&index.to_string()))
+                            .collect::<Vec<_>>();
+                        let responses = join_all(
+                            requests
+                                .iter()
+                                .map(|request| engine.handle_request(request)),
+                        )
+                        .await;
+                        black_box(responses.iter().all(JsonRpcResponse::is_success));
+                    });
+                });
+            },
+        );
+    }
+    group.finish();
 }
 
 fn bench_add_uri_qps(c: &mut Criterion) {
@@ -254,6 +334,7 @@ fn bench_auth_token_verify(c: &mut Criterion) {
 criterion_group!(
     rpc_benches,
     bench_add_uri_qps,
+    bench_mutation_gate_queue,
     bench_tell_active_empty,
     bench_get_global_stat,
     bench_read_only_multicall_poll,

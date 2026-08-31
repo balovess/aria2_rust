@@ -126,11 +126,8 @@ impl DownloadCoordinator {
         let request_man = RequestGroup::new();
         let config = Arc::new(RwLock::new(options));
 
-        // Initialize engine with default tick interval
-        let tick_ms = crate::constants::DEFAULT_TICK_INTERVAL_MS; // Default BT peer timeout
-
         Self {
-            engine: Arc::new(RwLock::new(Some(DownloadEngine::new(tick_ms)))),
+            engine: Arc::new(RwLock::new(Some(DownloadEngine::new()))),
             request_man: Arc::new(request_man),
             config,
         }

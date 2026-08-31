@@ -1,3 +1,4 @@
+use super::MAX_BT_MESSAGE_LENGTH;
 use super::types::{BtMessage, MessageType, PieceBlockRequest};
 use bytes::Bytes;
 use tracing::debug;
@@ -16,6 +17,12 @@ pub fn parse_message(data: &[u8]) -> Result<Option<BtMessage>, String> {
     }
 
     let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_BT_MESSAGE_LENGTH {
+        return Err(format!(
+            "BitTorrent message length {} exceeds maximum {}",
+            len, MAX_BT_MESSAGE_LENGTH
+        ));
+    }
     if len == 0 {
         return Ok(Some(BtMessage::KeepAlive));
     }
@@ -125,6 +132,12 @@ pub fn parse_message_bytes(data: Bytes) -> Result<Option<BtMessage>, String> {
     }
 
     let len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if len > MAX_BT_MESSAGE_LENGTH {
+        return Err(format!(
+            "BitTorrent message length {} exceeds maximum {}",
+            len, MAX_BT_MESSAGE_LENGTH
+        ));
+    }
     if len == 0 || data.len() < 4 + len {
         return parse_message(&data);
     }
@@ -567,5 +580,16 @@ mod tests {
         let bytes = serialize_extended(0, payload.clone());
         let decoded = parse_message(&bytes).unwrap().unwrap();
         assert_eq!(decoded, BtMessage::Extended { ext_id: 0, payload });
+    }
+
+    #[test]
+    fn test_oversized_frame_is_rejected_before_payload_allocation() {
+        let length = (super::MAX_BT_MESSAGE_LENGTH + 1) as u32;
+        let frame = length.to_be_bytes();
+        let error = parse_message(&frame).unwrap_err();
+        assert!(
+            error.contains("exceeds maximum"),
+            "unexpected error: {error}"
+        );
     }
 }

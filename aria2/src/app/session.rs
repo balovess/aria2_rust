@@ -49,6 +49,10 @@ impl App {
             return Ok(0);
         }
 
+        if !Self::looks_like_session_file(&input_file) {
+            return Ok(0);
+        }
+
         info!("Restoring download tasks from session file: {}", input_file);
 
         let mgr = ActiveSessionManager::new(session_path.clone());

@@ -253,6 +253,31 @@ impl Bucket {
         }
     }
 
+    /// Replace a specific node with a candidate from this bucket.
+    pub fn replace_node(&mut self, node_id: &[u8; 20], replacement: DhtNode) -> bool {
+        if let Some(pos) = self.nodes.iter().position(|n| &n.id == node_id) {
+            self.nodes.remove(pos);
+            self.nodes.push(replacement);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove a replacement candidate by ID.
+    pub fn remove_cached_node(&mut self, node_id: &[u8; 20]) -> bool {
+        if let Some(pos) = self
+            .cached_nodes
+            .iter()
+            .position(|node| &node.id == node_id)
+        {
+            self.cached_nodes.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Move a node to the head (front / LRU position) of the bucket.
     ///
     /// Equivalent to C++ `DHTBucket::moveToHead()`.
@@ -655,6 +680,29 @@ mod tests {
         assert_eq!(bucket.count_node(), 1);
         // The replacement should now be in the main node list.
         assert!(bucket.nodes().iter().any(|n| n.id == [2u8; 20]));
+    }
+
+    #[test]
+    fn test_replace_node_consumes_cached_candidate() {
+        let local = make_local_node();
+        let mut bucket = Bucket::new(&local);
+        let node_id = [1u8; 20];
+        let replacement_id = [2u8; 20];
+
+        bucket.add_node(DhtNode::new(node_id, "127.0.0.1:6882".parse().unwrap()));
+        bucket.cache_node(DhtNode::new(
+            replacement_id,
+            "127.0.0.1:6883".parse().unwrap(),
+        ));
+
+        assert!(bucket.remove_cached_node(&replacement_id));
+        assert!(bucket.replace_node(
+            &node_id,
+            DhtNode::new(replacement_id, "127.0.0.1:6883".parse().unwrap())
+        ));
+        assert!(!bucket.nodes().iter().any(|node| node.id == node_id));
+        assert!(bucket.nodes().iter().any(|node| node.id == replacement_id));
+        assert!(bucket.cached_nodes().is_empty());
     }
 
     #[test]

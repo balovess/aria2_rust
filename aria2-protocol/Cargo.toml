@@ -1,6 +1,6 @@
 [package]
 name = "aria2-protocol"
-version = "0.3.2"
+version = "0.3.3"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -15,6 +15,7 @@ include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
 tokio.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -83,10 +84,5 @@ required-features = ["bittorrent"]
 
 [[bench]]
 name = "bitfield_bench"
-harness = false
-required-features = ["bittorrent"]
-
-[[bench]]
-name = "sequential_picker_bench"
 harness = false
 required-features = ["bittorrent"]

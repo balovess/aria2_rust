@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "aria2"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "aria2-core",
  "aria2-protocol",
@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "adler32",
  "aes-gcm",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-protocol"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -261,13 +261,14 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
  "tracing",
  "url",
 ]
 
 [[package]]
 name = "aria2-rpc"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "async-trait",

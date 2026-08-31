@@ -217,6 +217,8 @@ pub struct DownloadOptions {
     pub bt_tracker_connect_timeout: u64,
     /// Tracker request timeout in seconds.
     pub bt_tracker_timeout: u64,
+    /// Total timeout for stopped tracker announces during shutdown.
+    pub bt_tracker_stopped_timeout: u64,
     /// Enable BEP 11 peer exchange for non-private torrents.
     pub enable_peer_exchange: bool,
     pub enable_public_trackers: bool,
@@ -574,6 +576,7 @@ impl Default for DownloadOptions {
             bt_tracker_interval: 0,
             bt_tracker_connect_timeout: 60,
             bt_tracker_timeout: 60,
+            bt_tracker_stopped_timeout: crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS,
             enable_peer_exchange: true,
             enable_public_trackers: true,
             bt_piece_selection_strategy: String::new(),
@@ -1025,6 +1028,10 @@ impl DownloadOptions {
                 .get("bt-tracker-timeout")
                 .and_then(|v| v.parse::<u64>().ok())
                 .unwrap_or(60),
+            bt_tracker_stopped_timeout: options
+                .get("bt-tracker-stopped-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
             enable_peer_exchange: options
                 .get("enable-peer-exchange")
                 .map(|v| v != "false")
