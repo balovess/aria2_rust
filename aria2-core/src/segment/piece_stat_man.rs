@@ -42,7 +42,7 @@ use super::bitfield_util::{byte_at, for_each_set_bit, for_each_set_byte};
 pub struct PieceStatMan {
     /// Piece indices in random-shuffled order for tie-breaking.
     /// Never mutated after construction, so no lock needed.
-    order: Vec<usize>,
+    order: Vec<u32>,
     /// Per-piece peer count (how many peers possess this piece).
     /// Protected by RwLock for concurrent read / exclusive write.
     counts: RwLock<Vec<u32>>,
@@ -58,7 +58,9 @@ impl PieceStatMan {
     pub fn new(piece_num: usize, random_shuffle: bool) -> Self {
         // Build the order array; shuffle if requested (before moving into struct,
         // since `order` is immutable after construction and not behind a lock).
-        let mut order: Vec<usize> = (0..piece_num).collect();
+        let mut order: Vec<u32> = (0..piece_num)
+            .map(|index| u32::try_from(index).expect("piece count exceeds u32::MAX"))
+            .collect();
         if random_shuffle {
             let mut rng = rand::thread_rng();
             order.shuffle(&mut rng);
@@ -140,7 +142,7 @@ impl PieceStatMan {
 
     /// Returns the piece order array (random-shuffled indices for tie-breaking).
     #[inline]
-    pub fn order(&self) -> &[usize] {
+    pub fn order(&self) -> &[u32] {
         &self.order
     }
 
@@ -186,11 +188,11 @@ mod tests {
     fn test_new_with_shuffle() {
         let man = PieceStatMan::new(100, true);
         // Order must be a permutation of 0..100
-        let mut sorted: Vec<usize> = man.order().to_vec();
+        let mut sorted: Vec<u32> = man.order().to_vec();
         sorted.sort();
-        assert_eq!(sorted, (0..100).collect::<Vec<_>>());
+        assert_eq!(sorted, (0..100u32).collect::<Vec<_>>());
         // Extremely unlikely that shuffle produces identity
-        assert_ne!(man.order(), (0..100).collect::<Vec<_>>());
+        assert_ne!(man.order(), (0..100u32).collect::<Vec<_>>());
     }
 
     #[test]
