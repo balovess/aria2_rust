@@ -812,10 +812,11 @@ impl Command for BtDownloadCommand {
         // the BEP 19 fallback. The torrent's url-list is metadata, not an
         // instruction to bypass --bt-enable-web-seed=false.
         let web_seed_enabled = self.group.recover().options().bt_enable_web_seed;
-        let web_seed_manager = if web_seed_enabled && !self.web_seed_urls.is_empty() {
+        let web_seed_urls = self.configured_web_seed_urls();
+        let web_seed_manager = if web_seed_enabled && !web_seed_urls.is_empty() {
             info!(
                 "[BT] Initializing web seed manager with {} URL(s)",
-                self.web_seed_urls.len()
+                web_seed_urls.len()
             );
             let web_seed_tls = {
                 let group = self.group.recover();
@@ -823,7 +824,7 @@ impl Command for BtDownloadCommand {
             };
             Some(
                 crate::engine::bt_web_seed::WebSeedManager::new_with_tls(
-                    self.web_seed_urls.clone(),
+                    web_seed_urls,
                     piece_length,
                     total_size,
                     &web_seed_tls,

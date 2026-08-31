@@ -196,8 +196,6 @@ pub struct BtDownloadCommand {
     pub(crate) tracker_state: TrackerState,
 
     // Web-seed (BEP 19 / HTTP fallback) integration
-    /// URLs extracted from torrent url-list field for HTTP piece download fallback
-    pub(crate) web_seed_urls: Vec<String>,
     /// Web seed manager for HTTP piece downloads (initialized on first use)
     pub(crate) web_seed_manager: Option<crate::engine::bt_web_seed::WebSeedManager>,
 

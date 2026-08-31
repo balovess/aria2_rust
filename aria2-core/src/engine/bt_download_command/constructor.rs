@@ -548,8 +548,6 @@ impl BtDownloadCommand {
             // Tracker event state machine default
             tracker_state: TrackerState::new(),
 
-            // Web-seed URLs (extracted from torrent url-list field)
-            web_seed_urls: meta.web_seeds.clone(),
             // Web seed manager (initialized lazily when needed)
             web_seed_manager: None,
 
