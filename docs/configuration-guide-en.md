@@ -33,6 +33,18 @@ The original C++ aria2 sets `SO_REUSEADDR` on its listening socket. On Windows a
 
 `daemon=true` only detaches the process; it does not enable RPC and does not turn a one-shot download into a permanent service. To run a background RPC service, use a configuration with no initial download input and set `enable-rpc=true`.
 
+### Relationship between `daemon` and `enable-rpc`
+
+These options do not conflict, but they control different things:
+
+| Configuration | Effect | Does not do |
+| --- | --- | --- |
+| `daemon=true` | Detaches the current process and runs it in the background | Does not start RPC automatically |
+| `enable-rpc=true` | Enables the RPC listener in applicable startup modes | Does not run the process in the background automatically |
+| Both set to `true` | Runs an RPC-only service in the background, or backgrounds an explicitly requested Download + RPC process | Does not make ordinary downloads inherit RPC |
+
+Therefore, keep `enable-rpc=true` in a shared configuration but omit `daemon=true`. Add `--daemon=true` when starting the background service; omit it for one-shot downloads. Otherwise the download will still skip RPC, but it will also be detached and will not show its complete output directly in the terminal.
+
 ## 3. Types, units, and examples
 
 | Type | Syntax |
