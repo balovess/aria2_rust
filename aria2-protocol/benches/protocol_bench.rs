@@ -2,6 +2,7 @@ use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use aria2_protocol::bittorrent::message::handshake::Handshake;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 fn bench_bencode_encode_dict(c: &mut Criterion) {
     let data: std::collections::BTreeMap<Vec<u8>, BencodeValue> = (0..20)
@@ -84,6 +85,24 @@ fn bench_sha1_hash(c: &mut Criterion) {
     });
 }
 
+fn bench_piece_verification(c: &mut Criterion) {
+    let data: Vec<u8> = (0..(16 * 1024)).map(|i| (i % 256) as u8).collect();
+    c.bench_function("bt_v1_sha1_piece_16KB", |b| {
+        b.iter(|| black_box(Sha1::digest(black_box(&data))))
+    });
+    c.bench_function("bt_v2_merkle_piece_16KB", |b| {
+        b.iter(|| {
+            black_box(aria2_protocol::bittorrent::torrent::merkle::piece_root(
+                black_box(&data),
+                16 * 1024,
+            ))
+        })
+    });
+    c.bench_function("bt_v2_sha256_block_16KB", |b| {
+        b.iter(|| black_box(Sha256::digest(black_box(&data))))
+    });
+}
+
 fn bench_dht_xor_distance(c: &mut Criterion) {
     let target: [u8; 20] = [0xFF; 20];
     let nodes: Vec<[u8; 20]> = (0..1000)
@@ -145,6 +164,7 @@ criterion_group!(
     bench_bencode_decode_bytes,
     bench_bt_handshake_build,
     bench_sha1_hash,
+    bench_piece_verification,
     bench_dht_xor_distance,
     bench_serde_json_parse,
     bench_serde_json_serialize,

@@ -100,11 +100,12 @@ impl PieceDataProvider for FileBackedPieceProvider {
         if let Some(ref layout) = self.multi_file_layout {
             let global_start = piece_index as u64 * layout.piece_length() as u64 + offset as u64;
 
-            if global_start >= layout.total_size() {
+            if global_start >= layout.piece_space_size() {
                 return None;
             }
 
-            let actual_length = (length as u64).min(layout.total_size() - global_start) as u32;
+            let actual_length =
+                (length as u64).min(layout.piece_space_size() - global_start) as u32;
             let mut result = Vec::with_capacity(actual_length as usize);
             let mut current_global = global_start;
             let mut remaining = actual_length as u64;
@@ -114,8 +115,17 @@ impl PieceDataProvider for FileBackedPieceProvider {
                 let current_offset_in_piece =
                     (current_global % layout.piece_length() as u64) as u32;
 
-                let (file_idx, file_offset) =
-                    layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)?;
+                let Some((file_idx, file_offset)) =
+                    layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)
+                else {
+                    let next =
+                        layout.next_content_offset(current_piece_idx, current_offset_in_piece);
+                    let skip = (next - current_offset_in_piece).min(remaining as u32) as usize;
+                    result.resize(result.len() + skip, 0);
+                    current_global += skip as u64;
+                    remaining -= skip as u64;
+                    continue;
+                };
                 let file_path = layout.file_absolute_path(file_idx)?.to_path_buf();
 
                 let file_info = layout.get_file_info(file_idx)?;

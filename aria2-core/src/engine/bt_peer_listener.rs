@@ -26,6 +26,7 @@ struct SharedRoute {
     peer_storage: Arc<Mutex<DefaultPeerStorage>>,
     sender: mpsc::Sender<IncomingPeer>,
     crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
+    info_hash_v2: Option<[u8; 32]>,
 }
 
 struct SharedListenerState {
@@ -39,6 +40,7 @@ pub struct BtPeerRouteConfig {
     pub bind_ip: IpAddr,
     pub ports: Vec<u16>,
     pub info_hash: [u8; 20],
+    pub info_hash_v2: Option<[u8; 32]>,
     pub local_peer_id: [u8; 20],
     pub caretaker_id: u64,
     pub max_peers: usize,
@@ -147,6 +149,7 @@ impl BtPeerListenerManager {
             max_peers,
             peer_storage,
             crypto_policy,
+            info_hash_v2,
             ..
         } = config;
         let (sender, receiver) = mpsc::channel(max_peers.max(1));
@@ -178,6 +181,7 @@ impl BtPeerListenerManager {
                 peer_storage,
                 sender,
                 crypto_policy,
+                info_hash_v2,
             },
         );
         drop(routes);
@@ -317,13 +321,17 @@ async fn run_shared_listener(
                     peer_storage: Arc::clone(&route.peer_storage),
                     sender: route.sender.clone(),
                     crypto_policy: route.crypto_policy,
+                    info_hash_v2: route.info_hash_v2,
                 })
             };
             let Some(route) = route else {
                 tracing::debug!(%endpoint, "Rejected incoming peer for unknown info-hash");
                 return;
             };
-            let connection = match incoming.complete(route.local_peer_id).await {
+            let connection = match incoming
+                .complete_with_hybrid(route.local_peer_id, route.info_hash_v2)
+                .await
+            {
                 Ok(connection) => connection,
                 Err(error) => {
                     tracing::debug!(%endpoint, %error, "Incoming BitTorrent handshake failed");
@@ -392,6 +400,7 @@ mod tests {
                 bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
                 ports: vec![0],
                 info_hash: hash_a,
+                info_hash_v2: None,
                 local_peer_id: [1; 20],
                 caretaker_id: 1,
                 max_peers: 4,
@@ -405,6 +414,7 @@ mod tests {
                 bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
                 ports: vec![port],
                 info_hash: hash_b,
+                info_hash_v2: None,
                 local_peer_id: [2; 20],
                 caretaker_id: 2,
                 max_peers: 4,
@@ -461,6 +471,7 @@ mod tests {
                 bind_ip: IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED),
                 ports: vec![0],
                 info_hash,
+                info_hash_v2: None,
                 local_peer_id: [1; 20],
                 caretaker_id: 55,
                 max_peers: 1,
@@ -502,6 +513,7 @@ mod tests {
                 bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
                 ports: vec![0],
                 info_hash: hash,
+                info_hash_v2: None,
                 local_peer_id: [1; 20],
                 caretaker_id: 1,
                 max_peers: 1,
@@ -515,6 +527,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_manager_answers_hybrid_peer_with_v2_hash() {
+        use aria2_protocol::bittorrent::message::handshake::Handshake;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let manager = BtPeerListenerManager::new();
+        let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
+        let v1 = [61u8; 20];
+        let v2 = [62u8; 32];
+        let (port, mut incoming_peers, _route) = manager
+            .register(BtPeerRouteConfig {
+                bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                ports: vec![0],
+                info_hash: v1,
+                info_hash_v2: Some(v2),
+                local_peer_id: [1; 20],
+                caretaker_id: 61,
+                max_peers: 1,
+                peer_storage: storage,
+                crypto_policy: Default::default(),
+            })
+            .await
+            .unwrap();
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        stream
+            .write_all(&Handshake::new(&v1, &[9; 20]).with_bep52(true).to_bytes())
+            .await
+            .unwrap();
+        let mut response = [0u8; 68];
+        stream.read_exact(&mut response).await.unwrap();
+        let response = Handshake::parse(&response).unwrap();
+        assert_eq!(response.info_hash, v2[..20]);
+        assert!(response.supports_bep52());
+        let incoming =
+            tokio::time::timeout(std::time::Duration::from_secs(2), incoming_peers.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(incoming.connection.remote_peer_id(), Some([9; 20]));
+    }
+
+    #[tokio::test]
     async fn shutdown_releases_the_shared_listener_socket() {
         let manager = BtPeerListenerManager::new();
         let storage = Arc::new(Mutex::new(DefaultPeerStorage::new()));
@@ -523,6 +579,7 @@ mod tests {
                 bind_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
                 ports: vec![0],
                 info_hash: [44u8; 20],
+                info_hash_v2: None,
                 local_peer_id: [1; 20],
                 caretaker_id: 1,
                 max_peers: 1,

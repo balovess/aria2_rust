@@ -599,14 +599,60 @@ impl BtDownloadCommand {
 
         let piece_selector = BtPieceSelector::new(num_pieces);
 
-        let mut piece_manager = crate::engine::bt_piece::PieceManager::new(
-            num_pieces,
-            piece_length,
-            total_size,
-            &meta.info.pieces,
-        );
+        let mut piece_manager = if meta.info.meta_version == Some(2) {
+            let files = meta
+                .info
+                .v2_files
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|file| {
+                    let hashes = file.pieces_root.map_or_else(Vec::new, |root| {
+                        meta.piece_layers.get(&root).cloned().unwrap_or_else(|| {
+                            if file.length <= piece_length as u64 {
+                                vec![root]
+                            } else {
+                                Vec::new()
+                            }
+                        })
+                    });
+                    (file.length, hashes)
+                })
+                .collect();
+            if meta.info.pieces.is_empty() {
+                crate::engine::bt_piece::PieceManager::new_v2(
+                    num_pieces,
+                    piece_length,
+                    total_size,
+                    files,
+                )
+            } else {
+                crate::engine::bt_piece::PieceManager::new_hybrid(
+                    num_pieces,
+                    piece_length,
+                    total_size,
+                    &meta.info.pieces,
+                    files,
+                )
+            }
+        } else {
+            crate::engine::bt_piece::PieceManager::new(
+                num_pieces,
+                piece_length,
+                total_size,
+                &meta.info.pieces,
+            )
+        };
 
         let mut piece_picker = crate::engine::bt_piece::PiecePicker::new(num_pieces);
+        if meta.info.meta_version == Some(2) {
+            for index in 0..num_pieces {
+                if piece_manager.expected_piece_verification(index).is_none() {
+                    piece_picker.mark_completed(index);
+                    piece_manager.mark_piece_complete(index);
+                }
+            }
+        }
         // aria2_original uses RarestPieceSelector as the base BitTorrent
         // selector. `bt-prioritize-piece` is an additive wrapper around it,
         // not a replacement for the torrent-wide selection strategy.
@@ -826,7 +872,7 @@ impl BtDownloadCommand {
                 let new_connections = self
                     .connect_to_discovered_peers(
                         &all_new_pex_peers,
-                        &meta.info_hash.bytes,
+                        &meta.network_info_hash(),
                         num_pieces,
                         active_connections,
                         piece_length,
@@ -863,7 +909,7 @@ impl BtDownloadCommand {
             if self.should_discover_more_peers(active_connections.len()) {
                 let new_peers = self
                     .periodic_tracker_announce(
-                        &meta.info_hash.bytes,
+                        &meta.network_info_hash(),
                         self.completed_bytes,
                         total_size.saturating_sub(self.completed_bytes),
                         self.total_uploaded,
@@ -878,7 +924,7 @@ impl BtDownloadCommand {
                     let new_connections = self
                         .connect_to_discovered_peers(
                             &new_peers,
-                            &meta.info_hash.bytes,
+                            &meta.network_info_hash(),
                             num_pieces,
                             active_connections,
                             piece_length,
@@ -919,7 +965,7 @@ impl BtDownloadCommand {
             super::check_periodic_dht_lookup(
                 &mut self.dht_periodic_lookup,
                 self.dht_engine.as_ref(),
-                &meta.info_hash.bytes,
+                &meta.network_info_hash(),
                 active_connections.len(),
                 &mut dht_peers,
             )
@@ -933,7 +979,7 @@ impl BtDownloadCommand {
                 let new_connections = self
                     .connect_to_discovered_peers(
                         &dht_peers,
-                        &meta.info_hash.bytes,
+                        &meta.network_info_hash(),
                         num_pieces,
                         active_connections,
                         piece_length,
@@ -1039,7 +1085,39 @@ impl BtDownloadCommand {
             tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
 
             let actual_piece_len =
-                piece_selector.calculate_piece_length(next_piece_idx, piece_length, total_size);
+                if meta.info.meta_version == Some(2) && meta.info.pieces.is_empty() {
+                    self.multi_file_layout
+                        .as_ref()
+                        .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
+                        .filter(|&length| length > 0)
+                        .map(|length| length as u32)
+                        .unwrap_or_else(|| {
+                            piece_selector.calculate_piece_length(
+                                next_piece_idx,
+                                piece_length,
+                                total_size,
+                            )
+                        })
+                } else if meta.info.meta_version == Some(2) {
+                    self.multi_file_layout
+                        .as_ref()
+                        .map(|layout| {
+                            piece_selector.calculate_piece_length(
+                                next_piece_idx,
+                                piece_length,
+                                layout.piece_space_size(),
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            piece_selector.calculate_piece_length(
+                                next_piece_idx,
+                                piece_length,
+                                total_size,
+                            )
+                        })
+                } else {
+                    piece_selector.calculate_piece_length(next_piece_idx, piece_length, total_size)
+                };
 
             let num_blocks = BtPieceSelector::calculate_num_blocks(actual_piece_len, BLOCK_SIZE);
             tracing::debug!(
@@ -1196,7 +1274,8 @@ impl BtDownloadCommand {
                         "[BT] All blocks received for piece {}, verifying...",
                         next_piece_idx
                     );
-                    let expected_hash = piece_manager.expected_piece_hash(next_piece_idx as u32);
+                    let expected_hash =
+                        piece_manager.expected_piece_verification(next_piece_idx as u32);
                     let (piece_verified, piece_data) =
                         super::verify_piece_hash_async(expected_hash, piece_data).await?;
                     if piece_verified {
@@ -1224,7 +1303,17 @@ impl BtDownloadCommand {
                                 .await?;
                         }
 
-                        self.completed_bytes += piece_data_len as u64;
+                        let accounted_piece_len = if meta.info.meta_version == Some(2)
+                            && !meta.info.pieces.is_empty()
+                        {
+                            self.multi_file_layout
+                                .as_ref()
+                                .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
+                                .unwrap_or(piece_data_len as u64)
+                        } else {
+                            piece_data_len as u64
+                        };
+                        self.completed_bytes += accounted_piece_len;
 
                         // Sync bitfield to RequestGroup for session persistence
                         let bitfield = piece_picker.export_bitfield();
@@ -1235,7 +1324,7 @@ impl BtDownloadCommand {
                         self.persist_checkpoint_after_piece(
                             &mut writer,
                             &bitfield,
-                            piece_data_len as u64,
+                            accounted_piece_len,
                         )
                         .await?;
 
@@ -1410,7 +1499,7 @@ impl BtDownloadCommand {
             && last_progress_save.elapsed() >= self.progress_save_interval
         {
             let progress = progress_snapshot(
-                meta.info_hash.bytes,
+                meta.network_info_hash(),
                 bitfield,
                 piece_length,
                 total_size,
@@ -1424,7 +1513,7 @@ impl BtDownloadCommand {
                 },
             );
 
-            match mgr.save_progress(&meta.info_hash.bytes, &progress) {
+            match mgr.save_progress(&meta.network_info_hash(), &progress) {
                 Ok(()) => {
                     *last_progress_save = Instant::now();
                     debug!(

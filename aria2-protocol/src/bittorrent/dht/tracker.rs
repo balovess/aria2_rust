@@ -22,6 +22,9 @@ pub enum QueryType {
     FindNode,
     GetPeers,
     AnnouncePeer,
+    SampleInfohashes,
+    Get,
+    Put,
 }
 
 /// Response delivered to the waiting task via oneshot channel.

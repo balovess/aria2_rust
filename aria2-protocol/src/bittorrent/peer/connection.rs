@@ -115,6 +115,38 @@ impl PeerConnection {
         .await
     }
 
+    /// Connect to a hybrid BEP 52 torrent.
+    ///
+    /// The initial handshake uses the v1 hash, as required by the upgrade
+    /// path. A responder may return either the v1 hash or the truncated v2
+    /// hash; the latter is accepted only when the responder advertises BEP 52.
+    pub async fn connect_hybrid_with_timeout(
+        addr: &PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
+        let socket_addr = addr.to_socket_addr();
+        let mut stream =
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+                .await
+                .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+                .map_err(|e| format!("Peer connection failed: {}", e))?;
+
+        let mut handshake = Handshake::new(info_hash_v1, local_peer_id);
+        handshake.set_bep52_enabled(true);
+        stream
+            .write_all(&handshake.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to send handshake: {}", e))?;
+
+        let remote_hs =
+            Self::read_remote_handshake_hybrid(&mut stream, info_hash_v1, info_hash_v2, timeout)
+                .await?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
     async fn from_stream_with_timeout(
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
@@ -161,6 +193,29 @@ impl PeerConnection {
         Self::from_incoming_handshake(stream, response, info_hash, local_peer_id).await
     }
 
+    /// Complete the server side of a hybrid BEP 52 handshake.
+    ///
+    /// A v1 request is answered with the v2 truncated hash only when the
+    /// requester advertised BEP 52. Otherwise the connection remains on the
+    /// v1 swarm, preserving interoperability with legacy peers.
+    pub async fn from_incoming_stream_hybrid(
+        mut stream: tokio::net::TcpStream,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        let mut response = [0u8; 68];
+        read_exact_with_timeout(&mut stream, &mut response).await?;
+        Self::from_incoming_handshake_hybrid(
+            stream,
+            response,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+        )
+        .await
+    }
+
     /// Complete a plain incoming handshake when the first 20 bytes were
     /// already consumed by a shared listener for route selection.
     pub async fn from_incoming_stream_with_prefix(
@@ -186,6 +241,24 @@ impl PeerConnection {
         Self::from_incoming_handshake(stream, response, info_hash, local_peer_id).await
     }
 
+    /// Complete a hybrid handshake after a shared listener consumed it.
+    pub async fn from_incoming_handshake_bytes_hybrid(
+        stream: tokio::net::TcpStream,
+        response: [u8; 68],
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        Self::from_incoming_handshake_hybrid(
+            stream,
+            response,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+        )
+        .await
+    }
+
     async fn from_incoming_handshake(
         mut stream: tokio::net::TcpStream,
         response: [u8; 68],
@@ -197,6 +270,37 @@ impl PeerConnection {
             return Err("info_hash mismatch".to_string());
         }
         let handshake = Handshake::new(info_hash, local_peer_id);
+        stream
+            .write_all(&handshake.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to send handshake response: {}", e))?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
+    async fn from_incoming_handshake_hybrid(
+        mut stream: tokio::net::TcpStream,
+        response: [u8; 68],
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+    ) -> Result<Self, String> {
+        let remote_hs = Handshake::parse(&response)?;
+        let v2_truncated: [u8; 20] = info_hash_v2[..20]
+            .try_into()
+            .expect("SHA-256 hash is 32 bytes");
+        if remote_hs.info_hash == v2_truncated && !remote_hs.supports_bep52() {
+            return Err("hybrid v2 handshake is missing BEP 52 capability".to_string());
+        }
+        if remote_hs.info_hash != *info_hash_v1 && remote_hs.info_hash != v2_truncated {
+            return Err("hybrid handshake info_hash mismatch".to_string());
+        }
+
+        let response_hash = if remote_hs.supports_bep52() {
+            &v2_truncated
+        } else {
+            info_hash_v1
+        };
+        let handshake = Handshake::new(response_hash, local_peer_id).with_bep52(true);
         stream
             .write_all(&handshake.to_bytes())
             .await
@@ -221,6 +325,31 @@ impl PeerConnection {
             return Err("info_hash mismatch".to_string());
         }
         Ok(remote_hs)
+    }
+
+    async fn read_remote_handshake_hybrid(
+        stream: &mut tokio::net::TcpStream,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        timeout: std::time::Duration,
+    ) -> Result<Handshake, String> {
+        let mut response = [0u8; 68];
+        tokio::time::timeout(timeout, stream.read_exact(&mut response))
+            .await
+            .map_err(|_| "Handshake response timeout".to_string())?
+            .map_err(|e| format!("Failed to read handshake response: {}", e))?;
+
+        let remote_hs = Handshake::parse(&response)?;
+        let v2_truncated: [u8; 20] = info_hash_v2[..20]
+            .try_into()
+            .expect("SHA-256 hash is 32 bytes");
+        if remote_hs.info_hash == *info_hash_v1 {
+            return Ok(remote_hs);
+        }
+        if remote_hs.info_hash == v2_truncated && remote_hs.supports_bep52() {
+            return Ok(remote_hs);
+        }
+        Err("hybrid handshake info_hash mismatch or missing BEP 52 capability".to_string())
     }
 
     fn finish_handshake(
@@ -586,6 +715,67 @@ mod tests {
         .unwrap();
 
         assert_eq!(connection.remote_peer_id, Some([b'Y'; 20]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hybrid_connect_accepts_v2_hash_in_response() {
+        let v1 = [1u8; 20];
+        let v2 = [2u8; 32];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 68];
+            stream.read_exact(&mut request).await.unwrap();
+            let request = Handshake::parse(&request).unwrap();
+            assert_eq!(request.info_hash, v1);
+            assert!(request.supports_bep52());
+            let response = Handshake::new(&v2[..20].try_into().unwrap(), &[b'Y'; 20])
+                .with_bep52(true)
+                .to_bytes();
+            stream.write_all(&response).await.unwrap();
+        });
+
+        let connection = PeerConnection::connect_hybrid_with_timeout(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &v1,
+            &v2,
+            &[b'X'; 20],
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(connection.remote_peer_id, Some([b'Y'; 20]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn hybrid_connect_rejects_v2_response_without_capability_bit() {
+        let v1 = [1u8; 20];
+        let v2 = [2u8; 32];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 68];
+            stream.read_exact(&mut request).await.unwrap();
+            let response = Handshake::new(&v2[..20].try_into().unwrap(), &[b'Y'; 20]);
+            stream.write_all(&response.to_bytes()).await.unwrap();
+        });
+
+        let result = PeerConnection::connect_hybrid_with_timeout(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &v1,
+            &v2,
+            &[b'X'; 20],
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+        match result {
+            Err(error) => assert!(error.contains("missing BEP 52 capability")),
+            Ok(_) => panic!("v2 response without the capability bit must be rejected"),
+        }
         server.await.unwrap();
     }
 }

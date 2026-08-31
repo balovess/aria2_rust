@@ -10,8 +10,12 @@ pub struct PeerBitfieldEntry {
 
 pub struct PeerBitfieldTracker {
     total_pieces: u32,
-    peers: HashMap<String, PeerBitfieldEntry>,
-    piece_peer_count: Vec<usize>,
+    // Peer IDs are immutable map keys. Box<str> removes String's capacity
+    // word and stores exactly the key length.
+    peers: HashMap<Box<str>, PeerBitfieldEntry>,
+    // Peer counts cannot exceed the number of active peers, so u32 is enough
+    // and saves 4 bytes per piece on 64-bit targets.
+    piece_peer_count: Vec<u32>,
 }
 
 pub struct PeerTrackerStats {
@@ -27,7 +31,7 @@ impl PeerBitfieldTracker {
         Self {
             total_pieces,
             peers: HashMap::new(),
-            piece_peer_count: vec![0usize; total_pieces as usize],
+            piece_peer_count: vec![0u32; total_pieces as usize],
         }
     }
 
@@ -58,7 +62,7 @@ impl PeerBitfieldTracker {
                 }
             }
             self.peers.insert(
-                peer_id.to_string(),
+                peer_id.into(),
                 PeerBitfieldEntry {
                     have_pieces: have,
                     last_updated: Instant::now(),
@@ -82,7 +86,7 @@ impl PeerBitfieldTracker {
         self.peers
             .iter()
             .filter(|(_, e)| e.have_pieces.test(idx))
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| id.to_string())
             .collect()
     }
 
@@ -94,7 +98,10 @@ impl PeerBitfieldTracker {
     }
 
     pub fn piece_frequencies(&self) -> Vec<usize> {
-        self.piece_peer_count.clone()
+        self.piece_peer_count
+            .iter()
+            .map(|&count| count as usize)
+            .collect()
     }
 
     pub fn should_enter_endgame(&self, threshold: u32, completed: &Bitfield) -> bool {
@@ -111,7 +118,11 @@ impl PeerBitfieldTracker {
     }
 
     pub fn stats(&self, completed: Option<&Bitfield>) -> PeerTrackerStats {
-        let total_have: usize = self.piece_peer_count.iter().sum();
+        let total_have: usize = self
+            .piece_peer_count
+            .iter()
+            .map(|&count| count as usize)
+            .sum();
         let avg = if self.peers.is_empty() {
             0.0
         } else {

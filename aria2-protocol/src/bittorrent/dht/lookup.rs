@@ -19,6 +19,9 @@ use tracing::{debug, warn};
 use super::client::extract_compact_nodes_from_response;
 use super::client::extract_compact_peers_from_response;
 use super::message::{DhtMessage, DhtMessageBuilder};
+use super::modern::{
+    MutableValue, SampleInfoHashesResponse, StoredItem, get_query, sample_infohashes_query,
+};
 use super::node::DhtNode;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
@@ -88,6 +91,75 @@ pub struct PeerLookupResult {
     pub nodes_contacted: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct ItemLookupResult {
+    pub item: Option<StoredItem>,
+    pub token_nodes: Vec<(SocketAddr, [u8; 20], Vec<u8>)>,
+    pub nodes_contacted: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SampleLookupResult {
+    pub response: Option<SampleInfoHashesResponse>,
+    pub nodes_contacted: usize,
+}
+
+/// Iteratively query nearby nodes for a BEP 51 sample. Responses are parsed
+/// during traversal so malformed samples cannot influence discovery.
+pub async fn iterative_sample_infohashes(
+    target: &[u8; 20],
+    self_id: &[u8; 20],
+    routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
+    socket: &DhtSocket,
+    tracker: &Arc<TransactionTracker>,
+    query_timeout: Duration,
+) -> SampleLookupResult {
+    let mut entries = initialize_entries(target, routing_table, self_id).await;
+    let mut pending = FuturesUnordered::<LookupPendingResponse>::new();
+    let mut response = None;
+    let mut contacted = 0;
+    let mut rounds = 0;
+    let request = LookupRequest {
+        target,
+        self_id,
+        info_hash: None,
+        socket,
+        tracker,
+        query_type: QueryType::SampleInfohashes,
+        query_timeout,
+    };
+    send_batch_with_seq(&request, None, &mut entries, &mut pending).await;
+    while !pending.is_empty() && rounds < MAX_ROUNDS {
+        rounds += 1;
+        let Some(result) = pending.next().await else {
+            break;
+        };
+        if let Some(tracked) = result.response {
+            contacted += 1;
+            let message = tracked.message;
+            mark_node_good(&tracked.from, &message, routing_table).await;
+            if response.is_none() {
+                response = message
+                    .r
+                    .as_ref()
+                    .and_then(|value| SampleInfoHashesResponse::from_bencode(value).ok());
+            }
+            for (addr, node_id) in extract_compact_nodes_from_response(&message) {
+                add_node_to_table(routing_table, DhtNode::new(node_id, addr)).await;
+                insert_entry(&mut entries, node_id, addr, target, self_id);
+            }
+            sort_and_dedup(&mut entries, target);
+        } else {
+            mark_node_bad(&result.node_id, routing_table).await;
+        }
+        send_batch_with_seq(&request, None, &mut entries, &mut pending).await;
+    }
+    SampleLookupResult {
+        response,
+        nodes_contacted: contacted,
+    }
+}
+
 /// Performs an iterative `find_node` lookup for the given target ID.
 ///
 /// This follows the standard Kademlia iterative lookup algorithm (BEP 0005):
@@ -104,7 +176,7 @@ pub async fn iterative_find_node(
     tracker: &Arc<TransactionTracker>,
     query_timeout: Duration,
 ) -> NodeLookupResult {
-    let mut entries = initialize_entries(target, routing_table).await;
+    let mut entries = initialize_entries(target, routing_table, self_id).await;
     let mut pending = FuturesUnordered::<LookupPendingResponse>::new();
     let mut nodes_contacted = 0usize;
     let mut rounds = 0usize;
@@ -141,7 +213,7 @@ pub async fn iterative_find_node(
                 for (addr, nid) in new_nodes {
                     let new_node = DhtNode::new(nid, addr);
                     add_node_to_table(routing_table, new_node).await;
-                    insert_entry(&mut entries, nid, addr, target);
+                    insert_entry(&mut entries, nid, addr, target, self_id);
                 }
 
                 // Sort entries by distance and dedup
@@ -180,7 +252,7 @@ pub async fn iterative_get_peers(
     tracker: &Arc<TransactionTracker>,
     query_timeout: Duration,
 ) -> PeerLookupResult {
-    let mut entries = initialize_entries(info_hash, routing_table).await;
+    let mut entries = initialize_entries(info_hash, routing_table, self_id).await;
     let mut pending = FuturesUnordered::<LookupPendingResponse>::new();
     let mut nodes_contacted = 0usize;
     let mut all_peers: Vec<SocketAddr> = Vec::new();
@@ -233,7 +305,7 @@ pub async fn iterative_get_peers(
                 for (addr, nid) in new_nodes {
                     let new_node = DhtNode::new(nid, addr);
                     add_node_to_table(routing_table, new_node).await;
-                    insert_entry(&mut entries, nid, addr, info_hash);
+                    insert_entry(&mut entries, nid, addr, info_hash, self_id);
                 }
 
                 sort_and_dedup(&mut entries, info_hash);
@@ -261,6 +333,127 @@ pub async fn iterative_get_peers(
         peers: all_peers,
         token_nodes,
         nodes_contacted,
+    }
+}
+
+/// Iteratively query the BEP 44 keyspace, returning the first valid value and
+/// tokens from the nodes contacted along the way.
+pub async fn iterative_get_item(
+    target: &[u8; 20],
+    seq: Option<i64>,
+    self_id: &[u8; 20],
+    routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
+    socket: &DhtSocket,
+    tracker: &Arc<TransactionTracker>,
+    query_timeout: Duration,
+) -> ItemLookupResult {
+    iterative_get_item_with_token_collection(
+        target,
+        seq,
+        self_id,
+        routing_table,
+        socket,
+        tracker,
+        query_timeout,
+        false,
+    )
+    .await
+}
+
+/// Look up an item while allowing publishers to collect tokens from every
+/// contacted node. Readers use [`iterative_get_item`] and return immediately
+/// after the first verified value; publishers need the additional tokens for
+/// redundant BEP 44 writes.
+pub async fn iterative_get_item_for_publish(
+    target: &[u8; 20],
+    seq: Option<i64>,
+    self_id: &[u8; 20],
+    routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
+    socket: &DhtSocket,
+    tracker: &Arc<TransactionTracker>,
+    query_timeout: Duration,
+) -> ItemLookupResult {
+    iterative_get_item_with_token_collection(
+        target,
+        seq,
+        self_id,
+        routing_table,
+        socket,
+        tracker,
+        query_timeout,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn iterative_get_item_with_token_collection(
+    target: &[u8; 20],
+    seq: Option<i64>,
+    self_id: &[u8; 20],
+    routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
+    socket: &DhtSocket,
+    tracker: &Arc<TransactionTracker>,
+    query_timeout: Duration,
+    collect_all_tokens: bool,
+) -> ItemLookupResult {
+    let mut entries = initialize_entries(target, routing_table, self_id).await;
+    let mut pending = FuturesUnordered::<LookupPendingResponse>::new();
+    let mut tokens = Vec::new();
+    let mut item = None;
+    let mut contacted = 0;
+    let mut rounds = 0;
+    let request = LookupRequest {
+        target,
+        self_id,
+        info_hash: None,
+        socket,
+        tracker,
+        query_type: QueryType::Get,
+        query_timeout,
+    };
+    send_batch_with_seq(&request, seq, &mut entries, &mut pending).await;
+    while !pending.is_empty() && rounds < MAX_ROUNDS {
+        rounds += 1;
+        let Some(result) = pending.next().await else {
+            break;
+        };
+        if let Some(response) = result.response {
+            contacted += 1;
+            let from = response.from;
+            let message = response.message;
+            mark_node_good(&from, &message, routing_table).await;
+            if let Some(result) = message.r.as_ref() {
+                if let Some(token) = result.dict_get(b"token").and_then(|v| v.as_bytes()) {
+                    tokens.push((from, result_node_id(&message), token.to_vec()));
+                }
+                if item.is_none()
+                    && let Some(candidate) = parse_stored_item(target, result)
+                    && candidate.verify_target()
+                {
+                    item = Some(candidate);
+                    if !collect_all_tokens {
+                        break;
+                    }
+                }
+            }
+            if collect_all_tokens && tokens.len() >= K {
+                break;
+            }
+            for (addr, nid) in extract_compact_nodes_from_response(&message) {
+                add_node_to_table(routing_table, DhtNode::new(nid, addr)).await;
+                insert_entry(&mut entries, nid, addr, target, self_id);
+            }
+            sort_and_dedup(&mut entries, target);
+        } else {
+            mark_node_bad(&result.node_id, routing_table).await;
+        }
+        send_batch_with_seq(&request, seq, &mut entries, &mut pending).await;
+    }
+    ItemLookupResult {
+        item,
+        token_nodes: tokens,
+        nodes_contacted: contacted,
     }
 }
 
@@ -330,10 +523,12 @@ pub async fn announce_to_token_nodes(
 async fn initialize_entries(
     target: &[u8; 20],
     routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
+    self_id: &[u8; 20],
 ) -> Vec<LookupEntry> {
     let rt = routing_table.read().await;
     rt.find_closest(target, K)
         .into_iter()
+        .filter(|node| &node.id != self_id)
         .map(|n| LookupEntry {
             node_id: n.id,
             addr: n.addr,
@@ -348,6 +543,15 @@ async fn initialize_entries(
 /// lookup's pending set.
 async fn send_batch(
     request: &LookupRequest<'_>,
+    entries: &mut [LookupEntry],
+    pending: &mut FuturesUnordered<LookupPendingResponse>,
+) {
+    send_batch_with_seq(request, None, entries, pending).await;
+}
+
+async fn send_batch_with_seq(
+    request: &LookupRequest<'_>,
+    seq: Option<i64>,
     entries: &mut [LookupEntry],
     pending: &mut FuturesUnordered<LookupPendingResponse>,
 ) {
@@ -388,7 +592,11 @@ async fn send_batch(
             QueryType::GetPeers => {
                 DhtMessageBuilder::get_peers(transaction_id, request.self_id, request.target)
             }
-            _ => unreachable!("lookup batches only contain find_node or get_peers"),
+            QueryType::Get => get_query(transaction_id, request.self_id, request.target, seq),
+            QueryType::SampleInfohashes => {
+                sample_infohashes_query(transaction_id, request.self_id, request.target)
+            }
+            _ => unreachable!("unsupported lookup query type"),
         };
 
         let encoded = match msg.encode() {
@@ -417,13 +625,58 @@ async fn send_batch(
     }
 }
 
+fn result_node_id(message: &DhtMessage) -> [u8; 20] {
+    message
+        .r
+        .as_ref()
+        .and_then(|r| r.dict_get(b"id"))
+        .and_then(|v| v.as_bytes())
+        .and_then(|v| v.try_into().ok())
+        .unwrap_or([0u8; 20])
+}
+
+fn parse_stored_item(
+    target: &[u8; 20],
+    result: &crate::bittorrent::bencode::codec::BencodeValue,
+) -> Option<StoredItem> {
+    let value = result.dict_get(b"v")?.clone();
+    if let (Some(key), Some(signature), Some(sequence)) = (
+        result.dict_get(b"k").and_then(|v| v.as_bytes()),
+        result.dict_get(b"sig").and_then(|v| v.as_bytes()),
+        result.dict_get(b"seq").and_then(|v| v.as_int()),
+    ) {
+        Some(StoredItem::Mutable {
+            target: *target,
+            item: MutableValue {
+                public_key: key.try_into().ok()?,
+                signature: signature.try_into().ok()?,
+                sequence,
+                salt: match result.dict_get(b"salt") {
+                    Some(value) => Some(value.as_bytes()?.to_vec()),
+                    None => None,
+                },
+                value,
+            },
+        })
+    } else {
+        Some(StoredItem::Immutable {
+            target: *target,
+            value,
+        })
+    }
+}
+
 /// Insert a new entry into the lookup list, avoiding duplicates.
 fn insert_entry(
     entries: &mut Vec<LookupEntry>,
     node_id: [u8; 20],
     addr: SocketAddr,
     target: &[u8; 20],
+    self_id: &[u8; 20],
 ) {
+    if &node_id == self_id {
+        return;
+    }
     // Skip if already present
     if entries.iter().any(|e| e.node_id == node_id) {
         return;

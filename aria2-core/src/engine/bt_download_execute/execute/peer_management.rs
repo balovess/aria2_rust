@@ -461,13 +461,17 @@ impl BtDownloadCommand {
         &mut self,
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
+        info_hash_v2: Option<[u8; 32]>,
         num_pieces: u32,
         piece_length: u32,
         total_size: u64,
     ) -> Result<Vec<BtPeerConn>> {
         let connection_options = {
             let group = self.group.recover();
-            BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id)
+            let mut options =
+                BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
+            options.hybrid_info_hash_v2 = info_hash_v2;
+            options
         };
 
         // Generate our local peer ID for this session. This is used for
@@ -819,7 +823,7 @@ mod tests {
         command.set_lpd_manager(Arc::clone(&manager));
 
         let peers = command
-            .discover_peers(&meta, meta.total_size(), &meta.info_hash.bytes)
+            .discover_peers(&meta, meta.total_size(), &meta.network_info_hash())
             .await
             .expect("discovery without network trackers should succeed");
 

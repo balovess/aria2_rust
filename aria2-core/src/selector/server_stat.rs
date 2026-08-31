@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,13 +53,13 @@ pub struct ServerStatSnapshot {
 #[derive(Debug)]
 pub struct ServerStat {
     /// Server hostname (e.g., "mirror1.example.com")
-    pub host: String,
+    pub host: Arc<str>,
     /// Protocol scheme (e.g., "http", "https", "ftp"); empty if unspecified
     ///
     /// In C++ aria2, ServerStat is keyed by (hostname, protocol). This field
     /// enables the same lookup semantics. The Rust ServerStatMan uses
     /// `(host, protocol)` as the composite key.
-    pub protocol: String,
+    pub protocol: Arc<str>,
     download_speed: AtomicU64,
     single_connection_avg_speed: AtomicU64,
     multi_connection_avg_speed: AtomicU64,
@@ -76,8 +77,8 @@ pub struct ServerStat {
 impl Clone for ServerStat {
     fn clone(&self) -> Self {
         Self {
-            host: self.host.clone(),
-            protocol: self.protocol.clone(),
+            host: Arc::clone(&self.host),
+            protocol: Arc::clone(&self.protocol),
             download_speed: AtomicU64::new(self.download_speed.load(Ordering::Relaxed)),
             single_connection_avg_speed: AtomicU64::new(
                 self.single_connection_avg_speed.load(Ordering::Relaxed),
@@ -103,8 +104,8 @@ impl ServerStat {
     /// (matching C++ aria2 behavior), use [`ServerStat::new_with_protocol`].
     pub fn new(host: &str) -> Self {
         Self {
-            host: host.to_string(),
-            protocol: String::new(),
+            host: Arc::from(host),
+            protocol: Arc::from(""),
             download_speed: AtomicU64::new(0),
             single_connection_avg_speed: AtomicU64::new(0),
             multi_connection_avg_speed: AtomicU64::new(0),
@@ -122,9 +123,13 @@ impl ServerStat {
     /// This matches the C++ aria2 `ServerStat(hostname, protocol)` constructor.
     /// The protocol field enables (host, protocol) composite key lookups.
     pub fn new_with_protocol(host: &str, protocol: &str) -> Self {
+        Self::from_shared(Arc::from(host), Arc::from(protocol))
+    }
+
+    pub(crate) fn from_shared(host: Arc<str>, protocol: Arc<str>) -> Self {
         Self {
-            host: host.to_string(),
-            protocol: protocol.to_string(),
+            host,
+            protocol,
             download_speed: AtomicU64::new(0),
             single_connection_avg_speed: AtomicU64::new(0),
             multi_connection_avg_speed: AtomicU64::new(0),
@@ -284,8 +289,8 @@ impl ServerStat {
     /// ```
     pub fn to_snapshot(&self) -> ServerStatSnapshot {
         ServerStatSnapshot {
-            host: self.host.clone(),
-            protocol: self.protocol.clone(),
+            host: self.host.to_string(),
+            protocol: self.protocol.to_string(),
             download_speed: self.download_speed.load(Ordering::Relaxed),
             single_connection_avg_speed: self.single_connection_avg_speed.load(Ordering::Relaxed),
             multi_connection_avg_speed: self.multi_connection_avg_speed.load(Ordering::Relaxed),
@@ -333,9 +338,21 @@ impl ServerStat {
     /// assert_eq!(stat.get_counter(), 10);
     /// ```
     pub fn from_snapshot(snapshot: &ServerStatSnapshot) -> Self {
+        Self::from_snapshot_shared(
+            snapshot,
+            Arc::from(snapshot.host.as_str()),
+            Arc::from(snapshot.protocol.as_str()),
+        )
+    }
+
+    pub(crate) fn from_snapshot_shared(
+        snapshot: &ServerStatSnapshot,
+        host: Arc<str>,
+        protocol: Arc<str>,
+    ) -> Self {
         Self {
-            host: snapshot.host.clone(),
-            protocol: snapshot.protocol.clone(),
+            host,
+            protocol,
             download_speed: AtomicU64::new(snapshot.download_speed),
             single_connection_avg_speed: AtomicU64::new(snapshot.single_connection_avg_speed),
             multi_connection_avg_speed: AtomicU64::new(snapshot.multi_connection_avg_speed),

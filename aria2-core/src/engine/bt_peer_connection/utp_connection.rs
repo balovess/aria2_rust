@@ -23,6 +23,7 @@ pub struct UtpPeerConnection {
     conn_id: u16,
     /// Info hash for the torrent
     info_hash: [u8; 20],
+    info_hash_v2: Option<[u8; 32]>,
     /// Whether handshake is complete
     handshake_complete: bool,
     /// Remote peer ID learned during the handshake
@@ -43,6 +44,7 @@ impl UtpPeerConnection {
             socket,
             conn_id,
             info_hash,
+            info_hash_v2: None,
             handshake_complete: false,
             remote_peer_id: None,
             remote_endpoint: None,
@@ -82,11 +84,56 @@ impl UtpPeerConnection {
         Self::connect_with_shared_socket(socket, addr, info_hash, local_peer_id, timeout).await
     }
 
+    /// Connect to a remote peer via uTP using a hybrid BEP 52 identity.
+    pub async fn connect_with_hybrid_options(
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+    ) -> Result<Self> {
+        let socket = match listen_port {
+            Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+            None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
+        }
+        .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
+        Self::connect_with_shared_socket_hybrid(
+            Arc::new(Mutex::new(socket)),
+            addr,
+            info_hash_v1,
+            Some(info_hash_v2),
+            local_peer_id,
+            timeout,
+        )
+        .await
+    }
+
     /// Connect on a socket shared by all uTP peers in one download task.
     pub async fn connect_with_shared_socket(
         socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
         addr: std::net::SocketAddr,
         info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        Self::connect_with_shared_socket_hybrid(
+            socket,
+            addr,
+            info_hash,
+            None,
+            local_peer_id,
+            timeout,
+        )
+        .await
+    }
+
+    /// Connect on uTP while advertising and accepting the BEP 52 hybrid hash.
+    pub async fn connect_with_shared_socket_hybrid(
+        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
     ) -> Result<Self> {
@@ -99,7 +146,8 @@ impl UtpPeerConnection {
         let mut connection = Self {
             socket,
             conn_id,
-            info_hash: *info_hash,
+            info_hash: *info_hash_v1,
+            info_hash_v2: info_hash_v2.copied(),
             handshake_complete: false,
             remote_peer_id: None,
             remote_endpoint: Some(addr),
@@ -251,7 +299,8 @@ impl UtpPeerConnection {
     pub async fn perform_handshake(&mut self, local_peer_id: &[u8; 20]) -> Result<()> {
         use aria2_protocol::bittorrent::message::handshake::Handshake;
 
-        let handshake = Handshake::new(&self.info_hash, local_peer_id);
+        let handshake =
+            Handshake::new(&self.info_hash, local_peer_id).with_bep52(self.info_hash_v2.is_some());
         let handshake_bytes = handshake.to_bytes();
 
         {
@@ -279,7 +328,11 @@ impl UtpPeerConnection {
         let response = Handshake::parse(&self.recv_buffer.split_to(68))
             .map_err(|e| Aria2Error::Fatal(FatalError::Config(e)))?;
 
-        if response.info_hash != self.info_hash {
+        let accepted = response.info_hash == self.info_hash
+            || self
+                .info_hash_v2
+                .is_some_and(|hash| response.info_hash == hash[..20] && response.supports_bep52());
+        if !accepted {
             return Err(Aria2Error::Fatal(FatalError::Config(
                 "Info hash mismatch".to_string(),
             )));
@@ -460,6 +513,61 @@ mod tests {
             .expect("server should receive the BitTorrent handshake")
             .expect("server task should not panic");
         assert!(connection.is_connected());
+        assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
+    }
+
+    #[tokio::test]
+    async fn connect_accepts_bep52_v2_response_over_utp() {
+        use aria2_protocol::bittorrent::message::handshake::Handshake;
+
+        let info_hash_v1 = [17u8; 20];
+        let info_hash_v2 = [18u8; 32];
+        let local_peer_id = [19u8; 20];
+        let remote_peer_id = [20u8; 20];
+        let client_socket = Arc::new(Mutex::new(UtpSocket::bind("127.0.0.1:0").unwrap()));
+        let mut server = UtpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server.local_addr();
+
+        let server_task = tokio::spawn(async move {
+            let mut request_buffer = Vec::new();
+            loop {
+                for (conn_id, data) in server.poll_recv().unwrap() {
+                    request_buffer.extend_from_slice(&data);
+                    if request_buffer.len() < 68 {
+                        continue;
+                    }
+                    let request = Handshake::parse(&request_buffer).unwrap();
+                    assert_eq!(request.info_hash, info_hash_v1);
+                    assert!(request.supports_bep52());
+                    let v2_wire: [u8; 20] = info_hash_v2[..20].try_into().unwrap();
+                    server
+                        .send(
+                            conn_id,
+                            &Handshake::new(&v2_wire, &remote_peer_id)
+                                .with_bep52(true)
+                                .to_bytes(),
+                        )
+                        .unwrap();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        });
+
+        let connection = UtpPeerConnection::connect_with_shared_socket_hybrid(
+            client_socket,
+            server_addr,
+            &info_hash_v1,
+            Some(&info_hash_v2),
+            &local_peer_id,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
     }
 }

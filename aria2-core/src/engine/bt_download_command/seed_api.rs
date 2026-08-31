@@ -87,7 +87,7 @@ impl BtDownloadCommand {
         }
 
         let mut seed_manager = BtSeedManager::new_with_info_hash(
-            meta.info_hash.bytes,
+            meta.network_info_hash(),
             connections,
             piece_provider,
             config,

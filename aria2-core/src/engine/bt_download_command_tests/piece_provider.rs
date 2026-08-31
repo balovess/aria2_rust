@@ -22,6 +22,9 @@ fn test_multi_file_piece_provider_reads_correct_file() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("mfp_test_{}", std::process::id()));
@@ -71,6 +74,51 @@ fn test_multi_file_piece_provider_reads_correct_file() {
         result_b.unwrap(),
         (156u8..=205u8).collect::<Vec<u8>>(),
         "Piece 1 offset 28 = global byte 156 = file b offset 56"
+    );
+
+    let _ = std::fs::remove_dir_all(&base_dir);
+}
+
+#[test]
+fn test_v2_multi_file_piece_provider_preserves_alignment_gap() {
+    use aria2_protocol::bittorrent::torrent::parser::{InfoDict, V2FileEntry};
+
+    let info = InfoDict {
+        name: "v2_gap_test".to_string(),
+        piece_length: 256,
+        pieces: Vec::new(),
+        length: None,
+        files: None,
+        private: None,
+        meta_version: Some(2),
+        v2_files: Some(vec![
+            V2FileEntry {
+                length: 100,
+                path: vec!["first.bin".to_string()],
+                pieces_root: Some([1u8; 32]),
+            },
+            V2FileEntry {
+                length: 100,
+                path: vec!["second.bin".to_string()],
+                pieces_root: Some([2u8; 32]),
+            },
+        ]),
+        pieces_root: None,
+    };
+    let base_dir = std::env::temp_dir().join(format!("v2_gap_provider_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base_dir);
+    let layout = MultiFileLayout::from_info_dict(&info, &base_dir).unwrap();
+    layout.create_directories().unwrap();
+    std::fs::write(layout.file_absolute_path(0).unwrap(), vec![0x11u8; 100]).unwrap();
+    std::fs::write(layout.file_absolute_path(1).unwrap(), vec![0x22u8; 100]).unwrap();
+
+    let provider = FileBackedPieceProvider::new(base_dir.clone(), 256, 2, Some(layout));
+    let first_piece = provider.get_piece_data(0, 0, 256).unwrap();
+    assert_eq!(&first_piece[..100], vec![0x11u8; 100].as_slice());
+    assert!(first_piece[100..].iter().all(|byte| *byte == 0));
+    assert_eq!(
+        provider.get_piece_data(1, 0, 100).unwrap(),
+        vec![0x22u8; 100]
     );
 
     let _ = std::fs::remove_dir_all(&base_dir);
@@ -150,6 +198,9 @@ fn test_multi_file_cross_boundary_read() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("cb_test_{}", std::process::id()));
@@ -211,6 +262,9 @@ fn test_large_offset_and_edge_cases() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("ec_test_{}", std::process::id()));
@@ -285,6 +339,9 @@ fn test_provider_error_handling() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("err_test_{}", std::process::id()));

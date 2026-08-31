@@ -15,7 +15,7 @@ pub(super) async fn try_web_seed_fallback(
     cmd: &mut BtDownloadCommand,
     web_seed_manager: Option<&crate::engine::bt_web_seed::WebSeedManager>,
     next_piece_idx: usize,
-    piece_manager: &mut crate::engine::bt_piece::PieceManager<'_>,
+    piece_manager: &mut crate::engine::bt_piece::PieceManager,
     piece_picker: &mut crate::engine::bt_piece::PiecePicker,
     writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
     piece_length: u32,
@@ -49,7 +49,7 @@ pub(super) async fn try_web_seed_fallback(
             );
             // Verify the piece on a bounded blocking worker so a large web
             // seed response cannot monopolize the download task.
-            let expected_hash = piece_manager.expected_piece_hash(next_piece_idx as u32);
+            let expected_hash = piece_manager.expected_piece_verification(next_piece_idx as u32);
             let (verified, web_seed_data) =
                 super::verify_piece_hash_async(expected_hash, web_seed_data).await?;
             if verified {

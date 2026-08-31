@@ -27,7 +27,8 @@ use fixtures::mock_bt_seeder::{MockBtSeeder, SeederConfig};
 use fixtures::mock_tracker::MockTrackerServer;
 use fixtures::mock_udp_tracker::MockUdpTracker;
 use fixtures::test_torrent_builder::{
-    build_multi_file_test_torrent, build_test_torrent, build_test_torrent_with_web_seeds,
+    build_hybrid_multi_file_test_torrent, build_multi_file_test_torrent, build_test_torrent,
+    build_test_torrent_with_web_seeds, build_v2_multi_file_test_torrent, build_v2_test_torrent,
     expected_piece_data,
 };
 use std::sync::{Arc, Mutex};
@@ -2129,6 +2130,143 @@ async fn test_e2e_bt_small_torrent_download() {
         !ControlFile::control_path_for(&output_path).exists(),
         "completed BT downloads must remove their Rust checkpoint"
     );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_v2_merkle_download_writes_verified_payload() {
+    let dir = tmp_dir();
+    let bootstrap = MockTrackerServer::start(0).await;
+    let placeholder =
+        build_v2_test_torrent("v2.bin", 20 * 1024, 16 * 1024, &bootstrap.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder.0)
+        .expect("v2 fixture must parse");
+    assert_eq!(meta.info.meta_version, Some(2));
+    assert!(meta.info_hash_v2.is_some());
+    assert_eq!(meta.num_pieces(), 2);
+
+    let pieces = vec![
+        placeholder.1[..16 * 1024].to_vec(),
+        placeholder.1[16 * 1024..].to_vec(),
+    ];
+    let peer = MockBtPeerServer::start(meta.network_info_hash(), pieces).await;
+    drop(bootstrap);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent = build_v2_test_torrent("v2.bin", 20 * 1024, 16 * 1024, &tracker.announce_url());
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(120),
+        &torrent.0,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .expect("v2 command creation must succeed");
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("v2 download timed out")
+        .expect("v2 Merkle download failed");
+
+    assert_eq!(
+        std::fs::read(dir.path().join("v2.bin")).unwrap(),
+        placeholder.1
+    );
+    assert!(peer.requested_pieces().await.len() >= 2);
+}
+
+#[tokio::test]
+async fn test_e2e_bt_v2_multi_file_download_respects_alignment() {
+    let dir = tmp_dir();
+    let bootstrap = MockTrackerServer::start(0).await;
+    let (placeholder, pieces) = build_v2_multi_file_test_torrent(&bootstrap.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("multi-file v2 fixture must parse");
+    assert_eq!(meta.info.meta_version, Some(2));
+    assert_eq!(meta.num_pieces(), 2);
+    assert_eq!(meta.piece_space_size(), 16 * 1024 + 1);
+
+    let peer = MockBtPeerServer::start(meta.network_info_hash(), pieces.clone()).await;
+    drop(bootstrap);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let (torrent, _) = build_v2_multi_file_test_torrent(&tracker.announce_url());
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(121),
+        &torrent,
+        &DownloadOptions {
+            dir: Some(dir.path().to_string_lossy().into_owned()),
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .expect("multi-file v2 command creation must succeed");
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("multi-file v2 download timed out")
+        .expect("multi-file v2 download failed");
+
+    assert_eq!(
+        std::fs::read(dir.path().join("one.bin")).unwrap(),
+        pieces[0]
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("two.bin")).unwrap(),
+        pieces[1]
+    );
+    assert!(peer.requested_pieces().await.contains(&0));
+    assert!(peer.requested_pieces().await.contains(&1));
+}
+
+#[tokio::test]
+async fn test_e2e_bt_hybrid_multi_file_verifies_without_writing_padding() {
+    let dir = tmp_dir();
+    let bootstrap = MockTrackerServer::start(0).await;
+    let (placeholder, wire_pieces, content) =
+        build_hybrid_multi_file_test_torrent(&bootstrap.announce_url());
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("hybrid multi-file fixture must parse");
+    assert_eq!(meta.info.meta_version, Some(2));
+    assert_eq!(meta.info.pieces.len(), 2);
+    let peer = MockBtPeerServer::start(meta.network_info_hash(), wire_pieces).await;
+    drop(bootstrap);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let (torrent, _, _) = build_hybrid_multi_file_test_torrent(&tracker.announce_url());
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(122),
+        &torrent,
+        &DownloadOptions {
+            dir: Some(dir.path().to_string_lossy().into_owned()),
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .expect("hybrid multi-file command creation must succeed");
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("hybrid multi-file download timed out")
+        .expect("hybrid multi-file download failed");
+
+    assert_eq!(
+        std::fs::read(dir.path().join("one.bin")).unwrap(),
+        content[0]
+    );
+    assert_eq!(
+        std::fs::read(dir.path().join("two.bin")).unwrap(),
+        content[1]
+    );
+    assert!(!dir.path().join(".pad").exists());
+    assert!(peer.requested_pieces().await.contains(&0));
+    assert!(peer.requested_pieces().await.contains(&1));
 }
 
 #[tokio::test]

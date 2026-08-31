@@ -37,12 +37,7 @@ pub struct ServerStatFile {
     pub servers: Vec<ServerStatSnapshot>,
 }
 
-/// Composite key for server statistics: (hostname, protocol).
-///
-/// In C++ aria2, `ServerStatMan::find()` takes `(hostname, protocol)` as a
-/// composite key. This Rust version uses the same approach for compatibility.
-/// When protocol is empty, the entry is treated as protocol-agnostic.
-type StatKey = (String, String);
+type ProtocolStats = HashMap<Arc<str>, Arc<ServerStat>>;
 
 /// Process-level shared `ServerStatMan` singleton.
 ///
@@ -53,7 +48,7 @@ type StatKey = (String, String);
 static SHARED_STAT_MAN: OnceLock<Arc<ServerStatMan>> = OnceLock::new();
 
 pub struct ServerStatMan {
-    stats: RwLock<HashMap<StatKey, Arc<ServerStat>>>,
+    stats: RwLock<HashMap<Arc<str>, ProtocolStats>>,
 }
 
 impl ServerStatMan {
@@ -89,15 +84,26 @@ impl ServerStatMan {
     /// Each `(host, protocol)` pair has its own separate ServerStat entry,
     /// so "example.com:http" and "example.com:ftp" are distinct entries.
     pub fn get_or_create_with_protocol(&self, host: &str, protocol: &str) -> Arc<ServerStat> {
-        let key = (host.to_string(), protocol.to_string());
         let mut map = self.stats.recover_mut();
-        if let Some(stat) = map.get(&key) {
-            Arc::clone(stat)
-        } else {
-            let stat = Arc::new(ServerStat::new_with_protocol(host, protocol));
-            map.insert(key, Arc::clone(&stat));
-            stat
+        if let Some(host_stats) = map.get(host)
+            && let Some(stat) = host_stats.get(protocol)
+        {
+            return Arc::clone(stat);
         }
+
+        let host_key = map
+            .get_key_value(host)
+            .map(|(key, _)| Arc::clone(key))
+            .unwrap_or_else(|| Arc::from(host));
+        let protocol_key = Arc::from(protocol);
+        let stat = Arc::new(ServerStat::from_shared(
+            Arc::clone(&host_key),
+            Arc::clone(&protocol_key),
+        ));
+        map.entry(host_key)
+            .or_default()
+            .insert(protocol_key, Arc::clone(&stat));
+        stat
     }
 
     /// Finds a ServerStat by hostname only (protocol-agnostic).
@@ -113,9 +119,8 @@ impl ServerStatMan {
     /// This matches the C++ `ServerStatMan::find(hostname, protocol)` semantics.
     /// Returns `None` if no entry exists for the given `(host, protocol)` pair.
     pub fn find_stat_by_protocol(&self, host: &str, protocol: &str) -> Option<Arc<ServerStat>> {
-        let key = (host.to_string(), protocol.to_string());
         let map = self.stats.recover();
-        map.get(&key).cloned()
+        map.get(host).and_then(|stats| stats.get(protocol)).cloned()
     }
 
     /// Finds any ServerStat for the given hostname, regardless of protocol.
@@ -124,9 +129,11 @@ impl ServerStatMan {
     /// about the protocol. Returns the first match found.
     pub fn find_stat_by_host(&self, host: &str) -> Option<Arc<ServerStat>> {
         let map = self.stats.recover();
-        map.iter()
-            .find(|((h, _), _)| h == host)
-            .map(|(_, v)| Arc::clone(v))
+        map.iter().find_map(|(stored_host, stats)| {
+            (stored_host.as_ref() == host)
+                .then(|| stats.values().next().cloned())
+                .flatten()
+        })
     }
 
     pub fn update(&self, host: &str, dl_speed: u64, is_multi: bool) {
@@ -142,25 +149,30 @@ impl ServerStatMan {
 
     pub fn get_all_stats(&self) -> Vec<Arc<ServerStat>> {
         let map = self.stats.recover();
-        map.values().cloned().collect()
+        map.values()
+            .flat_map(|stats| stats.values().cloned())
+            .collect()
     }
 
     pub fn remove(&self, host: &str) {
         let mut map = self.stats.recover_mut();
-        // Remove all entries for this host (all protocols)
-        map.retain(|(h, _), _| h != host);
+        map.remove(host);
     }
 
     /// Remove a specific (host, protocol) entry.
     pub fn remove_by_protocol(&self, host: &str, protocol: &str) {
-        let key = (host.to_string(), protocol.to_string());
         let mut map = self.stats.recover_mut();
-        map.remove(&key);
+        if let Some(stats) = map.get_mut(host) {
+            stats.remove(protocol);
+            if stats.is_empty() {
+                map.remove(host);
+            }
+        }
     }
 
     pub fn count(&self) -> usize {
         let map = self.stats.recover();
-        map.len()
+        map.values().map(HashMap::len).sum()
     }
 
     /// Remove statistics that have not been updated within `max_age`.
@@ -169,24 +181,27 @@ impl ServerStatMan {
     pub fn remove_stale(&self, max_age: std::time::Duration) -> usize {
         let now = std::time::SystemTime::now();
         let mut map = self.stats.recover_mut();
-        let before = map.len();
-        map.retain(|_, stat| {
-            let updated = stat.get_last_updated();
-            if updated == 0 {
-                return false;
-            }
-            let timestamp =
-                std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(updated));
-            timestamp
-                .and_then(|time| now.duration_since(time).ok())
-                .is_none_or(|age| age <= max_age)
+        let before = map.values().map(HashMap::len).sum::<usize>();
+        map.retain(|_, stats| {
+            stats.retain(|_, stat| {
+                let updated = stat.get_last_updated();
+                if updated == 0 {
+                    return false;
+                }
+                let timestamp =
+                    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(updated));
+                timestamp
+                    .and_then(|time| now.duration_since(time).ok())
+                    .is_none_or(|age| age <= max_age)
+            });
+            !stats.is_empty()
         });
-        before.saturating_sub(map.len())
+        before.saturating_sub(map.values().map(HashMap::len).sum())
     }
 
     pub fn hosts(&self) -> Vec<String> {
         let map = self.stats.recover();
-        let mut hosts: Vec<String> = map.keys().map(|(h, _)| h.clone()).collect();
+        let mut hosts: Vec<String> = map.keys().map(|h| h.to_string()).collect();
         hosts.sort();
         hosts.dedup();
         hosts
@@ -205,14 +220,15 @@ impl ServerStatMan {
     /// Clones the existing ServerStat, applies failure info via set_failure_info,
     /// and replaces the entry in the map so all future Arc holders see the update.
     pub fn mark_failure_with_protocol(&self, host: &str, protocol: &str, error_code: u16) {
-        let key = (host.to_string(), protocol.to_string());
         let mut map = self.stats.recover_mut();
-        if let Some(stat_arc) = map.get(&key) {
+        if let Some(stats) = map.get_mut(host)
+            && let Some(stat_arc) = stats.get(protocol)
+        {
             // Dereference Arc to get inner ServerStat, then clone the inner value
             let inner: &ServerStat = stat_arc;
             let mut updated = inner.clone();
             updated.set_failure_info(error_code);
-            map.insert(key, Arc::new(updated));
+            stats.insert(Arc::clone(&stat_arc.protocol), Arc::new(updated));
         }
     }
 
@@ -247,8 +263,11 @@ impl ServerStatMan {
     pub fn save_to_file(&self, path: &Path) -> Result<usize, String> {
         let map = self.stats.recover();
 
-        let servers: Vec<ServerStatSnapshot> =
-            map.values().map(|stat| stat.to_snapshot()).collect();
+        let servers: Vec<ServerStatSnapshot> = map
+            .values()
+            .flat_map(|stats| stats.values())
+            .map(|stat| stat.to_snapshot())
+            .collect();
 
         let file_content = ServerStatFile {
             version: "1.0".to_string(),
@@ -313,9 +332,14 @@ impl ServerStatMan {
         let mut map = self.stats.recover_mut();
 
         for snapshot in file_content.servers {
-            let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
-            let key = (snapshot.host.clone(), snapshot.protocol.clone());
-            map.insert(key, stat);
+            let host = Arc::from(snapshot.host.as_str());
+            let protocol = Arc::from(snapshot.protocol.as_str());
+            let stat = Arc::new(ServerStat::from_snapshot_shared(
+                &snapshot,
+                Arc::clone(&host),
+                Arc::clone(&protocol),
+            ));
+            map.entry(host).or_default().insert(protocol, stat);
         }
 
         Ok(count)
@@ -338,7 +362,10 @@ impl ServerStatMan {
         let path = path.to_path_buf();
         let snapshots: Vec<ServerStatSnapshot> = {
             let map = self.stats.recover();
-            map.values().map(|stat| stat.to_snapshot()).collect()
+            map.values()
+                .flat_map(|stats| stats.values())
+                .map(|stat| stat.to_snapshot())
+                .collect()
         };
 
         let file_content = ServerStatFile {
@@ -388,9 +415,14 @@ impl ServerStatMan {
         let count = file_content.servers.len();
         let mut map = self.stats.recover_mut();
         for snapshot in file_content.servers {
-            let stat = Arc::new(ServerStat::from_snapshot(&snapshot));
-            let key = (snapshot.host.clone(), snapshot.protocol.clone());
-            map.insert(key, stat);
+            let host = Arc::from(snapshot.host.as_str());
+            let protocol = Arc::from(snapshot.protocol.as_str());
+            let stat = Arc::new(ServerStat::from_snapshot_shared(
+                &snapshot,
+                Arc::clone(&host),
+                Arc::clone(&protocol),
+            ));
+            map.entry(host).or_default().insert(protocol, stat);
         }
 
         Ok(count)
@@ -417,7 +449,7 @@ mod tests {
     fn test_get_or_create_new_host() {
         let man = ServerStatMan::new();
         let stat = man.get_or_create("example.com");
-        assert_eq!(stat.host, "example.com");
+        assert_eq!(stat.host.as_ref(), "example.com");
         assert_eq!(man.count(), 1);
     }
 
@@ -428,6 +460,20 @@ mod tests {
         let s2 = man.get_or_create("example.com");
         assert!(Arc::ptr_eq(&s1, &s2));
         assert_eq!(man.count(), 1);
+    }
+
+    #[test]
+    fn test_protocol_entries_share_host_storage() {
+        let man = ServerStatMan::new();
+        let http = man.get_or_create_with_protocol("example.com", "http");
+        let ftp = man.get_or_create_with_protocol("example.com", "ftp");
+
+        assert_eq!(man.count(), 2);
+        assert!(Arc::ptr_eq(&http.host, &ftp.host,));
+        assert!(Arc::ptr_eq(
+            man.stats.recover().keys().next().unwrap(),
+            &http.host,
+        ));
     }
 
     #[test]

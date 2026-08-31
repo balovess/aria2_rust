@@ -19,15 +19,24 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+use super::lookup::{
+    iterative_get_item, iterative_get_item_for_publish, iterative_sample_infohashes,
+};
+use super::modern::{
+    MutableValue, SampleInfoHashesResponse, StoredItem, put_immutable_query, put_query,
+};
 use super::node::DhtNode;
 use super::peer_storage::DhtPeerStorage;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
+use super::store::DhtItemStore;
 use super::task::DhtTaskQueue;
 use super::task_impl::DhtTaskContext;
 use super::task_peer::DhtTaskFactory;
 use super::token_tracker::TokenTracker;
+use super::tracker::QueryType;
 use super::tracker::TransactionTracker;
+use futures::stream::{FuturesUnordered, StreamExt};
 
 // ==================== Configuration ====================
 
@@ -187,6 +196,7 @@ pub(super) struct DhtEngineContext {
     pub(super) socket: DhtSocket,
     pub(super) token_tracker: Arc<std::sync::Mutex<TokenTracker>>,
     pub(super) peer_storage: Arc<DhtPeerStorage>,
+    pub(super) item_store: DhtItemStore,
     pub(super) tracker: Arc<TransactionTracker>,
     pub(super) handler_self_id: [u8; 20],
     pub(super) shutdown_requested: Arc<AtomicBool>,
@@ -309,6 +319,21 @@ impl DhtEngine {
 
         let token_tracker = Arc::new(std::sync::Mutex::new(TokenTracker::new()));
         let peer_storage = Arc::new(DhtPeerStorage::new());
+        let item_store = config
+            .dht_file_path
+            .as_deref()
+            .map(|path| path.with_extension("items"))
+            .and_then(|path| match DhtItemStore::load_from_file_sync(&path) {
+                Ok(store) => {
+                    info!(path = %path.display(), "Loaded BEP 44 item store");
+                    Some(store)
+                }
+                Err(error) => {
+                    debug!(path = %path.display(), "BEP 44 item store unavailable: {error}");
+                    None
+                }
+            })
+            .unwrap_or_default();
         let tracker = Arc::new(TransactionTracker::new());
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -332,6 +357,7 @@ impl DhtEngine {
             socket: socket.clone(),
             token_tracker: Arc::clone(&token_tracker),
             peer_storage: Arc::clone(&peer_storage),
+            item_store,
             tracker: Arc::clone(&tracker),
             handler_self_id: self_id,
             shutdown_requested: Arc::clone(&shutdown_requested),
@@ -495,6 +521,163 @@ impl DhtEngine {
         Ok(())
     }
 
+    /// Query one nearby DHT node for a BEP 51 sample of its stored info-hashes.
+    ///
+    /// The returned response is validated before being exposed to callers.
+    pub async fn sample_infohashes(
+        &self,
+        target: &[u8; 20],
+    ) -> std::io::Result<Option<SampleInfoHashesResponse>> {
+        if !matches!(
+            self.state().await,
+            DhtEngineState::Running | DhtEngineState::Bootstrapping
+        ) {
+            return Ok(None);
+        }
+        Ok(iterative_sample_infohashes(
+            target,
+            &self.context.handler_self_id,
+            &self.context.routing_table,
+            &self.context.socket,
+            &self.context.tracker,
+            self.context.config.query_timeout,
+        )
+        .await
+        .response)
+    }
+
+    /// Fetch a BEP 44 item from the closest known node.
+    pub async fn get_item(
+        &self,
+        target: &[u8; 20],
+        seq: Option<i64>,
+    ) -> std::io::Result<Option<StoredItem>> {
+        Ok(iterative_get_item(
+            target,
+            seq,
+            &self.context.handler_self_id,
+            &self.context.routing_table,
+            &self.context.socket,
+            &self.context.tracker,
+            self.context.config.query_timeout,
+        )
+        .await
+        .item
+        .filter(StoredItem::verify_target))
+    }
+
+    pub async fn put_immutable(
+        &self,
+        value: &crate::bittorrent::bencode::codec::BencodeValue,
+    ) -> std::io::Result<bool> {
+        let target = StoredItem::immutable_target(value);
+        let lookup = iterative_get_item_for_publish(
+            &target,
+            None,
+            &self.context.handler_self_id,
+            &self.context.routing_table,
+            &self.context.socket,
+            &self.context.tracker,
+            self.context.config.query_timeout,
+        )
+        .await;
+        self.publish_immutable_to_tokens(&lookup.token_nodes, value)
+            .await
+    }
+
+    /// Publish a signed BEP 44 mutable item after obtaining a fresh token.
+    pub async fn put_mutable(
+        &self,
+        item: &MutableValue,
+        cas: Option<i64>,
+    ) -> std::io::Result<bool> {
+        if !item.verify_signature() {
+            return Ok(false);
+        }
+        let target = StoredItem::mutable_target(&item.public_key, item.salt.as_deref());
+        let lookup = iterative_get_item_for_publish(
+            &target,
+            None,
+            &self.context.handler_self_id,
+            &self.context.routing_table,
+            &self.context.socket,
+            &self.context.tracker,
+            self.context.config.query_timeout,
+        )
+        .await;
+        self.publish_mutable_to_tokens(&lookup.token_nodes, item, cas)
+            .await
+    }
+
+    async fn publish_immutable_to_tokens(
+        &self,
+        token_nodes: &[(SocketAddr, [u8; 20], Vec<u8>)],
+        value: &crate::bittorrent::bencode::codec::BencodeValue,
+    ) -> std::io::Result<bool> {
+        let mut sends = FuturesUnordered::new();
+        for (addr, node_id, token) in token_nodes.iter().take(8) {
+            let (tx, wait) = self.context.tracker.allocate_wait(
+                QueryType::Put,
+                *addr,
+                Some(*node_id),
+                None,
+                self.context.config.query_timeout,
+            );
+            let message = put_immutable_query(tx, &self.context.handler_self_id, token, value);
+            let encoded = message.encode().map_err(std::io::Error::other)?;
+            let socket = self.context.socket.clone();
+            let timeout = self.context.config.query_timeout;
+            let addr = *addr;
+            sends.push(async move {
+                socket.send_to(addr, &encoded).await.is_ok()
+                    && wait
+                        .wait(timeout)
+                        .await
+                        .is_some_and(|response| response.message.is_response())
+            });
+        }
+        let mut accepted = false;
+        while let Some(result) = sends.next().await {
+            accepted |= result;
+        }
+        Ok(accepted)
+    }
+
+    async fn publish_mutable_to_tokens(
+        &self,
+        token_nodes: &[(SocketAddr, [u8; 20], Vec<u8>)],
+        item: &MutableValue,
+        cas: Option<i64>,
+    ) -> std::io::Result<bool> {
+        let mut sends = FuturesUnordered::new();
+        for (addr, node_id, token) in token_nodes.iter().take(8) {
+            let (tx, wait) = self.context.tracker.allocate_wait(
+                QueryType::Put,
+                *addr,
+                Some(*node_id),
+                None,
+                self.context.config.query_timeout,
+            );
+            let message = put_query(tx, &self.context.handler_self_id, token, item, cas);
+            let encoded = message.encode().map_err(std::io::Error::other)?;
+            let socket = self.context.socket.clone();
+            let timeout = self.context.config.query_timeout;
+            let addr = *addr;
+            sends.push(async move {
+                socket.send_to(addr, &encoded).await.is_ok()
+                    && wait
+                        .wait(timeout)
+                        .await
+                        .is_some_and(|response| response.message.is_response())
+            });
+        }
+        let mut accepted = false;
+        while let Some(result) = sends.next().await {
+            accepted |= result;
+        }
+        Ok(accepted)
+    }
+
     /// Add a bootstrap node to the routing table.
     ///
     /// Sends a `ping` to `addr` and inserts it into the appropriate k-bucket
@@ -602,7 +785,9 @@ impl DhtEngine {
             let save_path = path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _save_guard = save_guard;
-                super::persistence::DhtPersistence::save_to_file_sync(&save_path, &self_id, &nodes)
+                super::persistence::DhtPersistence::merge_and_save_to_file_sync(
+                    &save_path, &self_id, &nodes,
+                )
             })
             .await;
             match result {
@@ -613,6 +798,25 @@ impl DhtEngine {
                 Err(e) => {
                     warn!(path = %path.display(), "DHT routing table save task failed: {}", e)
                 }
+            }
+
+            let item_path = path.with_extension("items");
+            let item_save_guard = Arc::clone(&self.context.routing_table_save_lock)
+                .lock_owned()
+                .await;
+            let item_store = self.context.item_store.clone();
+            let item_save_path = item_path.clone();
+            let item_result = tokio::task::spawn_blocking(move || {
+                let _save_guard = item_save_guard;
+                item_store.save_to_file_sync(&item_save_path)
+            })
+            .await;
+            match item_result {
+                Ok(Ok(())) => info!(path = %item_path.display(), "Saved BEP 44 item store"),
+                Ok(Err(error)) => {
+                    warn!(path = %item_path.display(), "Failed to save BEP 44 item store: {error}")
+                }
+                Err(error) => warn!("BEP 44 item store save task failed: {error}"),
             }
         }
 
@@ -716,6 +920,180 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn test_bep44_udp_roundtrip_and_store_restart() {
+        use crate::bittorrent::bencode::codec::BencodeValue;
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dht_path = temp_dir.path().join("dht.dat");
+        let node_a_id = [0x11; 20];
+        let node_b_id = [0x22; 20];
+        let engine_a = DhtEngine::start(DhtEngineConfig {
+            self_id: node_a_id,
+            listen_addr: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            ..DhtEngineConfig::local()
+        })
+        .await
+        .unwrap();
+        let engine_b_config = DhtEngineConfig {
+            self_id: node_b_id,
+            dht_file_path: Some(dht_path.clone()),
+            listen_addr: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            ..DhtEngineConfig::local()
+        };
+        let engine_b = DhtEngine::start(engine_b_config.clone()).await.unwrap();
+        let b_addr = engine_b.context.socket.local_addr();
+        engine_a
+            .context
+            .routing_table
+            .write()
+            .await
+            .insert(DhtNode::new(node_b_id, b_addr));
+
+        let immutable = BencodeValue::Bytes(b"udp immutable".to_vec());
+        assert!(engine_a.put_immutable(&immutable).await.unwrap());
+        let immutable_target = StoredItem::immutable_target(&immutable);
+        assert!(matches!(
+            engine_a.get_item(&immutable_target, None).await.unwrap(),
+            Some(StoredItem::Immutable { .. })
+        ));
+
+        let key = SigningKey::from_bytes(&[3u8; 32]);
+        let mut mutable = MutableValue {
+            public_key: key.verifying_key().to_bytes(),
+            signature: [0; 64],
+            sequence: 1,
+            salt: Some(b"udp".to_vec()),
+            value: BencodeValue::Bytes(b"mutable value".to_vec()),
+        };
+        mutable.signature = key.sign(&mutable.signed_payload()).to_bytes();
+        assert!(engine_a.put_mutable(&mutable, None).await.unwrap());
+        let mutable_target =
+            StoredItem::mutable_target(&mutable.public_key, mutable.salt.as_deref());
+        assert!(
+            engine_a
+                .get_item(&mutable_target, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        let mut updated = mutable.clone();
+        updated.sequence = 2;
+        updated.value = BencodeValue::Bytes(b"updated value".to_vec());
+        updated.signature = key.sign(&updated.signed_payload()).to_bytes();
+        assert!(!engine_a.put_mutable(&updated, Some(0)).await.unwrap());
+        assert!(engine_a.put_mutable(&updated, Some(1)).await.unwrap());
+
+        engine_b.shutdown_async().await;
+        let item_path = dht_path.with_extension("items");
+        assert!(item_path.exists());
+        let engine_b = DhtEngine::start(engine_b_config).await.unwrap();
+        let b_addr = engine_b.context.socket.local_addr();
+        engine_a
+            .context
+            .routing_table
+            .write()
+            .await
+            .insert(DhtNode::new(node_b_id, b_addr));
+        assert!(
+            engine_a
+                .get_item(&immutable_target, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            engine_a
+                .get_item(&mutable_target, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        engine_b.shutdown_async().await;
+        engine_a.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_bep51_udp_roundtrip_uses_peer_store_samples() {
+        let node_a_id = [0x31; 20];
+        let node_b_id = [0x32; 20];
+        let engine_a = DhtEngine::start(DhtEngineConfig {
+            self_id: node_a_id,
+            listen_addr: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            ..DhtEngineConfig::local()
+        })
+        .await
+        .unwrap();
+        let engine_b = DhtEngine::start(DhtEngineConfig {
+            self_id: node_b_id,
+            listen_addr: Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            ..DhtEngineConfig::local()
+        })
+        .await
+        .unwrap();
+
+        let sampled_info_hash = [0xA7; 20];
+        engine_b
+            .context
+            .peer_storage
+            .add_peer(sampled_info_hash, "127.0.0.1:6881".parse().unwrap());
+        let b_addr = engine_b.context.socket.local_addr();
+        engine_a
+            .context
+            .routing_table
+            .write()
+            .await
+            .insert(DhtNode::new(node_b_id, b_addr));
+
+        let response = engine_a
+            .sample_infohashes(&[0xA6; 20])
+            .await
+            .unwrap()
+            .expect("BEP 51 peer should return a sample response");
+        assert_eq!(response.interval, 900);
+        assert_eq!(response.num, 1);
+        assert_eq!(response.samples, vec![sampled_info_hash]);
+
+        engine_b.shutdown_async().await;
+        engine_a.shutdown_async().await;
+    }
+
+    /// Read-only public-network smoke test for DNS bootstrap and KRPC lookup.
+    /// It is intentionally ignored because availability depends on the host
+    /// network and public DHT nodes; CI can opt in explicitly.
+    #[tokio::test]
+    #[ignore = "requires public DHT connectivity"]
+    async fn test_public_dht_find_peers_interoperability() {
+        let engine = DhtEngine::start(DhtEngineConfig {
+            port: 0,
+            query_timeout: Duration::from_secs(3),
+            bootstrap_timeout: Duration::from_secs(15),
+            ..DhtEngineConfig::default()
+        })
+        .await
+        .expect("public DHT engine should bind an ephemeral port");
+
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if engine.stats().await.good_nodes > 0 {
+                    break engine.find_peers(&[0x3Cu8; 20]).await;
+                }
+                if engine.state().await == DhtEngineState::Running {
+                    break engine.find_peers(&[0x3Cu8; 20]).await;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("public DHT bootstrap or lookup timed out")
+        .expect("public DHT lookup failed");
+        assert!(result.nodes_contacted > 0);
+        engine.shutdown_async().await;
     }
 
     #[tokio::test]

@@ -63,7 +63,7 @@ fn piece_hash_semaphore() -> &'static Arc<Semaphore> {
 /// The owned payload is returned so callers can write it after verification
 /// without allocating a second piece-sized buffer.
 pub(super) async fn verify_piece_hash_async(
-    expected: Option<[u8; 20]>,
+    expected: Option<crate::engine::bt_piece::PieceVerification>,
     data: Vec<u8>,
 ) -> Result<(bool, Vec<u8>)> {
     let Some(expected) = expected else {
@@ -76,8 +76,47 @@ pub(super) async fn verify_piece_hash_async(
         .map_err(|error| Aria2Error::Io(format!("piece hash dispatcher closed: {error}")))?;
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let digest = sha1::Sha1::digest(&data);
-        (digest.as_slice() == expected.as_slice(), data)
+        let verified = match expected {
+            crate::engine::bt_piece::PieceVerification::Sha1(hashes) => hashes
+                .first()
+                .is_some_and(|hash| sha1::Sha1::digest(&data).as_slice() == hash),
+            crate::engine::bt_piece::PieceVerification::V2 {
+                piece_length,
+                hashes,
+            } => hashes
+                .first()
+                .zip(aria2_protocol::bittorrent::torrent::merkle::piece_root(
+                    &data,
+                    piece_length as usize,
+                ))
+                .is_some_and(|(expected, actual)| expected.as_ref() == Some(&actual)),
+            crate::engine::bt_piece::PieceVerification::Hybrid {
+                piece_length,
+                sha1,
+                v2_hashes,
+                v2_content_lengths,
+            } => {
+                let sha1_ok = sha1
+                    .first()
+                    .is_some_and(|hash| sha1::Sha1::digest(&data).as_slice() == hash);
+                let v2_ok = match v2_hashes.first().and_then(Option::as_ref) {
+                    Some(expected) => v2_content_lengths
+                        .first()
+                        .and_then(Option::as_ref)
+                        .and_then(|length| data.get(..*length))
+                        .and_then(|content| {
+                            aria2_protocol::bittorrent::torrent::merkle::piece_root(
+                                content,
+                                piece_length as usize,
+                            )
+                        })
+                        .is_some_and(|actual| expected == &actual),
+                    None => true,
+                };
+                sha1_ok && v2_ok
+            }
+        };
+        (verified, data)
     })
     .await
     .map_err(|error| Aria2Error::Io(format!("piece hash task failed: {error}")))
@@ -361,6 +400,7 @@ impl Command for BtDownloadCommand {
         }
 
         let (meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
+        let network_info_hash = meta.network_info_hash();
         self.group
             .recover()
             .set_control_file_path(ControlFile::control_path_for(&self.output_path));
@@ -379,7 +419,7 @@ impl Command for BtDownloadCommand {
                 total_size,
                 piece_length,
                 num_pieces as usize,
-                meta.info_hash.bytes,
+                network_info_hash,
             )
             .await?;
             checkpoint.remove().await?;
@@ -395,7 +435,7 @@ impl Command for BtDownloadCommand {
             total_size,
             piece_length,
             num_pieces as usize,
-            meta.info_hash.bytes,
+            network_info_hash,
         )
         .await?;
         let checkpoint_completed_length = checkpoint.completed_length();
@@ -636,7 +676,7 @@ impl Command for BtDownloadCommand {
         // remain authoritative because a progress file records trust, not
         // fresh hash evidence.
         if let Some(ref mgr) = self.progress_manager {
-            match mgr.load_progress(&meta.info_hash.bytes) {
+            match mgr.load_progress(&network_info_hash) {
                 Ok(saved)
                     if !self.check_integrity
                         && !seed_unverified
@@ -719,7 +759,8 @@ impl Command for BtDownloadCommand {
                 listener_manager.register(crate::engine::bt_peer_listener::BtPeerRouteConfig {
                     bind_ip,
                     ports: listen_ports.clone(),
-                    info_hash: meta.info_hash.bytes,
+                    info_hash: network_info_hash,
+                    info_hash_v2: meta.info_hash_v2,
                     local_peer_id: self.local_peer_id,
                     caretaker_id,
                     max_peers,
@@ -762,7 +803,7 @@ impl Command for BtDownloadCommand {
         }
 
         let peer_addrs = self
-            .discover_peers(&meta, total_size, &meta.info_hash.bytes)
+            .discover_peers(&meta, total_size, &network_info_hash)
             .await?;
 
         let mut active_connections = if peer_addrs.is_empty() {
@@ -770,7 +811,8 @@ impl Command for BtDownloadCommand {
         } else {
             self.connect_to_peers(
                 &peer_addrs,
-                &meta.info_hash.bytes,
+                &network_info_hash,
+                meta.info_hash_v2,
                 num_pieces,
                 piece_length,
                 total_size,
@@ -872,7 +914,7 @@ impl Command for BtDownloadCommand {
                 match Self::send_allowed_fast_for_torrent(
                     conn,
                     num_pieces,
-                    &meta.info_hash.bytes,
+                    &network_info_hash,
                     &mut sent,
                 )
                 .await
@@ -919,7 +961,7 @@ impl Command for BtDownloadCommand {
             if let Some(ref mut announcer) = self.tracker_announcer {
                 announcer
                     .announce_stopped(
-                        &meta.info_hash.bytes,
+                        &network_info_hash,
                         &self.local_peer_id,
                         self.completed_bytes,
                         total_size.saturating_sub(self.completed_bytes),
@@ -933,7 +975,7 @@ impl Command for BtDownloadCommand {
         if let Some(ref mut announcer) = self.tracker_announcer {
             announcer
                 .announce_completed(
-                    &meta.info_hash.bytes,
+                    &network_info_hash,
                     &self.local_peer_id,
                     self.completed_bytes,
                     self.total_uploaded,
@@ -950,7 +992,7 @@ impl Command for BtDownloadCommand {
                 active_connections,
                 piece_length,
                 num_pieces,
-                meta.info_hash.bytes,
+                network_info_hash,
             )
             .await?;
         } else {
@@ -1047,7 +1089,6 @@ impl BtDownloadCommand {
         let piece_length = meta.info.piece_length;
         let total_size = meta.total_size();
         let num_pieces = meta.num_pieces() as u32;
-
         Ok((meta, piece_length, total_size, num_pieces))
     }
 

@@ -192,16 +192,32 @@ impl BtPeerInteraction {
                         addr.ip, addr.port
                     )))
                 })?;
-            match BtPeerConn::connect_utp_with_options(
-                endpoint,
-                info_hash_raw,
-                &connection_options.local_peer_id,
-                connection_options.connection_timeout,
-                connection_options.utp_listen_port,
-                utp_socket,
-            )
-            .await
-            {
+            let utp_result = match connection_options.hybrid_info_hash_v2.as_ref() {
+                Some(info_hash_v2) => {
+                    BtPeerConn::connect_utp_hybrid_with_options(
+                        endpoint,
+                        info_hash_raw,
+                        info_hash_v2,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                        connection_options.utp_listen_port,
+                        utp_socket,
+                    )
+                    .await
+                }
+                None => {
+                    BtPeerConn::connect_utp_with_options(
+                        endpoint,
+                        info_hash_raw,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                        connection_options.utp_listen_port,
+                        utp_socket,
+                    )
+                    .await
+                }
+            };
+            match utp_result {
                 Ok(conn) => {
                     debug!("[BT] Connected to peer {}:{} over uTP", addr.ip, addr.port);
                     return Ok(conn);
@@ -217,37 +233,83 @@ impl BtPeerInteraction {
 
         if connection_options.crypto.require_mse {
             // Try MSE encrypted connection
-            BtPeerConn::connect_mse_with_options(
-                addr,
-                info_hash_raw,
-                connection_options.crypto.force_encryption,
-                connection_options.crypto.prefer_encryption,
-                &connection_options.local_peer_id,
-                connection_options.connection_timeout,
-            )
-            .await
-        } else {
-            // Try MSE first, fall back to plain
-            match BtPeerConn::connect_mse_with_options(
-                addr,
-                info_hash_raw,
-                connection_options.crypto.force_encryption,
-                connection_options.crypto.prefer_encryption,
-                &connection_options.local_peer_id,
-                connection_options.connection_timeout,
-            )
-            .await
-            {
-                Ok(conn) => Ok(conn),
-                Err(_) => {
-                    debug!("[BT] MSE failed, trying plain connection");
-                    BtPeerConn::connect_plain_with_options(
+            match connection_options.hybrid_info_hash_v2.as_ref() {
+                Some(info_hash_v2) => {
+                    BtPeerConn::connect_mse_hybrid_with_options(
                         addr,
                         info_hash_raw,
+                        info_hash_v2,
+                        connection_options.crypto.force_encryption,
+                        connection_options.crypto.prefer_encryption,
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
                     )
                     .await
+                }
+                None => {
+                    BtPeerConn::connect_mse_with_options(
+                        addr,
+                        info_hash_raw,
+                        connection_options.crypto.force_encryption,
+                        connection_options.crypto.prefer_encryption,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                    )
+                    .await
+                }
+            }
+        } else {
+            // Try MSE first, fall back to plain
+            let mse_result = match connection_options.hybrid_info_hash_v2.as_ref() {
+                Some(info_hash_v2) => {
+                    BtPeerConn::connect_mse_hybrid_with_options(
+                        addr,
+                        info_hash_raw,
+                        info_hash_v2,
+                        connection_options.crypto.force_encryption,
+                        connection_options.crypto.prefer_encryption,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                    )
+                    .await
+                }
+                None => {
+                    BtPeerConn::connect_mse_with_options(
+                        addr,
+                        info_hash_raw,
+                        connection_options.crypto.force_encryption,
+                        connection_options.crypto.prefer_encryption,
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                    )
+                    .await
+                }
+            };
+            match mse_result {
+                Ok(conn) => Ok(conn),
+                Err(_) => {
+                    debug!("[BT] MSE failed, trying plain connection");
+                    match connection_options.hybrid_info_hash_v2.as_ref() {
+                        Some(info_hash_v2) => {
+                            BtPeerConn::connect_plain_hybrid_with_options(
+                                addr,
+                                info_hash_raw,
+                                info_hash_v2,
+                                &connection_options.local_peer_id,
+                                connection_options.connection_timeout,
+                            )
+                            .await
+                        }
+                        None => {
+                            BtPeerConn::connect_plain_with_options(
+                                addr,
+                                info_hash_raw,
+                                &connection_options.local_peer_id,
+                                connection_options.connection_timeout,
+                            )
+                            .await
+                        }
+                    }
                 }
             }
         }

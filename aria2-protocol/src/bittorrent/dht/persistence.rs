@@ -1,8 +1,31 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::node::DhtNode;
 use super::routing_table::RoutingTable;
+
+static FILE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+fn persistence_file_key(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|dir| dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn persistence_file_lock(path: &Path) -> Arc<Mutex<()>> {
+    let locks = FILE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().unwrap_or_else(|error| error.into_inner());
+    locks
+        .entry(persistence_file_key(path))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 const DHT_MAGIC: &[u8] = &[0xA1, 0xA2];
 const DHT_FORMAT_ID: u8 = 0x02;
@@ -275,19 +298,22 @@ impl DhtPersistence {
     ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes)?;
 
-        let tmp_path = path.with_extension("dat.tmp");
+        let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
         tokio::fs::write(&tmp_path, &data)
             .await
             .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
 
-        tokio::fs::rename(&tmp_path, path).await.map_err(|e| {
-            format!(
+        #[cfg(windows)]
+        let _ = tokio::fs::remove_file(path).await;
+        if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(format!(
                 "Failed to rename {} -> {}: {}",
                 tmp_path.display(),
                 path.display(),
                 e
-            )
-        })?;
+            ));
+        }
 
         Ok(nodes.len())
     }
@@ -299,11 +325,14 @@ impl DhtPersistence {
     ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes)?;
 
-        let tmp_path = path.with_extension("dat.tmp");
+        let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
         std::fs::write(&tmp_path, &data)
             .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
 
+        #[cfg(windows)]
+        let _ = std::fs::remove_file(path);
         std::fs::rename(&tmp_path, path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
             format!(
                 "Failed to rename {} -> {}: {}",
                 tmp_path.display(),
@@ -313,6 +342,35 @@ impl DhtPersistence {
         })?;
 
         Ok(nodes.len())
+    }
+
+    /// Merge this engine's good nodes with the existing snapshot before saving.
+    ///
+    /// Multiple BitTorrent tasks can own independent DHT engines while sharing
+    /// one configured `dht-file-path`. The per-engine save lock cannot protect
+    /// that shared file, so this method serializes saves process-wide and
+    /// preserves nodes discovered by other engines.
+    pub fn merge_and_save_to_file_sync(
+        path: &Path,
+        self_id: &[u8; 20],
+        nodes: &[DhtNode],
+    ) -> Result<usize, String> {
+        let file_lock = persistence_file_lock(path);
+        let _guard = file_lock.lock().unwrap_or_else(|error| error.into_inner());
+
+        let mut merged = HashMap::<[u8; 20], DhtNode>::with_capacity(nodes.len());
+        if let Ok(existing) = Self::load_from_file_sync(path) {
+            for node in existing.nodes {
+                merged.insert(node.id, DhtNode::new(node.id, node.addr));
+            }
+        }
+        for node in nodes {
+            merged.insert(node.id, node.clone());
+        }
+
+        let mut merged: Vec<_> = merged.into_values().collect();
+        merged.sort_by_key(|node| node.id);
+        Self::save_to_file_sync(path, self_id, &merged)
     }
 
     pub async fn load_from_file(path: &Path) -> Result<DhtPersistedData, String> {
@@ -405,6 +463,48 @@ mod tests {
         assert_eq!(result.nodes.len(), 1);
         assert_eq!(result.nodes[0].id, id);
         assert_eq!(result.nodes[0].addr, addr);
+    }
+
+    #[test]
+    fn test_repeated_file_save_replaces_existing_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dht.dat");
+        let first = DhtNode::new([0x01; 20], "127.0.0.1:6881".parse().unwrap());
+        let second = DhtNode::new([0x02; 20], "127.0.0.1:6882".parse().unwrap());
+        DhtPersistence::save_to_file_sync(&path, &[0xAA; 20], &[first]).unwrap();
+        DhtPersistence::save_to_file_sync(&path, &[0xBB; 20], std::slice::from_ref(&second))
+            .unwrap();
+
+        let restored = DhtPersistence::load_from_file_sync(&path).unwrap();
+        assert_eq!(restored.self_id, [0xBB; 20]);
+        assert_eq!(restored.nodes.len(), 1);
+        assert_eq!(restored.nodes[0].id, second.id);
+        assert_eq!(restored.nodes[0].addr, second.addr);
+    }
+
+    #[test]
+    fn test_concurrent_merged_saves_preserve_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = Arc::new(dir.path().join("dht.dat"));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        std::thread::scope(|scope| {
+            for (id, port) in [(0x01, 6881), (0x02, 6882)] {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                scope.spawn(move || {
+                    let node = DhtNode::new([id; 20], ([127, 0, 0, 1], port).into());
+                    barrier.wait();
+                    DhtPersistence::merge_and_save_to_file_sync(&path, &[0xAA; 20], &[node])
+                        .unwrap();
+                });
+            }
+        });
+
+        let restored = DhtPersistence::load_from_file_sync(&path).unwrap();
+        assert_eq!(restored.nodes.len(), 2);
+        assert!(restored.nodes.iter().any(|node| node.id == [0x01; 20]));
+        assert!(restored.nodes.iter().any(|node| node.id == [0x02; 20]));
     }
 
     #[test]

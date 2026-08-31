@@ -241,6 +241,7 @@ dependencies = [
  "criterion",
  "digest 0.10.7",
  "dirs",
+ "ed25519-dalek",
  "flate2",
  "futures",
  "getrandom 0.2.17",

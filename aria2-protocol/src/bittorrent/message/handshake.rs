@@ -19,6 +19,9 @@ const RESERVED_DHT: u8 = 0x01;
 const RESERVED_FAST_EXT: u8 = 0x04;
 /// Extended Messaging: reserved[5] bit 4 (BEP 10)
 const RESERVED_EXT_MSG: u8 = 0x10;
+/// BitTorrent v2 hybrid upgrade support (BEP 52), the fourth most
+/// significant bit of the final reserved byte.
+const RESERVED_BEP52: u8 = 0x10;
 
 #[derive(Debug, Clone)]
 pub struct Handshake {
@@ -74,6 +77,21 @@ impl Handshake {
     /// Builder-pattern version of [`set_dht_enabled`].
     pub fn with_dht(mut self, enabled: bool) -> Self {
         self.set_dht_enabled(enabled);
+        self
+    }
+
+    /// Enable or disable the BEP 52 hybrid upgrade capability.
+    pub fn set_bep52_enabled(&mut self, enabled: bool) {
+        if enabled {
+            self.reserved[7] |= RESERVED_BEP52;
+        } else {
+            self.reserved[7] &= !RESERVED_BEP52;
+        }
+    }
+
+    /// Builder-pattern version of [`set_bep52_enabled`].
+    pub fn with_bep52(mut self, enabled: bool) -> Self {
+        self.set_bep52_enabled(enabled);
         self
     }
 
@@ -170,6 +188,11 @@ impl Handshake {
     /// Mirrors C++ `isExtendedMessagingEnabled()`: `reserved[5] & 0x10`.
     pub fn supports_extended_messaging(&self) -> bool {
         (self.reserved[5] & RESERVED_EXT_MSG) != 0
+    }
+
+    /// Check whether the peer supports the BEP 52 hybrid upgrade path.
+    pub fn supports_bep52(&self) -> bool {
+        (self.reserved[7] & RESERVED_BEP52) != 0
     }
 
     pub fn peer_id_str(&self) -> String {
@@ -272,6 +295,15 @@ mod tests {
         // reserved[7] should have both DHT (0x01) and Fast Extension (0x04)
         assert_eq!(bytes[27] & 0x01, 0x01);
         assert_eq!(bytes[27] & 0x04, 0x04);
+    }
+
+    #[test]
+    fn test_reserved_bytes_bep52_enabled() {
+        let hs = Handshake::new(&[0xAB; 20], &[0xCD; 20]).with_bep52(true);
+        let parsed = Handshake::parse(&hs.to_bytes()).unwrap();
+        assert!(parsed.supports_bep52());
+        assert_eq!(parsed.reserved[7] & RESERVED_BEP52, RESERVED_BEP52);
+        assert_eq!(parsed.reserved[7] & RESERVED_FAST_EXT, RESERVED_FAST_EXT);
     }
 
     #[test]

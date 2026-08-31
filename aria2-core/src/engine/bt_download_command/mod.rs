@@ -275,8 +275,15 @@ impl BtDownloadCommand {
     ///
     /// `Drop` can only reclaim synchronous resources. Callers that own the
     /// command lifecycle should await this method before aborting or dropping
-    /// the task so tracker stopped announcements are not lost.
+    /// the task so tracker stopped announcements and DHT routing-table
+    /// persistence are not lost.
     pub async fn shutdown(&mut self) {
+        // The DHT engine owns background receive/maintenance tasks and its
+        // final routing-table snapshot. Shut it down before the command is
+        // dropped; DhtEngine::Drop only aborts tasks and cannot persist state.
+        if let Some(engine) = self.dht_engine.take() {
+            engine.shutdown_async().await;
+        }
         if let (Some(manager), Some(info_hash)) =
             (&self.lpd_manager, self.lpd_registered_info_hash.take())
         {
@@ -289,7 +296,7 @@ impl BtDownloadCommand {
             let total_size = meta.total_size();
             announcer
                 .announce_stopped(
-                    &meta.info_hash.bytes,
+                    &meta.network_info_hash(),
                     &self.local_peer_id,
                     self.completed_bytes,
                     total_size.saturating_sub(self.completed_bytes),
@@ -390,6 +397,41 @@ impl BtDownloadCommand {
 #[cfg(test)]
 mod tests {
     use super::{BtDownloadCommand, BtRuntimeState};
+
+    #[tokio::test]
+    async fn shutdown_persists_owned_dht_engine_before_drop() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions::default();
+        let mut command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(9),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+
+        let temp_dir = tempfile::tempdir().expect("temporary directory should be created");
+        let dht_path = temp_dir.path().join("dht.dat");
+        let dht = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+                self_id: [0xA5; 20],
+                dht_file_path: Some(dht_path.clone()),
+                ..aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local()
+            },
+        )
+        .await
+        .expect("local DHT engine should start");
+        command.dht_engine = Some(dht);
+
+        command.shutdown().await;
+
+        let persisted =
+            aria2_protocol::bittorrent::dht::persistence::DhtPersistence::load_from_file_sync(
+                &dht_path,
+            )
+            .expect("command shutdown should persist dht.dat");
+        assert_eq!(persisted.self_id, [0xA5; 20]);
+    }
 
     #[test]
     fn runtime_state_uses_the_same_min_peer_boundary_as_tracker_demand() {
