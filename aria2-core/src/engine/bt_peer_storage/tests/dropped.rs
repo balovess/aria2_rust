@@ -8,7 +8,7 @@ use crate::engine::bt_peer_storage::storage::DefaultPeerStorage;
 fn test_return_peer_adds_to_dropped_on_graceful_disconnect() {
     let mut storage = DefaultPeerStorage::new();
     let peer = PeerEntry {
-        ip: "192.168.1.1".to_string(),
+        ip: "192.168.1.1".to_string().into(),
         port: 6881,
         used_by: 0,
         is_active: true,
@@ -23,7 +23,7 @@ fn test_return_peer_adds_to_dropped_on_graceful_disconnect() {
     storage.return_peer(&checked);
 
     assert_eq!(storage.dropped_peers.len(), 1);
-    assert_eq!(storage.dropped_peers[0].ip, "192.168.1.1");
+    assert_eq!(storage.dropped_peers[0].ip.as_ref(), "192.168.1.1");
     assert_eq!(storage.dropped_peers[0].used_by, 0);
 }
 
@@ -31,7 +31,7 @@ fn test_return_peer_adds_to_dropped_on_graceful_disconnect() {
 fn test_return_peer_no_drop_for_incoming() {
     let mut storage = DefaultPeerStorage::new();
     let peer = PeerEntry {
-        ip: "192.168.1.1".to_string(),
+        ip: "192.168.1.1".to_string().into(),
         port: 6881,
         used_by: 0,
         is_active: true,
@@ -55,7 +55,7 @@ fn test_return_peer_no_drop_for_incoming() {
 fn test_return_peer_no_drop_for_not_graceful() {
     let mut storage = DefaultPeerStorage::new();
     let peer = PeerEntry {
-        ip: "192.168.1.1".to_string(),
+        ip: "192.168.1.1".to_string().into(),
         port: 6881,
         used_by: 0,
         is_active: true,
@@ -81,7 +81,7 @@ fn test_dropped_peers_max_50() {
 
     for i in 0..60u16 {
         let peer = PeerEntry {
-            ip: format!("10.0.0.{}", i),
+            ip: format!("10.0.0.{}", i).into(),
             port: 6881,
             used_by: 0,
             is_active: true,
@@ -110,7 +110,7 @@ fn test_dropped_peers_dedup() {
     // Add, checkout, return the same peer twice.
     for _ in 0..2 {
         let peer = PeerEntry {
-            ip: "192.168.1.1".to_string(),
+            ip: "192.168.1.1".to_string().into(),
             port: 6881,
             used_by: 0,
             is_active: true,

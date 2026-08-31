@@ -57,7 +57,7 @@ pub struct DefaultPeerStorage {
 
     /// Set of (ip, port) pairs currently tracked (unused + used).
     /// Ensures no duplicate peers across both lists.
-    pub(super) uniq_peers: HashSet<(String, u16)>,
+    pub(super) uniq_peers: HashSet<(Arc<str>, u16)>,
 
     /// Unused (not connected) peers, sorted by last-added (FIFO).
     pub(super) unused_peers: VecDeque<PeerEntry>,

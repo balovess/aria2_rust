@@ -15,7 +15,7 @@ fn test_checkout_peer() {
     let peer = storage.checkout_peer(42);
     assert!(peer.is_some());
     let p = peer.unwrap();
-    assert_eq!(p.ip, "192.168.1.1");
+    assert_eq!(p.ip.as_ref(), "192.168.1.1");
     assert_eq!(p.port, 6881);
     assert_eq!(p.used_by, 42);
 
@@ -82,7 +82,7 @@ fn test_add_and_checkout_peer_new() {
     let result = storage.add_and_checkout_peer(peer, 42);
     assert!(result.is_some());
     let p = result.unwrap();
-    assert_eq!(p.ip, "192.168.1.1");
+    assert_eq!(p.ip.as_ref(), "192.168.1.1");
     assert_eq!(p.port, 6881);
     assert_eq!(p.used_by, 42);
 
@@ -146,7 +146,8 @@ fn test_delete_unused_peers() {
     storage.delete_unused_peers(2);
     assert_eq!(storage.unused_peers.len(), 1);
     assert_eq!(
-        storage.unused_peers[0].ip, "10.0.0.1",
+        storage.unused_peers[0].ip.as_ref(),
+        "10.0.0.1",
         "should keep front peers"
     );
     storage.verify_invariant();
@@ -175,14 +176,14 @@ fn test_on_erasing_peer_removes_from_uniq() {
     assert!(
         storage
             .uniq_peers
-            .contains(&("192.168.1.1".to_string(), 6881))
+            .contains(&("192.168.1.1".to_string().into(), 6881))
     );
 
     storage.on_erasing_peer(&peer);
     assert!(
         !storage
             .uniq_peers
-            .contains(&("192.168.1.1".to_string(), 6881))
+            .contains(&("192.168.1.1".to_string().into(), 6881))
     );
 }
 

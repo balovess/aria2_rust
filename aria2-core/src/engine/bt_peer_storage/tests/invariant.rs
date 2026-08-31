@@ -14,7 +14,7 @@ fn test_get_peer_from_unused() {
 
     let found = storage.get_peer("192.168.1.1", 6881);
     assert!(found.is_some(), "should find peer in unused list");
-    assert_eq!(found.unwrap().ip, "192.168.1.1");
+    assert_eq!(found.unwrap().ip.as_ref(), "192.168.1.1");
 }
 
 #[test]

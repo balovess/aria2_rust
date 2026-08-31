@@ -216,11 +216,10 @@ impl DefaultPeerStorage {
 
     /// Update the connection lifecycle flag for a checked-out peer.
     pub fn set_peer_active(&mut self, ip: &str, port: u16, active: bool) {
-        let key = (ip.to_owned(), port);
         let Some(peer) = self
             .used_peers
             .iter()
-            .find(|peer| (peer.ip.clone(), peer.port) == key)
+            .find(|peer| peer.ip.as_ref() == ip && peer.port == port)
             .cloned()
         else {
             return;
@@ -236,7 +235,7 @@ impl DefaultPeerStorage {
         let Some(peer) = self
             .used_peers
             .iter()
-            .find(|peer| peer.ip == ip && peer.port == port)
+            .find(|peer| peer.ip.as_ref() == ip && peer.port == port)
             .cloned()
         else {
             return;
@@ -310,7 +309,7 @@ impl DefaultPeerStorage {
         }
         // Then check unused_peers
         for peer in &self.unused_peers {
-            if peer.ip == ipaddr && peer.port == port {
+            if peer.ip.as_ref() == ipaddr && peer.port == port {
                 return Some(peer.clone());
             }
         }

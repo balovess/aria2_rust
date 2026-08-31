@@ -19,7 +19,7 @@ fn test_add_peer_single() {
     assert!(
         storage
             .uniq_peers
-            .contains(&("192.168.1.1".to_string(), 6881))
+            .contains(&("192.168.1.1".to_string().into(), 6881))
     );
     storage.verify_invariant();
 }
