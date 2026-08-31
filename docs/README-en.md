@@ -9,5 +9,6 @@
 - [Configuration](configuration-guide-en.md): complete configuration option reference
 - [RPC Guide](rpc-guide-en.md): JSON-RPC, XML-RPC, WebSocket, authentication, and HTTPS
 - [Troubleshooting](troubleshooting-en.md): startup, configuration, RPC, feature, and recovery issues
+- [0.3.4 Binary Release Notes](binary-release-0.3.4-en.md): artifacts, checksums, installation, upgrade, and compatibility boundaries
 
 Recommended path: start with “Quick Start”, use “Configuration” when tuning options, read “RPC Guide” for remote control, and use “Troubleshooting” when something fails.
