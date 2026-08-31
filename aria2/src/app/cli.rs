@@ -458,6 +458,34 @@ pub enum Commands {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "General options")]
 pub struct GeneralArgs {
+    /// Initialize a configuration and persistent-state layout, then exit.
+    #[arg(long = "init", conflicts_with_all = ["show_paths", "check_config", "repair_config", "reset_config"])]
+    pub init: bool,
+
+    /// Print the resolved platform paths and exit.
+    #[arg(long = "show-paths", conflicts_with_all = ["init", "check_config", "repair_config", "reset_config"])]
+    pub show_paths: bool,
+
+    /// Initialization profile: system, current, executable, portable, or custom.
+    #[arg(long = "profile")]
+    pub profile: Option<String>,
+
+    /// Persistent state/configuration directory used by --init.
+    #[arg(long = "state-dir")]
+    pub state_dir: Option<PathBuf>,
+
+    /// Download directory used by --init.
+    #[arg(long = "download-dir")]
+    pub download_dir: Option<PathBuf>,
+
+    /// Do not prompt during --init; default profile is system.
+    #[arg(long = "non-interactive")]
+    pub non_interactive: bool,
+
+    /// Compatibility flag; --init always backs up and replaces existing configuration.
+    #[arg(long = "force")]
+    pub force: bool,
+
     /// Save directory
     #[arg(short = 'd', long)]
     pub dir: Option<PathBuf>,

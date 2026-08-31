@@ -24,7 +24,22 @@ aria2c --continue=true https://example.com/file.zip
 
 BitTorrent accepts `.torrent` files and Magnet URIs. Metalink is available only in builds with the `metalink` feature enabled.
 
-## 3. Use a configuration file
+## 3. Initialize persistent paths
+
+Run `aria2c --init` for the interactive cross-platform initializer. Use an
+explicit profile and `--non-interactive` in automation. Existing configuration
+is backed up before reset.
+
+```text
+aria2c --init
+aria2c --init --profile=system --non-interactive
+aria2c --show-paths --profile=system
+```
+
+The generated configuration is deliberately minimal; configure session,
+logging, PID, cookies, DHT, or server-stat persistence separately.
+
+## 4. Use a configuration file
 
 ```text
 aria2c --conf-path=aria2.conf https://example.com/file.zip

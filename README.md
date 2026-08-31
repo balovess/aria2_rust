@@ -118,6 +118,22 @@ aria2c file.torrent
 aria2c -d ~/downloads http://example.com/file.zip
 ```
 
+### Initialize Persistent Paths
+
+Run `aria2c --init` to choose system, current-directory, executable-directory,
+portable, or custom storage. Existing configuration is backed up before reset.
+Use `--non-interactive` with an explicit profile in automation:
+
+```bash
+aria2c --init
+aria2c --init --profile=system --non-interactive
+aria2c --init --profile=custom --state-dir="$HOME/.aria2" --download-dir="$HOME/Downloads" --non-interactive
+aria2c --show-paths --profile=system
+```
+
+The generated configuration is intentionally minimal. Session, logging, PID,
+cookies, DHT state, and server statistics are enabled only by explicit options.
+
 ### Build from Source
 
 <details>
@@ -163,7 +179,7 @@ We provide ready-to-use configuration templates in `examples/configs/`:
 | [basic.conf](examples/configs/basic.conf) | Basic configuration with common options |
 | [advanced.conf](examples/configs/advanced.conf) | Advanced configuration with RPC, proxy, etc. |
 | [bittorrent.conf](examples/configs/bittorrent.conf) | Optimized for BitTorrent downloads |
-| [windows.conf](examples/configs/windows.conf) | Windows configuration using relative paths |
+| [windows.conf](examples/configs/windows.conf) | Windows manual configuration template |
 
 **Usage:**
 ```bash

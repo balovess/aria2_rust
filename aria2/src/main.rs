@@ -8,6 +8,7 @@
 use aria2::app::App;
 use aria2::app::cli::{CliArgs, Commands, render_help};
 use aria2::app::update_check;
+use aria2::app::{init, paths};
 use clap::CommandFactory;
 use clap::error::ErrorKind;
 
@@ -20,8 +21,26 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 // aria2's main work is asynchronous I/O. A small fixed pool avoids reserving
 // one runtime worker per logical CPU while retaining responsiveness when a
 // protocol path performs a bounded synchronous operation.
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() {
+fn main() {
+    let result = std::thread::Builder::new()
+        .name("aria2-main".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("failed to create Tokio runtime")
+                .block_on(async_main());
+        })
+        .expect("failed to create aria2 main thread")
+        .join();
+    if result.is_err() {
+        std::process::exit(1);
+    }
+}
+
+async fn async_main() {
     let cli = match CliArgs::try_parse() {
         Ok(cli) => cli,
         Err(error) => match error.kind() {
@@ -59,6 +78,59 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        std::process::exit(0);
+    }
+
+    if cli.general.init {
+        match init::initialize(init::InitRequest {
+            profile: cli
+                .general
+                .profile
+                .as_deref()
+                .map(|profile| profile.parse())
+                .transpose()
+                .unwrap_or_else(|error| {
+                    eprintln!("Initialization failed: {error}");
+                    std::process::exit(1);
+                }),
+            state_dir: cli.general.state_dir,
+            download_dir: cli.general.download_dir,
+            non_interactive: cli.general.non_interactive,
+            force: cli.general.force,
+        }) {
+            Ok(layout) => {
+                println!("Initialization completed.");
+                init::print_paths(&layout);
+                std::process::exit(0);
+            }
+            Err(error) => {
+                eprintln!("Initialization failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if cli.general.show_paths {
+        let profile = cli
+            .general
+            .profile
+            .as_deref()
+            .map(|profile| profile.parse())
+            .transpose()
+            .unwrap_or_else(|error| {
+                eprintln!("Cannot resolve paths: {error}");
+                std::process::exit(1);
+            })
+            .unwrap_or(paths::InitProfile::System);
+        let layout =
+            match paths::layout_for(profile, cli.general.state_dir, cli.general.download_dir) {
+                Ok(layout) => layout,
+                Err(error) => {
+                    eprintln!("Cannot resolve paths: {error}");
+                    std::process::exit(1);
+                }
+            };
+        init::print_paths(&layout);
         std::process::exit(0);
     }
 
