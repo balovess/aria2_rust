@@ -24,7 +24,21 @@ aria2c --continue=true https://example.com/file.zip
 
 BitTorrent 支持 `.torrent` 文件和 Magnet URI。Metalink 只有在启用 `metalink` feature 的构建中可用。
 
-## 3. 使用配置文件
+## 3. 初始化持久化目录
+
+运行 `aria2c --init` 进入跨平台初始化导航，可选择系统目录、当前目录、程序目录、
+便携模式或自定义目录。自动化环境使用明确的 profile 和 `--non-interactive`；已有
+配置会在重置前自动备份。
+
+```text
+aria2c --init
+aria2c --init --profile=system --non-interactive
+aria2c --show-paths --profile=system
+```
+
+生成的配置保持最小化；会话、日志、PID、Cookie、DHT 和服务器统计持久化需要单独配置。
+
+## 4. 使用配置文件
 
 ```text
 aria2c --conf-path=aria2.conf https://example.com/file.zip

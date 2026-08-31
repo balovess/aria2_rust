@@ -75,7 +75,9 @@ EXPOSE 6800
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD wget -q --spider http://localhost:6800/jsonrpc || exit 1
 
-# Volume for downloads and config
+# Volume for downloads and configuration/state. Initialize once with:
+# docker run --rm -v ./config:/config -v ./downloads:/downloads image \
+#   aria2c --init --profile=custom --state-dir=/config --download-dir=/downloads --non-interactive
 VOLUME ["/downloads", "/config"]
 
 # Entry point

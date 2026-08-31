@@ -199,4 +199,31 @@ mod tests {
             InitProfile::Portable
         );
     }
+
+    #[test]
+    fn explicit_directories_override_every_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state with spaces");
+        let downloads = root.path().join("downloads");
+        let layout = layout_for(
+            InitProfile::System,
+            Some(state.clone()),
+            Some(downloads.clone()),
+        )
+        .unwrap();
+        assert_eq!(layout.config_dir, state);
+        assert_eq!(layout.state_dir, layout.config_dir);
+        assert_eq!(layout.download_dir, downloads);
+    }
+
+    #[test]
+    fn portable_profile_is_relative_to_executable_directory() {
+        let layout = layout_for(InitProfile::Portable, None, None).unwrap();
+        assert!(layout.config_dir.ends_with(std::path::Path::new(".aria2")));
+        assert!(
+            layout
+                .download_dir
+                .ends_with(std::path::Path::new("downloads"))
+        );
+    }
 }

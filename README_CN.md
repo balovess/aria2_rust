@@ -88,6 +88,18 @@ cargo run --release -- --help
 cargo run --release -- --version
 ```
 
+## 初始化持久化目录
+
+运行 `aria2c --init`，可选择系统目录、当前目录、程序目录、便携模式或自定义目录。
+已有配置会先备份为 `.bak`、`.bak.1` 等再重置。脚本环境使用：
+
+```text
+aria2c --init --profile=system --non-interactive
+aria2c --show-paths --profile=system
+```
+
+生成的配置保持最小化；会话、日志、PID、Cookie、DHT 和服务器统计文件，只有显式配置对应选项后才会生成。
+
 ## 使用方法
 
 完整的用户使用说明、常用命令、配置文件、RPC、会话管理以及配置检查/修复/重置流程见
