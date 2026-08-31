@@ -10,7 +10,7 @@
 //! - When `DownloadContext` is not yet set, queries fall back to
 //!   `RequestGroup.uris` (the initial URI list).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tracing::{debug, trace};
@@ -21,7 +21,60 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_CONNECTION_CONTEXTS: usize = 32;
 
+/// Storage accounting for URI strings retained by a request group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UriMemoryStats {
+    /// Number of URI string values currently retained by the group/context.
+    pub stored_count: usize,
+    /// Sum of string lengths, excluding allocator overhead.
+    pub logical_bytes: usize,
+    /// Sum of `String::capacity()` values.
+    pub capacity_bytes: usize,
+    /// Logical bytes belonging to repeated URI values.
+    pub duplicate_logical_bytes: usize,
+    /// Capacity bytes belonging to repeated URI values.
+    pub duplicate_capacity_bytes: usize,
+}
+
 impl super::RequestGroup {
+    /// Measure URI duplication across the group's fallback list and its
+    /// download-context URI lifecycle lists. This is diagnostic only and
+    /// does not change URI ownership or ordering.
+    pub fn uri_memory_stats(&self) -> UriMemoryStats {
+        let mut stats = UriMemoryStats::default();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+
+        let mut account = |uri: &String| {
+            stats.stored_count += 1;
+            stats.logical_bytes += uri.len();
+            stats.capacity_bytes += uri.capacity();
+            if seen.insert(uri.clone(), uri.len()).is_some() {
+                stats.duplicate_logical_bytes += uri.len();
+                stats.duplicate_capacity_bytes += uri.capacity();
+            }
+        };
+
+        for uri in &self.uris {
+            account(uri);
+        }
+
+        if let Some(ctx) = self.download_context.recover().as_ref() {
+            for entry in ctx.get_file_entries() {
+                for uri in entry.remaining_uris() {
+                    account(uri);
+                }
+                for uri in entry.spent_uris() {
+                    account(uri);
+                }
+                for result in entry.uri_results() {
+                    account(&result.uri);
+                }
+            }
+        }
+
+        stats
+    }
+
     // ── DownloadContext Accessors ────────────────────────────────────────
 
     /// Get a shared reference to the `DownloadContext`, if set.

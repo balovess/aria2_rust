@@ -1047,6 +1047,26 @@ fn test_set_and_get_download_context() {
 }
 
 #[test]
+fn test_uri_memory_stats_reports_transferred_uri_duplication() {
+    let uri = "http://example.com/file.zip".to_string();
+    let group = RequestGroup::new(
+        GroupId::new(4),
+        vec![uri.clone()],
+        DownloadOptions::default(),
+    );
+    let mut ctx = DownloadContext::new(1024, 4096, "/tmp/file.bin".into());
+    ctx.get_file_entries_mut()[0].add_uri(&uri);
+
+    group.set_download_context(Arc::new(ctx));
+    let stats = group.uri_memory_stats();
+
+    assert_eq!(stats.stored_count, 2);
+    assert_eq!(stats.duplicate_logical_bytes, uri.len());
+    assert!(stats.capacity_bytes >= stats.logical_bytes);
+    assert!(stats.duplicate_capacity_bytes >= uri.len());
+}
+
+#[test]
 fn test_torrent_attribute_on_download_context() {
     use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
 

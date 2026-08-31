@@ -4,9 +4,7 @@ use std::time::Instant;
 use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 
 pub struct PeerBitfieldEntry {
-    pub peer_id: String,
     pub have_pieces: Bitfield,
-    pub raw_bitfield: Vec<u8>,
     pub last_updated: Instant,
 }
 
@@ -51,7 +49,6 @@ impl PeerBitfieldTracker {
             }
 
             existing.have_pieces = have;
-            existing.raw_bitfield = bitfield.to_vec();
             existing.last_updated = Instant::now();
         } else {
             let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
@@ -63,9 +60,7 @@ impl PeerBitfieldTracker {
             self.peers.insert(
                 peer_id.to_string(),
                 PeerBitfieldEntry {
-                    peer_id: peer_id.to_string(),
                     have_pieces: have,
-                    raw_bitfield: bitfield.to_vec(),
                     last_updated: Instant::now(),
                 },
             );
@@ -136,7 +131,7 @@ impl PeerBitfieldTracker {
     }
 
     pub fn get_peer_bitfield_raw(&self, peer_id: &str) -> Option<&[u8]> {
-        self.peers.get(peer_id).map(|e| e.raw_bitfield.as_slice())
+        self.peers.get(peer_id).map(|e| e.have_pieces.as_bytes())
     }
 
     pub fn get_peer_bitfield_or_empty(&self, peer_id: &str) -> Vec<u8> {

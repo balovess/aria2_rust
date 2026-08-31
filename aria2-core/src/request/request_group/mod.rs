@@ -38,6 +38,7 @@ pub(crate) use connection_state::ActiveConnectionGuard;
 pub(crate) use connection_state::BtConnectionGuard;
 #[cfg(feature = "bittorrent")]
 pub(crate) use connection_state::ConnectionState;
+pub use context_ops::UriMemoryStats;
 #[cfg(feature = "bittorrent")]
 pub use dependency::BtDependencyResolution;
 #[cfg(feature = "bittorrent")]
