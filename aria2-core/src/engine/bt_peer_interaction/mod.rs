@@ -434,7 +434,7 @@ impl BtPeerInteraction {
     pub fn initialize_peer_tracking(
         connections: &[BtPeerConn],
         _num_pieces: u32,
-        peer_tracker: &mut aria2_protocol::bittorrent::piece::peer_tracker::PeerBitfieldTracker,
+        peer_tracker: &mut crate::engine::bt_piece::PeerBitfieldTracker,
     ) {
         for conn in connections {
             let peer_key = Self::peer_tracker_key(conn);

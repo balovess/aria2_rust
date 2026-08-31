@@ -74,7 +74,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         "setInitialOption",
         compatibility_policy_names("setInitialOption"),
         INITIAL_REQUEST_OPTIONS,
-        &[],
+        &["bt-tracker-stopped-timeout"],
     );
     assert_policy_matches_baseline(
         "setChangeGlobalOption",
@@ -83,6 +83,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         &[
             "bt-tracker-source",
             "bt-tracker-update-interval",
+            "bt-tracker-stopped-timeout",
             "enable-public-trackers",
         ],
     );

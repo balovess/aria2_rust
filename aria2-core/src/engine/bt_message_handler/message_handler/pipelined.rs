@@ -17,8 +17,7 @@ use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::AtomicProgress;
 
 use super::super::types::{
-    BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES, PeerDownloadBytes,
-    PieceDownloadResult,
+    BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceDownloadResult,
 };
 use super::BtMessageHandler;
 
@@ -26,7 +25,7 @@ use super::BtMessageHandler;
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::block_request_deadline;
+    use super::{block_request_deadline, piece_attempt_budget_exhausted};
     use crate::engine::bt_message_handler::BLOCK_REQUEST_TIMEOUT_SECS;
 
     #[test]
@@ -42,6 +41,14 @@ mod tests {
             block_request_deadline(sent_at, configured),
             sent_at + Duration::from_secs(BLOCK_REQUEST_TIMEOUT_SECS)
         );
+    }
+
+    #[test]
+    fn piece_attempt_budget_uses_total_attempts_and_zero_is_unlimited() {
+        assert!(piece_attempt_budget_exhausted(1, 1));
+        assert!(!piece_attempt_budget_exhausted(1, 3));
+        assert!(piece_attempt_budget_exhausted(3, 3));
+        assert!(!piece_attempt_budget_exhausted(100, 0));
     }
 }
 
@@ -74,6 +81,10 @@ struct PendingRequest {
 
 fn block_request_deadline(sent_at: Instant, timeout: Duration) -> Instant {
     sent_at + timeout
+}
+
+fn piece_attempt_budget_exhausted(attempts: u32, max_attempts: u32) -> bool {
+    max_attempts != 0 && attempts >= max_attempts
 }
 
 enum PeerCommand {
@@ -674,6 +685,7 @@ async fn run_attempt(
 }
 
 impl BtMessageHandler {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn download_piece_blocks_pipelined_with_sources_and_activity(
         connections: &mut [BtPeerConn],
         piece_index: u32,
@@ -682,12 +694,14 @@ impl BtMessageHandler {
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         network_activity: Option<&AtomicProgress>,
         request_timeout: Duration,
+        max_attempts: u32,
     ) -> Result<PieceDownloadResult> {
-        for retry in 0..MAX_RETRIES {
+        let mut attempts: u32 = 0;
+        loop {
+            attempts = attempts.saturating_add(1);
             info!(
                 "[BT] Pipelined piece download attempt {} for piece {}",
-                retry + 1,
-                piece_index
+                attempts, piece_index
             );
 
             let peer_addresses = connections
@@ -738,14 +752,21 @@ impl BtMessageHandler {
                 });
             }
 
-            if retry + 1 < MAX_RETRIES {
+            if !piece_attempt_budget_exhausted(attempts, max_attempts) {
                 tokio::time::sleep(Duration::from_millis(constants::BT_RETRY_DELAY_MS)).await;
+            } else {
+                break;
             }
         }
 
         Err(Aria2Error::Fatal(FatalError::Config(format!(
             "Failed to download piece {} after {} pipelined attempts",
-            piece_index, MAX_RETRIES
+            piece_index,
+            if max_attempts == 0 {
+                attempts
+            } else {
+                max_attempts
+            }
         ))))
     }
 }

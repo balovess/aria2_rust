@@ -3,6 +3,7 @@
 use super::peer_stat::PeerStat;
 use super::segment_man_impl::SegmentMan;
 
+use crate::segment::UnknownLengthPieceStorage;
 use crate::segment::piece_storage::DefaultPieceStorage;
 
 /// Helper: create a SegmentMan with a DefaultPieceStorage.
@@ -175,6 +176,20 @@ fn test_complete_segment() {
     assert!(result);
     assert!(man.has_segment(0));
     assert!(man.used_segment_entries.is_empty());
+}
+
+#[test]
+fn test_complete_segment_rejects_wrong_cuid_without_mutating_storage() {
+    let mut man = create_segment_man(1024, 4096);
+    man.recognize_segment_for(0, 4096);
+
+    let seg = man.get_segment(1, 0).unwrap();
+    assert!(!man.complete_segment(2, &seg));
+    assert!(!man.has_segment(seg.index()));
+    assert_eq!(man.get_in_flight_segment_indices(1), vec![seg.index()]);
+
+    assert!(man.complete_segment(1, &seg));
+    assert!(man.has_segment(seg.index()));
 }
 
 // ── Download progress ───────────────────────────────────────────────
@@ -408,6 +423,73 @@ fn test_complete_segment_advertises_multiple_pieces() {
     for idx in &completed {
         assert!(indexes.contains(idx));
     }
+}
+
+#[test]
+fn test_rejected_piece_completion_keeps_tracking_entry() {
+    let mut man = SegmentMan::new(1024 * 1024, 0);
+    man.set_piece_storage(Box::new(UnknownLengthPieceStorage::new(1024 * 1024)));
+
+    let mut old_piece = man
+        .piece_storage
+        .as_mut()
+        .unwrap()
+        .get_missing_piece(0, &[], 0, 1)
+        .unwrap();
+    old_piece.set_length(1000);
+    old_piece.reconfigure(1000);
+    let old_segment = man.checkout_segment(1, Some(old_piece)).unwrap();
+    man.cancel_segment_by_segment(1, &old_segment);
+    let mut current_piece = man
+        .piece_storage
+        .as_mut()
+        .unwrap()
+        .get_missing_piece(0, &[], 0, 2)
+        .unwrap();
+    current_piece.set_length(1000);
+    current_piece.reconfigure(1000);
+    let current_segment = man.checkout_segment(2, Some(current_piece)).unwrap();
+
+    assert!(!man.complete_segment(1, &old_segment));
+    assert_eq!(man.get_in_flight_segment_indices(2), vec![0]);
+    assert!(!man.download_finished());
+
+    assert!(man.complete_segment(2, &current_segment));
+    assert!(man.download_finished());
+}
+
+#[test]
+fn test_cancel_segment_rejects_stale_checkout_without_clearing_current_piece() {
+    let mut man = SegmentMan::new(1024 * 1024, 0);
+    man.set_piece_storage(Box::new(UnknownLengthPieceStorage::new(1024 * 1024)));
+
+    let mut old_piece = man
+        .piece_storage
+        .as_mut()
+        .unwrap()
+        .get_missing_piece(0, &[], 0, 1)
+        .unwrap();
+    old_piece.set_length(1000);
+    old_piece.reconfigure(1000);
+    let old_segment = man.checkout_segment(1, Some(old_piece)).unwrap();
+    man.cancel_segment_by_segment(1, &old_segment);
+
+    let mut current_piece = man
+        .piece_storage
+        .as_mut()
+        .unwrap()
+        .get_missing_piece(0, &[], 0, 1)
+        .unwrap();
+    current_piece.set_length(1000);
+    current_piece.reconfigure(1000);
+    let current_segment = man.checkout_segment(1, Some(current_piece)).unwrap();
+
+    man.cancel_segment_by_segment(1, &old_segment);
+    assert_eq!(man.get_in_flight_segment_indices(1), vec![0]);
+    assert!(man.piece_storage.as_ref().unwrap().is_piece_used(0));
+
+    man.cancel_segment_by_segment(1, &current_segment);
+    assert!(man.get_in_flight_segment_indices(1).is_empty());
 }
 
 // ── get_segments_for_file_entry ────────────────────────────────────────

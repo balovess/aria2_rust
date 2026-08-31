@@ -8,12 +8,36 @@
 
 use super::App;
 use super::cli::CliArgs;
+use super::config_maintenance;
 use aria2_core::config::{OptionValue, UriListFile, project_initial_options};
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::validation::protocol_detector::detect;
+use std::path::Path;
 use tracing::warn;
 
 impl App {
+    /// Validate startup configuration without initializing the download
+    /// engine or requiring a positional URI.
+    pub async fn check_config(
+        &mut self,
+        no_conf: bool,
+        path: Option<&str>,
+    ) -> std::result::Result<(), String> {
+        self.load_startup_config(no_conf, path).await
+    }
+
+    /// Disable only invalid configuration entries while retaining a backup.
+    pub fn repair_config_file(path: &Path) -> Result<(std::path::PathBuf, usize), String> {
+        let update = config_maintenance::repair(path)?;
+        Ok((update.backup_path, update.changed_lines))
+    }
+
+    /// Replace a configuration file with the built-in defaults after backing it up.
+    pub fn reset_config_file(path: &Path) -> Result<std::path::PathBuf, String> {
+        let update = config_maintenance::reset(path)?;
+        Ok(update.backup_path)
+    }
+
     async fn global_option_values(&self) -> std::collections::HashMap<String, OptionValue> {
         let config = self.config.read().await;
         config.get_all_global_options().await
@@ -156,6 +180,8 @@ impl App {
         set_bool_true!("dry-run", g.dry_run);
         set_bool_true!("daemon", g.daemon);
         set_path!("pid-file", g.pid_file);
+        set_bool_true!("update-check", g.update_check);
+        set_u64!("update-check-interval-days", g.update_check_interval_days);
         set_bool_true!("allow-piece-length-change", g.allow_piece_length_change);
         set_bool_true!("always-resume", g.always_resume);
         set_bool_true!("check-integrity", g.check_integrity);
@@ -355,6 +381,7 @@ impl App {
         set_u64!("bt-tracker-connect-timeout", b.bt_tracker_connect_timeout);
         set_u64!("bt-tracker-interval", b.bt_tracker_interval);
         set_u64!("bt-tracker-timeout", b.bt_tracker_timeout);
+        set_u64!("bt-tracker-stopped-timeout", b.bt_tracker_stopped_timeout);
         set_u64!("dht-message-timeout", b.dht_message_timeout);
         set_bool_true!("enable-dht6", b.enable_dht6);
         set_str!("dht-listen-addr6", b.dht_listen_addr6);
@@ -444,9 +471,13 @@ impl App {
             }
         }
 
-        // Append URIs from --input-file
+        // `input-file` is also the session restore path in this application.
+        // A saved session starts with a URI, so treating it as a URI list here
+        // would add every restored task twice.
         let input_file = self.get_opt_str("input-file").await;
-        if let Some(path) = input_file {
+        if let Some(path) = input_file
+            && !Self::looks_like_session_file(&path)
+        {
             match UriListFile::from_file(&path) {
                 Ok(uri_list) => {
                     for entry in uri_list.entries() {
@@ -477,6 +508,24 @@ impl App {
             })
             .collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(())
+    }
+
+    pub(super) fn looks_like_session_file(path: &str) -> bool {
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+
+        // save-session may use gzip compression; ActiveSessionManager owns
+        // decompression, so the magic header is enough for classification.
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            return true;
+        }
+        let content = String::from_utf8_lossy(&bytes);
+
+        content.lines().any(|line| {
+            let property = line.trim_start();
+            line.starts_with([' ', '\t']) && property.starts_with("GID=")
+        })
     }
 
     /// Load configuration from environment variables.
@@ -552,7 +601,26 @@ impl App {
         let mut conf = self.config.write().await;
         conf.load_file(&conf_path).await;
         if conf.has_errors() {
-            return Err(format!("Failed to parse config file: {}", conf_path));
+            let details = conf
+                .errors()
+                .iter()
+                .enumerate()
+                .map(|(index, error)| {
+                    if let Some(context) = conf.parser().error_context(index) {
+                        format!(
+                            "{}:{}: {} -> {}",
+                            conf_path, context.line, context.content, error
+                        )
+                    } else {
+                        error.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!(
+                "Failed to parse config file '{}': {}",
+                conf_path, details
+            ));
         }
         Ok(())
     }

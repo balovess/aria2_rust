@@ -7,8 +7,8 @@ use aria2_core::request::request_group::Gid;
 fn bench_engine_creation(c: &mut Criterion) {
     c.bench_function("engine_create_destroy", |b| {
         b.iter(|| {
-            let engine = DownloadEngine::new(100);
-            black_box(engine.tick_interval_ms());
+            let engine = DownloadEngine::new();
+            black_box(std::mem::size_of_val(&engine));
         });
     });
 }

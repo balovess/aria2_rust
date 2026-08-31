@@ -129,10 +129,11 @@ impl SegmentMan {
     /// Uses the caller's `SegmentKind` to accurately memoize the written
     /// length for resume support, then cancels the piece in storage.
     pub fn cancel_segment_by_segment(&mut self, cuid: u64, segment: &SegmentKind) {
-        let idx = self
-            .used_segment_entries
-            .iter()
-            .position(|e| e.cuid == cuid && e.segment_index == segment.index());
+        let idx = self.used_segment_entries.iter().position(|e| {
+            e.cuid == cuid
+                && e.segment_index == segment.index()
+                && e.piece_identity == segment.piece().map(|piece| piece.identity())
+        });
 
         if let Some(i) = idx {
             let entry = self.used_segment_entries.remove(i);
@@ -205,30 +206,37 @@ impl SegmentMan {
     /// `pieceStorage_->advertisePiece(cuid, index, wallclock)`.
     pub fn complete_segment(&mut self, cuid: u64, segment: &SegmentKind) -> bool {
         let piece_index = segment.index();
+        let tracking_index = self.used_segment_entries.iter().position(|entry| {
+            entry.cuid == cuid
+                && entry.segment_index == piece_index
+                && entry.piece_identity == segment.piece().map(|piece| piece.identity())
+        });
+
+        let Some(tracking_index) = tracking_index else {
+            return false;
+        };
 
         // Complete the piece in storage
-        if let Some(piece) = segment.piece()
-            && let Some(ref mut ps) = self.piece_storage
-        {
-            ps.complete_piece(piece);
-            // Advertise the completed piece so other commands send Have messages
-            // to their peers. C++: pieceStorage_->advertisePiece(cuid, index, wallclock)
-            ps.advertise_piece(cuid, piece_index);
-        }
-
-        // Remove the tracking entry
-        let idx = self
-            .used_segment_entries
-            .iter()
-            .position(|e| e.segment_index == piece_index);
-
-        match idx {
-            Some(i) => {
-                self.used_segment_entries.remove(i);
-                true
+        if let Some(piece) = segment.piece() {
+            let completed = self
+                .piece_storage
+                .as_mut()
+                .is_some_and(|ps| ps.complete_piece(piece));
+            if !completed {
+                // Keep the tracking entry: the caller may still own the
+                // current checkout, and a stale completion must not discard it.
+                return false;
             }
-            None => false,
+
+            if let Some(ref mut ps) = self.piece_storage {
+                // Advertise only after the storage accepted completion.
+                // C++: ps->advertisePiece(cuid, index, wallclock)
+                ps.advertise_piece(cuid, piece_index);
+            }
         }
+
+        self.used_segment_entries.remove(tracking_index);
+        true
     }
 
     // ── Segment queries ────────────────────────────────────────────────
@@ -325,6 +333,7 @@ impl SegmentMan {
         self.used_segment_entries.push(TrackingEntry {
             cuid,
             segment_index: piece_index,
+            piece_identity: segment.piece().map(|piece| piece.identity()),
         });
 
         Some(segment)

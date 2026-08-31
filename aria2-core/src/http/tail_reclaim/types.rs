@@ -4,6 +4,8 @@
 //! reclaim is triggered, the result type describing a reclaimed range, and the
 //! associated default constants.
 
+use std::ops::RangeInclusive;
+
 // ---------------------------------------------------------------------------
 // Default constants (match C++ aria2 PREF_HTTP_TAIL_RECLAIM_* settings)
 // ---------------------------------------------------------------------------
@@ -45,6 +47,21 @@ pub struct TailReclaimConfig {
     /// Whether tail reclaim is enabled.
     /// Default: true (`DEFAULT_TAIL_RECLAIM_ENABLED`).
     pub enabled: bool,
+}
+
+/// Connection state required before a tail can be handed to another request.
+#[derive(Debug, Clone, Default)]
+pub struct TailReclaimConnectionState {
+    /// Whether the server has demonstrated byte-range support.
+    pub range_supported: bool,
+    /// The Content-Range returned for the current request.
+    pub response_range: Option<(u64, u64, u64)>,
+    /// Bytes already written by the current request.
+    pub written_ranges: Vec<RangeInclusive<u64>>,
+    /// Bytes whose integrity has been verified.
+    pub verified_ranges: Vec<RangeInclusive<u64>>,
+    /// Bytes still in flight and therefore unsafe to duplicate.
+    pub in_flight_ranges: Vec<RangeInclusive<u64>>,
 }
 
 impl Default for TailReclaimConfig {
@@ -171,6 +188,57 @@ impl TailReclaimConfig {
             tail_start,
             tail_end: range_end,
         })
+    }
+
+    /// Calculate a suffix only when the response and ownership state make a
+    /// second Range request safe.
+    pub fn calculate_safe_tail(
+        &self,
+        range_start: u64,
+        range_end: u64,
+        expected_entity_length: u64,
+        state: &TailReclaimConnectionState,
+    ) -> Option<TailReclaimResult> {
+        if !state.range_supported {
+            return None;
+        }
+
+        let (response_start, response_end, response_total) = state.response_range?;
+        if response_start != range_start
+            || response_end != range_end
+            || response_end < response_start
+            || (expected_entity_length != 0 && response_total != expected_entity_length)
+        {
+            return None;
+        }
+
+        let mut protected_end = range_start;
+        let mut has_protected_bytes = false;
+        for protected in state
+            .written_ranges
+            .iter()
+            .chain(&state.verified_ranges)
+            .chain(&state.in_flight_ranges)
+        {
+            let start = (*protected.start()).max(range_start);
+            let end = (*protected.end()).min(range_end);
+            if start <= end {
+                has_protected_bytes = true;
+                protected_end = protected_end.max(end);
+            }
+        }
+
+        if !has_protected_bytes {
+            return None;
+        }
+        let tail_start = protected_end
+            .saturating_add(1)
+            .max(range_start.saturating_add(1));
+        let result = TailReclaimResult {
+            tail_start,
+            tail_end: range_end,
+        };
+        (result.length() > self.min_tail_length && tail_start <= range_end).then_some(result)
     }
 }
 

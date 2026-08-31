@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::bittorrent::message::types::BtMessage;
+use aria2_protocol::bittorrent::message::types::BtMessage;
 
 /// Maximum block length (64 KiB), matching C++ aria2 `BtConstants.h` `MAX_BLOCK_LENGTH`.
 ///
@@ -103,11 +103,13 @@ impl std::error::Error for BtMessageValidationError {}
 ///
 /// Construct with the torrent metadata (`num_pieces`, `piece_length`) and
 /// optionally configure an expected info-hash or metadata-get mode.
+/// This is a core-layer validator: it checks a parsed protocol message against
+/// the active torrent, rather than parsing wire bytes.
 ///
 /// # Example
 ///
 /// ```
-/// use aria2_protocol::bittorrent::message::validation::BtMessageValidator;
+/// use aria2_core::engine::bt_message_validation::BtMessageValidator;
 ///
 /// let validator = BtMessageValidator::new(1000, 262144)
 ///     .with_expected_info_hash([0u8; 20]);
@@ -603,7 +605,9 @@ mod tests {
     fn validate_dispatches_request() {
         let v = validator_1k();
         let msg = BtMessage::Request {
-            request: crate::bittorrent::message::types::PieceBlockRequest::new(0, 0, 16384),
+            request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
+                0, 0, 16384,
+            ),
         };
         assert!(v.validate(&msg).is_ok());
     }
@@ -612,7 +616,9 @@ mod tests {
     fn validate_dispatches_cancel() {
         let v = validator_1k();
         let msg = BtMessage::Cancel {
-            request: crate::bittorrent::message::types::PieceBlockRequest::new(0, 0, 16384),
+            request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
+                0, 0, 16384,
+            ),
         };
         assert!(v.validate(&msg).is_ok());
     }

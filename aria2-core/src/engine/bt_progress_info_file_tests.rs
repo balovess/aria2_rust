@@ -301,7 +301,7 @@ mod tests {
         fs::write(&file_path, "This is completely invalid content@@@@###")
             .expect("Failed to write invalid content");
         let result = manager.load_progress(&info_hash);
-        assert!(result.is_err() || result.is_ok(), "Should not panic");
+        assert!(result.is_err(), "Invalid progress content must be rejected");
 
         let _ = fs::remove_dir_all(&test_dir);
     }

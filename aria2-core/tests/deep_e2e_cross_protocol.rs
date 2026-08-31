@@ -678,15 +678,6 @@ async fn concurrent_same_filename_collision() {
         }
     }
 
-    // At least one should have succeeded or given clear error (not silent corruption)
-    let at_least_one_clear_outcome =
-        result1.is_ok() || result2.is_ok() || result1.is_err() || result2.is_err(); // Always true, but documents intent
-
-    assert!(
-        at_least_one_clear_outcome,
-        "Both downloads should produce clear outcome (success or explicit error)"
-    );
-
     // If both succeeded, they must have generated unique filenames (no overwrite)
     if result1.is_ok() && result2.is_ok() {
         let collision_files: Vec<_> = files_in_dir

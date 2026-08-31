@@ -1,5 +1,7 @@
 //! Piece struct definition and core implementation.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tracing::trace;
 
 use super::bitfield::BlockBitfield;
@@ -7,6 +9,8 @@ use super::completion::{HashState, finalize_hash};
 
 /// Default block length: 16 KiB (16384 bytes), matching aria2 C++ BLOCK_LENGTH.
 pub const DEFAULT_BLOCK_LENGTH: u32 = 16 * 1024;
+
+static NEXT_PIECE_ID: AtomicU64 = AtomicU64::new(1);
 
 /// A piece of a download, tracking block-level completion with a dual-bitfield
 /// (completed + in-use), user reference counting, and hash verification.
@@ -53,6 +57,8 @@ pub const DEFAULT_BLOCK_LENGTH: u32 = 16 * 1024;
 /// assert!(!piece.is_block_in_use(0)); // no longer in-use after completion
 /// ```
 pub struct Piece {
+    /// Internal checkout identity; it is not part of equality or persistence.
+    pub(super) identity: u64,
     /// Bitfield tracking completed (downloaded) blocks
     pub(super) completed: BlockBitfield,
     /// Bitfield tracking blocks currently in-use (being requested)
@@ -87,6 +93,7 @@ impl Piece {
     pub fn with_block_length(index: usize, length: u64, block_length: u32) -> Self {
         let num_blocks = Self::compute_num_blocks(length, block_length);
         Piece {
+            identity: NEXT_PIECE_ID.fetch_add(1, Ordering::Relaxed),
             completed: BlockBitfield::new(num_blocks),
             in_use: BlockBitfield::new(num_blocks),
             users: Vec::new(),
@@ -129,6 +136,11 @@ impl Piece {
     #[inline]
     pub fn index(&self) -> usize {
         self.index
+    }
+
+    /// Returns the internal identity shared by clones of this checkout.
+    pub(crate) fn identity(&self) -> u64 {
+        self.identity
     }
 
     /// Sets the piece index.

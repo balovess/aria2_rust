@@ -9,6 +9,8 @@ use super::entry::FileEntry;
 use super::helpers::{extract_host, is_valid_uri};
 use super::types::UriResult;
 
+const MAX_URI_RESULTS: usize = 64;
+
 // ============================================================================
 // URI management
 // ============================================================================
@@ -210,6 +212,9 @@ impl FileEntry {
     /// Add a URI result record.
     pub fn add_uri_result(&mut self, uri: String, result_code: u16) {
         self.uri_results.push_back(UriResult::new(uri, result_code));
+        if self.uri_results.len() > MAX_URI_RESULTS {
+            self.uri_results.pop_front();
+        }
     }
 
     /// Return the URI results.

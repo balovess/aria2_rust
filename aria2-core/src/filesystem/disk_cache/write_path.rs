@@ -42,16 +42,28 @@ impl WrDiskCache {
         // remain visible. The map invariant after this block is that entries
         // are pairwise disjoint, so one predecessor lookup is sufficient for
         // a complete range read.
-        let overlapping_keys: Vec<u64> = entries
-            .range(..end)
-            .filter(|(_, entry)| {
-                entry
-                    .offset
-                    .checked_add(entry.data.len() as u64)
-                    .is_some_and(|entry_end| entry_end > offset)
-            })
-            .map(|(&key, _)| key)
-            .collect();
+        // Cache entries are kept pairwise disjoint. Only the predecessor of
+        // `offset` can overlap from the left; subsequent overlaps must start
+        // inside the new range. Avoid scanning every older entry here: that
+        // turns sequential small writes into an O(n^2) workload.
+        let mut overlapping_keys = Vec::new();
+        if let Some((&key, entry)) = entries.range(..=offset).next_back()
+            && entry
+                .offset
+                .checked_add(entry.data.len() as u64)
+                .is_some_and(|entry_end| entry_end > offset)
+        {
+            overlapping_keys.push(key);
+        }
+        overlapping_keys.extend(
+            entries
+                .range((
+                    std::ops::Bound::Excluded(offset),
+                    std::ops::Bound::Unbounded,
+                ))
+                .take_while(|(key, _)| **key < end)
+                .map(|(&key, _)| key),
+        );
 
         let mut retained = Vec::with_capacity(overlapping_keys.len() * 2);
         for key in overlapping_keys {
@@ -83,9 +95,15 @@ impl WrDiskCache {
         }
 
         for entry in retained {
+            let offset = entry.offset;
+            let seq = entry.seq;
+            let clean = !entry.dirty;
             self.total_cached_bytes
                 .fetch_add(entry.size_bytes(), Ordering::Relaxed);
-            entries.insert(entry.offset, entry);
+            entries.insert(offset, entry);
+            if clean {
+                self.enqueue_clean(offset, seq);
+            }
         }
 
         entries.insert(
@@ -156,13 +174,10 @@ impl WrDiskCache {
             .saturating_add(needed_size)
             > target
         {
-            // Find the clean entry with the smallest seq (true LRU order).
-            // Iterating all entries is O(n), but eviction is rare.
-            let evict_key = entries
-                .iter()
-                .filter(|(_, e)| !e.dirty)
-                .min_by_key(|(_, e)| e.seq)
-                .map(|(&k, _)| k);
+            // The heap may contain stale nodes after overlap splitting or a
+            // later rewrite. Validate each candidate against the map before
+            // removing it.
+            let evict_key = self.take_clean_lru_candidate(entries);
 
             match evict_key {
                 Some(key) => {
@@ -170,6 +185,7 @@ impl WrDiskCache {
                         let entry_size = entry.size_bytes();
                         self.total_cached_bytes
                             .fetch_sub(entry_size, Ordering::Relaxed);
+                        self.clean_eviction_count.fetch_add(1, Ordering::Relaxed);
                         evicted_bytes += entry_size;
                         evicted_count += 1;
 

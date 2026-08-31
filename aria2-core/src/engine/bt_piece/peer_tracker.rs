@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::bitfield::Bitfield;
+use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 
 pub struct PeerBitfieldEntry {
     pub peer_id: String,

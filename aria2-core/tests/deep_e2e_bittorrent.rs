@@ -336,7 +336,7 @@ async fn follow_torrent_mem_http_engine_downloads_web_seed_child() {
     let manager = Arc::new(RequestGroupMan::new());
     manager.add_group_arc(Arc::clone(&parent));
 
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let engine_task = tokio::spawn(engine.run());
 

@@ -374,6 +374,18 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "bt-tracker-stopped-timeout".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS as i64,
+            ),
+            min: Some(1),
+            max: Some(600),
+            description: "Total timeout for stopped tracker announces in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "dht-message-timeout".into(),
             opt_type: OptionType::Integer,
             default_value: OptionValue::Int(10),

@@ -40,7 +40,9 @@ use crate::engine::command::{Command, CommandStatus};
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::control_file::ControlFile;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::request::request_group::{ActiveConnectionGuard, BtConnectionGuard, GroupId};
+#[cfg(feature = "bittorrent")]
+use crate::request::request_group::BtConnectionGuard;
+use crate::request::request_group::{ActiveConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_PIECE_HASH_WORKERS: usize = 4;
@@ -297,6 +299,7 @@ impl Command for BtDownloadCommand {
 
     async fn execute(&mut self) -> Result<()> {
         let _connection_guard = ActiveConnectionGuard::new(Arc::clone(&self.group));
+        #[cfg(feature = "bittorrent")]
         let _bt_connection_guard = BtConnectionGuard::new(Arc::clone(&self.group));
         if !self.started {
             self.group.recover_mut().start()?;

@@ -185,13 +185,11 @@ pub async fn run_engine_loop(
     ctx: EngineLoopContext,
     cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    tick_interval: Duration,
 ) {
     run_engine_loop_with_receiver(
         ctx,
         EngineCommandReceiver::from_unbounded(cmd_rx),
         shutdown_rx,
-        tick_interval,
     )
     .await;
 }
@@ -200,12 +198,8 @@ pub(crate) async fn run_engine_loop_with_receiver(
     mut ctx: EngineLoopContext,
     mut cmd_rx: EngineCommandReceiver,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    tick_interval: Duration,
 ) {
-    info!(
-        "Engine loop started (configured tick={:?}, event-driven dispatch)",
-        tick_interval
-    );
+    info!("Engine loop started (event-driven dispatch)");
 
     let mut running_downloads: Vec<(GroupId, RunningDownload)> = Vec::new();
     let mut completed_generations: HashSet<CommandGeneration> = HashSet::new();
@@ -649,6 +643,11 @@ async fn process_engine_commands<R: EngineCommandQueue>(
                 }
                 *force_halt_requested = true;
 
+                // Allocation waiters are not driven by the protocol
+                // cancellation token. Wake them before waiting for the
+                // owning task, then repeat after the wait for allocations
+                // queued during task teardown.
+                cancel_running_file_allocations(ctx, running_downloads).await;
                 for (gid, running) in running_downloads.iter_mut() {
                     let generation = running.generation;
                     let completed = request_shutdown_and_wait(running, FORCE_SHUTDOWN_WAIT).await;
@@ -659,19 +658,7 @@ async fn process_engine_commands<R: EngineCommandQueue>(
                         let _ = completion_tx.send((*gid, generation, TaskResult::Cancelled));
                     }
                 }
-                for gid in running_downloads.iter().map(|(gid, _)| gid.value()) {
-                    let cancelled = crate::filesystem::file_allocation_man::cancel_gid(
-                        &ctx.file_alloc_man,
-                        gid,
-                    )
-                    .await;
-                    if cancelled > 0 {
-                        debug!(
-                            gid,
-                            cancelled, "Cancelled file allocations after force halt"
-                        );
-                    }
-                }
+                cancel_running_file_allocations(ctx, running_downloads).await;
                 // Every entry has either completed or been explicitly
                 // aborted above. The completion queue still owns lifecycle
                 // accounting; removing the handles here lets the engine
@@ -1262,6 +1249,28 @@ async fn request_shutdown_and_wait(running: &mut RunningDownload, wait: Duration
     completed
 }
 
+/// Wake allocation waiters before waiting for their owning download task.
+///
+/// A download command may be suspended inside `enqueue_path` or
+/// `enqueue_multi`. Those functions wait on the allocation manager's result,
+/// so cancelling the protocol task first cannot wake them promptly.
+async fn cancel_running_file_allocations(
+    ctx: &EngineLoopContext,
+    running_downloads: &[(GroupId, RunningDownload)],
+) {
+    for (gid, _) in running_downloads {
+        let cancelled =
+            crate::filesystem::file_allocation_man::cancel_gid(&ctx.file_alloc_man, gid.value())
+                .await;
+        if cancelled > 0 {
+            debug!(
+                gid = gid.value(),
+                cancelled, "Cancelled file allocations for running task"
+            );
+        }
+    }
+}
+
 /// Cleanup on engine exit.
 ///
 /// Mirrors C++ `onEndOfRun()`: remove stopped groups, close files, save.
@@ -1379,7 +1388,7 @@ mod tests {
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         budget: Duration,
     ) {
-        let loop_fut = run_engine_loop(ctx, cmd_rx, shutdown_rx, Duration::from_millis(5));
+        let loop_fut = run_engine_loop(ctx, cmd_rx, shutdown_rx);
         tokio::time::timeout(budget, loop_fut)
             .await
             .expect("engine loop failed to terminate after halt");
@@ -1443,6 +1452,92 @@ mod tests {
             .expect("queued force-halted group should have a stopped result");
         assert_eq!(result.status, DownloadStatus::Removed);
         assert_eq!(result.code, DownloadResultCode::Removed);
+    }
+
+    #[tokio::test]
+    async fn force_halt_wakes_file_allocation_waiter_before_protocol_timeout() {
+        use crate::filesystem::file_allocation::AllocationStrategy;
+        use crate::filesystem::file_allocation_man::enqueue_path;
+        use tokio::sync::oneshot;
+
+        let mut ctx = test_ctx(true);
+        let file_alloc_man = Arc::new(tokio::sync::RwLock::new(FileAllocationMan::new()));
+        ctx.file_alloc_man = Arc::clone(&file_alloc_man);
+        let gid = GroupId::new(703);
+        let path = std::env::temp_dir().join(format!(
+            "aria2-force-halt-allocation-{}",
+            std::process::id()
+        ));
+        let (done_tx, done_rx) = oneshot::channel();
+        let allocation_task = tokio::spawn({
+            let file_alloc_man = Arc::clone(&file_alloc_man);
+            async move {
+                let result = enqueue_path(
+                    &file_alloc_man,
+                    &path,
+                    4096,
+                    AllocationStrategy::Trunc,
+                    false,
+                    gid.value(),
+                )
+                .await;
+                let _ = done_tx.send(result.is_err());
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if file_alloc_man.read().await.is_queued_gid(gid.value()) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("allocation waiter should enter the queue");
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        cmd_tx
+            .send(EngineCommand::ForceHaltAll {
+                reason: HaltReason::ShutdownSignal,
+            })
+            .unwrap();
+        let mut cmd_rx = EngineCommandReceiver::from_unbounded(cmd_rx);
+        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+        let mut running_downloads = vec![(
+            gid,
+            RunningDownload {
+                _handle: allocation_task,
+                shutdown: Some(CancellationToken::new()),
+                generation: 1,
+                last_activity: Instant::now(),
+                timeout: None,
+            },
+        )];
+        let mut halt_requested = false;
+        let mut force_halt_requested = false;
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            process_engine_commands(
+                &mut ctx,
+                &mut cmd_rx,
+                &mut running_downloads,
+                &mut halt_requested,
+                &mut force_halt_requested,
+                &completion_tx,
+            ),
+        )
+        .await
+        .expect("force halt must wake allocation waiters before timeout");
+
+        assert!(
+            done_rx
+                .await
+                .expect("allocation task should report cancellation")
+        );
+        assert!(running_downloads.is_empty());
+        assert!(!file_alloc_man.read().await.is_queued_gid(gid.value()));
     }
 
     #[tokio::test]
@@ -1544,7 +1639,7 @@ mod tests {
         let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
         sd_tx.send(()).unwrap();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        run_engine_loop(ctx, cmd_rx, sd_rx, Duration::from_millis(5)).await;
+        run_engine_loop(ctx, cmd_rx, sd_rx).await;
 
         let group = group_man
             .find_group(gid)
@@ -1571,7 +1666,7 @@ mod tests {
         let (_tx, rx) = mpsc::unbounded_channel();
         let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
-        let loop_fut = run_engine_loop(test_ctx(true), rx, sd_rx, Duration::from_millis(5));
+        let loop_fut = run_engine_loop(test_ctx(true), rx, sd_rx);
         assert!(
             tokio::time::timeout(Duration::from_millis(200), loop_fut)
                 .await

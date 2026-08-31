@@ -96,6 +96,31 @@ impl BtDownloadCommand {
         }
     }
 
+    async fn persist_checkpoint_for_halt(&mut self) -> Result<()> {
+        let bitfield = self.group.recover().get_bt_bitfield();
+        let Some(checkpoint) = self.checkpoint.as_mut() else {
+            return Ok(());
+        };
+        let bitfield = bitfield
+            .or_else(|| checkpoint.bitfield().map(ToOwned::to_owned))
+            .unwrap_or_default();
+        checkpoint.save(&bitfield, self.completed_bytes).await
+    }
+
+    async fn announce_stopped_for_halt(&mut self, info_hash: &[u8; 20], total_size: u64) {
+        if let Some(announcer) = self.tracker_announcer.as_mut() {
+            announcer
+                .announce_stopped(
+                    info_hash,
+                    &self.local_peer_id,
+                    self.completed_bytes,
+                    total_size.saturating_sub(self.completed_bytes),
+                    self.total_uploaded,
+                )
+                .await;
+        }
+    }
+
     fn reconcile_checked_out_peers(
         &self,
         checked_out: &[(
@@ -154,6 +179,7 @@ impl BtDownloadCommand {
             excluded_trackers,
             tracker_timeout,
             tracker_connect_timeout,
+            tracker_stopped_timeout,
             tracker_interval,
             external_ip,
             force_encryption,
@@ -164,6 +190,7 @@ impl BtDownloadCommand {
                 g.options().bt_exclude_tracker.clone().unwrap_or_default(),
                 g.options().bt_tracker_timeout,
                 g.options().bt_tracker_connect_timeout,
+                g.options().bt_tracker_stopped_timeout,
                 g.options().bt_tracker_interval,
                 g.options().bt_external_ip.clone(),
                 g.options().bt_force_encrypt || g.options().bt_require_crypto,
@@ -212,6 +239,7 @@ impl BtDownloadCommand {
             Duration::from_secs(tracker_timeout),
             Duration::from_secs(tracker_connect_timeout),
         );
+        announcer.set_stopped_timeout(Duration::from_secs(tracker_stopped_timeout));
         announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
         announcer.set_announce_options(force_encryption, external_ip);
         if let Some(catalog) = public_tracker_catalog {
@@ -500,7 +528,23 @@ impl BtDownloadCommand {
             ));
         }
 
-        let conn_result = match BtPeerInteraction::connect_to_peers(
+        if self.group.recover().is_halt_requested() {
+            self.return_checked_out_peers(&checked_out);
+            self.persist_checkpoint_for_halt().await?;
+            self.announce_stopped_for_halt(info_hash_raw, total_size)
+                .await;
+            return Err(Aria2Error::DownloadFailed(
+                "BitTorrent download halted".into(),
+            ));
+        }
+
+        // Keep the initial connection batch cancellable. A tracker can return
+        // many slow peers, and waiting for every handshake would otherwise
+        // delay graceful shutdown while new sockets continue to open.
+        let lifecycle_notify = self.group.recover().lifecycle_notifier();
+        let lifecycle_wait = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_wait);
+        let mut connect_future = Box::pin(BtPeerInteraction::connect_to_peers(
             &eligible_peers,
             info_hash_raw,
             num_pieces,
@@ -508,9 +552,25 @@ impl BtDownloadCommand {
             total_size,
             &connection_options,
             self.utp_socket.clone(),
-        )
-        .await
-        {
+        ));
+        let conn_result = loop {
+            tokio::select! {
+                result = &mut connect_future => break result,
+                _ = &mut lifecycle_wait => {
+                    if self.group.recover().is_halt_requested() {
+                        self.return_checked_out_peers(&checked_out);
+                        self.persist_checkpoint_for_halt().await?;
+                        self.announce_stopped_for_halt(info_hash_raw, total_size)
+                            .await;
+                        return Err(Aria2Error::DownloadFailed(
+                            "BitTorrent download halted".into(),
+                        ));
+                    }
+                    lifecycle_wait.set(lifecycle_notify.notified());
+                }
+            }
+        };
+        let conn_result = match conn_result {
             Ok(result) => result,
             Err(error) => {
                 self.return_checked_out_peers(&checked_out);

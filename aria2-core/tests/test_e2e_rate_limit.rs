@@ -121,7 +121,7 @@ async fn test_engine_global_lifecycle() {
     use aria2_core::retry::RetryPolicy;
 
     let policy = RetryPolicy::default();
-    let mut engine = DownloadEngine::with_retry_policy(10, policy.clone());
+    let mut engine = DownloadEngine::with_retry_policy(policy.clone());
 
     assert!(
         engine.global_rate_limiter().is_none(),
@@ -143,7 +143,7 @@ async fn test_engine_global_lifecycle() {
 async fn test_engine_global_limiter_limits() {
     use aria2_core::retry::RetryPolicy;
 
-    let mut engine = DownloadEngine::with_retry_policy(10, RetryPolicy::default());
+    let mut engine = DownloadEngine::with_retry_policy(RetryPolicy::default());
     engine.set_global_rate_limiter(
         RateLimiterConfig::new(Some(10000), None).with_burst(Some(1000), None),
     );

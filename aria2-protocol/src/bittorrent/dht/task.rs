@@ -25,10 +25,13 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-use tracing::{debug, trace};
+use futures::FutureExt;
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, trace, warn};
 
 // ---------------------------------------------------------------------------
 // DhtTask trait
@@ -79,6 +82,10 @@ pub struct DhtTaskExecutor {
     semaphore: Arc<Semaphore>,
     /// Maximum concurrent tasks.
     num_concurrent: usize,
+    /// Cancels queued and running work when the owning DHT engine shuts down.
+    shutdown: CancellationToken,
+    /// Wakes shutdown waiters after the last running task leaves the executor.
+    idle_notify: Arc<Notify>,
 }
 
 struct DhtTaskExecutorInner {
@@ -86,18 +93,24 @@ struct DhtTaskExecutorInner {
     queue: VecDeque<BoxedDhtTask>,
     /// Number of currently executing tasks.
     executing: usize,
+    /// Maximum number of tasks observed waiting in the queue.
+    peak_queue_size: usize,
 }
 
 impl DhtTaskExecutor {
     /// Create a new executor with the given concurrency limit.
     pub fn new(num_concurrent: usize) -> Self {
+        let num_concurrent = num_concurrent.max(1);
         Self {
             inner: Arc::new(Mutex::new(DhtTaskExecutorInner {
                 queue: VecDeque::new(),
                 executing: 0,
+                peak_queue_size: 0,
             })),
             semaphore: Arc::new(Semaphore::new(num_concurrent)),
             num_concurrent,
+            shutdown: CancellationToken::new(),
+            idle_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -105,10 +118,17 @@ impl DhtTaskExecutor {
     ///
     /// If there is capacity, the task is dispatched immediately.
     /// Otherwise it waits in the FIFO queue until a slot opens.
-    pub async fn add_task(&self, task: BoxedDhtTask) {
+    pub async fn add_task(&self, task: BoxedDhtTask) -> bool {
+        if self.shutdown.is_cancelled() {
+            return false;
+        }
         let task_name = task.name();
         let mut inner = self.inner.lock().await;
+        if self.shutdown.is_cancelled() {
+            return false;
+        }
         inner.queue.push_back(task);
+        inner.peak_queue_size = inner.peak_queue_size.max(inner.queue.len());
         trace!(
             task = task_name,
             queue_len = inner.queue.len(),
@@ -119,6 +139,34 @@ impl DhtTaskExecutor {
 
         // Try to dispatch pending tasks.
         self.dispatch_pending().await;
+        true
+    }
+
+    /// Enqueue work only when this executor is idle.
+    ///
+    /// Periodic producers use this operation to coalesce a timer tick with
+    /// work that is already running or waiting. This keeps maintenance work
+    /// bounded when a network operation takes longer than its interval.
+    pub async fn try_add_task_if_idle(&self, task: BoxedDhtTask) -> bool {
+        if self.shutdown.is_cancelled() {
+            return false;
+        }
+
+        let task_name = task.name();
+        let mut inner = self.inner.lock().await;
+        if self.shutdown.is_cancelled() {
+            return false;
+        }
+        if inner.executing != 0 || !inner.queue.is_empty() {
+            return false;
+        }
+        inner.queue.push_back(task);
+        inner.peak_queue_size = inner.peak_queue_size.max(inner.queue.len());
+        trace!(task = task_name, "DHT idle periodic task enqueued");
+        drop(inner);
+
+        self.dispatch_pending().await;
+        true
     }
 
     /// Number of currently executing tasks.
@@ -131,8 +179,16 @@ impl DhtTaskExecutor {
         self.inner.lock().await.queue.len()
     }
 
+    /// Maximum number of tasks that have waited in this executor's queue.
+    pub async fn peak_queue_size(&self) -> usize {
+        self.inner.lock().await.peak_queue_size
+    }
+
     /// Try to dispatch as many queued tasks as the semaphore allows.
     async fn dispatch_pending(&self) {
+        if self.shutdown.is_cancelled() {
+            return;
+        }
         let sem = Arc::clone(&self.semaphore);
         loop {
             let task = {
@@ -161,10 +217,33 @@ impl DhtTaskExecutor {
                 Err(_) => {
                     // At capacity — re-queue the task at the front and stop.
                     let mut inner = self.inner.lock().await;
-                    inner.queue.push_front(task);
+                    if !self.shutdown.is_cancelled() {
+                        inner.queue.push_front(task);
+                    }
                     break;
                 }
             }
+        }
+    }
+
+    /// Run one task while converting a task panic into a completed task.
+    ///
+    /// The executor must release its permit and decrement `executing` even
+    /// when a task contains an unexpected panic; otherwise shutdown and all
+    /// later dispatches can wait forever on stale executor state.
+    async fn run_task(task: BoxedDhtTask, shutdown: &CancellationToken) {
+        let task_name = task.name();
+        let result = AssertUnwindSafe(async {
+            tokio::select! {
+                _ = shutdown.cancelled() => {}
+                _ = task.run() => {}
+            }
+        })
+        .catch_unwind()
+        .await;
+
+        if result.is_err() {
+            warn!(task = task_name, "DHT task panicked; executor continues");
         }
     }
 
@@ -175,6 +254,8 @@ impl DhtTaskExecutor {
     fn spawn_task(&self, task: BoxedDhtTask, _permit: OwnedSemaphorePermit) {
         let inner = Arc::clone(&self.inner);
         let semaphore = Arc::clone(&self.semaphore);
+        let shutdown = self.shutdown.clone();
+        let idle_notify = Arc::clone(&self.idle_notify);
 
         // The core task runner: runs the task, then re-dispatches.
         // This function returns a Future that the spawner awaits.
@@ -182,19 +263,26 @@ impl DhtTaskExecutor {
             // Hold the permit for the duration of the task.
             let _held = _permit;
 
-            task.run().await;
+            Self::run_task(task, &shutdown).await;
 
             // Task completed — update executing count.
             {
                 let mut guard = inner.lock().await;
                 guard.executing = guard.executing.saturating_sub(1);
             }
+            idle_notify.notify_one();
 
             // Release the permit so the next task can start.
             drop(_held);
 
             // Re-dispatch any pending tasks now that a slot is free.
             loop {
+                if shutdown.is_cancelled() {
+                    let mut guard = inner.lock().await;
+                    guard.queue.clear();
+                    break;
+                }
+
                 let next_task = {
                     let mut guard = inner.lock().await;
                     guard.queue.pop_front()
@@ -218,19 +306,22 @@ impl DhtTaskExecutor {
                         // tasks and ensures the chain continues.
                         // The permit is held across the recursive call.
                         let _held2 = permit;
-                        next_task.run().await;
+                        Self::run_task(next_task, &shutdown).await;
 
                         {
                             let mut guard = inner.lock().await;
                             guard.executing = guard.executing.saturating_sub(1);
                         }
+                        idle_notify.notify_one();
                         drop(_held2);
                         // Loop continues — try to dispatch more.
                     }
                     Err(_) => {
                         // No permits available — re-queue and stop.
                         let mut guard = inner.lock().await;
-                        guard.queue.push_front(next_task);
+                        if !shutdown.is_cancelled() {
+                            guard.queue.push_front(next_task);
+                        }
                         break;
                     }
                 }
@@ -238,6 +329,25 @@ impl DhtTaskExecutor {
         };
 
         tokio::spawn(run_and_redispatch);
+    }
+
+    /// Cancel running work and discard queued work.
+    pub async fn shutdown(&self) {
+        self.cancel();
+        self.inner.lock().await.queue.clear();
+
+        loop {
+            let notified = self.idle_notify.notified();
+            if self.executing_count().await == 0 {
+                break;
+            }
+            notified.await;
+        }
+    }
+
+    /// Signal cancellation without waiting for asynchronous task teardown.
+    pub fn cancel(&self) {
+        self.shutdown.cancel();
     }
 }
 
@@ -291,22 +401,32 @@ impl DhtTaskQueue {
     /// Add a task to periodic lane 1 (bucket refresh, node lookup).
     ///
     /// Equivalent to C++ `DHTTaskQueueImpl::addPeriodicTask1()`.
-    pub async fn add_periodic_task_1(&self, task: BoxedDhtTask) {
-        self.periodic_executor_1.add_task(task).await;
+    pub async fn add_periodic_task_1(&self, task: BoxedDhtTask) -> bool {
+        self.periodic_executor_1.add_task(task).await
+    }
+
+    /// Enqueue periodic lane-one work only when that lane is idle.
+    pub async fn try_add_periodic_task_1_if_idle(&self, task: BoxedDhtTask) -> bool {
+        self.periodic_executor_1.try_add_task_if_idle(task).await
     }
 
     /// Add a task to periodic lane 2 (keep-alive, maintenance).
     ///
     /// Equivalent to C++ `DHTTaskQueueImpl::addPeriodicTask2()`.
-    pub async fn add_periodic_task_2(&self, task: BoxedDhtTask) {
-        self.periodic_executor_2.add_task(task).await;
+    pub async fn add_periodic_task_2(&self, task: BoxedDhtTask) -> bool {
+        self.periodic_executor_2.add_task(task).await
+    }
+
+    /// Enqueue periodic lane-two work only when that lane is idle.
+    pub async fn try_add_periodic_task_2_if_idle(&self, task: BoxedDhtTask) -> bool {
+        self.periodic_executor_2.try_add_task_if_idle(task).await
     }
 
     /// Add an immediate (on-demand) task.
     ///
     /// Equivalent to C++ `DHTTaskQueueImpl::addImmediateTask()`.
-    pub async fn add_immediate_task(&self, task: BoxedDhtTask) {
-        self.immediate_executor.add_task(task).await;
+    pub async fn add_immediate_task(&self, task: BoxedDhtTask) -> bool {
+        self.immediate_executor.add_task(task).await
     }
 
     /// Reference to periodic executor 1 (for direct access if needed).
@@ -322,6 +442,22 @@ impl DhtTaskQueue {
     /// Reference to immediate executor.
     pub fn immediate_executor(&self) -> &DhtTaskExecutor {
         &self.immediate_executor
+    }
+
+    /// Cancel all queued and running work in every lane.
+    pub async fn shutdown(&self) {
+        tokio::join!(
+            self.periodic_executor_1.shutdown(),
+            self.periodic_executor_2.shutdown(),
+            self.immediate_executor.shutdown(),
+        );
+    }
+
+    /// Signal cancellation for all lanes without waiting for task teardown.
+    pub fn cancel(&self) {
+        self.periodic_executor_1.cancel();
+        self.periodic_executor_2.cancel();
+        self.immediate_executor.cancel();
     }
 }
 
@@ -490,5 +626,139 @@ mod tests {
         // Wait for all to finish.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert_eq!(counter.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn test_executor_coalesces_periodic_work_while_busy() {
+        let executor = DhtTaskExecutor::new(1);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Debug)]
+        struct BlockingTask {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            counter: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl DhtTask for BlockingTask {
+            async fn run(self: Box<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+
+            fn name(&self) -> &'static str {
+                "blocking"
+            }
+        }
+
+        executor
+            .add_task(Box::new(BlockingTask {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                counter: Arc::clone(&counter),
+            }))
+            .await;
+        started.notified().await;
+
+        assert!(
+            !executor
+                .try_add_task_if_idle(Box::new(CountTask {
+                    counter: Arc::clone(&counter),
+                    name: "coalesced",
+                }))
+                .await
+        );
+        assert_eq!(executor.queue_size().await, 0);
+
+        release.notify_one();
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_executor_shutdown_cancels_running_task() {
+        let executor = DhtTaskExecutor::new(1);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        #[derive(Debug)]
+        struct NeverEndingTask {
+            started: Arc<tokio::sync::Notify>,
+            counter: Arc<AtomicUsize>,
+        }
+
+        #[async_trait::async_trait]
+        impl DhtTask for NeverEndingTask {
+            async fn run(self: Box<Self>) {
+                self.counter.fetch_add(1, Ordering::SeqCst);
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+            }
+
+            fn name(&self) -> &'static str {
+                "never-ending"
+            }
+        }
+
+        executor
+            .add_task(Box::new(NeverEndingTask {
+                started: Arc::clone(&started),
+                counter: Arc::clone(&counter),
+            }))
+            .await;
+        started.notified().await;
+
+        executor.shutdown().await;
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(executor.executing_count().await, 0);
+        assert!(
+            !executor
+                .try_add_task_if_idle(Box::new(CountTask {
+                    counter: Arc::clone(&counter),
+                    name: "after-shutdown",
+                }))
+                .await
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_executor_does_not_stall_after_task_panic() {
+        #[derive(Debug)]
+        struct PanicTask {
+            started: Arc<tokio::sync::Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl DhtTask for PanicTask {
+            async fn run(self: Box<Self>) {
+                self.started.notify_one();
+                panic!("intentional task panic");
+            }
+
+            fn name(&self) -> &'static str {
+                "panic"
+            }
+        }
+
+        let executor = DhtTaskExecutor::new(1);
+        let started = Arc::new(tokio::sync::Notify::new());
+        assert!(
+            executor
+                .add_task(Box::new(PanicTask {
+                    started: Arc::clone(&started),
+                }))
+                .await
+        );
+        started.notified().await;
+
+        let shutdown =
+            tokio::time::timeout(std::time::Duration::from_millis(500), executor.shutdown()).await;
+        assert!(shutdown.is_ok(), "executor shutdown should not stall");
+        assert_eq!(executor.executing_count().await, 0);
     }
 }

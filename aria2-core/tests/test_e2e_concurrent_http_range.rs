@@ -987,7 +987,7 @@ async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
             "min-split-size".to_string(),
             serde_json::json!("1M"),
         )]));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -1056,7 +1056,7 @@ async fn test_engine_timeout_tracks_concurrent_range_payload_activity() {
             serde_json::json!("1M"),
         )]));
 
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -1111,7 +1111,7 @@ async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
             "min-split-size".to_string(),
             serde_json::json!("1M"),
         )]));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -1372,5 +1372,137 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
     assert!(max_active.load(Ordering::Acquire) <= 4);
 
     let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: A stalled Range is reclaimed without waiting for the HTTP timeout.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_stalled_range_is_reclaimed_and_requeued() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 4 * 1024 * 1024;
+    let data = generate_test_data(file_size, 123);
+    let first_range_attempt = Arc::new(std::sync::Mutex::new(true));
+    let first_range_attempt_for_handler = Arc::clone(&first_range_attempt);
+    let body = data.clone();
+
+    server.on_get(
+        "/stalled-range",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", body.len())
+                    .body(empty_body())
+                    .unwrap();
+            }
+
+            let Some((start, end)) = req
+                .headers()
+                .get("Range")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes="))
+                .and_then(|value| value.split_once('-'))
+                .and_then(|(start, end)| {
+                    Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
+                })
+            else {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(empty_body())
+                    .unwrap();
+            };
+
+            let end = end.min(body.len().saturating_sub(1));
+            if start == 0 {
+                let should_stall = {
+                    let mut first = first_range_attempt_for_handler
+                        .lock()
+                        .expect("range attempt lock poisoned");
+                    if *first {
+                        *first = false;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_stall {
+                    let stream = futures::stream::once(async move {
+                        std::future::pending::<Result<Frame<Bytes>, Infallible>>().await
+                    });
+                    return Response::builder()
+                        .status(StatusCode::PARTIAL_CONTENT)
+                        .header("Accept-Ranges", "bytes")
+                        .header(
+                            "Content-Range",
+                            format!("bytes={}-{}/{}", start, end, body.len()),
+                        )
+                        .header("Content-Length", end - start + 1)
+                        .body(StreamBody::new(stream).boxed())
+                        .unwrap();
+                }
+            }
+
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header("Accept-Ranges", "bytes")
+                .header(
+                    "Content-Range",
+                    format!("bytes={}-{}/{}", start, end, body.len()),
+                )
+                .header("Content-Length", end - start + 1)
+                .body(full_body(body[start..=end].to_vec()))
+                .unwrap()
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let output_name = "stalled-range.bin";
+    let output_path = dir.path().join(output_name);
+    let url = make_url(&server.base_url(), "/stalled-range");
+    let options = make_options(Some(4), Some(4), &dir.path().to_string_lossy(), output_name);
+    let started = std::time::Instant::now();
+    let mut command = make_concurrent_command(
+        GroupId::new(406),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some(output_name),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(45), command.execute())
+        .await
+        .expect("stalled Range download waited for the ordinary HTTP timeout")
+        .expect("reclaimed Range download should succeed");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(40),
+        "download should finish after segment reclaim, elapsed={:?}",
+        started.elapsed()
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), data);
+    let range_requests = server
+        .take_request_log()
+        .into_iter()
+        .filter_map(|entry| {
+            entry
+                .headers
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+                .map(|(_, value)| value)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        range_requests
+            .iter()
+            .filter(|range| *range == "bytes=0-1048575")
+            .count()
+            >= 2,
+        "the stalled first Range must be requested again: {range_requests:?}"
+    );
     server.shutdown().await;
 }

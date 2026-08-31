@@ -51,7 +51,7 @@ async fn test_config_manager_concurrent_read_write() {
 #[test]
 fn test_download_engine_quick_shutdown() {
     for _ in 0..20 {
-        let engine = DownloadEngine::new(10);
+        let engine = DownloadEngine::new();
         drop(engine);
     }
 }

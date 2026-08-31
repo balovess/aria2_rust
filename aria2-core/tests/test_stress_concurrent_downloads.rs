@@ -398,7 +398,7 @@ fn test_stress_engine_lifecycle() {
 
     // Create and destroy 20 engines rapidly (reduced from 50)
     for i in 0..20 {
-        let engine = DownloadEngine::new(10);
+        let engine = DownloadEngine::new();
 
         // Simulate some work
         std::thread::sleep(Duration::from_millis(2));

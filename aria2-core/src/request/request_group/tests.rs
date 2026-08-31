@@ -161,6 +161,26 @@ fn test_connection_contexts_are_deduplicated_and_reset() {
 }
 
 #[test]
+fn test_connection_context_history_is_bounded() {
+    use std::net::SocketAddr;
+
+    let group = RequestGroup::new(GroupId::new(100), Vec::new(), DownloadOptions::default());
+    for index in 0..40u16 {
+        group.set_connection_context(crate::network::ConnectionContext::new(
+            "example.test",
+            80,
+            SocketAddr::from(([192, 0, 2, 1], index + 1)),
+        ));
+    }
+
+    assert_eq!(group.connection_contexts().len(), 32);
+    assert_eq!(
+        group.latest_connection_context().unwrap().peer_addr,
+        SocketAddr::from(([192, 0, 2, 1], 40))
+    );
+}
+
+#[test]
 fn test_followed_by_gids_are_idempotent() {
     let group = RequestGroup::new(
         GroupId::new(1),

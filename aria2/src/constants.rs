@@ -34,7 +34,6 @@ pub const LABEL_WARNING: &str = "WARNING:";
 pub const LABEL_INFO: &str = "INFO:";
 
 // Engine defaults
-pub const DEFAULT_TICK_INTERVAL_MS: u64 = 100;
 pub const DEFAULT_BT_ENDGAME_THRESHOLD: usize = 20;
 /// Default value of aria2's `--max-tries`: total attempts, not retries.
 pub const DEFAULT_MAX_RETRIES: u32 = 5;

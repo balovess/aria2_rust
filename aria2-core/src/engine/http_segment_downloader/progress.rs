@@ -22,6 +22,10 @@ pub(crate) struct SegmentProgressTracker {
 pub(crate) struct SegmentProgress {
     tracker: Arc<SegmentProgressTracker>,
     reported: AtomicU64,
+    last_activity_nanos: AtomicU64,
+    last_sample_nanos: AtomicU64,
+    last_sample_bytes: AtomicU64,
+    recent_throughput_bps: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +62,10 @@ impl SegmentProgressTracker {
         Arc::new(SegmentProgress {
             tracker: Arc::clone(self),
             reported: AtomicU64::new(0),
+            last_activity_nanos: AtomicU64::new(self.elapsed_nanos()),
+            last_sample_nanos: AtomicU64::new(self.elapsed_nanos()),
+            last_sample_bytes: AtomicU64::new(0),
+            recent_throughput_bps: AtomicU64::new(0),
         })
     }
 
@@ -78,7 +86,24 @@ impl SegmentProgress {
     /// Refresh the group-level I/O inactivity clock for a received range
     /// chunk. This is independent of the coarser display progress threshold.
     pub(crate) fn record_network_activity(&self) {
+        self.last_activity_nanos
+            .store(self.tracker.elapsed_nanos(), Ordering::Release);
         self.tracker.progress.record_network_activity();
+    }
+
+    /// Check this Range independently from the group-level activity clock.
+    pub(crate) fn is_stalled(&self, timeout: std::time::Duration) -> bool {
+        let now = self.tracker.elapsed_nanos();
+        let last = self.last_activity_nanos.load(Ordering::Acquire);
+        now.saturating_sub(last) >= timeout.as_nanos().min(u128::from(u64::MAX)) as u64
+    }
+
+    /// Return the most recently measured throughput for this Range request.
+    ///
+    /// A low value does not make a request stalled. A request is stalled only
+    /// when it has received no bytes for the configured inactivity timeout.
+    pub(crate) fn recent_throughput_bps(&self) -> u64 {
+        self.recent_throughput_bps.load(Ordering::Acquire)
     }
 
     /// Record a monotonic byte count relative to this segment's range.
@@ -98,6 +123,16 @@ impl SegmentProgress {
         };
 
         let delta = downloaded - previous;
+        let now = self.tracker.elapsed_nanos();
+        let previous_sample_time = self.last_sample_nanos.swap(now, Ordering::AcqRel);
+        let previous_sample_bytes = self.last_sample_bytes.swap(downloaded, Ordering::AcqRel);
+        let sample_elapsed = now.saturating_sub(previous_sample_time);
+        if sample_elapsed > 0 && downloaded >= previous_sample_bytes {
+            let throughput = (downloaded - previous_sample_bytes).saturating_mul(NANOS_PER_SECOND)
+                / sample_elapsed;
+            self.recent_throughput_bps
+                .store(throughput, Ordering::Release);
+        }
         let total = self.tracker.total.fetch_add(delta, Ordering::AcqRel) + delta;
         self.tracker.update_count.fetch_add(1, Ordering::Relaxed);
         self.tracker.progress.set_completed_length(total);
@@ -145,6 +180,16 @@ impl ProgressSpeed {
     }
 }
 
+impl SegmentProgressTracker {
+    fn elapsed_nanos(&self) -> u64 {
+        self.speed
+            .started_at
+            .elapsed()
+            .as_nanos()
+            .min(u128::from(u64::MAX)) as u64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +224,17 @@ mod tests {
 
         assert_eq!(tracker.total(), 100);
         assert_eq!(tracker.stats().updates, 1);
+    }
+
+    #[test]
+    fn recent_throughput_does_not_change_inactivity_stall_semantics() {
+        let progress = Arc::new(AtomicProgress::new());
+        let tracker = SegmentProgressTracker::new(0, progress);
+        let segment = tracker.new_segment();
+
+        segment.record(1024);
+
+        assert!(segment.recent_throughput_bps() > 0);
+        assert!(!segment.is_stalled(std::time::Duration::from_secs(60)));
     }
 }

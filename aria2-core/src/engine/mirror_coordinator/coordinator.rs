@@ -43,9 +43,6 @@ use super::config::MirrorConfig;
 pub struct MirrorCoordinator {
     /// Server statistics manager for tracking mirror performance.
     stat_man: Arc<ServerStatMan>,
-    /// URI selector for intelligent mirror selection.
-    #[allow(dead_code)] // Selector stored for future per-request mirror selection logic
-    selector: Box<dyn UriSelector>,
     /// Segment manager for download state tracking.
     segment_manager: ConcurrentSegmentManager,
     /// Configuration for coordination behavior.
@@ -82,14 +79,8 @@ impl MirrorCoordinator {
             selector,
         );
 
-        // Create a new selector for the coordinator (since the previous one was moved)
-        // Note: In practice, you'd want to share the selector or use Arc
-        let coordinator_selector =
-            Box::new(crate::selector::uri_selector::InorderUriSelector::new());
-
         Self {
             stat_man,
-            selector: coordinator_selector,
             segment_manager,
             config,
             urls,
@@ -102,14 +93,12 @@ impl MirrorCoordinator {
     /// configuration.
     pub fn with_segment_manager(
         stat_man: Arc<ServerStatMan>,
-        selector: Box<dyn UriSelector>,
         segment_manager: ConcurrentSegmentManager,
         config: MirrorConfig,
         urls: Vec<String>,
     ) -> Self {
         Self {
             stat_man,
-            selector,
             segment_manager,
             config,
             urls,

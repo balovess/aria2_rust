@@ -37,7 +37,7 @@ export function findBinary(): string | null {
     path.resolve(process.cwd(), '..', '..', '..'),
   ];
   for (const root of roots) {
-    for (const targetDir of ['target/debug', 'target-check/debug']) {
+    for (const targetDir of ['target/debug']) {
       for (const name of ['aria2c', 'aria2c.exe', 'aria2c-rust', 'aria2c-rust.exe']) {
         candidates.push(path.join(root, targetDir, name));
       }

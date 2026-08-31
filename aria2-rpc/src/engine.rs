@@ -427,14 +427,14 @@ impl RpcEngine {
             .execute_with_snapshot(request.clone(), snapshot)
             .await
             .map_err(backend_error)?;
-        self.publish_events(&result.events);
+        self.publish_events(result.events);
         let value = self.response_value(&request, result.response)?;
         Ok(JsonRpcResponse::success(id, value))
     }
 
-    fn publish_events(&self, events: &[crate::backend::BackendEvent]) {
+    fn publish_events(&self, events: Vec<crate::backend::BackendEvent>) {
         for event in events {
-            let (event_type, notification) = handlers::event_notification(event.clone());
+            let (event_type, notification) = handlers::event_notification(event);
             let _ = self.event_publisher.publish(event_type, notification);
         }
     }

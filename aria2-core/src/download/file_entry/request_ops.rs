@@ -315,7 +315,12 @@ impl FileEntry {
         if let Some(pos) = self.remaining_uris.iter().position(|u| *u == uri) {
             self.remaining_uris.remove(pos);
         }
-        self.spent_uris.push_back(uri);
+        // A URI can be reused after a retry cycle. Keep spent URIs as a set
+        // represented by the existing deque; repeated attempts must not grow
+        // this history without bound.
+        if !self.spent_uris.iter().any(|spent| spent == &uri) {
+            self.spent_uris.push_back(uri);
+        }
 
         let req = Arc::new(req);
         self.in_flight_requests.push(Arc::clone(&req));

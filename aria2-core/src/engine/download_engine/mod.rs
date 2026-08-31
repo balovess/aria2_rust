@@ -28,7 +28,6 @@ pub struct DownloadEngine {
     pub(crate) engine_cmd_rx: Option<EngineCommandReceiver>,
     pub(crate) shutdown_tx: Option<oneshot::Sender<()>>,
     pub(crate) shutdown_rx: Option<oneshot::Receiver<()>>,
-    pub(crate) tick_interval: Duration,
     pub(crate) retry_policy: Arc<RetryPolicy>,
     pub(crate) retry_stats: Arc<RetryStats>,
     pub(crate) global_limiter: Option<RateLimiter>,
@@ -80,41 +79,38 @@ pub struct DownloadEngine {
     pub(crate) event_hooks: Arc<super::download_event_hooks::DownloadEventHooks>,
 }
 
+impl Default for DownloadEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DownloadEngine {
-    pub fn new(tick_interval_ms: u64) -> Self {
-        Self::with_retry_policy(tick_interval_ms, RetryPolicy::default())
+    pub fn new() -> Self {
+        Self::with_retry_policy(RetryPolicy::default())
     }
 
-    pub fn with_retry_policy(tick_interval_ms: u64, policy: RetryPolicy) -> Self {
+    pub fn with_retry_policy(policy: RetryPolicy) -> Self {
         #[cfg(feature = "bittorrent")]
         {
             Self::with_retry_policy_and_lpd_manager(
-                tick_interval_ms,
                 policy,
                 Arc::new(crate::engine::lpd_manager::LpdManager::new()),
             )
         }
 
         #[cfg(not(feature = "bittorrent"))]
-        Self::with_retry_policy_and_lpd_manager(tick_interval_ms, policy)
+        Self::with_retry_policy_and_lpd_manager(policy)
     }
 
     /// Construct an engine with the process-wide LPD manager supplied by the
     /// application layer.
     #[cfg(feature = "bittorrent")]
-    pub fn with_lpd_manager(
-        tick_interval_ms: u64,
-        lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
-    ) -> Self {
-        Self::with_retry_policy_and_lpd_manager(
-            tick_interval_ms,
-            RetryPolicy::default(),
-            lpd_manager,
-        )
+    pub fn with_lpd_manager(lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>) -> Self {
+        Self::with_retry_policy_and_lpd_manager(RetryPolicy::default(), lpd_manager)
     }
 
     fn with_retry_policy_and_lpd_manager(
-        tick_interval_ms: u64,
         policy: RetryPolicy,
         #[cfg(feature = "bittorrent")] lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
     ) -> Self {
@@ -128,7 +124,6 @@ impl DownloadEngine {
             engine_cmd_rx: Some(engine_cmd_rx),
             shutdown_tx: Some(shutdown_tx),
             shutdown_rx: Some(shutdown_rx),
-            tick_interval: Duration::from_millis(tick_interval_ms),
             retry_policy: Arc::new(policy),
             retry_stats: Arc::new(RetryStats::default()),
             global_limiter: None,
@@ -159,8 +154,8 @@ impl DownloadEngine {
         };
 
         info!(
-            "Download engine initialization complete, tick interval: {}ms, max retries: {}",
-            tick_interval_ms, max_tries
+            "Download engine initialization complete, max retries: {}",
+            max_tries
         );
 
         engine
@@ -393,7 +388,7 @@ mod tests {
     /// Verify that the engine creates a BtRegistry and the accessor returns it.
     #[test]
     fn test_bt_registry_accessor_returns_valid_registry() {
-        let engine = DownloadEngine::new(100);
+        let engine = DownloadEngine::new();
         let registry = engine.bt_registry();
         let reg = registry.read().unwrap();
         assert!(reg.is_empty(), "new engine should have empty BtRegistry");
@@ -405,7 +400,7 @@ mod tests {
     #[test]
     fn test_lpd_manager_is_injected_at_engine_construction() {
         let manager = Arc::new(crate::engine::lpd_manager::LpdManager::new());
-        let engine = DownloadEngine::with_lpd_manager(100, Arc::clone(&manager));
+        let engine = DownloadEngine::with_lpd_manager(Arc::clone(&manager));
 
         assert!(
             Arc::ptr_eq(engine.lpd_manager(), &manager),
@@ -419,7 +414,7 @@ mod tests {
     /// through the other.
     #[test]
     fn test_bt_registry_arc_shared_ownership() {
-        let engine = DownloadEngine::new(100);
+        let engine = DownloadEngine::new();
         let registry_arc = engine.bt_registry().clone();
 
         // Insert via the cloned Arc
@@ -445,7 +440,7 @@ mod tests {
             BtFileMode, ContextAttributeType, TorrentAttribute,
         };
 
-        let engine = DownloadEngine::new(100);
+        let engine = DownloadEngine::new();
         let info_hash = "abcdef0123456789abcdef0123456789abcdef01";
 
         // Create a DownloadContext with TorrentAttribute

@@ -1,4 +1,7 @@
-use std::collections::BTreeMap;
+use bytes::{Bytes, BytesMut};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tracing::debug;
@@ -7,6 +10,48 @@ use crate::error::Result;
 
 /// Default maximum cache size: 16 MB
 const DEFAULT_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COALESCED_FLUSH_BYTES: usize = 1024 * 1024;
+
+/// Runtime counters for observing write-back cache behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiskCacheStats {
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub flush_count: u64,
+    pub flush_pending_write_count: u64,
+    pub flush_write_count: u64,
+    pub flush_write_bytes: u64,
+    pub clean_eviction_count: u64,
+    pub dirty_eviction_count: u64,
+}
+
+fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
+    let mut coalesced: Vec<(u64, BytesMut)> = Vec::new();
+    for (offset, data, _) in pending {
+        let can_extend = coalesced.last().is_some_and(|(start, current)| {
+            start
+                .checked_add(current.len() as u64)
+                .is_some_and(|end| end == *offset)
+                && current.len() + data.len() <= MAX_COALESCED_FLUSH_BYTES
+        });
+
+        if can_extend {
+            coalesced
+                .last_mut()
+                .expect("coalesced entry exists")
+                .1
+                .extend_from_slice(data);
+        } else {
+            let mut merged = BytesMut::with_capacity(data.len());
+            merged.extend_from_slice(data);
+            coalesced.push((*offset, merged));
+        }
+    }
+    coalesced
+        .into_iter()
+        .map(|(offset, data)| (offset, data.freeze()))
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Sub-modules implementing write-path and read-path operations
@@ -82,6 +127,9 @@ impl CacheEntry {
 pub struct WrDiskCache {
     /// Cache entries keyed by start offset, enabling O(log n) range queries.
     pub(crate) entries: Mutex<BTreeMap<u64, CacheEntry>>,
+    /// Lazy LRU index for clean entries. Stale nodes are discarded during
+    /// eviction after checking the current map entry and sequence number.
+    clean_lru: StdMutex<BinaryHeap<Reverse<(u64, u64)>>>,
     /// Serializes cache mutations with flushes that perform external I/O.
     ///
     /// The entry lock is intentionally released while a caller-provided
@@ -95,6 +143,14 @@ pub struct WrDiskCache {
     pub(crate) total_cached_bytes: AtomicUsize,
     /// Monotonic counter assigning insertion sequence numbers for LRU ordering.
     pub(crate) next_seq: AtomicU64,
+    cache_hits: AtomicU64,
+    cache_misses: AtomicU64,
+    flush_count: AtomicU64,
+    flush_pending_write_count: AtomicU64,
+    flush_write_count: AtomicU64,
+    flush_write_bytes: AtomicU64,
+    clean_eviction_count: AtomicU64,
+    dirty_eviction_count: AtomicU64,
 }
 
 impl Default for WrDiskCache {
@@ -114,7 +170,7 @@ impl WrDiskCache {
     /// let cache = WrDiskCache::new(16); // 16 MB max
     /// `
     pub fn new(max_size_mb: usize) -> Self {
-        let max_size_bytes = max_size_mb * 1024 * 1024;
+        let max_size_bytes = max_size_mb.saturating_mul(1024 * 1024);
 
         debug!(
             "Initializing write-back disk cache, max capacity: {} MB ({} bytes)",
@@ -123,10 +179,19 @@ impl WrDiskCache {
 
         WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
+            clean_lru: StdMutex::new(BinaryHeap::new()),
             flush_gate: Mutex::new(()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            flush_count: AtomicU64::new(0),
+            flush_pending_write_count: AtomicU64::new(0),
+            flush_write_count: AtomicU64::new(0),
+            flush_write_bytes: AtomicU64::new(0),
+            clean_eviction_count: AtomicU64::new(0),
+            dirty_eviction_count: AtomicU64::new(0),
         }
     }
 
@@ -144,10 +209,19 @@ impl WrDiskCache {
 
         WrDiskCache {
             entries: Mutex::new(BTreeMap::new()),
+            clean_lru: StdMutex::new(BinaryHeap::new()),
             flush_gate: Mutex::new(()),
             max_size_bytes,
             total_cached_bytes: AtomicUsize::new(0),
             next_seq: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            flush_count: AtomicU64::new(0),
+            flush_pending_write_count: AtomicU64::new(0),
+            flush_write_count: AtomicU64::new(0),
+            flush_write_bytes: AtomicU64::new(0),
+            clean_eviction_count: AtomicU64::new(0),
+            dirty_eviction_count: AtomicU64::new(0),
         }
     }
 
@@ -189,6 +263,20 @@ impl WrDiskCache {
             .count()
     }
 
+    /// Return a point-in-time snapshot of cache and write-back counters.
+    pub fn stats(&self) -> DiskCacheStats {
+        DiskCacheStats {
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            flush_count: self.flush_count.load(Ordering::Relaxed),
+            flush_pending_write_count: self.flush_pending_write_count.load(Ordering::Relaxed),
+            flush_write_count: self.flush_write_count.load(Ordering::Relaxed),
+            flush_write_bytes: self.flush_write_bytes.load(Ordering::Relaxed),
+            clean_eviction_count: self.clean_eviction_count.load(Ordering::Relaxed),
+            dirty_eviction_count: self.dirty_eviction_count.load(Ordering::Relaxed),
+        }
+    }
+
     /// Flush dirty entries through a caller-provided positioned writer.
     ///
     /// Entries are marked clean only after the writer reports success, so a
@@ -207,10 +295,21 @@ impl WrDiskCache {
                 .collect()
         };
 
-        for (offset, data, _) in &pending {
-            writer.write_bytes_at(*offset, data.clone()).await?;
+        // Network chunks are commonly adjacent but much smaller than the
+        // blocking-pool and syscall overhead. Coalesce only contiguous ranges
+        // and cap the merged buffer so sparse/out-of-order writes retain their
+        // original semantics and memory remains bounded.
+        self.flush_pending_write_count
+            .fetch_add(pending.len() as u64, Ordering::Relaxed);
+        for (offset, data) in coalesce_flush_entries(&pending) {
+            let data_len = data.len() as u64;
+            writer.write_bytes_at(offset, data).await?;
+            self.flush_write_count.fetch_add(1, Ordering::Relaxed);
+            self.flush_write_bytes
+                .fetch_add(data_len, Ordering::Relaxed);
         }
         writer.flush().await?;
+        self.flush_count.fetch_add(1, Ordering::Relaxed);
 
         let mut entries = self.entries.lock().await;
         for (offset, _, seq) in pending {
@@ -218,6 +317,7 @@ impl WrDiskCache {
                 && entry.seq == seq
             {
                 entry.dirty = false;
+                self.enqueue_clean(offset, seq);
             }
         }
         Ok(())
@@ -230,11 +330,41 @@ impl WrDiskCache {
 
         let cleared_bytes: usize = entries.values().map(|e| e.size_bytes()).sum();
         entries.clear();
+        self.clean_lru
+            .lock()
+            .expect("clean LRU lock is not poisoned")
+            .clear();
         self.total_cached_bytes
             .fetch_sub(cleared_bytes, Ordering::Relaxed);
 
         debug!("Cleared cache ({} bytes)", cleared_bytes);
         Ok(())
+    }
+
+    pub(crate) fn enqueue_clean(&self, offset: u64, seq: u64) {
+        self.clean_lru
+            .lock()
+            .expect("clean LRU lock is not poisoned")
+            .push(Reverse((seq, offset)));
+    }
+
+    pub(crate) fn take_clean_lru_candidate(
+        &self,
+        entries: &BTreeMap<u64, CacheEntry>,
+    ) -> Option<u64> {
+        let mut lru = self
+            .clean_lru
+            .lock()
+            .expect("clean LRU lock is not poisoned");
+        while let Some(Reverse((seq, offset))) = lru.pop() {
+            if entries
+                .get(&offset)
+                .is_some_and(|entry| !entry.dirty && entry.seq == seq)
+            {
+                return Some(offset);
+            }
+        }
+        None
     }
 
     // The write-path and read-path methods are in their respective sub-modules.

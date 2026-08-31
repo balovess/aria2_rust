@@ -52,11 +52,11 @@ fn test_zero_bytes_always_passes() {
 /// Test empty path handled gracefully
 #[test]
 fn test_empty_path_handling() {
-    let result = check_disk_space(Path::new(""), 1024);
-    // Should not panic - either succeed (using ".") or fail gracefully
-    assert!(
-        result.is_ok() || result.is_err(),
-        "Empty path should be handled gracefully"
+    let empty_path_result = check_disk_space(Path::new(""), 1024);
+    let current_dir_result = check_disk_space(Path::new("."), 1024);
+    assert_eq!(
+        empty_path_result, current_dir_result,
+        "an empty path must be normalized to the current directory"
     );
 }
 
@@ -109,16 +109,15 @@ async fn test_disk_writer_invalid_path_error() {
     let empty_path = Path::new("");
 
     let mut writer = CachedDiskWriter::new(empty_path, None, None);
-    let result = writer.open().await;
-
-    // Should handle gracefully - either succeed (using ".") or fail
-    if let Err(err) = result {
-        assert!(
-            err.to_string().contains("IO") || err.to_string().contains("path"),
-            "Error should mention I/O or path issue: {}",
-            err
-        );
-    }
+    let error = writer
+        .open()
+        .await
+        .expect_err("an empty path must not open as a disk writer");
+    assert!(
+        error.to_string().contains("path") || error.to_string().contains("open"),
+        "Error should identify the invalid path: {}",
+        error
+    );
 }
 
 /// Test write failure recovery with retry
@@ -443,13 +442,16 @@ async fn test_preallocation_invalid_method() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("invalid_method.bin");
 
-    // Invalid method should be handled (implementation may vary)
+    // Unknown methods map to AllocationStrategy::None.
     let result = preallocate_file(&path, 256, "invalid_method", false).await;
 
-    // Either succeeds (defaulting to a valid method) or fails gracefully
     assert!(
-        result.is_ok() || result.is_err(),
-        "Should handle invalid method gracefully"
+        result.is_ok(),
+        "Unknown allocation methods should be ignored"
+    );
+    assert!(
+        !path.exists(),
+        "No file should be created for an unknown method"
     );
 }
 

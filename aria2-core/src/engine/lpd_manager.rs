@@ -314,6 +314,11 @@ impl LpdManager {
 
         let mut announce_ports = self.announce_ports.write().await;
         announce_ports.remove(info_hash);
+        drop(announce_ports);
+
+        // Peer state belongs to the torrent lifecycle. Retaining the empty
+        // set after unregister would leak one map entry per completed torrent.
+        self.peers.write().await.remove(info_hash);
 
         info!(info_hash = %&info_hash[..8], "Torrent unregistered from LPD");
     }

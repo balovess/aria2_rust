@@ -256,17 +256,23 @@ impl BtDownloadCommand {
         // aborting the remaining connection attempts in this batch.
         let mut connected = Vec::with_capacity(peers_to_connect.len());
         for peer in &peers_to_connect {
-            match BtPeerInteraction::connect_peer_ready(
-                peer,
-                info_hash_raw,
-                &connection_options,
-                num_pieces,
-                piece_length,
-                total_size,
-                self.utp_socket.clone(),
-            )
-            .await
-            {
+            if self.group.recover().is_halt_requested() {
+                break;
+            }
+            let Some(result) = self
+                .connect_peer_ready_unless_halted(
+                    peer,
+                    info_hash_raw,
+                    &connection_options,
+                    num_pieces,
+                    piece_length,
+                    total_size,
+                )
+                .await
+            else {
+                break;
+            };
+            match result {
                 Ok(mut conn) => {
                     debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
                     self.apply_peer_exchange_policy(&mut conn);
@@ -283,6 +289,41 @@ impl BtDownloadCommand {
 
         // Return only connections that were established successfully.
         connected
+    }
+
+    async fn connect_peer_ready_unless_halted(
+        &self,
+        peer: &PeerAddr,
+        info_hash_raw: &[u8; 20],
+        connection_options: &BtPeerConnectionOptions,
+        num_pieces: u32,
+        piece_length: u32,
+        total_size: u64,
+    ) -> Option<Result<BtPeerConn>> {
+        let lifecycle_notify = self.group.recover().lifecycle_notifier();
+        let lifecycle_wait = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_wait);
+        let mut connect_future = Box::pin(BtPeerInteraction::connect_peer_ready(
+            peer,
+            info_hash_raw,
+            connection_options,
+            num_pieces,
+            piece_length,
+            total_size,
+            self.utp_socket.clone(),
+        ));
+
+        loop {
+            tokio::select! {
+                result = &mut connect_future => return Some(result),
+                _ = &mut lifecycle_wait => {
+                    if self.group.recover().is_halt_requested() {
+                        return None;
+                    }
+                    lifecycle_wait.set(lifecycle_notify.notified());
+                }
+            }
+        }
     }
 }
 
@@ -377,36 +418,6 @@ pub(super) async fn send_periodic_pex(
             pex_peers_count
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Inbound PEX: process ExtensionUpdate from dispatch
-// ---------------------------------------------------------------------------
-
-/// Process an `ExtensionUpdate::PeerExchange` received from the interaction
-/// loop's dispatch layer. Converts compact peers to `PeerAddr`, adds them
-/// to the known-peers list, and returns the newly added peers for
-/// potential connection.
-///
-/// This is the bridge between the BEP 10/11 dispatch in `BtPeerInteractive`
-/// and the download command's PEX state.
-///
-/// # Wiring path
-///
-/// When `BtPeerInteractive::do_interaction_processing()` returns
-/// `InteractionResult::Continue { pex_update: Some(..), .. }`, the caller
-/// should invoke this function to feed the discovered peers into the
-/// known-peers list. The current download loop (`download_pieces_loop`)
-/// uses raw `BtMessageHandler` calls rather than the full interaction
-/// loop, so this path will become active once the interaction loop is
-/// wired into the command execution framework.
-#[allow(dead_code)] // Will be called from interaction loop wiring (see doc above)
-pub(super) fn process_incoming_pex_update(
-    cmd: &mut BtDownloadCommand,
-    update: &ExtensionUpdate,
-    local_addr: &PeerAddr,
-) -> Vec<PeerAddr> {
-    cmd.process_pex_extension_update(update, local_addr)
 }
 
 #[cfg(test)]

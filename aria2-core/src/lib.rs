@@ -50,6 +50,39 @@
 //! - **[`ui`]** — Console UI components: `ProgressBar`, `MultiProgress` (multi-task summary),
 //!   `StatusPanel`, and formatting utilities (`format_size`, `format_speed`, `format_duration`).
 //!
+//! ## BitTorrent Library API
+//!
+//! BitTorrent task state and scheduling are exposed from this crate's root so
+//! downstream users do not need to depend on the internal `engine` layout.
+//! Use [`PiecePicker`] for task-level piece selection, [`PieceManager`] for
+//! completion and hash accounting, [`PeerBitfieldTracker`] for peer
+//! availability, and [`BtMessageValidator`] for validation against torrent
+//! metadata.
+//!
+//! ```rust,no_run
+//! use aria2_core::{
+//!     BtMessageValidator, PeerBitfieldTracker, PieceManager, PiecePicker,
+//!     PieceSelectionStrategy,
+//! };
+//!
+//! let mut picker = PiecePicker::new(128);
+//! picker.set_strategy(PieceSelectionStrategy::RarestFirst);
+//! let mut peers = PeerBitfieldTracker::new(128);
+//! peers.update_peer_bitfield("peer-1", &[0xff; 16]);
+//!
+//! let hashes = vec![[0u8; 20]; 128];
+//! let manager = PieceManager::new(128, 262_144, 128 * 262_144, hashes);
+//! let validator = BtMessageValidator::new(manager.num_pieces(), manager.piece_length());
+//! assert!(validator.validate_index(0).is_ok());
+//! # let _ = (picker, peers);
+//! ```
+//!
+//! The companion `aria2-protocol` crate owns wire formats and protocol
+//! transports, such as Bencode, BT messages, Handshake, and `Bitfield`.
+//! Download policy and torrent-domain state intentionally belong here.
+//! Applications should import the task-facing types from `aria2_core` rather
+//! than from `aria2_protocol`.
+//!
 //! ## Quick Start
 //!
 //! ```rust,no_run
@@ -106,6 +139,16 @@ pub mod validation;
 
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
+#[cfg(feature = "bittorrent")]
+pub use engine::bt_message_validation::{
+    BtMessageValidationError, BtMessageValidator, MAX_BLOCK_LENGTH,
+};
+#[cfg(feature = "bittorrent")]
+pub use engine::bt_piece::{
+    Bitfield, PeerBitfieldEntry, PeerBitfieldTracker, PeerTrackerStats, PickedPiece, PieceInfo,
+    PieceManager, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
+    PieceSelectionStrategy,
+};
 #[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{

@@ -156,6 +156,32 @@ impl BtMessageHandler {
         network_activity: Option<&AtomicProgress>,
         request_timeout: Duration,
     ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            network_activity,
+            request_timeout,
+            MAX_RETRIES,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
+        max_attempts: u32,
+    ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -169,6 +195,7 @@ impl BtMessageHandler {
             &mut failed_peers,
             network_activity,
             request_timeout,
+            max_attempts,
         )
         .await?;
         Ok(PieceDownloadResult {
@@ -210,14 +237,17 @@ impl BtMessageHandler {
         failed_peers: &mut Vec<std::net::SocketAddr>,
         network_activity: Option<&AtomicProgress>,
         request_timeout: Duration,
+        max_attempts: u32,
     ) -> Result<Vec<u8>> {
         // Retry the entire piece multiple times (same as normal mode)
-        for _retry in 0..MAX_RETRIES {
+        let mut attempts: u32 = 0;
+        loop {
+            attempts = attempts.saturating_add(1);
             peer_bytes.clear();
             failed_peers.clear();
             info!(
                 "[BT] Endgame piece download attempt {} for piece {} ({} peers)",
-                _retry + 1,
+                attempts,
                 piece_index,
                 connections.len()
             );
@@ -289,6 +319,7 @@ impl BtMessageHandler {
                                 piece_index,
                                 offset,
                                 len,
+                                result.peer_index,
                                 endgame_state,
                             )
                             .await;
@@ -326,10 +357,12 @@ impl BtMessageHandler {
 
             warn!(
                 "[BT] Endgame: Incomplete piece {} (attempt {}/{}), retrying...",
-                piece_index,
-                _retry + 1,
-                MAX_RETRIES
+                piece_index, attempts, max_attempts
             );
+
+            if max_attempts != 0 && attempts >= max_attempts {
+                break;
+            }
 
             // Small delay before retry
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -337,7 +370,12 @@ impl BtMessageHandler {
 
         Err(Aria2Error::Fatal(FatalError::Config(format!(
             "Failed to download piece {} in endgame mode after {} attempts",
-            piece_index, MAX_RETRIES
+            piece_index,
+            if max_attempts == 0 {
+                attempts
+            } else {
+                max_attempts
+            }
         ))))
     }
 
@@ -443,6 +481,10 @@ impl BtMessageHandler {
             }
         }
 
+        // No peer won this round. Drop all ownership before retrying so a
+        // later response from a cancelled/late peer cannot affect the retry.
+        endgame_state.remove_request(piece_index, block_offset, block_length);
+
         // All peers failed or timed out
         warn!("[BT] Endgame: Failed to get block from any peer");
         Ok(BlockDownloadResult {
@@ -507,10 +549,20 @@ impl BtMessageHandler {
         piece_index: u32,
         offset: u32,
         len: u32,
+        winner_index: Option<usize>,
         endgame_state: &mut EndgameState,
     ) {
-        // Get list of peers that have pending requests for this block
-        let targets = endgame_state.get_cancel_targets(piece_index, offset, len);
+        let winner = winner_index
+            .and_then(|index| connections.get(index))
+            .and_then(|conn| {
+                format!("{}:{}", conn.ip_addr, conn.port)
+                    .parse()
+                    .ok()
+                    .map(crate::engine::bt_download_execute::types::PeerKey::new)
+            });
+        let targets = winner
+            .map(|winner| endgame_state.take_cancel_targets(piece_index, offset, len, winner))
+            .unwrap_or_else(|| endgame_state.get_cancel_targets(piece_index, offset, len));
 
         if targets.is_empty() {
             debug!(
@@ -565,7 +617,8 @@ impl BtMessageHandler {
             }
         }
 
-        // Remove the tracked request since we've handled it
-        endgame_state.remove_request(piece_index, offset, len);
+        if winner.is_none() {
+            endgame_state.remove_request(piece_index, offset, len);
+        }
     }
 }

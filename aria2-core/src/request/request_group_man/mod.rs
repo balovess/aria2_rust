@@ -484,8 +484,12 @@ impl RequestGroupMan {
     /// This is deliberately separate from `fail_spawned_group`: no command
     /// exists yet, so leaving the group in `reserved` would make it appear as
     /// waiting forever and prevent the engine from reaching an idle state.
-    #[cfg(feature = "bittorrent")]
-    pub(super) fn fail_reserved_group(&self, gid: GroupId, message: &str) -> bool {
+    pub(super) fn fail_reserved_group_with_code(
+        &self,
+        gid: GroupId,
+        code: crate::request::request_group::DownloadResultCode,
+        message: String,
+    ) -> bool {
         let _lifecycle = self.lifecycle_guard();
         let Some(group) = self.reserved.remove_by_gid(gid) else {
             warn!(gid = gid.value(), "Failed reserved group not found");
@@ -493,16 +497,22 @@ impl RequestGroupMan {
         };
 
         self.unregister_group(gid);
-        group.recover().mark_error_with_code(
-            crate::request::request_group::DownloadResultCode::BittorrentParseError,
-            message.to_string(),
-        );
+        group.recover().mark_error_with_code(code, message);
         self.stopped.add(group.recover().create_download_result());
         info!(
             gid = gid.value(),
             "Recorded failed reserved dependency group"
         );
         true
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) fn fail_reserved_group(&self, gid: GroupId, message: &str) -> bool {
+        self.fail_reserved_group_with_code(
+            gid,
+            crate::request::request_group::DownloadResultCode::BittorrentParseError,
+            message.to_string(),
+        )
     }
 
     /// Return both sides of a standard Metalink metadata/payload graph.
@@ -625,25 +635,43 @@ impl RequestGroupMan {
 
     pub fn pause_all(&self) {
         let _lifecycle = self.lifecycle_guard();
-        for entry in self.groups.iter() {
-            let mut group = entry.recover_mut();
-            let _ = group.pause();
+        let gids: Vec<_> = self.groups.iter().map(|entry| *entry.key()).collect();
+        let mut visited = HashSet::with_capacity(gids.len());
+        for gid in gids {
+            for group_lock in self.metalink_graph_groups(gid) {
+                let related_gid = group_lock.recover().gid();
+                if visited.insert(related_gid) {
+                    let _ = group_lock.recover_mut().pause();
+                }
+            }
         }
     }
 
     pub fn force_pause_all(&self) {
         let _lifecycle = self.lifecycle_guard();
-        for entry in self.groups.iter() {
-            let mut group = entry.recover_mut();
-            let _ = group.force_pause();
+        let gids: Vec<_> = self.groups.iter().map(|entry| *entry.key()).collect();
+        let mut visited = HashSet::with_capacity(gids.len());
+        for gid in gids {
+            for group_lock in self.metalink_graph_groups(gid) {
+                let related_gid = group_lock.recover().gid();
+                if visited.insert(related_gid) {
+                    let _ = group_lock.recover_mut().force_pause();
+                }
+            }
         }
     }
 
     pub fn unpause_all(&self) {
         let _lifecycle = self.lifecycle_guard();
-        for entry in self.groups.iter() {
-            let mut group = entry.recover_mut();
-            let _ = group.resume();
+        let gids: Vec<_> = self.groups.iter().map(|entry| *entry.key()).collect();
+        let mut visited = HashSet::with_capacity(gids.len());
+        for gid in gids {
+            for group_lock in self.metalink_graph_groups(gid) {
+                let related_gid = group_lock.recover().gid();
+                if visited.insert(related_gid) {
+                    let _ = group_lock.recover_mut().resume();
+                }
+            }
         }
     }
 
@@ -1427,6 +1455,53 @@ mod tests {
         assert_eq!(promoted[0].recover().gid(), payload_gid);
     }
 
+    #[test]
+    fn failed_completion_dependency_does_not_leave_reserved_group_stuck() {
+        use crate::request::request_group::DownloadResultCode;
+
+        for (prerequisite_status, expected_message) in [
+            (
+                DownloadStatus::Error("metadata failed".to_string()),
+                "completion dependency failed: metadata failed",
+            ),
+            (DownloadStatus::Removed, "completion dependency was removed"),
+        ] {
+            let man = RequestGroupMan::new();
+            let prerequisite_gid = GroupId::new(60);
+            let dependent_gid = GroupId::new(61);
+            let prerequisite = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                prerequisite_gid,
+                vec!["http://example.com/prerequisite.bin".to_string()],
+                DownloadOptions::default(),
+            )));
+            let dependent = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+                dependent_gid,
+                vec!["http://example.com/dependent.bin".to_string()],
+                DownloadOptions::default(),
+            )));
+            dependent.recover().set_dependency(Box::new(
+                crate::request::request_group::CompletionDependency::new(prerequisite_gid),
+            ));
+            man.add_restored_group(prerequisite).unwrap();
+            man.add_restored_group(dependent).unwrap();
+
+            man.resolve_dependencies_for_status(prerequisite_gid, prerequisite_status);
+
+            assert!(
+                man.find_group(dependent_gid).is_none(),
+                "failed dependency must leave the canonical group index"
+            );
+            let result = man
+                .find_stopped_result(&dependent_gid.to_hex_string())
+                .expect("failed dependency must be recorded as stopped");
+            assert_eq!(result.code, DownloadResultCode::UnknownError);
+            assert_eq!(
+                result.status,
+                DownloadStatus::Error(expected_message.to_string())
+            );
+        }
+    }
+
     #[cfg(all(feature = "metalink", feature = "bittorrent"))]
     #[test]
     fn test_failed_metadata_with_direct_fallback_releases_payload() {
@@ -2091,5 +2166,40 @@ mod tests {
             "failed-spawn group must be recorded as an error, got {:?}",
             result.status
         );
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn batch_pause_operations_cover_both_metalink_graph_groups() {
+        let man = RequestGroupMan::new();
+        let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+            "https://example.test/file.torrent",
+            "file.bin",
+            &DownloadOptions::default(),
+            GroupId::new(81),
+            GroupId::new(82),
+        )
+        .unwrap();
+        let (metadata_gid, payload_gid) = man.add_metalink_graph(graph).unwrap();
+
+        man.pause_all();
+        for gid in [metadata_gid, payload_gid] {
+            let group = man.find_group(gid).unwrap();
+            assert!(group.recover().status().is_paused());
+        }
+
+        man.unpause_all();
+        for gid in [metadata_gid, payload_gid] {
+            let group = man.find_group(gid).unwrap();
+            assert_eq!(group.recover().status(), DownloadStatus::Waiting);
+        }
+
+        man.force_pause_all();
+        for gid in [metadata_gid, payload_gid] {
+            let group = man.find_group(gid).unwrap();
+            let group = group.recover();
+            assert!(group.status().is_paused());
+            assert!(group.is_force_pause_requested());
+        }
     }
 }

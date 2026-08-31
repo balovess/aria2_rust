@@ -7,6 +7,7 @@ use tracing::{debug, trace, warn};
 
 use super::super::types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, MAX_BLOCK_READ_MESSAGES,
+    MAX_RETRIES,
 };
 use super::BtMessageHandler;
 
@@ -394,6 +395,30 @@ impl BtMessageHandler {
         network_activity: Option<&AtomicProgress>,
         request_timeout: std::time::Duration,
     ) -> Result<super::super::types::PieceDownloadResult> {
+        Self::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            dht_engine,
+            network_activity,
+            request_timeout,
+            MAX_RETRIES,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: std::time::Duration,
+        max_attempts: u32,
+    ) -> Result<super::super::types::PieceDownloadResult> {
         Self::download_piece_blocks_pipelined_with_sources_and_activity(
             connections,
             piece_index,
@@ -402,6 +427,7 @@ impl BtMessageHandler {
             dht_engine,
             network_activity,
             request_timeout,
+            max_attempts,
         )
         .await
     }

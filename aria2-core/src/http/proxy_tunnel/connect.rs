@@ -180,13 +180,6 @@ impl HttpProxyTunnel {
         request
     }
 
-    /// Build an absolute-URI forward proxy request line.
-    // TODO: will be used when forward proxy request construction is fully wired up
-    #[allow(dead_code)]
-    pub(crate) fn build_forward_request_line(method: &str, target_url: &str) -> String {
-        format!("{} {} HTTP/1.1\r\n", method, target_url)
-    }
-
     // -- I/O helpers -----------------------------------------------------------
 
     async fn send_request(

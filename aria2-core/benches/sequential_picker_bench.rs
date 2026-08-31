@@ -1,9 +1,7 @@
 // Performance benchmark for sequential piece selection optimization
 // This benchmark demonstrates the O(1) complexity improvement
 
-use aria2_protocol::bittorrent::piece::picker::{
-    PiecePicker, PiecePriorityMode, PieceSelectionStrategy,
-};
+use aria2_core::engine::bt_piece::{PiecePicker, PiecePriorityMode, PieceSelectionStrategy};
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_sequential_selection(c: &mut Criterion) {

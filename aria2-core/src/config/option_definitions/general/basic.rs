@@ -41,6 +41,24 @@ impl crate::config::OptionRegistry {
             ..Default::default()
         });
         self.register(OptionDef {
+            name: "update-check".into(),
+            opt_type: OptionType::Boolean,
+            default_value: OptionValue::Bool(true),
+            description: "Check for updates at most once per interval".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "update-check-interval-days".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(7),
+            min: Some(1),
+            max: Some(365),
+            description: "Minimum days between update checks".into(),
+            category: OptionCategory::General,
+            ..Default::default()
+        });
+        self.register(OptionDef {
             name: "input-file".into(),
             opt_type: OptionType::Path,
             short_name: Some('i'),

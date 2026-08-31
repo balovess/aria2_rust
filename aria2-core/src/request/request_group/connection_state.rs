@@ -64,10 +64,12 @@ impl RequestGroup {
     }
 
     /// Publish the current BitTorrent peer connection count.
+    #[cfg(any(feature = "bittorrent", test))]
     pub(crate) fn set_bt_connection_count(&self, count: usize) {
         self.connection_state.set_bt(count);
     }
 
+    #[cfg(feature = "bittorrent")]
     pub(crate) fn connection_state(&self) -> Arc<ConnectionState> {
         Arc::clone(&self.connection_state)
     }
@@ -100,10 +102,12 @@ impl Drop for ActiveConnectionGuard {
 }
 
 /// Clears BitTorrent peer counts when the BT command lifecycle exits.
+#[cfg(feature = "bittorrent")]
 pub(crate) struct BtConnectionGuard {
     group: Arc<RwLock<RequestGroup>>,
 }
 
+#[cfg(feature = "bittorrent")]
 impl BtConnectionGuard {
     pub(crate) fn new(group: Arc<RwLock<RequestGroup>>) -> Self {
         group.recover().set_bt_connection_count(0);
@@ -111,6 +115,7 @@ impl BtConnectionGuard {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 impl Drop for BtConnectionGuard {
     fn drop(&mut self) {
         self.group.recover().set_bt_connection_count(0);

@@ -9,6 +9,8 @@ pub const SFTP_DEFAULT_PORT: u16 = 22;
 pub const HTTP_DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 15;
 pub const HTTP_DEFAULT_OVERALL_TIMEOUT_SECS: u64 = 120;
 pub const HTTP_DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 300;
+/// Maximum idle time for one concurrent HTTP Range before it is re-scheduled.
+pub const HTTP_DEFAULT_SEGMENT_STALL_TIMEOUT_SECS: u64 = 30;
 pub const HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS: u64 = 90;
 pub const HTTP_DEFAULT_TCP_KEEPALIVE_SECS: u64 = 60;
 pub const HTTP_DEFAULT_MAX_REDIRECTS: usize = 5;
@@ -60,6 +62,8 @@ pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";
 pub const BT_PEER_CONNECTION_DELAY_MS: u64 = 100;
 pub const BT_MAX_UNCHOKE_WAIT_ATTEMPTS: usize = 50;
 pub const BT_PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
+/// Total budget for best-effort stopped announces during task shutdown.
+pub const BT_TRACKER_STOPPED_TIMEOUT_SECS: u64 = 5;
 pub const BT_HANDSHAKE_RESPONSE_SIZE: usize = 68;
 pub const BT_RECEIVE_BUFFER_SIZE: usize = 4096;
 pub const BT_RETRY_DELAY_MS: u64 = 100;
