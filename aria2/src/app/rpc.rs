@@ -480,14 +480,19 @@ mod bridge_tests {
 
         bridge.on_download_event(CoreDownloadEvent::Complete, GID);
 
-        let (event_type, notification) = rx.try_recv().expect("notification must be published");
+        let (event_type, notification) = rx.recv().await.expect("notification must be published");
         assert_eq!(event_type, EventType::DownloadComplete);
         assert_eq!(notification.method(), "aria2.onDownloadComplete");
         assert_eq!(notification.gid(), GID);
 
         // Start must stay silent on this path.
         bridge.on_download_event(CoreDownloadEvent::Start, GID);
-        assert!(rx.try_recv().is_err(), "Start must not be re-published");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+                .await
+                .is_err(),
+            "Start must not be re-published"
+        );
     }
 
     /// The bridge holds a `Weak`, so it must degrade to a no-op (never panic,
