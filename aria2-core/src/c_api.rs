@@ -180,7 +180,7 @@ impl Aria2RustSession {
         })?;
 
         let request_man = Arc::new(RequestGroupMan::new());
-        let mut engine = DownloadEngine::new(100);
+        let mut engine = DownloadEngine::new();
         #[cfg(feature = "bittorrent")]
         {
             let sources = runtime.block_on(config.get_global_option("bt-tracker-source"));

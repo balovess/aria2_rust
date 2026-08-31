@@ -175,7 +175,7 @@ async fn metalink_engine_promotes_torrent_payload_and_preserves_mapping() {
     let payload_gid = payload.recover().gid();
 
     let group_man = Arc::new(RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&group_man));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -364,7 +364,7 @@ async fn metalink_engine_force_halt_preserves_resume_state() {
     assert_eq!(groups.len(), 1);
     let group = groups.pop().unwrap();
     let group_man = Arc::new(RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&group_man));
     let command_tx = engine.engine_command_sender();
     let group_handle = Arc::clone(&group);
@@ -445,7 +445,7 @@ async fn metalink_follow_mem_engine_creates_child_without_source_file() {
         options,
     )));
     let group_man = Arc::new(RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&group_man));
     let command_tx = engine.engine_command_sender();
     command_tx

@@ -124,7 +124,7 @@ async fn rust_engine_loop_high_concurrency_baseline() {
     let group_man = Arc::new(RequestGroupMan::new());
     group_man.set_max_concurrent(max_concurrent);
 
-    let mut engine = DownloadEngine::new(1);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&group_man));
     let command_tx = engine.engine_command_sender();
 

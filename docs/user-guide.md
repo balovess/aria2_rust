@@ -85,6 +85,11 @@ When a relative path is used, it is resolved from the process working
 directory. Keep the configuration, session, log, PID, and DHT files in the
 same working directory when using relative paths.
 
+For the recommended shared-configuration workflow, keep RPC enabled in the
+configuration file and supply `--daemon=true` only when starting the
+background service. A command with download input reuses the same file but
+does not start RPC from configuration-only `enable-rpc=true`.
+
 ## Windows Example
 
 From the directory containing `aria2c.exe` and `aria2.conf`:
@@ -102,20 +107,34 @@ avoids embedding an installation directory in a distributed configuration.
 
 ## RPC and Daemon Mode
 
-A minimal local RPC configuration is:
+Recommended shared configuration:
 
 ```ini
 enable-rpc=true
+rpc-listen-address=127.0.0.1
 rpc-listen-port=6800
 rpc-secret=replace-with-a-long-random-token
-daemon=true
 ```
 
-Start it with:
+Start the background service with no initial download input:
 
 ```text
-aria2c --conf-path=aria2.conf
+aria2c --conf-path=aria2.conf --daemon=true
 ```
+
+Use the same file for an occasional one-shot download:
+
+```text
+aria2c --conf-path=aria2.conf https://example.com/file.zip
+```
+
+The one-shot command ignores configuration-file/environment-only
+`enable-rpc=true` and exits after the download. To intentionally combine
+initial downloads with RPC, explicitly pass `--enable-rpc=true`. This mode is
+different from the original C++ aria2: its `SO_REUSEADDR` behavior may allow
+multiple processes to listen on the same address and port on Windows, while
+aria2-rust does not rely on cross-process port reuse and reports an error when
+all permitted address-family binds fail.
 
 Keep `rpc-listen-all` disabled unless remote access is required. If remote
 access is enabled, use `rpc-secret` and restrict access with a firewall.

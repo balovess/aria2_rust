@@ -41,7 +41,7 @@ thiserror.workspace = true
 base64.workspace = true
 clap = { version = "4.5", features = ["derive", "color", "wrap_help", "env"] }
 clap_complete = "4.5"
-mimalloc = "0.1"
+mimalloc = { version = "0.1", optional = true }
 
 # Unix-specific dependencies for daemon mode
 [target.'cfg(unix)'.dependencies]
@@ -53,9 +53,10 @@ tempfile.workspace = true
 tokio-tungstenite.workspace = true
 
 [features]
-default = ["http", "bittorrent", "rpc"]
+default = ["http", "bittorrent", "rpc", "mimalloc"]
 http = ["aria2-protocol/http"]
 bittorrent = ["aria2-protocol/bittorrent", "aria2-core/bittorrent", "aria2-rpc/bittorrent"]
 metalink = ["aria2-protocol/metalink", "aria2-core/metalink", "aria2-rpc/metalink"]
 rpc = []
+mimalloc = ["dep:mimalloc"]
 sftp = ["aria2-protocol/sftp", "aria2-core/sftp", "aria2-rpc/sftp"]

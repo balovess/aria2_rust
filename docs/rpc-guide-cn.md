@@ -21,6 +21,19 @@ aria2c --conf-path=aria2.conf
 
 默认地址为 `127.0.0.1:6800`。HTTP JSON-RPC 地址是 `http://127.0.0.1:6800/jsonrpc`，XML-RPC 地址是 `http://127.0.0.1:6800/rpc`，WebSocket 连接地址是 `ws://127.0.0.1:6800/jsonrpc`。
 
+### 启动模式差异
+
+aria2-rust 将 RPC 监听作为启动计划的一部分，而不是让配置文件中的 `enable-rpc=true` 无条件影响每次命令行调用：
+
+- 没有下载输入时，`enable-rpc=true` 启动 RPC-only 服务并保持进程运行。
+- 有 URI、URI 列表、torrent、Metalink 或 session 恢复任务时，配置文件/环境变量中的 `enable-rpc=true` 不会启动本次 RPC listener；下载完成后进程退出。
+- 需要同时下载和接受远程任务时，必须在命令行显式指定 `--enable-rpc=true`。
+- `daemon=true` 只改变进程是否后台运行，不改变上述模式选择。
+
+这与 C++ 原版 aria2 按最终 `enable-rpc` 创建 listener 的行为不同，是 aria2-rust 为共享配置场景采用的有意产品差异。它解决了“后台服务和一次性命令共用配置”时的端口占用问题，但也意味着不能仅通过配置文件让带有初始下载输入的命令自动进入下载 + RPC 模式。
+
+原版 C++ aria2 的 listener 设置了 `SO_REUSEADDR`。在 Windows 等系统上，同一地址和端口可能因此被多个进程同时监听；原版还可能通过 IPv4/IPv6 回退掩盖其中一个地址族的占用。这种端口复用不代表多个进程共享任务或 RPC 状态，也不保证请求会到达期望的进程。aria2-rust 的显式 RPC 模式不采用这种跨进程复用：会根据 `disable-ipv6` 尝试地址族，全部绑定失败时直接报告启动错误。需要稳定的单一 RPC 服务时，推荐只运行一个无初始下载输入的 RPC-only 后台进程。
+
 需要远程访问时设置 `rpc-listen-all=true`，或设置明确的 `rpc-listen-address`，并同时使用 `rpc-secret` 和防火墙限制。不要在公网暴露无认证的 RPC。
 
 ## 2. 认证

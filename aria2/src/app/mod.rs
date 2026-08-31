@@ -50,8 +50,11 @@ pub mod update_check;
 // (`rpc::CoreEventBridge`) without spinning up a real RPC server.
 pub mod rpc;
 mod session;
+mod startup;
 #[cfg(test)]
 mod tests;
+
+use startup::{StartupInputs, StartupPlan};
 
 /// Top-level application runtime for aria2-rust CLI.
 pub struct App {
@@ -63,8 +66,8 @@ pub struct App {
     /// The registry keeps the HTTP/FTP-compatible default at 60 seconds, but
     /// an omitted generic timeout must not impose a BT-wide inactivity halt.
     explicit_timeout: bool,
-    /// Whether `--enable-rpc` was explicitly supplied for this invocation.
-    explicit_rpc: bool,
+    /// The explicit CLI value, if `--enable-rpc` was supplied.
+    explicit_rpc: Option<bool>,
 }
 
 fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
@@ -88,7 +91,7 @@ impl App {
             request_man,
             detected_inputs: Vec::new(),
             explicit_timeout: false,
-            explicit_rpc: false,
+            explicit_rpc: None,
         }
     }
 
@@ -139,7 +142,7 @@ impl App {
             return 1;
         }
 
-        self.explicit_rpc = cli.rpc.enable_rpc.is_some();
+        self.explicit_rpc = cli.rpc.enable_rpc;
         if let Err(e) = self.load_cli_args(cli).await {
             eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
@@ -359,25 +362,23 @@ impl App {
         // manager guard scoped to this synchronous snapshot: `run` continues
         // through RPC startup and the engine lifetime, so retaining it here
         // would starve the first RPC write lock indefinitely.
-        let has_restored_tasks = { self.request_man.count() > 0 };
-        let configured_rpc_enabled = self.get_opt_bool("enable-rpc").await.unwrap_or(false);
-        let has_explicit_download_input = !self.detected_inputs.is_empty();
-        let rpc_enabled =
-            configured_rpc_enabled && (!has_explicit_download_input || self.explicit_rpc);
-
-        if !has_restored_tasks && self.detected_inputs.is_empty() {
-            if rpc_enabled {
-                info!("Starting in RPC-only mode (no initial downloads)");
-            } else if daemon_mode {
-                warn!("Daemon mode requires --enable-rpc when no downloads are specified");
-                info!("Starting daemon with RPC server for remote control");
-            } else {
-                eprintln!(
-                    "{}",
-                    "Error: Please provide a download URI or torrent file path, or use --input-file to resume previous downloads".red()
-                );
+        let restored_task_count = self.request_man.count();
+        let has_restored_tasks = restored_task_count > 0;
+        let startup_plan = match StartupPlan::resolve(StartupInputs {
+            has_initial_downloads: !self.detected_inputs.is_empty(),
+            has_input_file: self.get_opt_str("input-file").await.is_some(),
+            restored_tasks: restored_task_count,
+            configured_rpc: self.get_opt_bool("enable-rpc").await.unwrap_or(false),
+            explicit_rpc: self.explicit_rpc,
+        }) {
+            Ok(plan) => plan,
+            Err(error) => {
+                eprintln!("{}", format!("Error: {error}").red());
                 return 1;
             }
+        };
+        if startup_plan.is_rpc_service() {
+            info!("Starting in RPC-only mode (no initial downloads)");
         }
 
         // Step 5: Add CLI-specified download tasks
@@ -415,14 +416,17 @@ impl App {
         }
 
         // Step 6: Start RPC server (if enabled)
-        let rpc_handle = if rpc_enabled {
+        let rpc_handle = if startup_plan.starts_rpc() {
             // Extract shared state from the engine before run() consumes it
             let (group_man, engine_cmd_tx) = {
                 let engine_lock = self.engine.lock().await;
                 let engine_ref = engine_lock.as_ref().expect("engine should be initialized");
                 (self.request_man.clone(), engine_ref.engine_command_sender())
             };
-            match self.start_rpc_server(group_man, engine_cmd_tx).await {
+            match self
+                .start_rpc_server(startup_plan, group_man, engine_cmd_tx)
+                .await
+            {
                 Ok(handle) => Some(handle),
                 Err(e) => {
                     eprintln!("Failed to start RPC server: {}", e);
@@ -442,7 +446,7 @@ impl App {
                 .unwrap_or(true),
             self.get_opt_bool("quiet").await.unwrap_or(false),
         );
-        let run_result = self.run_engine(rpc_enabled, show_progress).await;
+        let run_result = self.run_engine(startup_plan, show_progress).await;
 
         // Step 8: Shutdown RPC server
         if let Some(handle) = rpc_handle {

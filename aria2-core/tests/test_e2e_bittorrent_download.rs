@@ -289,7 +289,7 @@ async fn test_e2e_engine_bt_force_halt_preserves_resume_state() {
     group.recover().set_bt_metadata_data(torrent_data);
 
     let manager = Arc::new(RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -409,7 +409,7 @@ async fn test_e2e_engine_bt_multi_file_force_halt_preserves_layout() {
     group.recover().set_bt_metadata_data(torrent_data);
 
     let manager = Arc::new(RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let command_tx = engine.engine_command_sender();
     command_tx

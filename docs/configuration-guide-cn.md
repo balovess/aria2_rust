@@ -16,7 +16,24 @@ aria2c --check-config --conf-path=aria2.conf
 
 相对路径相对于进程工作目录。配置文件中的空行、`#` 和 `;` 开头行会被忽略；格式是每行一个 `name=value`。已知但当前运行时未实现的兼容项会保留并发出警告，不会改变下载行为；未知项也会警告。重复出现的累积选项按定义追加，其余选项以后出现的值覆盖以前的值。
 
-## 2. 类型、单位与示例
+## 2. 启动模式：与原版 aria2 的明确差异
+
+aria2-rust 不直接把合并后的 `enable-rpc` 值当作“本次进程一定要监听 RPC”。启动阶段会先生成一个启动计划，将 daemon（进程是否脱离终端）与下载/RPC 业务模式分开：
+
+| 启动条件 | aria2-rust 模式 | RPC 行为 |
+| --- | --- | --- |
+| 没有下载输入，`enable-rpc=true` | RPC-only | 启动 RPC 并等待远程任务 |
+| 有 URI、`@uri-list`、URI 列表、torrent、Metalink 或 session 恢复任务 | 一次性下载 | 忽略仅来自配置文件/环境的 `enable-rpc` |
+| 有下载输入，且命令行显式 `--enable-rpc=true` | 下载 + RPC | 下载期间接受 RPC；初始任务完成后仍保持 RPC 服务，直到 RPC shutdown 或进程停止 |
+| 命令行显式 `--enable-rpc=false` | 禁止 RPC | 覆盖其他来源的 RPC 设置 |
+
+这是产品设计上的行为差异，不是对 C++ 原版行为的声称。原版 aria2 通常依据最终的 `enable-rpc` 值创建 RPC listener，因此同一份含 `enable-rpc=true` 的配置在原版中可让一次性命令行下载同时监听 RPC。aria2-rust 选择按用户是否明确启动下载来决定进程生命周期，避免后台 RPC 服务与临时命令行共用配置时发生端口冲突。
+
+在原版 C++ aria2 中，监听 socket 会设置 `SO_REUSEADDR`。在 Windows 等系统上，这可能允许多个进程以相同地址和端口进入监听状态；IPv4/IPv6 的地址族回退也可能让端口冲突暂时不明显。这不是多个 aria2 进程共享同一个 RPC 服务：请求最终由哪个进程接收并不适合作为应用层契约。aria2-rust 的显式 RPC 模式不依赖这种跨进程端口复用；它会按 `disable-ipv6` 尝试可用的地址族，若所有尝试都失败则启动失败。需要保证 RPC 服务唯一时，应使用 RPC-only 后台进程，并让命令行下载走共享配置的默认一次性模式。
+
+`daemon=true` 只负责将进程放到后台，不会自动打开 RPC，也不会把一次性下载变成长驻服务。要运行后台 RPC 服务，应使用没有初始下载输入的配置并设置 `enable-rpc=true`。
+
+## 3. 类型、单位与示例
 
 | 类型 | 写法 |
 | --- | --- |
@@ -28,7 +45,32 @@ aria2c --check-config --conf-path=aria2.conf
 
 时间选项统一使用秒；速度和大小选项使用字节，可写 `2M`、`512K`。配置文件不使用 `--` 前缀。
 
-## 3. 推荐模板
+## 4. 推荐模板
+
+### 共享配置（推荐）
+
+这是 aria2-rust 推荐的默认使用方式：同一份配置供后台 RPC 服务和偶尔执行的一次性命令复用。不要把 `daemon=true` 写入共享配置；只在启动后台服务的命令中显式添加它。
+
+```ini
+dir=downloads
+continue=true
+split=4
+max-connection-per-server=4
+enable-rpc=true
+rpc-listen-address=127.0.0.1
+rpc-listen-port=6800
+rpc-secret=replace-with-a-long-random-token
+```
+
+```text
+# 后台 RPC 服务：没有初始下载输入，因此启动 RPC 并保持运行
+aria2c --conf-path=aria2.conf --daemon=true
+
+# 普通命令行下载：复用配置，但不会再次监听 RPC
+aria2c --conf-path=aria2.conf https://example.com/file.iso
+```
+
+配置文件/环境变量中的 `enable-rpc=true` 只在没有下载输入时自动启动 RPC。若确实需要当前命令同时下载并提供 RPC，必须显式使用 `--enable-rpc=true`；此时至少一个允许的监听地址必须可用，不能依赖原版的 `SO_REUSEADDR` 行为。
 
 ### 普通下载
 
@@ -51,19 +93,18 @@ save-session-interval=60
 keep-unfinished-download-result=true
 ```
 
-### RPC 守护进程
+### 独立 RPC 守护进程
 
 ```ini
 enable-rpc=true
 rpc-listen-address=127.0.0.1
 rpc-listen-port=6800
 rpc-secret=replace-with-a-long-random-token
-daemon=true
 pid-file=aria2.pid
 log=aria2.log
 ```
 
-## 4. 配置维护
+## 5. 配置维护
 
 ```text
 aria2c --conf-path=aria2.conf --check-config
@@ -73,7 +114,7 @@ aria2c --conf-path=aria2.conf --reset-config
 
 `--check-config` 只校验，不启动下载引擎。`--repair-config` 会创建不覆盖已有文件的备份，并注释掉无效行；`--reset-config` 会先备份，再写入内置默认模板。这三个操作都应显式指定 `--conf-path`。不要在 aria2c 运行期间编辑 session 文件。
 
-## 5. 完整选项目录
+## 6. 完整选项目录
 
 以下目录覆盖当前 `OptionRegistry` 注册的 canonical 名称，但“已注册”不等于“已接线”。当前源码明确标记为 `supported: false` 的选项只用于兼容旧配置，解析时会保留并警告，不会改变运行行为。其他选项也应以当前构建的 `aria2c --help` 和实际测试为准。`max-retries`、`enable-lpd`、`dht-message-path`、`server-stat-file`、`max-downloads` 是兼容别名，分别映射到 `max-tries`、`bt-enable-lpd`、`dht-file-path`、`server-stat-of`、`max-concurrent-downloads`。
 
@@ -147,13 +188,13 @@ aria2c --conf-path=aria2.conf --reset-config
 
 RPC 的完整行为和安全配置见 [`rpc-guide-cn.md`](rpc-guide-cn.md)。
 
-## 6. 短选项
+## 7. 短选项
 
 原始兼容短选项：`-a` allocation、`-c` continue、`-d` dir、`-D` daemon、`-i` input-file、`-j` max-concurrent-downloads、`-k` min-split-size、`-l` log、`-m` max-tries、`-M` metalink-file、`-n` no-netrc、`-o` out、`-O` index-out、`-p` ftp-pasv、`-P` parameterized-uri、`-q` quiet、`-R` remote-time、`-s` split、`-S` show-files、`-t` timeout、`-T` torrent-file、`-u` max-upload-limit、`-U` user-agent、`-V` check-integrity、`-x` max-connection-per-server、`-Z` force-sequential。
 
 Rust 额外别名包括 `-B`、`-e`、`-g`、`-G`、`-I`、`-L`、`-r`、`-X`。`-h`/`--help` 和 `-v`/`--version` 是进程动作，不是配置选项。
 
-## 7. 验证与排查
+## 8. 验证与排查
 
 ```text
 aria2c --help

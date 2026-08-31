@@ -987,7 +987,7 @@ async fn test_engine_pause_unpause_preserves_concurrent_control_file() {
             "min-split-size".to_string(),
             serde_json::json!("1M"),
         )]));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -1056,7 +1056,7 @@ async fn test_engine_timeout_tracks_concurrent_range_payload_activity() {
             serde_json::json!("1M"),
         )]));
 
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -1111,7 +1111,7 @@ async fn test_engine_remove_preserves_incomplete_concurrent_control_file() {
             "min-split-size".to_string(),
             serde_json::json!("1M"),
         )]));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));

@@ -586,7 +586,7 @@ async fn test_e2e_engine_timeout_is_inactivity_not_total_download_duration() {
         options,
     )));
     let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -632,7 +632,7 @@ async fn test_e2e_engine_timeout_uses_network_activity_below_progress_threshold(
         options,
     )));
     let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -677,7 +677,7 @@ async fn test_e2e_engine_timeout_stops_response_with_no_payload() {
         options,
     )));
     let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -722,7 +722,7 @@ async fn test_e2e_engine_sequential_http_pause_unpause_preserves_control_file() 
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -820,7 +820,7 @@ async fn test_e2e_engine_save_session_flushes_sequential_http_control_file() {
         options,
     )));
     let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::clone(&manager));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -911,7 +911,7 @@ async fn test_e2e_engine_sequential_http_shutdown_halt_preserves_resume_state() 
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -993,7 +993,7 @@ async fn test_e2e_engine_sequential_http_force_halt_preserves_resume_state() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -1076,7 +1076,7 @@ async fn test_e2e_engine_sequential_http_remove_preserves_control_file() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));
@@ -1144,7 +1144,7 @@ async fn test_e2e_engine_sequential_http_force_remove_preserves_control_file() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(
         aria2_core::request::request_group_man::RequestGroupMan::new(),
     ));

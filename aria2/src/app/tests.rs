@@ -565,7 +565,18 @@ async fn application_rpc_does_not_enable_cors_by_default() {
 
     let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let server = app
-        .start_rpc_server(app.request_man.clone(), cmd_tx)
+        .start_rpc_server(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: false,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: true,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            app.request_man.clone(),
+            cmd_tx,
+        )
         .await
         .expect("RPC server should start");
 
@@ -624,10 +635,6 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
         .local_addr()
         .expect("test listener should expose an address")
         .port();
-    match tokio::net::TcpListener::bind(("::1", rpc_port)).await {
-        Ok(listener) => drop(listener),
-        Err(_) => return,
-    }
 
     let download_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -662,7 +669,7 @@ async fn application_run_ignores_config_rpc_for_cli_download() {
     tokio::fs::write(
         &config_path,
         format!(
-            "enable-rpc=true\nrpc-listen-port={rpc_port}\nstop=1\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=1\n",
+            "enable-rpc=true\ndisable-ipv6=true\nrpc-listen-port={rpc_port}\nstop=1\ndir={}\nout=download.bin\nquiet=true\nshow-console-readout=false\nmax-tries=1\nconnect-timeout=1\n",
             temp_dir.path().display()
         ),
     )
@@ -1184,7 +1191,17 @@ async fn test_process_restart_executes_restored_metalink_graph() {
     );
 
     restarted
-        .run_engine(false, false)
+        .run_engine(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: true,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: false,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            false,
+        )
         .await
         .expect("restored Metalink graph should execute to completion");
     metadata_server
@@ -1332,7 +1349,17 @@ async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() 
     );
 
     restarted
-        .run_engine(false, false)
+        .run_engine(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: true,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: false,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            false,
+        )
         .await
         .expect("restored nonzero Metalink graph should execute to completion");
     metadata_server
@@ -1488,7 +1515,17 @@ async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
     );
 
     restarted
-        .run_engine(false, false)
+        .run_engine(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: true,
+                has_input_file: false,
+                restored_tasks: 0,
+                configured_rpc: false,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            false,
+        )
         .await
         .expect("unpaused restored Metalink graph should execute to completion");
     metadata_server

@@ -885,7 +885,7 @@ async fn test_engine_ftp_pause_unpause_preserves_control_file() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -1011,7 +1011,7 @@ async fn test_engine_ftp_remove_preserves_partial_control_file() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -1062,7 +1062,7 @@ async fn test_engine_ftp_force_remove_preserves_partial_control_file() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -1117,7 +1117,7 @@ async fn test_engine_ftp_shutdown_halt_preserves_resume_state() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx
@@ -1179,7 +1179,7 @@ async fn test_engine_ftp_force_halt_preserves_resume_state() {
         vec![url],
         options,
     )));
-    let mut engine = DownloadEngine::new(5);
+    let mut engine = DownloadEngine::new();
     engine.set_request_group_man(Arc::new(RequestGroupMan::new()));
     let command_tx = engine.engine_command_sender();
     command_tx

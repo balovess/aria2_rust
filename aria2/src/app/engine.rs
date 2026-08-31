@@ -6,6 +6,7 @@
 //! - Running the engine event loop
 
 use super::App;
+use super::startup::StartupPlan;
 #[cfg(feature = "bittorrent")]
 use aria2_core::config::TrackerCatalogConfig;
 use aria2_core::engine::download_engine::DownloadEngine;
@@ -109,10 +110,7 @@ impl App {
                 }
             };
 
-            let mut engine = DownloadEngine::with_lpd_manager(
-                crate::constants::DEFAULT_TICK_INTERVAL_MS,
-                lpd_manager,
-            );
+            let mut engine = DownloadEngine::with_lpd_manager(lpd_manager);
             engine.set_public_tracker_config(TrackerCatalogConfig {
                 enabled,
                 sources,
@@ -122,7 +120,7 @@ impl App {
         };
 
         #[cfg(not(feature = "bittorrent"))]
-        let mut engine = DownloadEngine::new(crate::constants::DEFAULT_TICK_INTERVAL_MS);
+        let mut engine = DownloadEngine::new();
 
         let server_stat_timeout = self
             .get_opt_i64("server-stat-timeout")
@@ -428,19 +426,20 @@ impl App {
     ///
     /// # Arguments
     ///
-    /// * `keep_alive` - If true, the engine stays alive with no pending commands
-    ///   (used for RPC listen mode).
+    /// * `startup_plan` - The resolved process contract. RPC modes keep the
+    ///   engine alive with no pending commands; one-shot mode exits when all
+    ///   downloads finish.
     /// * `show_progress` - If true, render progress to stdout. TTY output is
     ///   rendered in place; redirected output uses plain flushed lines.
-    pub async fn run_engine(
+    pub(super) async fn run_engine(
         &self,
-        keep_alive: bool,
+        startup_plan: StartupPlan,
         show_progress: bool,
     ) -> std::result::Result<(), String> {
         let mut engine_lock: tokio::sync::MutexGuard<'_, Option<DownloadEngine>> =
             self.engine.lock().await;
         if let Some(mut engine) = engine_lock.take() {
-            engine.set_keep_alive(keep_alive);
+            engine.set_keep_alive(startup_plan.keeps_engine_alive());
             if let Some(tx) = engine.take_shutdown_sender() {
                 let cmd_tx = engine.engine_cmd_tx();
                 tokio::spawn(async move {

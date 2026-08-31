@@ -16,7 +16,24 @@ aria2c --check-config --conf-path=aria2.conf
 
 Relative paths are resolved from the process working directory. A configuration file contains one `name=value` entry per line. Blank lines and lines beginning with `#` or `;` are ignored. Cumulative options append when repeated; other options use the later value. Known options that are not implemented by the current runtime are retained with a warning and do not change download behavior. Unknown options also produce a warning.
 
-## 2. Types, units, and examples
+## 2. Startup modes: an intentional difference from original aria2
+
+aria2-rust does not treat the merged `enable-rpc` value as a command to always bind an RPC listener. Startup first creates a plan that separates daemonization (whether the process is detached) from the download/RPC business mode:
+
+| Startup condition | aria2-rust mode | RPC behavior |
+| --- | --- | --- |
+| No download input and `enable-rpc=true` | RPC-only | Start RPC and wait for remote tasks |
+| URI, `@uri-list`, URI list, torrent, Metalink, or session work is present | One-shot download | Ignore config/file/environment-only `enable-rpc` |
+| Download input plus explicit `--enable-rpc=true` | Download + RPC | Accept RPC while downloading and keep the RPC service alive after initial work finishes, until RPC shutdown or process termination |
+| Explicit `--enable-rpc=false` | RPC disabled | Override RPC settings from other sources |
+
+This is an intentional product behavior and is not claimed to match the C++ original. Original aria2 generally creates its RPC listener from the final `enable-rpc` value, so the same configuration containing `enable-rpc=true` can make a one-shot command-line download listen for RPC as well. aria2-rust instead uses the presence of an explicit download request to avoid port conflicts when a background RPC configuration is reused for an occasional command-line download.
+
+The original C++ aria2 sets `SO_REUSEADDR` on its listening socket. On Windows and some other systems, this can allow multiple processes to enter a listening state on the same address and port; IPv4/IPv6 address-family fallback can also make a conflict temporarily less visible. This does not make multiple aria2 processes share one RPC service: which process receives a request is not a suitable application-level contract. aria2-rust's explicit RPC mode does not depend on cross-process port reuse. It tries the address families allowed by `disable-ipv6`, and startup fails if all attempts fail. Use one RPC-only background process and the shared-configuration one-shot mode when the RPC service must remain unique.
+
+`daemon=true` only detaches the process; it does not enable RPC and does not turn a one-shot download into a permanent service. To run a background RPC service, use a configuration with no initial download input and set `enable-rpc=true`.
+
+## 3. Types, units, and examples
 
 | Type | Syntax |
 | --- | --- |
@@ -28,7 +45,32 @@ Relative paths are resolved from the process working directory. A configuration 
 
 Time options use seconds. Rate, cache, and size options use bytes and may use suffixes such as `2M` or `512K`. Do not use the `--` prefix in a configuration file.
 
-## 3. Recommended templates
+## 4. Recommended templates
+
+### Shared configuration (recommended)
+
+This is the recommended default for aria2-rust: reuse one configuration for a background RPC service and occasional one-shot commands. Do not put `daemon=true` in the shared file; add it explicitly only to the service-start command.
+
+```ini
+dir=downloads
+continue=true
+split=4
+max-connection-per-server=4
+enable-rpc=true
+rpc-listen-address=127.0.0.1
+rpc-listen-port=6800
+rpc-secret=replace-with-a-long-random-token
+```
+
+```text
+# Background RPC service: no initial download input, so RPC starts and stays alive
+aria2c --conf-path=aria2.conf --daemon=true
+
+# One-shot command: reuses the configuration without binding RPC again
+aria2c --conf-path=aria2.conf https://example.com/file.iso
+```
+
+Configuration-file/environment `enable-rpc=true` starts RPC automatically only when there is no download input. If the current command must download and provide RPC at the same time, explicitly pass `--enable-rpc=true`; at least one permitted listen address must be available, and the original `SO_REUSEADDR` behavior must not be relied on.
 
 ### Standard download
 
@@ -51,19 +93,18 @@ save-session-interval=60
 keep-unfinished-download-result=true
 ```
 
-### RPC daemon
+### Dedicated RPC daemon
 
 ```ini
 enable-rpc=true
 rpc-listen-address=127.0.0.1
 rpc-listen-port=6800
 rpc-secret=replace-with-a-long-random-token
-daemon=true
 pid-file=aria2.pid
 log=aria2.log
 ```
 
-## 4. Configuration maintenance
+## 5. Configuration maintenance
 
 ```text
 aria2c --conf-path=aria2.conf --check-config
@@ -73,7 +114,7 @@ aria2c --conf-path=aria2.conf --reset-config
 
 `--check-config` validates without starting the download engine. `--repair-config` creates a non-overwriting backup and comments out invalid lines. `--reset-config` creates a backup and replaces the file with the built-in default template. All three operations require an explicit `--conf-path`. Do not edit a session file while aria2c is running.
 
-## 5. Complete option catalog
+## 6. Complete option catalog
 
 The following catalog covers all canonical names registered by the current `OptionRegistry`, but registered does not mean fully wired. Options explicitly marked `supported: false` are retained for old configuration compatibility; they produce a warning and do not change runtime behavior. For all other options, follow the current build's `aria2c --help` output and observed tests. Compatibility aliases are `max-retries` -> `max-tries`, `enable-lpd` -> `bt-enable-lpd`, `dht-message-path` -> `dht-file-path`, `server-stat-file` -> `server-stat-of`, and `max-downloads` -> `max-concurrent-downloads`.
 
@@ -146,13 +187,13 @@ Bandwidth, cache, and buffer options use bytes or Size suffixes. `stop` controls
 
 See [`rpc-guide-en.md`](rpc-guide-en.md) for complete RPC behavior and security configuration.
 
-## 6. Short options
+## 7. Short options
 
 Original-compatible short options are: `-a` allocation, `-c` continue, `-d` dir, `-D` daemon, `-i` input-file, `-j` max-concurrent-downloads, `-k` min-split-size, `-l` log, `-m` max-tries, `-M` metalink-file, `-n` no-netrc, `-o` out, `-O` index-out, `-p` ftp-pasv, `-P` parameterized-uri, `-q` quiet, `-R` remote-time, `-s` split, `-S` show-files, `-t` timeout, `-T` torrent-file, `-u` max-upload-limit, `-U` user-agent, `-V` check-integrity, `-x` max-connection-per-server, and `-Z` force-sequential.
 
 Rust-only aliases include `-B`, `-e`, `-g`, `-G`, `-I`, `-L`, `-r`, and `-X`. `-h`/`--help` and `-v`/`--version` are process actions, not configuration options.
 
-## 7. Validation and troubleshooting
+## 8. Validation and troubleshooting
 
 ```text
 aria2c --help

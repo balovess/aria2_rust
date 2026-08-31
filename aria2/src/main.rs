@@ -14,10 +14,14 @@ use clap::error::ErrorKind;
 // Use mimalloc as the global allocator for better multi-threaded throughput.
 // On Windows, the system allocator has higher lock contention under concurrent
 // allocations; mimalloc's per-thread caches significantly reduce this.
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[tokio::main]
+// aria2's main work is asynchronous I/O. A small fixed pool avoids reserving
+// one runtime worker per logical CPU while still allowing RPC and downloads to
+// make progress independently.
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let cli = match CliArgs::try_parse() {
         Ok(cli) => cli,

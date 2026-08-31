@@ -21,6 +21,19 @@ aria2c --conf-path=aria2.conf
 
 The default address is `127.0.0.1:6800`. HTTP JSON-RPC is available at `http://127.0.0.1:6800/jsonrpc`, XML-RPC at `http://127.0.0.1:6800/rpc`, and WebSocket at `ws://127.0.0.1:6800/jsonrpc`.
 
+### Startup mode difference
+
+aria2-rust makes RPC binding part of a startup plan instead of allowing `enable-rpc=true` in a shared configuration to affect every command-line invocation unconditionally:
+
+- With no download input, `enable-rpc=true` starts an RPC-only service and keeps the process alive.
+- With a URI, URI list, torrent, Metalink, or session work, `enable-rpc=true` from the configuration file or environment does not start an RPC listener for that invocation; the process exits after the downloads finish.
+- To download and accept remote tasks at the same time, explicitly pass `--enable-rpc=true` on the command line.
+- `daemon=true` only changes whether the process is detached; it does not change the mode selection above.
+
+This intentionally differs from the C++ original aria2, which creates its listener from the final `enable-rpc` value. The aria2-rust policy is designed for reusing one configuration between a background service and occasional one-shot commands. It prevents the shared configuration from causing a port conflict, but it also means a download command with initial input will not enter Download + RPC mode from configuration alone.
+
+The original C++ aria2 sets `SO_REUSEADDR` on its listener. On Windows and some other systems, this can allow multiple processes to listen on the same address and port; its IPv4/IPv6 fallback can also hide occupancy in one address family. This does not mean that processes share task or RPC state, and it does not guarantee that a request reaches the intended process. aria2-rust's explicit RPC mode does not use this cross-process reuse: it tries the address families allowed by `disable-ipv6` and reports a startup error when all binds fail. For a stable single RPC service, run one RPC-only background process with no initial download input.
+
 For remote access, set `rpc-listen-all=true` or use an explicit `rpc-listen-address`, and also configure `rpc-secret` and a firewall. Do not expose unauthenticated RPC to the public internet.
 
 ## 2. Authentication

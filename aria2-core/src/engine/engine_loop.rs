@@ -185,13 +185,11 @@ pub async fn run_engine_loop(
     ctx: EngineLoopContext,
     cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    tick_interval: Duration,
 ) {
     run_engine_loop_with_receiver(
         ctx,
         EngineCommandReceiver::from_unbounded(cmd_rx),
         shutdown_rx,
-        tick_interval,
     )
     .await;
 }
@@ -200,12 +198,8 @@ pub(crate) async fn run_engine_loop_with_receiver(
     mut ctx: EngineLoopContext,
     mut cmd_rx: EngineCommandReceiver,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-    tick_interval: Duration,
 ) {
-    info!(
-        "Engine loop started (configured tick={:?}, event-driven dispatch)",
-        tick_interval
-    );
+    info!("Engine loop started (event-driven dispatch)");
 
     let mut running_downloads: Vec<(GroupId, RunningDownload)> = Vec::new();
     let mut completed_generations: HashSet<CommandGeneration> = HashSet::new();
@@ -1394,7 +1388,7 @@ mod tests {
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
         budget: Duration,
     ) {
-        let loop_fut = run_engine_loop(ctx, cmd_rx, shutdown_rx, Duration::from_millis(5));
+        let loop_fut = run_engine_loop(ctx, cmd_rx, shutdown_rx);
         tokio::time::timeout(budget, loop_fut)
             .await
             .expect("engine loop failed to terminate after halt");
@@ -1645,7 +1639,7 @@ mod tests {
         let (sd_tx, sd_rx) = tokio::sync::oneshot::channel();
         sd_tx.send(()).unwrap();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        run_engine_loop(ctx, cmd_rx, sd_rx, Duration::from_millis(5)).await;
+        run_engine_loop(ctx, cmd_rx, sd_rx).await;
 
         let group = group_man
             .find_group(gid)
@@ -1672,7 +1666,7 @@ mod tests {
         let (_tx, rx) = mpsc::unbounded_channel();
         let (_sd_tx, sd_rx) = tokio::sync::oneshot::channel();
 
-        let loop_fut = run_engine_loop(test_ctx(true), rx, sd_rx, Duration::from_millis(5));
+        let loop_fut = run_engine_loop(test_ctx(true), rx, sd_rx);
         assert!(
             tokio::time::timeout(Duration::from_millis(200), loop_fut)
                 .await
