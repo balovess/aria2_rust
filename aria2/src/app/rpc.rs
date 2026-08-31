@@ -524,7 +524,7 @@ mod bridge_tests {
 
     #[tokio::test]
     async fn rejects_an_occupied_rpc_port_before_startup() {
-        let occupied = tokio::net::TcpListener::bind("127.0.0.2:0")
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
         let port = occupied
@@ -544,9 +544,13 @@ mod bridge_tests {
                 .await
                 .expect("rpc-listen-port should be valid");
             config
+                .set_global_option("disable-ipv6", OptionValue::Bool(true))
+                .await
+                .expect("disable-ipv6 should be valid");
+            config
                 .set_global_option(
                     "rpc-listen-address",
-                    OptionValue::Str("127.0.0.2".to_string()),
+                    OptionValue::Str("127.0.0.1".to_string()),
                 )
                 .await
                 .expect("rpc-listen-address should be valid");

@@ -599,7 +599,7 @@ async fn application_rpc_does_not_enable_cors_by_default() {
 
 #[tokio::test]
 async fn application_run_fails_when_rpc_bind_fails() {
-    let occupied = tokio::net::TcpListener::bind("127.0.0.2:0")
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("test listener should bind");
     let port = occupied
@@ -612,7 +612,8 @@ async fn application_run_fails_when_rpc_bind_fails() {
         "aria2c",
         "--no-conf=true",
         "--enable-rpc=true",
-        "--rpc-listen-address=127.0.0.2",
+        "--rpc-listen-address=127.0.0.1",
+        "--disable-ipv6=true",
         "--quiet=true",
         port_argument.as_str(),
     ])
