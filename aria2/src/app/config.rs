@@ -574,28 +574,12 @@ impl App {
             // 2. USERPROFILE (Windows fallback)
             // 3. HOMEDRIVE+HOMEPATH (last resort Windows fallback)
             // 4. "." (fallback if nothing works)
-            let home = std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .or_else(|| {
-                    let drive = std::env::var_os("HOMEDRIVE")?;
-                    let path = std::env::var_os("HOMEPATH")?;
-                    Some(std::path::Path::new(&drive).join(&path).into())
-                })
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| ".".to_string());
-
-            let candidate = format!(
-                "{}/{}/{}",
-                home,
-                crate::constants::CONFIG_DIR_NAME,
-                crate::constants::CONFIG_FILE_NAME
-            );
-
-            if std::path::Path::new(&candidate).exists() {
-                candidate
-            } else {
+            let candidates = crate::app::paths::default_config_candidates();
+            let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists())
+            else {
                 return Ok(());
-            }
+            };
+            candidate.to_string_lossy().into_owned()
         };
 
         let mut conf = self.config.write().await;

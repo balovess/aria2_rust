@@ -43,7 +43,9 @@ use cli::CliArgs;
 mod config;
 mod config_maintenance;
 mod engine;
+pub mod init;
 mod metadata;
+pub mod paths;
 pub mod rpc_backend;
 pub mod update_check;
 // Public so integration tests can exercise the core → RPC notification bridge
