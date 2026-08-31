@@ -603,7 +603,7 @@ impl BtDownloadCommand {
             num_pieces,
             piece_length,
             total_size,
-            meta.info.pieces.clone(),
+            &meta.info.pieces,
         );
 
         let mut piece_picker = crate::engine::bt_piece::PiecePicker::new(num_pieces);
