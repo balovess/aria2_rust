@@ -19,6 +19,8 @@ use crate::download::DownloadContext;
 use crate::download::file_entry::UriResult;
 use crate::util::rwlock_ext::RwLockRecover;
 
+const MAX_CONNECTION_CONTEXTS: usize = 32;
+
 impl super::RequestGroup {
     // ── DownloadContext Accessors ────────────────────────────────────────
 
@@ -322,6 +324,9 @@ impl super::RequestGroup {
         if let Ok(mut contexts) = self.connection_contexts.write() {
             if let Some(index) = contexts.iter().position(|existing| existing == &context) {
                 contexts.remove(index);
+            }
+            if contexts.len() >= MAX_CONNECTION_CONTEXTS {
+                contexts.remove(0);
             }
             contexts.push(context);
         }

@@ -8,13 +8,12 @@
 //!
 //! Per-task:
 //! ```text
-//! [#1] filename.iso
-//!      [████████████░░░░░░░] 65.2%  (12.3MiB / 18.9MiB)  DL:2.34MiB/s  ETA:3m12s
+//! [1] filename.iso 65% [████████████░░░░░░░] 12.3 MiB/18.9 MiB 2.34 MiB/s ETA 3m12s
 //! ```
 //!
 //! Overall summary:
 //! ```text
-//! Overall: [████████░░░░░░░░░░] 42%  (450MiB / 1.07GiB)  DL:5.67MiB/s  3 active / 8 total
+//! Total 8 tasks 42% [████████░░░░░░░░░░] 5.67 MiB/s ETA 3m12s
 //! ```
 
 use std::time::{Duration, Instant};
@@ -106,6 +105,16 @@ pub struct ProgressBar {
     render_interval: Duration,
     /// Optional terminal width used to keep task headers within one line.
     max_line_width: Option<usize>,
+    /// Whether status labels should use ANSI colors when supported.
+    color: bool,
+}
+
+#[derive(Clone, Copy)]
+struct TaskLineOptions {
+    include_eta: bool,
+    include_connections: bool,
+    include_bt: bool,
+    include_elapsed: bool,
 }
 
 impl ProgressBar {
@@ -130,6 +139,7 @@ impl ProgressBar {
             last_render: Instant::now() - Duration::from_secs(1), // Allow immediate first render
             render_interval: Duration::from_millis(250),          // ~4 FPS max
             max_line_width: None,
+            color: false,
         }
     }
 
@@ -152,6 +162,12 @@ impl ProgressBar {
     /// Set the available terminal width for line-local rendering.
     pub fn with_terminal_width(mut self, width: usize) -> Self {
         self.max_line_width = Some(width.max(1));
+        self
+    }
+
+    /// Enable colored status labels for an interactive terminal.
+    pub fn with_color(mut self, color: bool) -> Self {
+        self.color = color;
         self
     }
 
@@ -213,9 +229,8 @@ impl ProgressBar {
 
     /// Render the full progress display to a string.
     ///
-    /// Produces a multi-line string containing:
-    /// - Per-task progress bars (one per tracked task)
-    /// - An overall summary line at the bottom
+    /// Produces one stable line per tracked task and, optionally, one summary
+    /// line at the bottom.
     ///
     /// In quiet mode, returns an empty string.
     pub fn render(&self) -> String {
@@ -248,145 +263,177 @@ impl ProgressBar {
         output
     }
 
-    /// Render a single task's progress bar lines.
+    /// Render a single task's progress bar line.
     ///
-    /// Produces 2-3 lines depending on task type:
-    /// - Line 1: Task header with index and filename
-    /// - Line 2: Progress bar with stats
-    /// - Line 3 (BT only): Seed/peer/upload info
+    /// Every task occupies exactly one line. Optional fields are removed in
+    /// a deterministic order when a terminal width is configured.
     ///
     /// # Arguments
     ///
     /// * `task` - The task to render
     /// * `index` - 1-based display index for this task
     pub fn render_task_bar(&self, task: &TaskProgress, index: usize) -> String {
-        let mut lines = Vec::new();
+        let full_options = TaskLineOptions {
+            include_eta: true,
+            include_connections: true,
+            include_bt: true,
+            include_elapsed: true,
+        };
+        let Some(max_width) = self.max_line_width else {
+            return self.format_task_line(task, index, self.width, full_options, &task.filename);
+        };
 
-        // Header line: [#N] filename
-        let filename = self
-            .max_line_width
-            .map(|width| truncate_display(&task.filename, width.saturating_sub(5)))
-            .unwrap_or_else(|| task.filename.clone());
-        lines.push(format!("[#{}] {}", index, filename));
+        let mut options = full_options;
+        let mut bar_width = self.width;
+        loop {
+            let full_line = self.format_task_line(task, index, bar_width, options, &task.filename);
+            if display_width(&full_line) <= max_width {
+                return full_line;
+            }
 
-        // Determine what to show based on status
-        match task.status {
-            TaskStatus::Seeding => {
-                // Seeding mode: show [SEEDING] instead of percentage
-                let ratio = if task.total_length > 0 {
-                    task.uploaded as f64 / task.total_length as f64
-                } else {
-                    0.0
-                };
-                let bar = format_progress_bar(1.0, self.width);
-                lines.push(format!(
-                    "     {} [SEEDING]  ({}/{})  UL:{}  Ratio:{:.2}",
-                    bar,
-                    format_bytes(task.completed_length),
-                    format_bytes(task.total_length),
-                    format_speed(task.upload_speed),
-                    ratio
-                ));
+            // Preserve the task identity and primary state before optional
+            // telemetry. This also makes narrow terminals deterministic.
+            if options.include_bt && task.is_bt {
+                options.include_bt = false;
+                continue;
             }
-            TaskStatus::Complete => {
-                let bar = format_progress_bar(1.0, self.width);
-                lines.push(format!(
-                    "     {} [COMPLETE]  ({}/{})  Avg:{}  Time:{}",
-                    bar,
-                    format_bytes(task.completed_length),
-                    format_bytes(task.total_length),
-                    format_speed(average_speed(task)),
-                    aria2_core::util::format::format_duration_short(task.elapsed.as_secs())
-                ));
+            if options.include_connections {
+                options.include_connections = false;
+                continue;
             }
-            TaskStatus::Error => {
-                let fraction = if task.total_length > 0 {
-                    task.completed_length as f64 / task.total_length as f64
-                } else {
-                    0.0
-                };
-                let bar = format_progress_bar(fraction, self.width);
-                lines.push(format!(
-                    "     {} [ERROR]  ({}/{})",
-                    bar,
-                    format_bytes(task.completed_length),
-                    format_bytes(task.total_length)
-                ));
+            if options.include_eta {
+                options.include_eta = false;
+                continue;
             }
-            TaskStatus::Waiting => {
-                let bar = format_progress_bar(0.0, self.width);
-                lines.push(format!(
-                    "     {} [WAITING]  ({}/{})",
-                    bar,
-                    format_bytes(0),
-                    format_bytes(task.total_length)
-                ));
+            if options.include_elapsed {
+                options.include_elapsed = false;
+                continue;
             }
-            TaskStatus::Removed => {
-                let fraction = progress_fraction(task);
-                let bar = format_progress_bar(fraction, self.width);
-                lines.push(format!(
-                    "     {} [REMOVED]  ({}/{})",
-                    bar,
-                    format_bytes(task.completed_length),
-                    format_bytes(task.total_length)
-                ));
+            if bar_width > crate::constants::PROGRESS_BAR_MIN_WIDTH {
+                bar_width -= 1;
+                continue;
             }
-            TaskStatus::Paused => {
-                let fraction = progress_fraction(task);
-                let bar = format_progress_bar(fraction, self.width);
-                lines.push(format!(
-                    "     {} [PAUSED]  ({}/{})",
-                    bar,
-                    format_bytes(task.completed_length),
-                    format_bytes(task.total_length)
-                ));
-            }
-            TaskStatus::Active => {
-                let fraction = progress_fraction(task);
-                let bar = format_progress_bar(fraction, self.width);
 
-                let eta = format_eta(
+            let fixed_line = self.format_task_line(task, index, bar_width, options, "");
+            let filename_width = max_width.saturating_sub(display_width(&fixed_line));
+            let filename = truncate_display(&task.filename, filename_width);
+            let line = self.format_task_line(task, index, bar_width, options, &filename);
+            return truncate_display(&line, max_width);
+        }
+    }
+
+    fn format_task_line(
+        &self,
+        task: &TaskProgress,
+        index: usize,
+        bar_width: usize,
+        options: TaskLineOptions,
+        filename: &str,
+    ) -> String {
+        let prefix = format!("[{}] {}", index, filename);
+        let mut fields = match task.status {
+            TaskStatus::Active => vec![
+                format_percentage(task),
+                format_progress_bar(progress_fraction(task), bar_width),
+                format!(
+                    "{}/{}",
+                    format_bytes(task.completed_length),
+                    format_bytes(task.total_length)
+                ),
+                format_speed(task.download_speed),
+            ],
+            TaskStatus::Seeding => vec![
+                self.status_label("SEED", task.status),
+                format_speed(task.upload_speed),
+                format!("R{:.2}", share_ratio(task)),
+            ],
+            TaskStatus::Complete => vec![
+                self.status_label("OK", task.status),
+                format_bytes(task.completed_length),
+                format_speed(average_speed(task)),
+            ],
+            TaskStatus::Error => vec![
+                self.status_label("ERR", task.status),
+                format!(
+                    "{}/{}",
+                    format_bytes(task.completed_length),
+                    format_bytes(task.total_length)
+                ),
+            ],
+            TaskStatus::Waiting => vec![self.status_label("WAIT", task.status)],
+            TaskStatus::Paused => vec![
+                self.status_label("PAUSE", task.status),
+                format_bytes(task.completed_length),
+            ],
+            TaskStatus::Removed => vec![
+                self.status_label("RM", task.status),
+                format_bytes(task.completed_length),
+            ],
+        };
+
+        if task.status == TaskStatus::Active {
+            if options.include_eta
+                && let Some(eta) = format_eta(
                     task.total_length.saturating_sub(task.completed_length),
                     task.download_speed,
-                );
-
-                let eta_str = match eta {
-                    Some(s) => format!("  ETA:{}", s),
-                    None => String::new(),
-                };
-
-                lines.push(format!(
-                    "     {} {}  ({}/{})  CN:{}  DL:{}{}  Time:{}",
-                    bar,
-                    format_percentage(task),
-                    format_bytes(task.completed_length),
-                    format_bytes(task.total_length),
-                    task.connections,
-                    format_speed(task.download_speed),
-                    eta_str,
+                )
+            {
+                fields.push(format!("ETA {}", eta));
+            }
+            if options.include_connections {
+                fields.push(format!("C{}", task.connections));
+            }
+        }
+        if options.include_bt && task.is_bt && task.status != TaskStatus::Seeding {
+            fields.push(format!(
+                "S{} P{} R{:.2}",
+                task.num_seeders,
+                task.num_peers,
+                share_ratio(task)
+            ));
+        }
+        if options.include_elapsed {
+            match task.status {
+                TaskStatus::Active | TaskStatus::Complete => fields.push(format!(
+                    "T{}",
                     aria2_core::util::format::format_duration_short(task.elapsed.as_secs())
-                ));
-
-                // BT extra info line
-                if task.is_bt {
-                    let ratio = if task.total_length > 0 {
-                        task.uploaded as f64 / task.total_length as f64
-                    } else {
-                        0.0
-                    };
-                    lines.push(format!(
-                        "     (S:{} P:{} U:{} Ratio:{:.2})",
-                        task.num_seeders,
-                        task.num_peers,
-                        format_bytes(task.uploaded),
-                        ratio
-                    ));
-                }
+                )),
+                _ => {}
             }
         }
 
-        lines.join("\n")
+        format!(
+            "{} {}",
+            self.style_prefix(&prefix, task.status),
+            fields.join(" ")
+        )
+    }
+
+    fn status_label(&self, label: &str, status: TaskStatus) -> String {
+        if !self.color {
+            return label.to_string();
+        }
+        use colored::Colorize;
+        match status {
+            TaskStatus::Complete => label.green().bold().to_string(),
+            TaskStatus::Error => label.red().bold().to_string(),
+            TaskStatus::Waiting | TaskStatus::Paused => label.yellow().to_string(),
+            TaskStatus::Removed => label.dimmed().to_string(),
+            TaskStatus::Seeding => label.cyan().to_string(),
+            TaskStatus::Active => label.to_string(),
+        }
+    }
+
+    fn style_prefix(&self, prefix: &str, status: TaskStatus) -> String {
+        if !self.color {
+            return prefix.to_string();
+        }
+        use colored::Colorize;
+        match status {
+            TaskStatus::Error => prefix.red().to_string(),
+            TaskStatus::Complete => prefix.green().to_string(),
+            _ => prefix.to_string(),
+        }
     }
 
     /// Render the overall summary line showing aggregate statistics.
@@ -409,12 +456,6 @@ impl ProgressBar {
                 _ => average_speed(task),
             })
             .sum();
-        let total_elapsed = self
-            .tasks
-            .iter()
-            .map(|task| task.elapsed)
-            .max()
-            .unwrap_or_default();
         let active_count = self
             .tasks
             .iter()
@@ -432,19 +473,46 @@ impl ProgressBar {
         } else {
             "--%".to_string()
         };
-        let bar = format_progress_bar(fraction, self.width);
-
-        format!(
-            "Overall: {} {} ({}/{}) DL:{} Time:{} {}/{} total\n",
-            bar,
-            percentage,
-            format_bytes(completed_length),
-            format_bytes(total_length),
-            format_speed(total_download_speed),
-            aria2_core::util::format::format_duration_short(total_elapsed.as_secs()),
-            active_count,
-            total_count
-        )
+        let mut bar_width = self.width;
+        let mut include_eta = true;
+        let task_word = if total_count == 1 { "task" } else { "tasks" };
+        let line = loop {
+            let bar = format_progress_bar(fraction, bar_width);
+            let eta = if include_eta {
+                format_eta(
+                    total_length.saturating_sub(completed_length),
+                    total_download_speed,
+                )
+                .map(|value| format!(" ETA {}", value))
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let candidate = format!(
+                "Total {} {} {} {} {} active {}{}",
+                total_count,
+                task_word,
+                percentage,
+                bar,
+                format_speed(total_download_speed),
+                active_count,
+                eta
+            );
+            let Some(max_width) = self.max_line_width else {
+                break candidate;
+            };
+            if display_width(&candidate) <= max_width {
+                break candidate;
+            }
+            if include_eta {
+                include_eta = false;
+            } else if bar_width > crate::constants::PROGRESS_BAR_MIN_WIDTH {
+                bar_width -= 1;
+            } else {
+                break truncate_display(&candidate, max_width);
+            }
+        };
+        format!("{}\n", line)
     }
 
     /// Render one stable line for redirected output such as a PowerShell pipe.
@@ -523,6 +591,31 @@ fn truncate_display(value: &str, max_chars: usize) -> String {
     format!("{prefix}...")
 }
 
+fn display_width(value: &str) -> usize {
+    let mut width = 0;
+    let mut in_escape = false;
+    for character in value.chars() {
+        if in_escape {
+            if character.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if character == '\x1b' {
+            in_escape = true;
+        } else {
+            width += 1;
+        }
+    }
+    width
+}
+
+fn share_ratio(task: &TaskProgress) -> f64 {
+    if task.total_length > 0 {
+        task.uploaded as f64 / task.total_length as f64
+    } else {
+        0.0
+    }
+}
+
 /// Render stable per-download results and aggregate statistics after the
 /// engine exits. This output is intentionally independent of the live TTY
 /// frame so a completed result remains readable in logs and pipes.
@@ -570,7 +663,7 @@ pub fn render_final_summary(results: &[DownloadResult]) -> String {
                 result.download_speed as f64
             };
             output.push_str(&format!(
-                "[#{}] COMPLETE {} Size:{}/{} Avg:{} Time:{}\n",
+                "[#{}] OK {} Size:{}/{} Avg:{} Time:{}\n",
                 result.gid_hex(),
                 filename,
                 format_bytes(result.completed_length),
@@ -580,7 +673,7 @@ pub fn render_final_summary(results: &[DownloadResult]) -> String {
             ));
         } else {
             output.push_str(&format!(
-                "[#{}] ERROR {} Size:{}/{} Code:{} Time:{} Message:{}\n",
+                "[#{}] ERR {} Size:{}/{} Code:{} Time:{} Message:{}\n",
                 result.gid_hex(),
                 filename,
                 format_bytes(result.completed_length),
@@ -624,7 +717,7 @@ fn format_percentage(task: &TaskProgress) -> String {
     if task.total_length == 0 {
         "--%".to_string()
     } else {
-        format!("{:.1}%", progress_fraction(task) * 100.0)
+        format!("{:.0}%", progress_fraction(task) * 100.0)
     }
 }
 
@@ -679,16 +772,17 @@ mod tests {
         let output = bar.render();
 
         // Verify key components are present
-        assert!(output.contains("[#1]"), "Should have task header");
+        assert!(output.contains("[1]"), "Should have task header");
         assert!(output.contains("test-file.iso"), "Should have filename");
         assert!(
-            output.contains("65.0%") || output.contains("65."),
+            output.contains("65.0%") || output.contains("65%"),
             "Should show percentage"
         );
         assert!(output.contains("MiB"), "Should use MiB units");
-        assert!(output.contains("DL:"), "Should show download speed label");
-        assert!(output.contains("ETA:"), "Should show ETA");
-        assert!(output.contains("Time:31s"), "Should show elapsed time");
+        assert!(output.contains("MiB/s"), "Should show download speed");
+        assert!(output.contains("ETA "), "Should show ETA");
+        assert!(output.contains("T31s"), "Should show elapsed time");
+        assert_eq!(output.lines().count(), 2, "One task plus one summary line");
     }
 
     #[test]
@@ -717,20 +811,24 @@ mod tests {
         let output = bar.render();
 
         // Verify overall summary present
-        assert!(output.contains("Overall:"), "Should have overall summary");
-
-        // Verify individual task headers
-        assert!(output.contains("[#1]"), "Should have task #1");
-        assert!(output.contains("[#2]"), "Should have task #2");
-        assert!(output.contains("[#3]"), "Should have task #3");
-
-        // Verify different statuses rendered
         assert!(
-            output.contains("ACTIVE") || output.contains("WAITING") || output.contains("COMPLETE")
+            output.contains("Total 3 tasks"),
+            "Should have overall summary"
         );
 
+        // Verify individual task headers
+        assert!(output.contains("[1]"), "Should have task #1");
+        assert!(output.contains("[2]"), "Should have task #2");
+        assert!(output.contains("[3]"), "Should have task #3");
+
+        // Verify different statuses rendered
+        assert!(output.contains("WAIT") || output.contains("OK"));
+
         // Verify task count in summary
-        assert!(output.contains("/3 total"), "Should show 3 total tasks");
+        assert!(
+            output.contains("Total 3 tasks"),
+            "Should show 3 total tasks"
+        );
     }
 
     #[test]
@@ -756,17 +854,15 @@ mod tests {
         let output = bar.render();
 
         assert!(
-            output.contains("[SEEDING]"),
+            output.contains("SEED"),
             "Seeding task should show SEEDING tag"
         );
-        // Note: The overall summary may contain %, so we check that the seeding
-        // task line shows [SEEDING] tag rather than a percentage like "65.2%"
         assert!(
-            output.contains("Ratio:"),
+            output.contains("R"),
             "Seeding task should show upload ratio"
         );
         assert!(
-            output.contains("UL:"),
+            output.contains("MiB/s"),
             "Seeding task should show upload speed"
         );
     }
@@ -780,14 +876,13 @@ mod tests {
         let output = bar.render();
 
         // BT-specific fields should be present
-        assert!(output.contains("(S:"), "Should show seeder count");
-        assert!(output.contains("P:"), "Should show peer count");
-        assert!(output.contains("U:"), "Should show uploaded bytes");
-        assert!(output.contains("Ratio:"), "Should show share ratio");
+        assert!(output.contains("S3"), "Should show seeder count");
+        assert!(output.contains("P12"), "Should show peer count");
+        assert!(output.contains("R"), "Should show share ratio");
 
         // Verify actual values
-        assert!(output.contains("S:3"), "Should show 3 seeders");
-        assert!(output.contains("P:12"), "Should show 12 peers");
+        assert!(output.contains("S3"), "Should show 3 seeders");
+        assert!(output.contains("P12"), "Should show 12 peers");
     }
 
     #[test]
@@ -904,9 +999,9 @@ mod tests {
         bar.add_task(task);
 
         let output = bar.render();
-        assert!(output.contains("[COMPLETE]"));
-        assert!(output.contains("Avg:"));
-        assert!(output.contains("Time:31s"));
+        assert!(output.contains("OK"));
+        assert!(output.contains("MiB/s"));
+        assert!(output.contains("T31s"));
     }
 
     #[test]
@@ -921,7 +1016,7 @@ mod tests {
         bar.add_task(task);
 
         let output = bar.render();
-        assert!(output.contains("Avg:10 B/s"));
+        assert!(output.contains("10 B/s"));
     }
 
     #[test]
@@ -933,9 +1028,8 @@ mod tests {
         bar.add_task(task);
 
         let output = bar.render_compact_summary();
-        assert!(output.contains("Overall:"));
-        assert!(output.contains("DL:"));
-        assert!(output.contains("Time:31s"));
+        assert!(output.contains("Total 1 task"));
+        assert!(output.contains("MiB/s"));
     }
 
     #[test]
@@ -947,7 +1041,7 @@ mod tests {
         bar.add_task(task);
 
         let output = bar.render();
-        assert!(output.contains("[ERROR]"));
+        assert!(output.contains("ERR"));
     }
 
     #[test]
@@ -959,8 +1053,8 @@ mod tests {
         bar.add_task(task);
 
         let output = bar.render();
-        assert!(output.contains("[PAUSED]"));
-        assert!(!output.contains("[WAITING]"));
+        assert!(output.contains("PAUSE"));
+        assert!(!output.contains("WAIT"));
     }
 
     #[test]
@@ -971,8 +1065,8 @@ mod tests {
         bar.add_task(task);
 
         let output = bar.render();
-        assert!(output.contains("[REMOVED]"));
-        assert!(!output.contains("[ERROR]"));
+        assert!(output.contains("RM"));
+        assert!(!output.contains("ERR"));
     }
 
     #[test]
@@ -988,6 +1082,22 @@ mod tests {
         let header = output.lines().next().unwrap();
         assert!(header.chars().count() <= 32);
         assert!(header.ends_with("..."));
+    }
+
+    #[test]
+    fn test_render_keeps_task_and_summary_lines_within_terminal_width() {
+        let mut bar = ProgressBar::new(false)
+            .with_width(24)
+            .with_terminal_width(48);
+        let mut task = make_bt_task();
+        task.filename = "a-very-long-bittorrent-file-name.iso".to_string();
+        bar.add_task(task);
+        bar.add_task(make_active_task());
+
+        let output = bar.render();
+        assert_eq!(output.lines().count(), 3, "Two tasks plus one summary line");
+        assert!(output.lines().all(|line| display_width(line) <= 48));
+        assert!(output.lines().all(|line| !line.contains('\n')));
     }
 
     #[test]

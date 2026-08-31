@@ -286,6 +286,24 @@ fn test_add_uri_result() {
 }
 
 #[test]
+fn test_uri_result_history_is_bounded() {
+    let mut entry = FileEntry::default();
+    for index in 0..65 {
+        entry.add_uri_result(format!("http://example.test/{index}"), 2);
+    }
+
+    assert_eq!(entry.uri_results().len(), 64);
+    assert_eq!(
+        entry.uri_results().front().unwrap().uri,
+        "http://example.test/1"
+    );
+    assert_eq!(
+        entry.uri_results().back().unwrap().uri,
+        "http://example.test/64"
+    );
+}
+
+#[test]
 fn test_extract_uri_result() {
     let mut entry = FileEntry::default();
     entry.add_uri_result("http://a.com/file".to_string(), 1);

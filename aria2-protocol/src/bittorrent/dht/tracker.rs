@@ -15,9 +15,6 @@ use tracing::{debug, trace};
 
 use super::message::DhtMessage;
 
-/// Default timeout for a single DHT query before considering it lost.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
-
 /// Type of outbound DHT query being tracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryType {
@@ -36,6 +33,32 @@ pub struct TrackedResponse {
     pub from: SocketAddr,
     /// Round-trip time from query send to response receipt.
     pub rtt: Duration,
+}
+
+/// A tracked response wait that removes its transaction if the caller drops
+/// it before a response arrives.
+pub struct TrackedResponseWait {
+    transaction_id: Vec<u8>,
+    receiver: Option<tokio::sync::oneshot::Receiver<TrackedResponse>>,
+    tracker: Arc<TransactionTracker>,
+}
+
+impl TrackedResponseWait {
+    /// Wait for the response, treating timeout and channel closure uniformly
+    /// as a missing response.
+    pub async fn wait(mut self, timeout: Duration) -> Option<TrackedResponse> {
+        let receiver = self.receiver.take()?;
+        match tokio::time::timeout(timeout, receiver).await {
+            Ok(Ok(response)) => Some(response),
+            Ok(Err(_)) | Err(_) => None,
+        }
+    }
+}
+
+impl Drop for TrackedResponseWait {
+    fn drop(&mut self) {
+        self.tracker.cancel(&self.transaction_id);
+    }
 }
 
 /// A pending outbound transaction awaiting a response.
@@ -121,9 +144,51 @@ impl TransactionTracker {
                 timeout,
             },
         );
-        self.change_notify.notify_waiters();
+        self.change_notify.notify_one();
 
         (key, response_rx)
+    }
+
+    /// Allocate a transaction and return an owned response wait.
+    pub fn allocate_wait(
+        self: &Arc<Self>,
+        query_type: QueryType,
+        target_addr: SocketAddr,
+        target_id: Option<[u8; 20]>,
+        info_hash: Option<[u8; 20]>,
+        timeout: Duration,
+    ) -> (u32, TrackedResponseWait) {
+        let (transaction_id, response_rx) =
+            self.allocate(query_type, target_addr, target_id, info_hash, timeout);
+        let numeric_id = u32::from_be_bytes(
+            transaction_id
+                .as_slice()
+                .try_into()
+                .expect("transaction IDs are always four bytes"),
+        );
+        (
+            numeric_id,
+            TrackedResponseWait {
+                transaction_id,
+                receiver: Some(response_rx),
+                tracker: Arc::clone(self),
+            },
+        )
+    }
+
+    /// Cancel a pending transaction and close its response channel.
+    pub fn cancel(&self, tx_id: &[u8]) -> bool {
+        let removed = self
+            .inner
+            .lock()
+            .expect("TransactionTracker mutex poisoned")
+            .transactions
+            .remove(tx_id)
+            .is_some();
+        if removed {
+            self.change_notify.notify_one();
+        }
+        removed
     }
 
     /// Match an inbound response to a pending transaction.
@@ -135,6 +200,24 @@ impl TransactionTracker {
             .inner
             .lock()
             .expect("TransactionTracker mutex poisoned");
+        let Some(pending) = inner.transactions.get(tx_id) else {
+            debug!(
+                tx_id = %hex::encode(tx_id),
+                from = %from,
+                "Received DHT response for unknown transaction"
+            );
+            return false;
+        };
+        if pending.target_addr != from {
+            debug!(
+                tx_id = %hex::encode(tx_id),
+                expected = %pending.target_addr,
+                actual = %from,
+                "Received DHT response from unexpected address"
+            );
+            return false;
+        }
+
         if let Some(mut pending) = inner.transactions.remove(tx_id) {
             let rtt = pending.created_at.elapsed();
             trace!(
@@ -150,13 +233,9 @@ impl TransactionTracker {
                     rtt,
                 });
             }
+            self.change_notify.notify_one();
             true
         } else {
-            debug!(
-                tx_id = %hex::encode(tx_id),
-                from = %from,
-                "Received DHT response for unknown transaction"
-            );
             false
         }
     }
@@ -245,7 +324,7 @@ impl TransactionTracker {
         Arc::clone(&self.change_notify)
     }
 
-    /// Clean up expired transactions (older than `QUERY_TIMEOUT * 3`).
+    /// Clean up transactions that exceeded three of their configured timeouts.
     /// This is a safety net in case `handle_timeouts` isn't called.
     pub fn cleanup_expired(&self) -> usize {
         let mut inner = self
@@ -253,12 +332,16 @@ impl TransactionTracker {
             .lock()
             .expect("TransactionTracker mutex poisoned");
         let now = Instant::now();
-        let max_age = QUERY_TIMEOUT * 3;
         let before = inner.transactions.len();
-        inner
-            .transactions
-            .retain(|_, pending| now.duration_since(pending.created_at) < max_age);
-        before - inner.transactions.len()
+        inner.transactions.retain(|_, pending| {
+            let max_age = pending.timeout.saturating_mul(3);
+            now.duration_since(pending.created_at) < max_age
+        });
+        let removed = before - inner.transactions.len();
+        if removed > 0 {
+            self.change_notify.notify_one();
+        }
+        removed
     }
 }
 
@@ -334,8 +417,9 @@ mod tests {
         let tracker = TransactionTracker::new();
         let addr: SocketAddr = "10.0.0.3:6881".parse().unwrap();
 
-        let (id1, _) = tracker.allocate(QueryType::Ping, addr, None, None, QUERY_TIMEOUT);
-        let (id2, _) = tracker.allocate(QueryType::Ping, addr, None, None, QUERY_TIMEOUT);
+        let timeout = Duration::from_secs(10);
+        let (id1, _) = tracker.allocate(QueryType::Ping, addr, None, None, timeout);
+        let (id2, _) = tracker.allocate(QueryType::Ping, addr, None, None, timeout);
 
         assert_ne!(id1, id2);
     }
@@ -359,5 +443,18 @@ mod tests {
         // The oneshot should be closed (sender dropped without sending)
         use tokio::sync::oneshot::error::TryRecvError;
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Closed)));
+    }
+
+    #[tokio::test]
+    async fn test_response_wait_cancels_when_dropped() {
+        let tracker = Arc::new(TransactionTracker::new());
+        let addr: SocketAddr = "10.0.0.5:6881".parse().unwrap();
+
+        let (_tx_id, response_wait) =
+            tracker.allocate_wait(QueryType::Ping, addr, None, None, Duration::from_secs(10));
+        assert_eq!(tracker.pending_count(), 1);
+
+        drop(response_wait);
+        assert_eq!(tracker.pending_count(), 0);
     }
 }

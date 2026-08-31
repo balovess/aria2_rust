@@ -34,15 +34,17 @@ pub(super) fn task_options_for_input(
     task_options
 }
 
-#[cfg(feature = "bittorrent")]
 fn task_option_snapshot_for_input(
     mut snapshot: std::collections::HashMap<String, serde_json::Value>,
     input_type: &InputType,
     explicit_timeout: bool,
 ) -> std::collections::HashMap<String, serde_json::Value> {
+    #[cfg(feature = "bittorrent")]
     if matches!(input_type, InputType::TorrentFile | InputType::MagnetLink) && !explicit_timeout {
         snapshot.remove("timeout");
     }
+    #[cfg(not(feature = "bittorrent"))]
+    let _ = (input_type, explicit_timeout);
     snapshot
 }
 

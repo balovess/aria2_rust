@@ -11,16 +11,15 @@ use aria2::app::update_check;
 use clap::CommandFactory;
 use clap::error::ErrorKind;
 
-// Use mimalloc as the global allocator for better multi-threaded throughput.
-// On Windows, the system allocator has higher lock contention under concurrent
-// allocations; mimalloc's per-thread caches significantly reduce this.
+// mimalloc remains available for allocation-heavy deployments. The default
+// Windows system allocator has a substantially smaller idle private footprint.
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // aria2's main work is asynchronous I/O. A small fixed pool avoids reserving
-// one runtime worker per logical CPU while still allowing RPC and downloads to
-// make progress independently.
+// one runtime worker per logical CPU while retaining responsiveness when a
+// protocol path performs a bounded synchronous operation.
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let cli = match CliArgs::try_parse() {

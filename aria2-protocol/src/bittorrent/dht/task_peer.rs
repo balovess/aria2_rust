@@ -12,7 +12,7 @@
 //! method call.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::{debug, info, trace, warn};
 
@@ -21,7 +21,10 @@ use super::message::DhtMessageBuilder;
 use super::node::DhtNode;
 use super::task::BoxedDhtTask;
 use super::task::DhtTask;
-use super::task_impl::{BucketRefreshTask, DhtTaskContext, NodeLookupTask, PingTask};
+use super::task_impl::{
+    BootstrapRefreshTask, BucketRefreshTask, DhtTaskContext, NodeLookupTask, PingTask,
+};
+use super::tracker::QueryType;
 
 // ---------------------------------------------------------------------------
 // PeerLookupTask
@@ -76,25 +79,15 @@ impl PeerLookupTask {
 #[async_trait::async_trait]
 impl DhtTask for PeerLookupTask {
     async fn run(self: Box<Self>) {
-        let rt = Arc::clone(&self.ctx.routing_table);
         let result = iterative_get_peers(
             &self.info_hash,
             &self.ctx.self_id,
-            &rt,
+            &self.ctx.routing_table,
             &self.ctx.socket,
             &self.ctx.tracker,
             self.ctx.query_timeout,
         )
         .await;
-
-        // Merge discovered nodes.
-        {
-            let discovered_rt = rt.read().await;
-            let mut main_rt = self.ctx.routing_table.write().await;
-            for node in discovered_rt.all_nodes() {
-                main_rt.insert(node.clone());
-            }
-        }
 
         // Announce to token nodes if requested.
         if self.announce_port > 0 && !result.token_nodes.is_empty() {
@@ -105,6 +98,7 @@ impl DhtTask for PeerLookupTask {
                 &result.token_nodes,
                 &self.ctx.socket,
                 &self.ctx.tracker,
+                self.ctx.query_timeout,
             )
             .await;
         }
@@ -142,8 +136,10 @@ impl DhtTask for PeerLookupTask {
 #[derive(Debug)]
 pub struct ReplaceNodeTask {
     ctx: DhtTaskContext,
-    /// Bucket prefix length identifying which bucket to operate on.
-    bucket_prefix_length: usize,
+    /// Optional exact node identifying the bucket and replacement target.
+    questionable_node_id: Option<[u8; 20]>,
+    /// Optional legacy bucket-prefix selector.
+    bucket_prefix_length: Option<usize>,
     /// New node to potentially insert.
     new_node: DhtNode,
 }
@@ -151,13 +147,26 @@ pub struct ReplaceNodeTask {
 impl ReplaceNodeTask {
     /// Create a new replace node task.
     ///
-    /// The `bucket_prefix_length` identifies which bucket to operate on.
-    /// The task will find the LRU questionable node in that bucket and
-    /// attempt to ping it.
+    /// Create a task using the legacy bucket-prefix selector.
     pub fn new(ctx: DhtTaskContext, bucket_prefix_length: usize, new_node: DhtNode) -> Self {
         Self {
             ctx,
-            bucket_prefix_length,
+            questionable_node_id: None,
+            bucket_prefix_length: Some(bucket_prefix_length),
+            new_node,
+        }
+    }
+
+    /// Create a task for an exact questionable node.
+    pub fn new_for_node(
+        ctx: DhtTaskContext,
+        questionable_node_id: [u8; 20],
+        new_node: DhtNode,
+    ) -> Self {
+        Self {
+            ctx,
+            questionable_node_id: Some(questionable_node_id),
+            bucket_prefix_length: None,
             new_node,
         }
     }
@@ -169,35 +178,52 @@ impl DhtTask for ReplaceNodeTask {
         // Find the bucket and extract the questionable node info.
         let (q_id, q_addr) = {
             let rt = self.ctx.routing_table.read().await;
-            let buckets = rt.get_all_buckets();
-            let bucket = buckets
-                .iter()
-                .find(|b| b.prefix_length() == self.bucket_prefix_length);
-
-            match bucket {
-                Some(b) => match b.get_lru_questionable_node() {
-                    Some(node) => (node.id, node.addr),
-                    None => {
-                        trace!(
-                            "ReplaceNodeTask: no questionable node in bucket prefix={}",
-                            self.bucket_prefix_length
-                        );
-                        return;
-                    }
-                },
-                None => {
+            let bucket = if let Some(node_id) = self.questionable_node_id {
+                let Some(bucket) = rt.get_bucket_for(&node_id) else {
                     trace!(
-                        "ReplaceNodeTask: bucket not found prefix={}",
-                        self.bucket_prefix_length
+                        "ReplaceNodeTask: bucket not found for node {}",
+                        hex::encode(node_id)
                     );
                     return;
-                }
-            }
+                };
+                bucket
+            } else {
+                let Some(prefix_length) = self.bucket_prefix_length else {
+                    return;
+                };
+                let Some(bucket) = rt
+                    .get_all_buckets()
+                    .into_iter()
+                    .find(|bucket| bucket.prefix_length() == prefix_length)
+                else {
+                    trace!("ReplaceNodeTask: bucket not found prefix={}", prefix_length);
+                    return;
+                };
+                bucket
+            };
+
+            let Some(node) = bucket.nodes().iter().find(|node| {
+                self.questionable_node_id
+                    .map(|id| node.id == id)
+                    .unwrap_or(true)
+                    && node.is_questionable()
+            }) else {
+                trace!("ReplaceNodeTask: no questionable node available");
+                return;
+            };
+            (node.id, node.addr)
         };
 
         // Send ping to the questionable node with retry.
         for attempt in 0..2 {
-            let msg = DhtMessageBuilder::ping(0, &self.ctx.self_id);
+            let (transaction_id, response_wait) = self.ctx.tracker.allocate_wait(
+                QueryType::Ping,
+                q_addr,
+                Some(q_id),
+                None,
+                self.ctx.query_timeout,
+            );
+            let msg = DhtMessageBuilder::ping(transaction_id, &self.ctx.self_id);
             let encoded = match msg.encode() {
                 Ok(e) => e,
                 Err(e) => {
@@ -215,34 +241,23 @@ impl DhtTask for ReplaceNodeTask {
                 return;
             }
 
-            let mut buf = [0u8; 4096];
-            match self
-                .ctx
-                .socket
-                .recv_with_timeout(&mut buf, self.ctx.query_timeout)
-                .await
+            if let Some(response) = response_wait.wait(self.ctx.query_timeout).await
+                && response.from == q_addr
+                && (response.message.is_response() || response.message.is_error())
             {
-                Ok((len, _from)) if len > 0 => {
-                    if let Ok(response) = super::message::DhtMessage::decode(&buf[..len])
-                        && response.is_response()
-                    {
-                        info!(
-                            "ReplaceNodeTask: ping reply received from {} — node is alive",
-                            hex::encode(q_id)
-                        );
-                        let mut rt = self.ctx.routing_table.write().await;
-                        rt.mark_good(&q_id);
-                        return;
-                    }
-                }
-                _ => {
-                    if attempt < 1 {
-                        debug!(
-                            "ReplaceNodeTask: ping timeout from {}, retrying",
-                            hex::encode(q_id)
-                        );
-                    }
-                }
+                info!(
+                    "ReplaceNodeTask: ping reply received from {} — node is alive",
+                    hex::encode(q_id)
+                );
+                let mut rt = self.ctx.routing_table.write().await;
+                rt.mark_good(&q_id);
+                return;
+            }
+            if attempt < 1 {
+                debug!(
+                    "ReplaceNodeTask: ping timeout from {}, retrying",
+                    hex::encode(q_id)
+                );
             }
         }
 
@@ -255,7 +270,12 @@ impl DhtTask for ReplaceNodeTask {
 
         let mut rt = self.ctx.routing_table.write().await;
         rt.mark_bad(&q_id);
-        rt.insert(self.new_node.clone());
+        if !rt.replace_node(&q_id, self.new_node.clone()) {
+            trace!(
+                "ReplaceNodeTask: replacement candidate {} is no longer available",
+                self.new_node.id_hex()
+            );
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -301,25 +321,15 @@ impl DhtTask for PeerAnnounceTask {
             "PeerAnnounceTask: starting get_peers lookup"
         );
 
-        let rt = Arc::clone(&self.ctx.routing_table);
         let result = iterative_get_peers(
             &self.info_hash,
             &self.ctx.self_id,
-            &rt,
+            &self.ctx.routing_table,
             &self.ctx.socket,
             &self.ctx.tracker,
             self.ctx.query_timeout,
         )
         .await;
-
-        // Merge discovered nodes.
-        {
-            let discovered_rt = rt.read().await;
-            let mut main_rt = self.ctx.routing_table.write().await;
-            for node in discovered_rt.all_nodes() {
-                main_rt.insert(node.clone());
-            }
-        }
 
         // Announce to token nodes.
         if result.token_nodes.is_empty() {
@@ -337,6 +347,7 @@ impl DhtTask for PeerAnnounceTask {
             &result.token_nodes,
             &self.ctx.socket,
             &self.ctx.tracker,
+            self.ctx.query_timeout,
         )
         .await;
 
@@ -377,9 +388,29 @@ impl DhtTaskFactory {
         Box::new(PingTask::new(self.ctx.clone(), remote_node, max_retry))
     }
 
+    /// Create a ping task that returns the node ID from a successful reply.
+    pub fn create_ping_task_with_result(
+        &self,
+        remote_node: DhtNode,
+        max_retry: u32,
+        result_tx: tokio::sync::oneshot::Sender<Option<DhtNode>>,
+    ) -> BoxedDhtTask {
+        Box::new(PingTask::with_result(
+            self.ctx.clone(),
+            remote_node,
+            max_retry,
+            result_tx,
+        ))
+    }
+
     /// Create a bucket refresh task.
     pub fn create_bucket_refresh_task(&self, force_refresh: bool) -> BoxedDhtTask {
         Box::new(BucketRefreshTask::new(self.ctx.clone(), force_refresh))
+    }
+
+    /// Create the bounded first refresh used by bootstrap.
+    pub fn create_bootstrap_refresh_task(&self, timeout: Duration) -> BoxedDhtTask {
+        Box::new(BootstrapRefreshTask::new(self.ctx.clone(), timeout))
     }
 
     /// Create a node lookup task for the given target ID.
@@ -415,6 +446,19 @@ impl DhtTaskFactory {
         ))
     }
 
+    /// Create a replacement task for an exact questionable node.
+    pub fn create_replace_node_for_node(
+        &self,
+        questionable_node_id: [u8; 20],
+        new_node: DhtNode,
+    ) -> BoxedDhtTask {
+        Box::new(ReplaceNodeTask::new_for_node(
+            self.ctx.clone(),
+            questionable_node_id,
+            new_node,
+        ))
+    }
+
     /// Create a peer announce task.
     pub fn create_peer_announce_task(&self, info_hash: [u8; 20], port: u16) -> BoxedDhtTask {
         Box::new(PeerAnnounceTask::new(self.ctx.clone(), info_hash, port))
@@ -431,6 +475,7 @@ mod tests {
     use super::super::socket::DhtSocket;
     use super::super::tracker::TransactionTracker;
     use super::*;
+    use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::RwLock;
 
@@ -463,5 +508,24 @@ mod tests {
         };
         assert_eq!(result.peers.len(), 1);
         assert_eq!(result.nodes_contacted, 5);
+    }
+
+    #[tokio::test]
+    async fn test_peer_lookup_does_not_reacquire_shared_table() {
+        let ctx = DhtTaskContext {
+            self_id: [0u8; 20],
+            routing_table: Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
+            socket: DhtSocket::bind(0).await.expect("test socket should bind"),
+            tracker: Arc::new(TransactionTracker::new()),
+            query_timeout: Duration::from_millis(20),
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            Box::new(PeerLookupTask::new(ctx, [1u8; 20], 0, None)).run(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "peer lookup task should not deadlock");
     }
 }

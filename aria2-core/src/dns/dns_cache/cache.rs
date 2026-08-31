@@ -105,6 +105,10 @@ impl DnsCache {
         hostname: &str,
         port: u16,
     ) -> Result<Vec<SocketAddr>, Aria2Error> {
+        // Opportunistically reclaim entries for hosts that are no longer used.
+        // The cache is engine-owned, so this keeps it bounded without adding
+        // another background task solely for cache maintenance.
+        self.purge_expired();
         let endpoint = EndpointKey::new(hostname, port);
         // 1. Check positive cache first
         if let Some(entry) = self.cache.get(&endpoint)

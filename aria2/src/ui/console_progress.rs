@@ -10,9 +10,8 @@
 //! updates on each tick:
 //!
 //! ```text
-//! [#1] file.iso
-//!      [████████████░░░░░░░] 65.2%  (12.3MiB / 18.9MiB)  DL:2.34MiB/s  ETA:3m12s
-//! Overall: [████████░░░░░░░░░░] 42%  (450MiB / 1.07GiB)  DL:5.67MiB/s  3 active / 8 total
+//! [1] file.iso 65% [████████████░░░░░░░] 12.3 MiB/18.9 MiB 2.34 MiB/s ETA 3m12s
+//! Total 8 tasks 42% [████████░░░░░░░░░░] 5.67 MiB/s active 3 ETA 3m12s
 //! ```
 
 use std::collections::HashSet;
@@ -287,7 +286,8 @@ impl ConsoleProgressReporter {
             .clamp(crate::constants::PROGRESS_BAR_MIN_WIDTH, 24);
         let mut bar = ProgressBar::new(false)
             .with_width(bar_width)
-            .with_terminal_width(terminal_width);
+            .with_terminal_width(terminal_width)
+            .with_color(self.terminal_output);
         for task in &tasks {
             bar.add_task(task.clone());
         }

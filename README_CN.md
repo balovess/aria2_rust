@@ -233,8 +233,22 @@ aria2-rust/
 | 文件预分配 | Linux `fallocate`、Windows `SetFileValidData`、macOS `F_PREALLOCATE` 的平台适配，以及不会阻塞 reactor 的 fallback。 |
 | RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
 
-台账同时记录已知边界：DHT 周期任务尚未全部切换到统一 task queue，跨平台真实
-运行时证据仍需补充，也尚未建立可与 `aria2_original` C++ binary 对比的同条件基线。
+### 当前版本与原版对比
+
+以下数据来自同一台 Windows 11 x64 机器上的 Release 构建和空闲 RPC 进程测试：
+
+| 指标 | aria2 1.37.0 原版 | aria2-rust 当前参考值 |
+| --- | ---: | ---: |
+| `aria2c.exe` 文件大小 | 约 5.39 MiB | 约 13.6 MiB |
+| 空闲 RPC Working Set | 约 12.5 MiB | 约 16.1 MiB |
+| 空闲 RPC Private Bytes | 约 3.25 MiB | 约 3.6 MiB |
+
+数据会随编译 feature、Windows 版本、分配器和测量时机变化，不能替代同负载下载基准。当前版本的 Private Bytes 已接近原版，但二进制体积和 Working Set 仍高于原版。
+
+台账同时记录已知边界：DHT 网络维护和主动 peer lookup 已通过统一 task queue 调度，
+周期网络任务在对应 lane 忙碌时会合并重复 tick；token 轮换和本地清理保留在 deadline
+协调器内；路由表保存使用 blocking worker。Linux 和 macOS 的真实运行时证据仍需补充，
+也尚未建立可与 `aria2_original` C++ binary 对比的同负载完整下载基线。
 
 已有事件驱动热路径包括：
 

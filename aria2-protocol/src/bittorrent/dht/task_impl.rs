@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::StreamExt;
 use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
@@ -15,7 +16,9 @@ use super::node::DhtNode;
 use super::routing_table::RoutingTable;
 use super::socket::DhtSocket;
 use super::task::DhtTask;
-use super::tracker::TransactionTracker;
+use super::tracker::{QueryType, TransactionTracker};
+
+const BUCKET_REFRESH_CONCURRENCY: usize = 3;
 
 // ---------------------------------------------------------------------------
 // Shared context for tasks that need engine resources
@@ -68,6 +71,8 @@ pub struct PingTask {
     max_retry: u32,
     /// Per-attempt timeout.
     timeout: Duration,
+    /// Optional result channel used when adding an unknown bootstrap node.
+    result_tx: Option<tokio::sync::oneshot::Sender<Option<DhtNode>>>,
 }
 
 impl PingTask {
@@ -78,6 +83,23 @@ impl PingTask {
             ctx,
             remote_node,
             max_retry,
+            result_tx: None,
+        }
+    }
+
+    /// Create a ping task that returns the node ID from a successful reply.
+    pub fn with_result(
+        ctx: DhtTaskContext,
+        remote_node: DhtNode,
+        max_retry: u32,
+        result_tx: tokio::sync::oneshot::Sender<Option<DhtNode>>,
+    ) -> Self {
+        Self {
+            timeout: ctx.query_timeout,
+            ctx,
+            remote_node,
+            max_retry,
+            result_tx: Some(result_tx),
         }
     }
 }
@@ -87,6 +109,7 @@ impl DhtTask for PingTask {
     async fn run(self: Box<Self>) {
         let addr = self.remote_node.addr;
         let node_id = self.remote_node.id;
+        let mut result_tx = self.result_tx;
 
         for attempt in 0..=self.max_retry {
             if attempt > 0 {
@@ -98,41 +121,61 @@ impl DhtTask for PingTask {
                 );
             }
 
-            let msg = DhtMessageBuilder::ping(0, &self.ctx.self_id);
+            let (transaction_id, response_wait) = self.ctx.tracker.allocate_wait(
+                QueryType::Ping,
+                addr,
+                Some(node_id),
+                None,
+                self.timeout,
+            );
+            let msg = DhtMessageBuilder::ping(transaction_id, &self.ctx.self_id);
             let encoded = match msg.encode() {
                 Ok(e) => e,
                 Err(e) => {
                     warn!("PingTask: encode error for {}: {}", hex::encode(node_id), e);
+                    if let Some(tx) = result_tx.take() {
+                        let _ = tx.send(None);
+                    }
                     return;
                 }
             };
 
             if let Err(e) = self.ctx.socket.send_to(addr, &encoded).await {
                 debug!("PingTask: send error to {}: {}", hex::encode(node_id), e);
+                if let Some(tx) = result_tx.take() {
+                    let _ = tx.send(None);
+                }
                 return;
             }
 
-            // Wait for a response with timeout.
-            let mut buf = [0u8; 4096];
-            match self
-                .ctx
-                .socket
-                .recv_with_timeout(&mut buf, self.timeout)
-                .await
+            if let Some(response) = response_wait.wait(self.timeout).await
+                && response.from == addr
+                && (response.message.is_response() || response.message.is_error())
             {
-                Ok((len, _from)) if len > 0 => {
-                    if let Ok(response) = super::message::DhtMessage::decode(&buf[..len])
-                        && response.is_response()
-                    {
-                        trace!("PingTask: node {} responded", hex::encode(node_id));
-                        let mut rt = self.ctx.routing_table.write().await;
-                        rt.mark_good(&node_id);
-                        return;
-                    }
+                trace!("PingTask: node {} responded", hex::encode(node_id));
+                let response_node = response
+                    .message
+                    .r
+                    .as_ref()
+                    .and_then(|result| result.dict_get(b"id"))
+                    .and_then(|id| id.as_bytes())
+                    .filter(|id| id.len() == 20)
+                    .map(|id| {
+                        let mut response_id = [0u8; 20];
+                        response_id.copy_from_slice(id);
+                        DhtNode::new(response_id, addr)
+                    });
+                let mut rt = self.ctx.routing_table.write().await;
+                if node_id != [0u8; 20] {
+                    rt.mark_good(&node_id);
                 }
-                _ => {
-                    // Timeout or error — retry if attempts remain.
+                if let Some(response_node) = &response_node {
+                    rt.insert(response_node.clone());
                 }
+                if let Some(tx) = result_tx.take() {
+                    let _ = tx.send(response_node);
+                }
+                return;
             }
         }
 
@@ -144,6 +187,9 @@ impl DhtTask for PingTask {
         );
         let mut rt = self.ctx.routing_table.write().await;
         rt.mark_bad(&node_id);
+        if let Some(tx) = result_tx {
+            let _ = tx.send(None);
+        }
     }
 
     fn name(&self) -> &'static str {
@@ -199,37 +245,63 @@ impl DhtTask for BucketRefreshTask {
 
         info!(count = targets.len(), "Dispatching bucket refresh lookups");
 
-        for target in targets {
-            let rt = Arc::clone(&self.ctx.routing_table);
-            let result = iterative_find_node(
-                &target,
-                &self.ctx.self_id,
-                &rt,
-                &self.ctx.socket,
-                &self.ctx.tracker,
-                self.ctx.query_timeout,
-            )
+        let ctx = &self.ctx;
+        futures::stream::iter(targets)
+            .map(|target| async move {
+                let result = iterative_find_node(
+                    &target,
+                    &ctx.self_id,
+                    &ctx.routing_table,
+                    &ctx.socket,
+                    &ctx.tracker,
+                    ctx.query_timeout,
+                )
+                .await;
+                (target, result)
+            })
+            .buffer_unordered(BUCKET_REFRESH_CONCURRENCY)
+            .for_each(|(target, result)| async move {
+                trace!(
+                    target = %hex::encode(target),
+                    nodes_contacted = result.nodes_contacted,
+                    "Bucket refresh lookup completed"
+                );
+            })
             .await;
-
-            // Merge discovered nodes into the routing table.
-            {
-                let discovered_rt = rt.read().await;
-                let mut main_rt = self.ctx.routing_table.write().await;
-                for node in discovered_rt.all_nodes() {
-                    main_rt.insert(node.clone());
-                }
-            }
-
-            trace!(
-                target = %hex::encode(target),
-                nodes_contacted = result.nodes_contacted,
-                "Bucket refresh lookup completed"
-            );
-        }
     }
 
     fn name(&self) -> &'static str {
         "BucketRefreshTask"
+    }
+}
+
+/// Run the initial forced refresh with an explicit bootstrap deadline.
+#[derive(Debug)]
+pub struct BootstrapRefreshTask {
+    ctx: DhtTaskContext,
+    timeout: Duration,
+}
+
+impl BootstrapRefreshTask {
+    pub fn new(ctx: DhtTaskContext, timeout: Duration) -> Self {
+        Self { ctx, timeout }
+    }
+}
+
+#[async_trait::async_trait]
+impl DhtTask for BootstrapRefreshTask {
+    async fn run(self: Box<Self>) {
+        let refresh = Box::new(BucketRefreshTask::new(self.ctx, true));
+        if tokio::time::timeout(self.timeout, refresh.run())
+            .await
+            .is_err()
+        {
+            warn!(timeout = ?self.timeout, "DHT bootstrap refresh timed out");
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        "BootstrapRefreshTask"
     }
 }
 
@@ -258,25 +330,15 @@ impl NodeLookupTask {
 #[async_trait::async_trait]
 impl DhtTask for NodeLookupTask {
     async fn run(self: Box<Self>) {
-        let rt = Arc::clone(&self.ctx.routing_table);
         let result = iterative_find_node(
             &self.target_id,
             &self.ctx.self_id,
-            &rt,
+            &self.ctx.routing_table,
             &self.ctx.socket,
             &self.ctx.tracker,
             self.ctx.query_timeout,
         )
         .await;
-
-        // Merge discovered nodes.
-        {
-            let discovered_rt = rt.read().await;
-            let mut main_rt = self.ctx.routing_table.write().await;
-            for node in discovered_rt.all_nodes() {
-                main_rt.insert(node.clone());
-            }
-        }
 
         debug!(
             target = %hex::encode(self.target_id),
@@ -309,5 +371,25 @@ mod tests {
             query_timeout: Duration::from_secs(10),
         };
         assert_eq!(ctx.self_id, [0u8; 20]);
+    }
+
+    #[tokio::test]
+    async fn test_node_lookup_does_not_reacquire_shared_table() {
+        let routing_table = Arc::new(RwLock::new(RoutingTable::new([0u8; 20])));
+        let ctx = DhtTaskContext {
+            self_id: [0u8; 20],
+            routing_table,
+            socket: DhtSocket::bind(0).await.expect("test socket should bind"),
+            tracker: Arc::new(TransactionTracker::new()),
+            query_timeout: Duration::from_millis(20),
+        };
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            Box::new(NodeLookupTask::new(ctx, [1u8; 20])).run(),
+        )
+        .await;
+
+        assert!(result.is_ok(), "lookup task should not deadlock");
     }
 }

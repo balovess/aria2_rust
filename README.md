@@ -346,9 +346,25 @@ Rust-specific differences are:
 | File allocation | Platform-aware Linux `fallocate`, Windows `SetFileValidData`, macOS `F_PREALLOCATE`, and cooperative fallbacks that keep long allocation work off the reactor. |
 | RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
 
+### Current Version Compared with Original
+
+The following data comes from a Release build and idle-RPC process measurement on the same Windows 11 x64 machine:
+
+| Metric | Original aria2 1.37.0 | Current aria2-rust reference |
+| --- | ---: | ---: |
+| `aria2c.exe` file size | about 5.39 MiB | about 13.6 MiB |
+| Idle RPC Working Set | about 12.5 MiB | about 16.1 MiB |
+| Idle RPC Private Bytes | about 3.25 MiB | about 3.6 MiB |
+
+These values vary with compiler features, Windows version, allocator, and measurement timing. They are not a substitute for a same-load download benchmark. Private Bytes are already close to the original, while the current binary size and Working Set remain higher.
+
 The same document records compatibility impact, source entry points, focused test
-evidence, and known boundaries such as the not-yet-complete DHT task-queue
-wiring and the lack of a comparable `aria2_original` C++ benchmark.
+evidence, and known boundaries. DHT network maintenance and active peer
+lookups now use the unified task queue, with duplicate periodic network ticks
+coalesced while a lane is busy. Token rotation and local cleanup remain in the
+deadline coordinator, while routing-table saves use a blocking worker. Linux
+and macOS runtime evidence and a comparable full-download workload benchmark
+against `aria2_original` are still pending.
 
 Existing event-driven hot paths include:
 

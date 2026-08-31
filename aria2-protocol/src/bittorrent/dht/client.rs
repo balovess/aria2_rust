@@ -358,6 +358,7 @@ impl DhtClient {
         &mut self,
         target_info_hash: &[u8; 20],
     ) -> Result<DiscoveredPeers, String> {
+        self.purge_expired_cache();
         // Check cache first for valid (non-expired) entries
         if let Some(entry) = self.node_cache.get(target_info_hash) {
             if entry.timestamp.elapsed().as_secs() < NODE_CACHE_TTL_SECS {
@@ -467,6 +468,11 @@ impl DhtClient {
             addresses: all_peers,
             nodes_contacted,
         })
+    }
+
+    fn purge_expired_cache(&mut self) {
+        self.node_cache
+            .retain(|_, entry| entry.timestamp.elapsed().as_secs() < NODE_CACHE_TTL_SECS);
     }
 
     async fn query_node_with_socket(
@@ -751,6 +757,32 @@ mod tests {
             rt.total_node_count() >= 1,
             "bootstrap nodes share zero ID so only one is stored"
         );
+    }
+
+    #[test]
+    fn test_purge_expired_cache_removes_entries_without_lookup() {
+        let mut client = DhtClient::new(DhtClientConfig::default());
+        client.node_cache.insert(
+            [1u8; 20],
+            NodeCacheEntry {
+                peers: Vec::new(),
+                timestamp: Instant::now() - Duration::from_secs(NODE_CACHE_TTL_SECS + 1),
+                nodes_contacted: 0,
+            },
+        );
+        client.node_cache.insert(
+            [2u8; 20],
+            NodeCacheEntry {
+                peers: Vec::new(),
+                timestamp: Instant::now(),
+                nodes_contacted: 0,
+            },
+        );
+
+        client.purge_expired_cache();
+
+        assert!(!client.node_cache.contains_key(&[1u8; 20]));
+        assert!(client.node_cache.contains_key(&[2u8; 20]));
     }
 
     #[test]
