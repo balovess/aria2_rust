@@ -94,6 +94,19 @@ fn test_bitfield_man_zero_length() {
 }
 
 #[test]
+fn test_filter_bitfield_is_lazy() {
+    let mut bfman = BitfieldMan::new(1024, 1024 * 1_000_000);
+    let expected_bytes = 1_000_000usize.div_ceil(8);
+
+    assert!(bfman.get_filter_bitfield().is_empty());
+    bfman.enable_filter();
+    assert_eq!(bfman.get_filter_bitfield().len(), expected_bytes);
+
+    bfman.clear_filter();
+    assert!(bfman.get_filter_bitfield().is_empty());
+}
+
+#[test]
 fn test_bitfield_man_zero_piece_length_operations_are_safe() {
     let mut bfman = BitfieldMan::new(0, 4096);
     bfman.mark_pieces_done(4096);

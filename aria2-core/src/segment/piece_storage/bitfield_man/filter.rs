@@ -22,6 +22,7 @@ impl BitfieldMan {
     /// represent which pieces are INCLUDED in the download (bit set = included).
     /// An empty filter bitfield with filterEnabled means "nothing to download".
     pub fn enable_filter(&mut self) {
+        self.ensure_filter_bitfield();
         self.filter_enabled = true;
     }
 
@@ -34,8 +35,14 @@ impl BitfieldMan {
     /// Clears and disables the filter bitfield entirely.
     /// C++: `clearFilter()` — deletes `filterBitfield_` and sets `filterEnabled_ = false`.
     pub fn clear_filter(&mut self) {
-        self.filter_bitfield.fill(0);
+        self.filter_bitfield = Vec::new();
         self.filter_enabled = false;
+    }
+
+    fn ensure_filter_bitfield(&mut self) {
+        if self.filter_bitfield.is_empty() && self.num_pieces != 0 {
+            self.filter_bitfield = vec![0u8; self.num_pieces.div_ceil(8)];
+        }
     }
 
     // ── Filter add/remove operations ──────────────────────────────────────
@@ -55,6 +62,7 @@ impl BitfieldMan {
         if self.num_pieces == 0 || length == 0 {
             return;
         }
+        self.ensure_filter_bitfield();
         let start_index = (offset / self.piece_length) as usize;
         let end_index = std::cmp::min(
             ((offset + length - 1) / self.piece_length) as usize,
@@ -74,6 +82,7 @@ impl BitfieldMan {
         if self.num_pieces == 0 || length == 0 {
             return;
         }
+        self.ensure_filter_bitfield();
         let start_index = (offset / self.piece_length) as usize;
         let end_index = std::cmp::min(
             ((offset + length - 1) / self.piece_length) as usize,
@@ -98,6 +107,7 @@ impl BitfieldMan {
         if self.num_pieces == 0 || length == 0 {
             return;
         }
+        self.ensure_filter_bitfield();
         let start_index = std::cmp::min((offset / self.piece_length) as usize, self.num_pieces);
         let end_index = std::cmp::min(
             ((offset + length - 1) / self.piece_length) as usize,
@@ -171,6 +181,7 @@ impl BitfieldMan {
 
     /// Returns the filter bitfield as a mutable byte slice.
     pub fn get_filter_bitfield_mut(&mut self) -> &mut [u8] {
+        self.ensure_filter_bitfield();
         &mut self.filter_bitfield
     }
 

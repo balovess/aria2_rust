@@ -45,7 +45,9 @@ impl BitfieldMan {
         BitfieldMan {
             bitfield: vec![0u8; num_bytes],
             use_bitfield: vec![0u8; num_bytes],
-            filter_bitfield: vec![0u8; num_bytes],
+            // Selective downloading is uncommon; allocate this bitfield only
+            // when a filter is first used.
+            filter_bitfield: Vec::new(),
             num_pieces,
             piece_length,
             total_length,
