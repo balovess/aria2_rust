@@ -7,7 +7,7 @@ pub struct PieceManager {
     piece_length: u32,
     total_size: u64,
     completed: Bitfield,
-    downloaded_bytes_per_piece: Vec<u64>,
+    total_downloaded: u64,
     piece_hashes: Vec<[u8; 20]>,
 }
 
@@ -19,7 +19,7 @@ impl PieceManager {
             piece_length,
             total_size,
             completed: Bitfield::new(num_pieces as usize),
-            downloaded_bytes_per_piece: vec![0; num_pieces as usize],
+            total_downloaded: 0,
             piece_hashes: hashes,
         }
     }
@@ -42,8 +42,8 @@ impl PieceManager {
     }
 
     pub fn mark_piece_downloaded(&mut self, index: u32, bytes: u64) {
-        if (index as usize) < self.downloaded_bytes_per_piece.len() {
-            self.downloaded_bytes_per_piece[index as usize] += bytes;
+        if (index as usize) < self.num_pieces as usize {
+            self.total_downloaded += bytes;
         }
     }
 
@@ -74,8 +74,7 @@ impl PieceManager {
         if self.total_size == 0 {
             return 100.0;
         }
-        let downloaded: u64 = self.downloaded_bytes_per_piece.iter().sum();
-        downloaded as f64 / self.total_size as f64 * 100.0
+        self.total_downloaded as f64 / self.total_size as f64 * 100.0
     }
 
     pub fn num_pieces(&self) -> u32 {
