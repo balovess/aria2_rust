@@ -345,6 +345,8 @@ jobs:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ needs.prepare.outputs.sha }}
           name: aria2 ${{ needs.prepare.outputs.version }}
-          body_path: docs/binary-release-0.3.4-en.md
+          body: |
+            ## Changes
+            ${{ steps.changelog.outputs.changelog }}
           files: artifacts/*/*
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
