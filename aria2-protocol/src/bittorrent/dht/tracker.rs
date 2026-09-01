@@ -41,7 +41,7 @@ pub struct TrackedResponse {
 /// A tracked response wait that removes its transaction if the caller drops
 /// it before a response arrives.
 pub struct TrackedResponseWait {
-    transaction_id: Vec<u8>,
+    transaction_id: [u8; 4],
     receiver: Option<tokio::sync::oneshot::Receiver<TrackedResponse>>,
     tracker: Arc<TransactionTracker>,
 }
@@ -96,7 +96,7 @@ pub struct TransactionTracker {
 }
 
 struct TransactionTrackerInner {
-    transactions: HashMap<Vec<u8>, PendingTransaction>,
+    transactions: HashMap<[u8; 4], PendingTransaction>,
     next_tx_id: u32,
 }
 
@@ -124,13 +124,31 @@ impl TransactionTracker {
         info_hash: Option<[u8; 20]>,
         timeout: Duration,
     ) -> (Vec<u8>, tokio::sync::oneshot::Receiver<TrackedResponse>) {
+        let (transaction_id, response_rx) = self.allocate_inner(
+            query_type,
+            target_addr,
+            target_id,
+            info_hash,
+            timeout,
+        );
+        (transaction_id.to_vec(), response_rx)
+    }
+
+    fn allocate_inner(
+        &self,
+        query_type: QueryType,
+        target_addr: SocketAddr,
+        target_id: Option<[u8; 20]>,
+        info_hash: Option<[u8; 20]>,
+        timeout: Duration,
+    ) -> ([u8; 4], tokio::sync::oneshot::Receiver<TrackedResponse>) {
         let mut inner = self
             .inner
             .lock()
             .expect("TransactionTracker mutex poisoned");
         let tx_id = inner.next_tx_id;
         inner.next_tx_id = inner.next_tx_id.wrapping_add(1);
-        let key = tx_id.to_be_bytes().to_vec();
+        let key = tx_id.to_be_bytes();
 
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
@@ -162,13 +180,8 @@ impl TransactionTracker {
         timeout: Duration,
     ) -> (u32, TrackedResponseWait) {
         let (transaction_id, response_rx) =
-            self.allocate(query_type, target_addr, target_id, info_hash, timeout);
-        let numeric_id = u32::from_be_bytes(
-            transaction_id
-                .as_slice()
-                .try_into()
-                .expect("transaction IDs are always four bytes"),
-        );
+            self.allocate_inner(query_type, target_addr, target_id, info_hash, timeout);
+        let numeric_id = u32::from_be_bytes(transaction_id);
         (
             numeric_id,
             TrackedResponseWait {
@@ -181,12 +194,15 @@ impl TransactionTracker {
 
     /// Cancel a pending transaction and close its response channel.
     pub fn cancel(&self, tx_id: &[u8]) -> bool {
+        let Ok(key) = <[u8; 4]>::try_from(tx_id) else {
+            return false;
+        };
         let removed = self
             .inner
             .lock()
             .expect("TransactionTracker mutex poisoned")
             .transactions
-            .remove(tx_id)
+            .remove(&key)
             .is_some();
         if removed {
             self.change_notify.notify_one();
@@ -199,11 +215,14 @@ impl TransactionTracker {
     /// If a matching transaction is found, the response is delivered to the
     /// waiting task via the oneshot channel. Returns `true` if matched.
     pub fn handle_response(&self, tx_id: &[u8], response: DhtMessage, from: SocketAddr) -> bool {
+        let Ok(key) = <[u8; 4]>::try_from(tx_id) else {
+            return false;
+        };
         let mut inner = self
             .inner
             .lock()
             .expect("TransactionTracker mutex poisoned");
-        let Some(pending) = inner.transactions.get(tx_id) else {
+        let Some(pending) = inner.transactions.get(&key) else {
             debug!(
                 tx_id = %hex::encode(tx_id),
                 from = %from,
@@ -221,7 +240,7 @@ impl TransactionTracker {
             return false;
         }
 
-        if let Some(mut pending) = inner.transactions.remove(tx_id) {
+        if let Some(mut pending) = inner.transactions.remove(&key) {
             let rtt = pending.created_at.elapsed();
             trace!(
                 tx_id = %hex::encode(tx_id),
