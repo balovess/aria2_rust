@@ -166,7 +166,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-core"
-version = "0.3.5"
+version = "0.3.6"
 dependencies = [
  "adler32",
  "aes-gcm",
@@ -230,7 +230,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-protocol"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "aria2-rpc"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "async-trait",

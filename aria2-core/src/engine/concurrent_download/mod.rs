@@ -254,7 +254,7 @@ impl ConcurrentDownloader {
 
         let all_uris: Vec<String> = {
             let g = self.group.recover();
-            g.uris().to_vec()
+            g.uris().iter().map(|uri| uri.to_string()).collect()
         };
 
         if all_uris.len() > 1 {

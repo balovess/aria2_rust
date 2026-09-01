@@ -44,30 +44,30 @@ impl super::RequestGroup {
         let mut stats = UriMemoryStats::default();
         let mut seen: HashMap<String, usize> = HashMap::new();
 
-        let mut account = |uri: &String| {
+        let mut account = |uri: &str, capacity: usize| {
             stats.stored_count += 1;
             stats.logical_bytes += uri.len();
-            stats.capacity_bytes += uri.capacity();
-            if seen.insert(uri.clone(), uri.len()).is_some() {
+            stats.capacity_bytes += capacity;
+            if seen.insert(uri.to_owned(), uri.len()).is_some() {
                 stats.duplicate_logical_bytes += uri.len();
-                stats.duplicate_capacity_bytes += uri.capacity();
+                stats.duplicate_capacity_bytes += capacity;
             }
         };
 
         for uri in &self.uris {
-            account(uri);
+            account(uri, uri.len());
         }
 
         if let Some(ctx) = self.download_context.recover().as_ref() {
             for entry in ctx.get_file_entries() {
                 for uri in entry.remaining_uris() {
-                    account(uri);
+                    account(uri, uri.capacity());
                 }
                 for uri in entry.spent_uris() {
-                    account(uri);
+                    account(uri, uri.capacity());
                 }
                 for result in entry.uri_results() {
-                    account(&result.uri);
+                    account(&result.uri, result.uri.capacity());
                 }
             }
         }
@@ -177,7 +177,7 @@ impl super::RequestGroup {
             uris
         } else {
             // Fallback: return initial URIs (none have been dispatched yet)
-            self.uris.clone()
+            self.uris.iter().map(|uri| uri.to_string()).collect()
         }
     }
 
@@ -218,7 +218,7 @@ impl super::RequestGroup {
             }
             uris
         } else {
-            self.uris.clone()
+            self.uris.iter().map(|uri| uri.to_string()).collect()
         }
     }
 
@@ -248,7 +248,7 @@ impl super::RequestGroup {
         } else {
             self.uris
                 .iter()
-                .cloned()
+                .map(|uri| uri.to_string())
                 .map(|uri| super::UriEntry {
                     uri,
                     status: "waiting".to_string(),
@@ -315,7 +315,10 @@ impl super::RequestGroup {
             ));
         }
         self.uris.retain(|uri| {
-            if del_uris.iter().any(|deleted_uri| deleted_uri == uri) {
+            if del_uris
+                .iter()
+                .any(|deleted_uri| deleted_uri == uri.as_ref())
+            {
                 deleted += 1;
                 false
             } else {
@@ -330,7 +333,8 @@ impl super::RequestGroup {
                         continue;
                     }
                     let insert_position = position.min(self.uris.len());
-                    self.uris.insert(insert_position, uri.clone());
+                    self.uris
+                        .insert(insert_position, uri.clone().into_boxed_str());
                     position = position.saturating_add(1);
                     added += 1;
                 }
@@ -340,7 +344,7 @@ impl super::RequestGroup {
                 .iter()
                 .filter(|uri| url::Url::parse(uri).is_ok())
                 .map(|uri| {
-                    self.uris.push(uri.clone());
+                    self.uris.push(uri.clone().into_boxed_str());
                     1
                 })
                 .sum(),
@@ -490,14 +494,14 @@ impl super::RequestGroup {
             // initial URI list. The URI will be available for the next
             // download attempt via reuse_uri().
             drop(guard);
-            self.uris.push(uri.to_string());
+            self.uris.push(uri.to_owned().into_boxed_str());
             trace!(
                 "Added redirect URI to initial URI list (shared Arc): {}",
                 uri
             );
         } else {
             drop(guard);
-            self.uris.push(uri.to_string());
+            self.uris.push(uri.to_owned().into_boxed_str());
             trace!(
                 "Added redirect URI to initial URI list (no context): {}",
                 uri

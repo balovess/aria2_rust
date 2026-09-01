@@ -11,4 +11,8 @@
 - [Troubleshooting](troubleshooting-en.md): startup, configuration, RPC, feature, and recovery issues
 - [0.3.4 Binary Release Notes](binary-release-0.3.4-en.md): artifacts, checksums, installation, upgrade, and compatibility boundaries
 
+## Developer documentation
+
+- [Browser Session Bridge Developer Guide](browser-bridge-guide-en.md): update Cookies, User-Agent, and signed headers from external integrations
+
 Recommended path: start with “Quick Start”, use “Configuration” when tuning options, read “RPC Guide” for remote control, and use “Troubleshooting” when something fails.

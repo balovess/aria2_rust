@@ -193,6 +193,17 @@ These cover seeding, DHT/IPv6 DHT, PEX, LPD/uTP, trackers, peers, file selection
 
 Bandwidth, cache, and buffer options use bytes or Size suffixes. `stop` controls stop conditions. `max-download-limit` applies per task; `max-overall-download-limit` applies to the whole process.
 
+#### `disk-cache` sizing
+
+The default `disk-cache` value is `16 MiB`, which is a fixed starting point for general environments and is not tied to a particular operating system. It primarily helps combine small or out-of-order writes; larger sequential writes are written directly to the file. A larger cache is not necessarily faster and increases the memory available to each task. When several tasks run at once, consider their cache usage together.
+
+- `0`: Disable the write-back cache. This minimizes memory use and is suitable for low-memory systems or direct-write workloads.
+- `4 MiB`: Suitable for small downloads, many concurrent tasks, or tighter memory limits.
+- `16 MiB`: The default for most download workloads.
+- `64 MiB` or more: Use only when measurements show that many small writes benefit from the larger cache; avoid increasing it blindly with many concurrent tasks.
+
+Example: `aria2c --disk-cache=4M URL`. In a configuration file, use `disk-cache=16M`. These values are cache limits, not disk space that must be preallocated. Actual gains depend on network chunking, the filesystem, and the storage device, so use download throughput and memory usage as the final criteria.
+
 ### RPC
 
 `enable-rpc`, `rpc-listen-all`, `rpc-listen-port` (1024..65535, default 6800), `rpc-listen-address` (default `127.0.0.1`), `rpc-secret`, `rpc-user`, `rpc-passwd`, `rpc-allow-origin`, `rpc-cors-domain`, `rpc-secure`, `rpc-certificate`, `rpc-private-key`, `rpc-allow-origin-all`, `rpc-max-request-size` (default 2 MiB), and `rpc-save-upload-metadata`.

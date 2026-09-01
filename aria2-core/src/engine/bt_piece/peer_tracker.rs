@@ -28,10 +28,12 @@ pub struct PeerTrackerStats {
 
 impl PeerBitfieldTracker {
     pub fn new(total_pieces: u32) -> Self {
+        let piece_count = usize::try_from(total_pieces)
+            .expect("piece count does not fit in the target platform's usize");
         Self {
             total_pieces,
             peers: HashMap::new(),
-            piece_peer_count: vec![0u32; total_pieces as usize],
+            piece_peer_count: vec![0u32; piece_count],
         }
     }
 
@@ -45,20 +47,20 @@ impl PeerBitfieldTracker {
             }
 
             // Update with new bitfield
-            let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
+            let have = Bitfield::from_bytes(bitfield, self.piece_peer_count.len());
             for i in have.iter_set() {
                 if i < self.piece_peer_count.len() {
-                    self.piece_peer_count[i] += 1;
+                    self.piece_peer_count[i] = self.piece_peer_count[i].saturating_add(1);
                 }
             }
 
             existing.have_pieces = have;
             existing.last_updated = Instant::now();
         } else {
-            let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
+            let have = Bitfield::from_bytes(bitfield, self.piece_peer_count.len());
             for i in have.iter_set() {
                 if i < self.piece_peer_count.len() {
-                    self.piece_peer_count[i] += 1;
+                    self.piece_peer_count[i] = self.piece_peer_count[i].saturating_add(1);
                 }
             }
             self.peers.insert(
@@ -112,7 +114,7 @@ impl PeerBitfieldTracker {
     pub fn missing_pieces(&self, completed: &Bitfield) -> Vec<u32> {
         completed
             .iter_clear()
-            .take(self.total_pieces as usize)
+            .take(self.piece_peer_count.len())
             .map(|i| i as u32)
             .collect()
     }
@@ -333,5 +335,15 @@ mod tests {
         );
         assert_eq!(tracker.piece_frequencies()[3], 1, "new piece 3 now counted");
         assert_eq!(tracker.peer_count(), 1, "still only 1 peer");
+    }
+
+    #[test]
+    fn test_piece_count_saturates_at_u32_limit() {
+        let mut tracker = PeerBitfieldTracker::new(1);
+        tracker.piece_peer_count[0] = u32::MAX;
+
+        tracker.update_peer_bitfield("peer", &make_bf(1, &[0]));
+
+        assert_eq!(tracker.piece_peer_count[0], u32::MAX);
     }
 }

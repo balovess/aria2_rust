@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// snapshot readers (e.g. [`ConnectionLimiter::host_count`]) may observe
 /// briefly-stale values.
 pub struct ConnectionLimiter {
-    per_host: DashMap<String, AtomicUsize>,
+    per_host: DashMap<Box<str>, AtomicUsize>,
     global_count: AtomicUsize,
     global_limit: usize,
     per_host_limit: usize,
@@ -79,7 +79,7 @@ impl ConnectionLimiter {
         // for a soft limiter.
         let entry = self
             .per_host
-            .entry(host.to_string())
+            .entry(host.to_owned().into_boxed_str())
             .or_insert_with(|| AtomicUsize::new(0));
         loop {
             let current = entry.load(Ordering::Relaxed);

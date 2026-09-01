@@ -82,7 +82,7 @@ pub(crate) fn spawn_download_task(
         let (result, connection_context) = tokio::select! {
             command_result = create_command_for_group(
                 Arc::clone(&group),
-                first_uri,
+                first_uri.to_string(),
                 options,
                 dependencies,
             ) => {

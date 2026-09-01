@@ -102,7 +102,7 @@ impl MagnetDownloadCommand {
 
         Ok(Self {
             group,
-            magnet_uri,
+            magnet_uri: magnet_uri.to_string(),
             output_path: path,
             started: false,
             completed_bytes: 0,

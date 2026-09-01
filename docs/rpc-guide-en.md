@@ -146,11 +146,26 @@ Common `tellStatus` keys include `gid`, `status`, `totalLength`, `completedLengt
 | `aria2.purgeDownloadResult` | none | `OK` |
 | `aria2.shutdown` / `forceShutdown` | none | `OK` |
 
+### Browser session context
+
+| Method | Parameters | Result |
+| --- | --- | --- |
+| `aria2.updateBrowserContext` | `context`: `cookie?`, `user_agent?`, `headers?` | `OK` |
+| `aria2.clearBrowserContext` | none | `OK` |
+
+These methods let external developers update browser session data while downloads are running. `context` is a complete snapshot: `cookie` and `user_agent` are strings, and `headers` is an array of `[name, value]` pairs. Each update replaces the complete snapshot, so a bridge should merge changes and publish all credentials that are still valid. Both methods require RPC authentication and affect HTTP downloads using the process-wide browser context.
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"aria2.updateBrowserContext","params":["token:replace-with-a-long-random-token",{"cookie":"sid=abc","user_agent":"Mozilla/5.0","headers":[["X-Signature","signed-value"]]}]}
+```
+
+The same request can be sent through `POST /jsonrpc` or the existing `ws://host:port/jsonrpc` WebSocket transport; no second bridge protocol is required. See the [browser session bridge developer guide](browser-bridge-guide-en.md) for standalone-process, browser-extension, and CDP client examples.
+
 ### System methods
 
 `system.listMethods` returns methods supported by the current build. `system.listNotifications` returns event names. `system.multicall` accepts an array of `{"methodName":"...","params":[...]}` objects.
 
-The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, and `aria2.addMetalink` as applicable.
+The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, and `aria2.addMetalink` as applicable.
 
 ## 7. Errors and limits
 

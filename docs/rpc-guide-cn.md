@@ -149,11 +149,26 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.purgeDownloadResult` | 无 | `OK` |
 | `aria2.shutdown` / `forceShutdown` | 无 | `OK` |
 
+### 浏览器会话上下文
+
+| 方法 | 参数 | 返回 |
+| --- | --- | --- |
+| `aria2.updateBrowserContext` | `context`：`cookie?`、`user_agent?`、`headers?` | `OK` |
+| `aria2.clearBrowserContext` | 无 | `OK` |
+
+这两个方法用于外部开发者在下载运行期间更新浏览器会话。`context` 是完整快照：`cookie` 和 `user_agent` 为字符串，`headers` 为 `[名称, 值]` 数组。每次更新都会替换整个快照，因此桥接器应合并后提交当前仍有效的全部凭证。方法需要 RPC 认证，且会影响使用全局浏览器上下文的 HTTP 下载。
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"aria2.updateBrowserContext","params":["token:replace-with-a-long-random-token",{"cookie":"sid=abc","user_agent":"Mozilla/5.0","headers":[["X-Signature","signed-value"]]}]}
+```
+
+同一请求可通过 `POST /jsonrpc` 或现有 `ws://host:port/jsonrpc` WebSocket 发送；无需另行实现 bridge 协议。独立进程、浏览器扩展和 CDP 客户端的接入示例见[浏览器会话桥接开发指南](browser-bridge-guide-cn.md)。
+
 ### 系统方法
 
 `system.listMethods` 返回当前构建实际支持的方法；`system.listNotifications` 返回事件名；`system.multicall` 接收 `[{"methodName":"...","params":[...]}]` 数组。
 
-当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.addMetalink`。
+当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.addMetalink`。
 
 ## 7. 错误与限制
 

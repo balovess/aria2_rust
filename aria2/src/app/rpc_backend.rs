@@ -826,6 +826,15 @@ impl RpcBackend for CoreRpcBackend {
 
     async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
         match request {
+            BackendRequest::UpdateBrowserContext { context } => {
+                super::browser_context_rpc::update(context)
+                    .map_err(Self::invalid)?;
+                Ok(BackendResult::response(BackendResponse::Ok))
+            }
+            BackendRequest::ClearBrowserContext => {
+                super::browser_context_rpc::clear();
+                Ok(BackendResult::response(BackendResponse::Ok))
+            }
             BackendRequest::AddUri {
                 uris,
                 options,

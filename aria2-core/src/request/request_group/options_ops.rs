@@ -589,7 +589,7 @@ impl super::RequestGroup {
     /// created. For the current remaining/spent URI state, use
     /// `get_remaining_uris()` / `get_spent_uris()` which delegate to
     /// `FileEntry` via `DownloadContext`.
-    pub fn uris(&self) -> &[String] {
+    pub fn uris(&self) -> &[Box<str>] {
         &self.uris
     }
 
@@ -598,7 +598,7 @@ impl super::RequestGroup {
     /// Dependency fallbacks use this to remove the synthetic `bt://` dispatch
     /// URI after torrent metadata failed and continue with direct mirrors.
     pub fn replace_uris(&mut self, uris: Vec<String>) {
-        self.uris = uris;
+        self.uris = uris.into_iter().map(String::into_boxed_str).collect();
     }
 
     /// Set a per-group output filename, used by Metalink entries.

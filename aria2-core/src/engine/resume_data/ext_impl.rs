@@ -23,7 +23,7 @@ impl ResumeDataExt for ResumeData {
         let uris: Vec<UriState> = raw_uris
             .iter()
             .map(|uri| UriState {
-                uri: uri.clone(),
+                uri: uri.to_string(),
                 tried: true, // Assume all added URIs were at least considered
                 used: false, // Not actively connected at snapshot time
                 last_result: None,

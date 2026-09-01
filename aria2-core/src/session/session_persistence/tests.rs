@@ -176,7 +176,7 @@ async fn test_session_load_restores_commands() {
     for group_lock in &loaded_groups {
         let group = group_lock.recover();
         for uri in group.uris() {
-            found_uris.push(uri.clone());
+            found_uris.push(uri.to_string());
         }
     }
 

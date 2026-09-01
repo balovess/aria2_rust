@@ -626,8 +626,8 @@ impl DownloadCommand {
 
         let group_uris = self.group.recover().uris().to_vec();
         for uri in group_uris {
-            if !uri.is_empty() && !candidates.iter().any(|candidate| candidate == &uri) {
-                candidates.push(uri);
+            if !uri.is_empty() && !candidates.iter().any(|candidate| candidate == uri.as_ref()) {
+                candidates.push(uri.to_string());
             }
         }
         candidates

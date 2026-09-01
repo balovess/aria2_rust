@@ -198,7 +198,7 @@ fn prompt_performance() -> Result<InitPerformance, String> {
 }
 
 fn prompt_u16(label: &str, default: u16, min: u16, max: u16) -> Result<u16, String> {
-    prompt_value(label, default.to_string(), |value| {
+    prompt_value(label, default, |value| {
         let parsed = value
             .parse::<u16>()
             .map_err(|_| format!("enter an integer from {min} to {max}"))?;

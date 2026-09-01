@@ -12,6 +12,11 @@ use crate::error::Result;
 const DEFAULT_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_COALESCED_FLUSH_BYTES: usize = 1024 * 1024;
 
+enum CoalescedData {
+    Shared(Bytes),
+    Merged(BytesMut),
+}
+
 /// Runtime counters for observing write-back cache behavior.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DiskCacheStats {
@@ -26,30 +31,55 @@ pub struct DiskCacheStats {
 }
 
 fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
-    let mut coalesced: Vec<(u64, BytesMut)> = Vec::new();
+    let mut coalesced: Vec<(u64, CoalescedData)> = Vec::new();
     for (offset, data, _) in pending {
         let can_extend = coalesced.last().is_some_and(|(start, current)| {
+            let current_len = match current {
+                CoalescedData::Shared(current) => current.len(),
+                CoalescedData::Merged(current) => current.len(),
+            };
             start
-                .checked_add(current.len() as u64)
+                .checked_add(current_len as u64)
                 .is_some_and(|end| end == *offset)
-                && current.len() + data.len() <= MAX_COALESCED_FLUSH_BYTES
+                && current_len + data.len() <= MAX_COALESCED_FLUSH_BYTES
         });
 
         if can_extend {
-            coalesced
-                .last_mut()
-                .expect("coalesced entry exists")
-                .1
-                .extend_from_slice(data);
-        } else {
-            let mut merged = BytesMut::with_capacity(data.len());
+            let (start, current) = coalesced
+                .pop()
+                .expect("coalesced entry exists when extending");
+            let mut merged = match current {
+                CoalescedData::Shared(current) => {
+                    // Reserve geometrically so a chain of adjacent chunks is
+                    // copied once into a growing buffer instead of once per
+                    // merge (which would make the flush O(n^2)).
+                    let required = current.len() + data.len();
+                    let capacity = required
+                        .next_power_of_two()
+                        .min(MAX_COALESCED_FLUSH_BYTES);
+                    let mut merged = BytesMut::with_capacity(capacity);
+                    merged.extend_from_slice(&current);
+                    merged
+                }
+                CoalescedData::Merged(merged) => merged,
+            };
             merged.extend_from_slice(data);
-            coalesced.push((*offset, merged));
+            coalesced.push((start, CoalescedData::Merged(merged)));
+        } else {
+            // Cloning Bytes only increments its reference count. Keep the
+            // original allocation when this range does not need merging.
+            coalesced.push((*offset, CoalescedData::Shared(data.clone())));
         }
     }
     coalesced
         .into_iter()
-        .map(|(offset, data)| (offset, data.freeze()))
+        .map(|(offset, data)| {
+            let data = match data {
+                CoalescedData::Shared(data) => data,
+                CoalescedData::Merged(data) => data.freeze(),
+            };
+            (offset, data)
+        })
         .collect()
 }
 

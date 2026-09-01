@@ -75,7 +75,7 @@ pub struct DefaultPeerStorage {
     leecher_state_choke: BtLeecherStateChoke,
 
     /// Temporarily rejected peers: ip -> timeout instant.
-    pub(super) temporarily_rejected_peers: HashMap<String, Instant>,
+    pub(super) temporarily_rejected_peers: HashMap<Box<str>, Instant>,
 
     /// Last time we cleaned up expired entries from temporarily_rejected_peers.
     pub(super) last_temp_peer_cleanup: Instant,
