@@ -3,7 +3,22 @@
 //! The browser process is intentionally outside aria2-core. A CDP client or
 //! extension can deserialize a [`BrowserContextUpdate`] and publish it here;
 //! download requests then read one atomic snapshot immediately before send.
+//!
+//! The smallest external bridge looks like this:
+//!
+//! ```rust,no_run
+//! use aria2_core::http::update_global_json;
+//!
+//! fn on_browser_event(snapshot_json: &str) -> Result<(), serde_json::Error> {
+//!     update_global_json(snapshot_json)
+//! }
+//! ```
+//!
+//! The JSON schema is `{ "cookie": "...", "user_agent": "...",
+//! "headers": [["X-Signature", "..."]] }`. Updates replace the complete
+//! snapshot, so a bridge should publish all currently valid credentials.
 
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +38,27 @@ pub struct BrowserContextUpdate {
     pub headers: Vec<(String, String)>,
 }
 
+impl BrowserContextUpdate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_cookie(mut self, cookie: impl Into<String>) -> Self {
+        self.cookie = Some(cookie.into());
+        self
+    }
+
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+}
+
 /// Thread-safe last-value-wins browser session context.
 #[derive(Clone, Debug, Default)]
 pub struct BrowserContext {
@@ -40,6 +76,10 @@ impl BrowserContext {
         if let Ok(mut current) = self.current.write() {
             *current = update;
         }
+    }
+
+    pub fn clear(&self) {
+        self.replace(BrowserContextUpdate::default());
     }
 
     /// Publish a JSON snapshot received from a CDP client or extension.
@@ -75,6 +115,20 @@ impl BrowserContext {
         });
         result
     }
+}
+
+/// Shared context used by the normal aria2 download pipeline.
+///
+/// An embedding application or a local CDP/extension bridge can retain this
+/// handle and publish new snapshots without rebuilding download tasks.
+pub fn global() -> BrowserContext {
+    static CONTEXT: OnceLock<BrowserContext> = OnceLock::new();
+    CONTEXT.get_or_init(BrowserContext::new).clone()
+}
+
+/// Convenience entry point for a bridge that receives one JSON snapshot.
+pub fn update_global_json(json: &str) -> Result<(), serde_json::Error> {
+    global().replace_json(json)
 }
 
 #[cfg(test)]
@@ -121,5 +175,19 @@ mod tests {
             .unwrap();
         assert_eq!(context.snapshot().cookie.as_deref(), Some("sid=1"));
         assert_eq!(context.snapshot().headers[0].1, "t");
+    }
+
+    #[test]
+    fn builder_creates_a_context_for_an_embedded_integration() {
+        let context = BrowserContext::new();
+        context.replace(
+            BrowserContextUpdate::new()
+                .with_cookie("sid=1")
+                .with_user_agent("Browser UA")
+                .with_header("X-Signature", "sig"),
+        );
+        assert_eq!(context.snapshot().user_agent.as_deref(), Some("Browser UA"));
+        context.clear();
+        assert!(context.snapshot().cookie.is_none());
     }
 }

@@ -70,7 +70,9 @@ pub use auth::{
 // Re-export netrc parser types for direct access
 pub use auth::netrc::{NetrcEntry as NetrcParserEntry, NetrcError, NetrcParser, find_netrc_file};
 
-pub use browser_context::{BrowserContext, BrowserContextUpdate};
+pub use browser_context::{
+    BrowserContext, BrowserContextUpdate, global as global_browser_context, update_global_json,
+};
 pub use request_policy::{HttpRequestPolicy, RequestPacing};
 
 // Re-export response processor types for convenient access
