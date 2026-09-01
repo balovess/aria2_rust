@@ -160,6 +160,20 @@ impl MagnetDownloadCommand {
             .join(format!("{}.torrent", hex::encode(info_hash)))
     }
 
+    fn saved_metadata_path_for_magnet(
+        &self,
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+    ) -> std::path::PathBuf {
+        let name = magnet
+            .info_hash_v2
+            .map(hex::encode)
+            .unwrap_or_else(|| hex::encode(magnet.info_hash));
+        self.output_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(format!("{}.torrent", name))
+    }
+
     fn load_saved_metadata(&self, info_hash: &[u8; 20]) -> Option<Vec<u8>> {
         let path = self.saved_metadata_path(info_hash);
         let data = match std::fs::read(&path) {
@@ -190,6 +204,62 @@ impl MagnetDownloadCommand {
                 None
             }
         }
+    }
+
+    fn load_saved_metadata_for_magnet(
+        &self,
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+    ) -> Option<Vec<u8>> {
+        if magnet.info_hash_v2.is_none() {
+            return self.load_saved_metadata(&magnet.info_hash);
+        }
+        let path = self.saved_metadata_path_for_magnet(magnet);
+        let data = match std::fs::read(&path) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "Failed to read saved BitTorrent metadata");
+                return None;
+            }
+        };
+        match Self::metadata_matches_magnet(magnet, &data) {
+            Ok(()) => {
+                info!(path = %path.display(), "Loaded BitTorrent metadata from saved torrent file");
+                Some(data)
+            }
+            Err(error) => {
+                warn!(path = %path.display(), %error, "Ignoring saved BitTorrent metadata with unexpected info-hash");
+                None
+            }
+        }
+    }
+
+    fn metadata_matches_magnet(
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+        torrent_bytes: &[u8],
+    ) -> std::result::Result<(), String> {
+        let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)?;
+        if let Some(expected_v1) = magnet.info_hash_v1
+            && meta.info_hash.bytes != expected_v1
+        {
+            return Err(format!(
+                "v1 info-hash mismatch: expected {}, got {}",
+                hex::encode(expected_v1),
+                meta.info_hash.as_hex()
+            ));
+        }
+        if let Some(expected_v2) = magnet.info_hash_v2
+            && meta.info_hash_v2 != Some(expected_v2)
+        {
+            return Err(format!(
+                "v2 info-hash mismatch: expected {}, got {}",
+                hex::encode(expected_v2),
+                meta.info_hash_v2
+                    .map(hex::encode)
+                    .unwrap_or_else(|| "absent".into())
+            ));
+        }
+        Ok(())
     }
 
     fn save_metadata_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<bool> {
@@ -358,7 +428,7 @@ impl Command for MagnetDownloadCommand {
         };
 
         let torrent_bytes = if load_saved_metadata {
-            if let Some(data) = self.load_saved_metadata(&ml.info_hash) {
+            if let Some(data) = self.load_saved_metadata_for_magnet(&ml) {
                 data
             } else {
                 self.fetch_magnet_metadata(&ml).await?
@@ -366,6 +436,13 @@ impl Command for MagnetDownloadCommand {
         } else {
             self.fetch_magnet_metadata(&ml).await?
         };
+
+        Self::metadata_matches_magnet(&ml, &torrent_bytes).map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "Fetched metadata does not match magnet: {}",
+                error
+            )))
+        })?;
 
         info!("Fetched torrent metadata: {} bytes", torrent_bytes.len());
 
@@ -377,7 +454,7 @@ impl Command for MagnetDownloadCommand {
         self.enforce_bep0027_after_metadata(&torrent_bytes).await?;
 
         if save_metadata {
-            let path = self.saved_metadata_path(&ml.info_hash);
+            let path = self.saved_metadata_path_for_magnet(&ml);
             match Self::save_metadata_file(&path, &torrent_bytes) {
                 Ok(true) => info!(path = %path.display(), "Saved BitTorrent metadata"),
                 Ok(false) => {

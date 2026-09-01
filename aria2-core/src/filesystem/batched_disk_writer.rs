@@ -62,16 +62,67 @@ impl BatchedDiskWriter {
         Ok(())
     }
 
-    fn append_buffered(&mut self, offset: u64, data: Bytes) {
-        self.total_buffered += data.len();
-        if let Some(existing) = self.buffer.get_mut(&offset) {
-            let mut merged = BytesMut::with_capacity(existing.len() + data.len());
-            merged.extend_from_slice(existing);
-            merged.extend_from_slice(&data);
-            *existing = merged.freeze();
-        } else {
-            self.buffer.insert(offset, data);
+    fn append_buffered(&mut self, offset: u64, data: Bytes) -> Result<()> {
+        let end = offset.checked_add(data.len() as u64).ok_or_else(|| {
+            Aria2Error::InvalidArgument("buffered write range exceeds u64 address space".into())
+        })?;
+
+        // Keep buffered ranges disjoint and merge adjacent ranges. Besides
+        // reducing syscalls for sequential small writes, this preserves
+        // last-write-wins behavior for overlapping writes.
+        let overlapping_keys: Vec<u64> = self
+            .buffer
+            .range(..=end)
+            .filter_map(|(&start, existing)| {
+                let existing_end = start.checked_add(existing.len() as u64)?;
+                (existing_end >= offset && start <= end).then_some(start)
+            })
+            .collect();
+
+        let merge_start = overlapping_keys
+            .first()
+            .copied()
+            .unwrap_or(offset)
+            .min(offset);
+        let merge_end = overlapping_keys
+            .iter()
+            .filter_map(|start| {
+                self.buffer
+                    .get(start)
+                    .and_then(|existing| start.checked_add(existing.len() as u64))
+            })
+            .max()
+            .unwrap_or(end)
+            .max(end);
+
+        let merged_len = usize::try_from(merge_end - merge_start)
+            .map_err(|_| Aria2Error::InvalidArgument("buffered write range is too large".into()))?;
+        let mut merged = BytesMut::zeroed(merged_len);
+
+        for start in &overlapping_keys {
+            let existing = self
+                .buffer
+                .get(start)
+                .expect("buffered range disappeared during merge");
+            let relative =
+                usize::try_from(*start - merge_start).expect("buffered range offset fits in usize");
+            merged[relative..relative + existing.len()].copy_from_slice(existing);
         }
+
+        let relative =
+            usize::try_from(offset - merge_start).expect("buffered range offset fits in usize");
+        merged[relative..relative + data.len()].copy_from_slice(&data);
+
+        for start in overlapping_keys {
+            let existing = self
+                .buffer
+                .remove(&start)
+                .expect("buffered range disappeared during merge");
+            self.total_buffered -= existing.len();
+        }
+        self.buffer.insert(merge_start, merged.freeze());
+        self.total_buffered += merged_len;
+        Ok(())
     }
 
     fn should_flush(&self) -> bool {
@@ -101,7 +152,7 @@ impl SeekableDiskWriter for BatchedDiskWriter {
             return Ok(());
         }
 
-        self.append_buffered(offset, Bytes::copy_from_slice(data));
+        self.append_buffered(offset, Bytes::copy_from_slice(data))?;
 
         if self.should_flush() {
             self.flush().await?;
@@ -117,7 +168,7 @@ impl SeekableDiskWriter for BatchedDiskWriter {
             return Ok(());
         }
 
-        self.append_buffered(offset, data);
+        self.append_buffered(offset, data)?;
 
         if self.should_flush() {
             self.flush().await?;
@@ -226,6 +277,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_adjacent_writes_are_coalesced() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.bin");
+        let mut writer = BatchedDiskWriter::new(&path).with_threshold(1024 * 1024);
+
+        writer.write_at(100, b"world").await.unwrap();
+        writer.write_at(105, b"!").await.unwrap();
+        writer.write_at(94, b"hello ").await.unwrap();
+
+        assert_eq!(writer.buffered_count(), 1);
+        assert_eq!(writer.buffered_bytes(), 12);
+        writer.flush().await.unwrap();
+
+        let contents = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(&contents[94..106], b"hello world!");
+    }
+
+    #[tokio::test]
+    async fn test_overlapping_writes_use_last_write() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.bin");
+        let mut writer = BatchedDiskWriter::new(&path).with_threshold(1024 * 1024);
+
+        writer.write_at(0, b"abcdef").await.unwrap();
+        writer.write_at(2, b"XY").await.unwrap();
+
+        assert_eq!(writer.buffered_count(), 1);
+        assert_eq!(writer.buffered_bytes(), 6);
+        writer.flush().await.unwrap();
+
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abXYef");
+    }
+
+    #[tokio::test]
     async fn test_auto_flush_on_threshold() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("test.bin");
@@ -260,7 +345,7 @@ mod tests {
         writer.write_at(0, b"hello ").await.unwrap();
         writer.write_at(6, b"world").await.unwrap();
 
-        assert_eq!(writer.buffered_count(), 2);
+        assert_eq!(writer.buffered_count(), 1);
 
         writer.flush().await.unwrap();
         assert_eq!(writer.buffered_count(), 0);
