@@ -395,13 +395,20 @@ impl MetadataExchangeSession {
             }
         }
 
-        collector.assemble().ok_or_else(|| {
+        if collector.is_complete() {
+            collector
+                .into_bytes()
+                .ok_or(MetadataExchangeError::IncompleteMetadata {
+                    expected: metadata_size,
+                    received: 0,
+                })
+        } else {
             let received = (collector.progress() * metadata_size as f64) as u64;
-            MetadataExchangeError::IncompleteMetadata {
+            Err(MetadataExchangeError::IncompleteMetadata {
                 expected: metadata_size,
                 received,
-            }
-        })
+            })
+        }
     }
 
     async fn read_extension_message(

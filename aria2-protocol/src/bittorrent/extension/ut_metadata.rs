@@ -200,6 +200,22 @@ impl MetadataCollector {
         Some(result)
     }
 
+    /// Assemble metadata by consuming the collector and moving each piece.
+    ///
+    /// This avoids retaining all piece allocations after the complete
+    /// metadata buffer has been built, which keeps the peak temporary memory
+    /// close to one metadata-sized buffer instead of two.
+    pub fn into_bytes(self) -> Option<Vec<u8>> {
+        if self.collected.iter().any(Option::is_none) {
+            return None;
+        }
+        let mut result = Vec::with_capacity(self.total_size as usize);
+        for piece in self.collected {
+            result.extend(piece.expect("complete metadata must contain every piece"));
+        }
+        Some(result)
+    }
+
     pub fn progress(&self) -> f64 {
         let done = self.collected.iter().filter(|p| p.is_some()).count();
         done as f64 / self.collected.len() as f64
@@ -258,7 +274,7 @@ mod tests {
         collector.add_piece(1, &vec![0xCD; 1000]);
         assert!(collector.is_complete());
 
-        let assembled = collector.assemble().unwrap();
+        let assembled = collector.into_bytes().unwrap();
         assert_eq!(assembled.len(), 2000);
     }
 }
