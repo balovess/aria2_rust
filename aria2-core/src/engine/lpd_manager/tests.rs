@@ -106,7 +106,7 @@ fn test_lpd_receive_parses_bep14_announcement() {
     );
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, info_hash.to_lowercase());
+    assert_eq!(peer.info_hash.as_ref(), info_hash.to_lowercase());
     assert_eq!(peer.port, port);
     assert_eq!(peer.addr, sender_ip);
     assert!(peer.is_local, "10.x.x.x should be detected as local");
@@ -124,7 +124,7 @@ fn test_lpd_receive_parses_bep14_case_insensitive_hash() {
 
     let peer = result.unwrap();
     // Should be normalized to lowercase
-    assert_eq!(peer.info_hash, peer.info_hash.to_lowercase());
+    assert_eq!(peer.info_hash.as_ref(), peer.info_hash.to_lowercase());
     assert_eq!(peer.port, 6881);
 }
 
@@ -139,7 +139,7 @@ fn test_lpd_receive_parses_bep14_extra_whitespace() {
     assert!(result.is_some(), "Should handle extra whitespace");
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(peer.info_hash.as_ref(), "0123456789abcdef0123456789abcdef01234567");
     assert_eq!(peer.port, 6881);
 }
 
@@ -155,7 +155,7 @@ fn test_lpd_receive_parses_bep14_unordered_headers() {
 
     let peer = result.unwrap();
     assert_eq!(peer.port, 6999);
-    assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(peer.info_hash.as_ref(), "0123456789abcdef0123456789abcdef01234567");
 }
 
 // =========================================================================
@@ -177,7 +177,7 @@ fn test_lpd_receive_parses_legacy_format() {
     );
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(peer.info_hash.as_ref(), "0123456789abcdef0123456789abcdef01234567");
     assert_eq!(peer.port, 6881);
 }
 
@@ -369,7 +369,7 @@ fn test_lpd_peer_creation() {
         IpAddr::V4(Ipv4Addr::LOCALHOST),
     );
 
-    assert_eq!(peer.info_hash, "abc123def456abc123def456abc123def456abcd");
+    assert_eq!(peer.info_hash.as_ref(), "abc123def456abc123def456abc123def456abcd");
     assert_eq!(peer.port, 6881);
     assert_eq!(peer.addr, IpAddr::V4(Ipv4Addr::LOCALHOST));
     assert!(peer.is_local, "127.0.0.1 should be detected as local");

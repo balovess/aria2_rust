@@ -49,12 +49,12 @@ impl DownloadContext {
     pub fn get_piece_hash(&self, index: usize) -> &str {
         self.piece_hashes
             .get(index)
-            .map(|s| s.as_str())
+            .map(|s| &**s)
             .unwrap_or(EMPTY_STRING)
     }
 
     /// Return a reference to all piece hashes.
-    pub fn get_piece_hashes(&self) -> &[String] {
+    pub fn get_piece_hashes(&self) -> &[Box<str>] {
         &self.piece_hashes
     }
 
@@ -66,9 +66,13 @@ impl DownloadContext {
     /// Set piece hashes and their algorithm.
     ///
     /// Replaces any existing piece hashes.
-    pub fn set_piece_hashes(&mut self, hash_type: String, hashes: Vec<String>) {
+    pub fn set_piece_hashes<I, S>(&mut self, hash_type: String, hashes: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Box<str>>,
+    {
         self.piece_hash_type = hash_type;
-        self.piece_hashes = hashes;
+        self.piece_hashes = hashes.into_iter().map(Into::into).collect();
         debug!(
             hash_type = %self.piece_hash_type,
             count = self.piece_hashes.len(),

@@ -833,7 +833,7 @@ mod tests {
                 .active_hashes
                 .read()
                 .await
-                .contains(&meta.info_hash.as_hex()),
+                .contains(meta.info_hash.as_hex().as_str()),
             "LPD must register a public torrent even when no peer is discovered"
         );
     }

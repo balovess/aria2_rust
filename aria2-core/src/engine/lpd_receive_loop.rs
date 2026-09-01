@@ -102,8 +102,8 @@ impl LpdReceiveLoop {
     /// already in use, multicast unavailable in this environment).
     pub async fn start(
         &mut self,
-        peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
-        active_hashes: Arc<RwLock<HashSet<String>>>,
+        peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>>,
+        active_hashes: Arc<RwLock<HashSet<Arc<str>>>>,
     ) -> Result<(), String> {
         self.start_with_config(peers, active_hashes, constants::LPD_PORT, None)
             .await
@@ -112,8 +112,8 @@ impl LpdReceiveLoop {
     /// Start the loop on a configured BEP 14 port and multicast interface.
     pub async fn start_with_config(
         &mut self,
-        peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
-        active_hashes: Arc<RwLock<HashSet<String>>>,
+        peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>>,
+        active_hashes: Arc<RwLock<HashSet<Arc<str>>>>,
         listen_port: u16,
         interface: Option<Ipv4Addr>,
     ) -> Result<(), String> {
@@ -404,8 +404,8 @@ fn create_lpd_socket_with_config(
 /// `try_recv_from` before updating the registry.
 async fn run_receive_loop(
     socket: tokio::net::UdpSocket,
-    peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
-    active_hashes: Arc<RwLock<HashSet<String>>>,
+    peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>>,
+    active_hashes: Arc<RwLock<HashSet<Arc<str>>>>,
     cancel_token: CancellationToken,
 ) {
     let mut buf = [0u8; LPD_BUFFER_SIZE];
@@ -488,8 +488,8 @@ async fn run_receive_loop(
 /// in `LpdManager::register_torrent()` — private hashes are never
 /// added to `active_hashes`, so they are implicitly filtered here.
 async fn update_peer_registry(
-    peers: &Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
-    active_hashes: &Arc<RwLock<HashSet<String>>>,
+    peers: &Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>>,
+    active_hashes: &Arc<RwLock<HashSet<Arc<str>>>>,
     new_peers: Vec<LpdPeer>,
 ) {
     let active = active_hashes.read().await;
@@ -498,7 +498,11 @@ async fn update_peer_registry(
     // C++: `auto& dctx = reg->getDownloadContext(m->infoHash); if (!dctx) continue;`
     let relevant_peers: Vec<LpdPeer> = new_peers
         .into_iter()
-        .filter(|p| active.contains(&p.info_hash))
+        .filter_map(|mut peer| {
+            let shared_hash = active.get(peer.info_hash.as_ref())?.clone();
+            peer.info_hash = shared_hash;
+            Some(peer)
+        })
         .collect();
 
     drop(active); // Release read lock before acquiring write lock
@@ -584,14 +588,14 @@ mod tests {
     /// Test that update_peer_registry filters unknown info hashes.
     #[tokio::test]
     async fn test_update_peer_registry_filters_unknown_hashes() {
-        let peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>> =
+        let peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let active_hashes: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
+        let active_hashes: Arc<RwLock<HashSet<Arc<str>>>> = Arc::new(RwLock::new(HashSet::new()));
 
         // Register only one hash
         {
             let mut active = active_hashes.write().await;
-            active.insert("0123456789abcdef0123456789abcdef01234567".to_string());
+            active.insert(Arc::from("0123456789abcdef0123456789abcdef01234567"));
         }
 
         // Create peers: one known hash, one unknown hash
@@ -625,14 +629,14 @@ mod tests {
     /// Test that update_peer_registry respects MAX_PEERS_PER_HASH.
     #[tokio::test]
     async fn test_update_peer_registry_max_peers() {
-        let peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>> =
+        let peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let active_hashes: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
+        let active_hashes: Arc<RwLock<HashSet<Arc<str>>>> = Arc::new(RwLock::new(HashSet::new()));
 
         let info_hash = "0123456789abcdef0123456789abcdef01234567";
         {
             let mut active = active_hashes.write().await;
-            active.insert(info_hash.to_string());
+            active.insert(Arc::from(info_hash));
         }
 
         // Add more peers than MAX_PEERS_PER_HASH
@@ -663,9 +667,9 @@ mod tests {
         let mut recv_loop = LpdReceiveLoop::new();
         assert!(!recv_loop.is_running(), "Should not be running initially");
 
-        let peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>> =
+        let peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let active_hashes: Arc<RwLock<HashSet<String>>> = Arc::new(RwLock::new(HashSet::new()));
+        let active_hashes: Arc<RwLock<HashSet<Arc<str>>>> = Arc::new(RwLock::new(HashSet::new()));
 
         // Try to start. May fail in restricted environments.
         match recv_loop.start(peers, active_hashes).await {

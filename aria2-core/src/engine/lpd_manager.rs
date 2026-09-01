@@ -71,7 +71,7 @@ pub const MAX_PEERS_PER_HASH: usize = 50;
 #[derive(Debug, Clone)]
 pub struct LpdPeer {
     /// The torrent info hash this peer is sharing
-    pub info_hash: String,
+    pub info_hash: Arc<str>,
     /// The peer's listen port
     pub port: u16,
     /// The peer's IP address (from recv_from)
@@ -85,7 +85,7 @@ pub struct LpdPeer {
 
 impl LpdPeer {
     /// Create a new LpdPeer
-    pub fn new(info_hash: impl Into<String>, port: u16, addr: IpAddr) -> Self {
+    pub fn new(info_hash: impl Into<Arc<str>>, port: u16, addr: IpAddr) -> Self {
         Self {
             info_hash: info_hash.into(),
             port,
@@ -139,11 +139,11 @@ pub struct LpdManager {
     /// The underlying UDP announcer
     announcer: Arc<LpdAnnouncer>,
     /// Registry of discovered peers keyed by info_hash
-    peers: Arc<RwLock<HashMap<String, HashSet<LpdPeer>>>>,
+    peers: Arc<RwLock<HashMap<Arc<str>, HashSet<LpdPeer>>>>,
     /// Track which info hashes we're currently announcing
-    pub active_hashes: Arc<RwLock<HashSet<String>>>,
+    pub active_hashes: Arc<RwLock<HashSet<Arc<str>>>>,
     /// TCP listen port to advertise for each registered torrent.
-    announce_ports: Arc<RwLock<HashMap<String, u16>>>,
+    announce_ports: Arc<RwLock<HashMap<Arc<str>, u16>>>,
     /// Handle to the background announce task
     announce_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Background receive loop for continuous LPD announcement processing
@@ -293,14 +293,15 @@ impl LpdManager {
         }
 
         let mut active = self.active_hashes.write().await;
-        active.insert(info_hash.to_string());
+        let shared_hash: Arc<str> = Arc::from(info_hash);
+        active.insert(Arc::clone(&shared_hash));
 
         let mut announce_ports = self.announce_ports.write().await;
-        announce_ports.insert(info_hash.to_string(), port);
+        announce_ports.insert(Arc::clone(&shared_hash), port);
 
         // Ensure peer set exists
         let mut peers_map = self.peers.write().await;
-        peers_map.entry(info_hash.to_string()).or_default();
+        peers_map.entry(shared_hash).or_default();
 
         info!(info_hash = %&info_hash[..8], "Torrent registered for LPD");
         Ok(())
@@ -398,7 +399,7 @@ impl LpdManager {
             loop {
                 ticker.tick().await;
 
-                let torrents: Vec<(String, u16)> = {
+                let torrents: Vec<(Arc<str>, u16)> = {
                     let active = active_hashes.read().await;
                     let ports = announce_ports.read().await;
                     active
@@ -555,9 +556,14 @@ impl LpdManager {
     /// Update peer registry with newly discovered peers
     pub async fn update_peers(&self, info_hash: &str, new_peers: Vec<LpdPeer>) {
         let mut peers_map = self.peers.write().await;
-        let entry = peers_map.entry(info_hash.to_string()).or_default();
+        let shared_hash: Arc<str> = Arc::from(info_hash);
+        let entry = peers_map
+            .entry(Arc::clone(&shared_hash))
+            .or_default();
 
         for peer in new_peers {
+            let mut peer = peer;
+            peer.info_hash = Arc::clone(&shared_hash);
             // Limit total peers per hash
             if entry.len() >= MAX_PEERS_PER_HASH {
                 // Remove oldest expired peer first

@@ -235,7 +235,10 @@ impl DownloadCommand {
                     .get_download_context()
                     .map(|ctx| {
                         (
-                            ctx.get_piece_hashes().to_vec(),
+                            ctx.get_piece_hashes()
+                                .iter()
+                                .map(|hash| hash.to_string())
+                                .collect(),
                             ctx.get_piece_length() as u64,
                             ctx.get_piece_hash_type().to_string(),
                         )
