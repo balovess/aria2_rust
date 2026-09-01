@@ -125,8 +125,6 @@ pub struct BtDownloadCommand {
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
-    /// Public catalog entries actually appended to this command's announce list.
-    pub(crate) public_tracker_urls: HashSet<String>,
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
     pub(crate) multi_file_layout: Option<MultiFileLayout>,
 

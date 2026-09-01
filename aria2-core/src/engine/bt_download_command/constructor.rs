@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -543,7 +542,6 @@ impl BtDownloadCommand {
             ),
             dht_engine: None,
             public_trackers: None,
-            public_tracker_urls: HashSet::new(),
             choking_algo,
             multi_file_layout,
             file_allocation: options

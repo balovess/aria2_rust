@@ -210,6 +210,7 @@ impl BtDownloadCommand {
             ClientTlsConfig::from_download_options(group.options())
         };
         let public_tracker_catalog = self.public_trackers.clone();
+        let mut public_tracker_urls = HashSet::new();
         if enable_public_trackers && let Some(catalog) = public_tracker_catalog.as_ref() {
             let public_entries = catalog.available_snapshot().await;
             let existing_urls: HashSet<String> = tracker_tiers
@@ -227,7 +228,7 @@ impl BtDownloadCommand {
                 .take(MAX_PUBLIC_TRACKERS_TO_TRY)
                 .collect();
             for url in public_urls {
-                self.public_tracker_urls.insert(url.clone());
+                public_tracker_urls.insert(url.clone());
                 tracker_tiers.push(vec![url]);
             }
         }
@@ -243,7 +244,7 @@ impl BtDownloadCommand {
         announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
         announcer.set_announce_options(force_encryption, external_ip);
         if let Some(catalog) = public_tracker_catalog {
-            announcer.set_public_tracker_catalog(catalog, self.public_tracker_urls.clone());
+            announcer.set_public_tracker_catalog(catalog, public_tracker_urls);
         }
 
         // Set up UDP client for UDP tracker support
