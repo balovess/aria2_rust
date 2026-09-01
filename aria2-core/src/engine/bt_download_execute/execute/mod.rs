@@ -102,8 +102,9 @@ pub(super) async fn verify_piece_hash_async(
                 let v2_ok = match v2_hashes.first().and_then(Option::as_ref) {
                     Some(expected) => v2_content_lengths
                         .first()
-                        .and_then(Option::as_ref)
-                        .and_then(|length| data.get(..*length))
+                        .copied()
+                        .filter(|length| *length != 0)
+                        .and_then(|length| data.get(..length as usize))
                         .and_then(|content| {
                             aria2_protocol::bittorrent::torrent::merkle::piece_root(
                                 content,
@@ -399,7 +400,8 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        let (meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
+        let (mut meta, piece_length, total_size, num_pieces) =
+            self.prepare_environment().await?;
         let network_info_hash = meta.network_info_hash();
         self.group
             .recover()
@@ -945,7 +947,7 @@ impl Command for BtDownloadCommand {
         let piece_result = self
             .download_pieces_loop(
                 &mut active_connections,
-                &meta,
+                &mut meta,
                 piece_length,
                 total_size,
                 num_pieces,

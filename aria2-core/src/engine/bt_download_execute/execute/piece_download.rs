@@ -525,7 +525,7 @@ impl BtDownloadCommand {
     pub(super) async fn download_pieces_loop(
         &mut self,
         active_connections: &mut Vec<BtPeerConn>,
-        meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        meta: &mut aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
@@ -599,16 +599,22 @@ impl BtDownloadCommand {
 
         let piece_selector = BtPieceSelector::new(num_pieces);
 
+        // PieceManager owns the hashes needed during the download loop. The
+        // parsed piece-layer map is only an input to its construction, so
+        // release that second representation before entering the long-lived
+        // scheduling loop.
+        let piece_layers = std::mem::take(&mut meta.piece_layers);
+        let sha1_hashes = std::mem::take(&mut meta.info.pieces);
+        let has_v1_piece_hashes = !sha1_hashes.is_empty();
+        let v2_files = std::mem::take(&mut meta.info.v2_files);
         let mut piece_manager = if meta.info.meta_version == Some(2) {
-            let files = meta
-                .info
-                .v2_files
+            let files = v2_files
                 .as_deref()
                 .unwrap_or_default()
                 .iter()
                 .map(|file| {
                     let hashes = file.pieces_root.map_or_else(Vec::new, |root| {
-                        meta.piece_layers.get(&root).cloned().unwrap_or_else(|| {
+                        piece_layers.get(&root).cloned().unwrap_or_else(|| {
                             if file.length <= piece_length as u64 {
                                 vec![root]
                             } else {
@@ -619,7 +625,7 @@ impl BtDownloadCommand {
                     (file.length, hashes)
                 })
                 .collect();
-            if meta.info.pieces.is_empty() {
+            if sha1_hashes.is_empty() {
                 crate::engine::bt_piece::PieceManager::new_v2(
                     num_pieces,
                     piece_length,
@@ -627,22 +633,24 @@ impl BtDownloadCommand {
                     files,
                 )
             } else {
-                crate::engine::bt_piece::PieceManager::new_hybrid(
+                crate::engine::bt_piece::PieceManager::new_hybrid_owned(
                     num_pieces,
                     piece_length,
                     total_size,
-                    &meta.info.pieces,
+                    sha1_hashes,
                     files,
                 )
             }
         } else {
-            crate::engine::bt_piece::PieceManager::new(
+            crate::engine::bt_piece::PieceManager::new_owned(
                 num_pieces,
                 piece_length,
                 total_size,
-                &meta.info.pieces,
+                sha1_hashes,
             )
         };
+        drop(piece_layers);
+        drop(v2_files);
 
         let mut piece_picker = crate::engine::bt_piece::PiecePicker::new(num_pieces);
         if meta.info.meta_version == Some(2) {
@@ -1085,7 +1093,7 @@ impl BtDownloadCommand {
             tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
 
             let actual_piece_len =
-                if meta.info.meta_version == Some(2) && meta.info.pieces.is_empty() {
+                if meta.info.meta_version == Some(2) && !has_v1_piece_hashes {
                     self.multi_file_layout
                         .as_ref()
                         .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
@@ -1304,7 +1312,7 @@ impl BtDownloadCommand {
                         }
 
                         let accounted_piece_len = if meta.info.meta_version == Some(2)
-                            && !meta.info.pieces.is_empty()
+                            && has_v1_piece_hashes
                         {
                             self.multi_file_layout
                                 .as_ref()

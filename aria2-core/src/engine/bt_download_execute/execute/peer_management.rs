@@ -309,7 +309,7 @@ impl BtDownloadCommand {
             && let Some(lpd) = self.lpd_manager.as_ref().cloned()
         {
             let info_hash_hex = hex::encode(*info_hash_raw);
-            if self.lpd_registered_info_hash.as_deref() != Some(info_hash_hex.as_str()) {
+            if self.lpd_registered_info_hash.as_ref() != Some(info_hash_raw) {
                 let registration = if self.listen_port > 0 {
                     lpd.register_torrent_with_port(&info_hash_hex, false, self.listen_port)
                         .await
@@ -324,7 +324,7 @@ impl BtDownloadCommand {
                         "LPD torrent registration failed: {error}"
                     )))
                 })?;
-                self.lpd_registered_info_hash = Some(info_hash_hex.clone());
+                self.lpd_registered_info_hash = Some(*info_hash_raw);
             }
             lpd.ensure_runtime_started().await;
             if self.listen_port > 0

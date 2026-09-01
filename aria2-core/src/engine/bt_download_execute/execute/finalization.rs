@@ -78,7 +78,8 @@ impl BtDownloadCommand {
         if let (Some(manager), Some(info_hash)) =
             (&self.lpd_manager, self.lpd_registered_info_hash.take())
         {
-            manager.unregister_torrent(&info_hash).await;
+            let info_hash_hex = hex::encode(info_hash);
+            manager.unregister_torrent(&info_hash_hex).await;
         }
 
         if let Some(ref hooks) = self.hook_manager {

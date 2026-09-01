@@ -15,7 +15,9 @@ pub enum PieceVerification {
         piece_length: u32,
         sha1: Vec<[u8; 20]>,
         v2_hashes: Vec<Option<[u8; 32]>>,
-        v2_content_lengths: Vec<Option<usize>>,
+        /// Content lengths indexed by piece; zero means no v2 hash/content.
+        /// Valid torrent file lengths are positive and bounded by piece_length.
+        v2_content_lengths: Vec<u32>,
     },
 }
 
@@ -31,13 +33,27 @@ pub struct PieceManager {
 impl PieceManager {
     pub fn new(num_pieces: u32, piece_length: u32, total_size: u64, hashes: &[[u8; 20]]) -> Self {
         assert_eq!(num_pieces as usize, hashes.len());
+        Self::new_owned(num_pieces, piece_length, total_size, hashes.to_vec())
+    }
+
+    /// Construct a manager by taking ownership of v1 piece hashes.
+    ///
+    /// The owned form lets torrent execution transfer parsed metadata directly
+    /// instead of retaining a second copy for the download lifetime.
+    pub fn new_owned(
+        num_pieces: u32,
+        piece_length: u32,
+        total_size: u64,
+        hashes: Vec<[u8; 20]>,
+    ) -> Self {
+        assert_eq!(num_pieces as usize, hashes.len());
         Self {
             num_pieces,
             piece_length,
             total_size,
             completed: Bitfield::new(num_pieces as usize),
             total_downloaded: 0,
-            verification: PieceVerification::Sha1(hashes.to_vec()),
+            verification: PieceVerification::Sha1(hashes),
         }
     }
 
@@ -69,6 +85,24 @@ impl PieceManager {
         files: Vec<(u64, Vec<[u8; 32]>)>,
     ) -> Self {
         assert_eq!(num_pieces as usize, sha1.len());
+        Self::new_hybrid_owned(
+            num_pieces,
+            piece_length,
+            total_size,
+            sha1.to_vec(),
+            files,
+        )
+    }
+
+    /// Construct a hybrid manager by taking ownership of v1 piece hashes.
+    pub fn new_hybrid_owned(
+        num_pieces: u32,
+        piece_length: u32,
+        total_size: u64,
+        sha1: Vec<[u8; 20]>,
+        files: Vec<(u64, Vec<[u8; 32]>)>,
+    ) -> Self {
+        assert_eq!(num_pieces as usize, sha1.len());
         assert!(piece_length >= aria2_protocol::bittorrent::torrent::merkle::BLOCK_SIZE as u32);
         let (v2_hashes, v2_content_lengths) = Self::build_v2_hashes(piece_length, files);
         Self {
@@ -79,7 +113,7 @@ impl PieceManager {
             total_downloaded: 0,
             verification: PieceVerification::Hybrid {
                 piece_length,
-                sha1: sha1.to_vec(),
+                sha1,
                 v2_hashes,
                 v2_content_lengths,
             },
@@ -89,7 +123,7 @@ impl PieceManager {
     fn build_v2_hashes(
         piece_length: u32,
         files: Vec<(u64, Vec<[u8; 32]>)>,
-    ) -> (Vec<Option<[u8; 32]>>, Vec<Option<usize>>) {
+    ) -> (Vec<Option<[u8; 32]>>, Vec<u32>) {
         let mut result = Vec::new();
         let mut content_lengths = Vec::new();
         let mut address = 0u64;
@@ -99,13 +133,15 @@ impl PieceManager {
             }
             let start_piece = address.div_ceil(piece_length as u64) as usize;
             result.resize(result.len().max(start_piece), None);
-            content_lengths.resize(content_lengths.len().max(start_piece), None);
+            content_lengths.resize(content_lengths.len().max(start_piece), 0);
             let count = length.div_ceil(piece_length as u64) as usize;
             result.extend(hashes.into_iter().take(count).map(Some));
             content_lengths.extend((0..count).map(|index| {
-                Some(
-                    (length - index as u64 * piece_length as u64).min(piece_length as u64) as usize,
+                u32::try_from(
+                    (length - index as u64 * piece_length as u64)
+                        .min(piece_length as u64),
                 )
+                    .expect("v2 piece content length must fit in u32")
             }));
             address = start_piece as u64 * piece_length as u64 + length;
         }
@@ -174,13 +210,13 @@ impl PieceManager {
                 }
                 match v2_hashes.get(index as usize).and_then(Option::as_ref) {
                     Some(expected) => {
-                        let Some(content_length) = v2_content_lengths
-                            .get(index as usize)
-                            .and_then(Option::as_ref)
-                        else {
+                        let Some(&content_length) = v2_content_lengths.get(index as usize) else {
                             return false;
                         };
-                        let Some(content) = data.get(..*content_length) else {
+                        if content_length == 0 {
+                            return false;
+                        }
+                        let Some(content) = data.get(..content_length as usize) else {
                             return false;
                         };
                         aria2_protocol::bittorrent::torrent::merkle::piece_root(
@@ -224,7 +260,7 @@ impl PieceManager {
                     sha1: vec![*sha1_hash],
                     v2_hashes: vec![v2_hashes.get(index as usize).copied().flatten()],
                     v2_content_lengths: vec![
-                        v2_content_lengths.get(index as usize).copied().flatten(),
+                        v2_content_lengths.get(index as usize).copied().unwrap_or(0),
                     ],
                 }),
         }

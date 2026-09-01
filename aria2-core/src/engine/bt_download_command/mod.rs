@@ -162,7 +162,7 @@ pub struct BtDownloadCommand {
     /// LPD LAN peer discovery manager
     pub(crate) lpd_manager: Option<Arc<LpdManager>>,
     /// Info-hash registered in the shared LPD manager for this command.
-    pub(crate) lpd_registered_info_hash: Option<String>,
+    pub(crate) lpd_registered_info_hash: Option<[u8; 20]>,
     /// Post-download handler manager
     pub(crate) hook_manager: Option<Arc<crate::engine::hook_manager::HookManager>>,
 
@@ -285,7 +285,8 @@ impl BtDownloadCommand {
         if let (Some(manager), Some(info_hash)) =
             (&self.lpd_manager, self.lpd_registered_info_hash.take())
         {
-            manager.unregister_torrent(&info_hash).await;
+            let info_hash_hex = hex::encode(info_hash);
+            manager.unregister_torrent(&info_hash_hex).await;
         }
         if let Ok(meta) =
             aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
