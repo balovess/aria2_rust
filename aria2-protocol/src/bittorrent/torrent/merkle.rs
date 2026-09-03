@@ -63,7 +63,9 @@ pub fn piece_root(data: &[u8], piece_length: usize) -> Option<[u8; 32]> {
 fn reduce_tree(mut hashes: Vec<[u8; 32]>) -> [u8; 32] {
     while hashes.len() > 1 {
         hashes = hashes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| parent_hash(&pair[0], &pair[1]))
             .collect();
     }

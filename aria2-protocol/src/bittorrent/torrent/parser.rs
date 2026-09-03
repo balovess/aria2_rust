@@ -379,7 +379,9 @@ impl TorrentMeta {
                 return Err("piece layer length must be a multiple of 32 bytes".to_string());
             }
             let hashes = layer
-                .chunks_exact(32)
+                .as_chunks::<32>()
+                .0
+                .iter()
                 .map(|chunk| {
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(chunk);

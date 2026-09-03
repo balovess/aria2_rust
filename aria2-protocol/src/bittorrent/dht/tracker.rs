@@ -153,7 +153,7 @@ impl TransactionTracker {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
 
         inner.transactions.insert(
-            key.clone(),
+            key,
             PendingTransaction {
                 query_type,
                 target_addr,

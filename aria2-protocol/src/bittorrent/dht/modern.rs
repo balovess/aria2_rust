@@ -158,7 +158,9 @@ impl SampleInfoHashesResponse {
             return Err("sample_infohashes samples must be 20-byte hashes".to_string());
         }
         let samples: Vec<[u8; 20]> = raw_samples
-            .chunks_exact(20)
+            .as_chunks::<20>()
+            .0
+            .iter()
             .map(|chunk| {
                 let mut hash = [0u8; 20];
                 hash.copy_from_slice(chunk);

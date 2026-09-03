@@ -61,6 +61,7 @@ jobs:
         with:
           key: test-${{ matrix.os }}
       - name: Run tests
+        shell: bash
         run: |
           if [ "${{ matrix.os }}" = "aarch64-unknown-linux-gnu" ]; then
             cargo check --workspace --all-targets --target "${{ matrix.os }}"

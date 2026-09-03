@@ -660,6 +660,7 @@ fn scoop_cache_dir() -> Option<String> {
     None
 }
 
+#[cfg(any(windows, test))]
 fn scoop_cache_dir_from_env(
     cache: Option<std::ffi::OsString>,
     scoop_root: Option<std::ffi::OsString>,
@@ -688,9 +689,13 @@ mod tests {
 
     #[test]
     fn scoop_cache_falls_back_to_scoop_root() {
+        let expected = std::path::PathBuf::from(r"D:\scoop")
+            .join("cache")
+            .to_string_lossy()
+            .into_owned();
         assert_eq!(
             scoop_cache_dir_from_env(None, Some(OsString::from(r"D:\scoop"))),
-            Some(r"D:\scoop\cache".to_string())
+            Some(expected)
         );
     }
 
