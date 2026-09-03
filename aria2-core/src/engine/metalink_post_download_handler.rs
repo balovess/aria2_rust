@@ -420,12 +420,12 @@ mod tests {
         assert_eq!(groups[0].recover().gid(), GroupId::new(100));
         assert_eq!(groups[1].recover().gid(), GroupId::new(101));
         assert_eq!(
-            groups[0].recover().uris(),
-            &["https://example.test/payload.torrent".to_string()]
+            groups[0].recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["https://example.test/payload.torrent"]
         );
         assert_eq!(
-            groups[1].recover().uris(),
-            &["bt://0000000000000064".to_string()]
+            groups[1].recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["bt://0000000000000064"]
         );
         assert!(!groups[1].recover().is_dependency_resolved());
 

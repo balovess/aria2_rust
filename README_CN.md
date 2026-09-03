@@ -88,6 +88,13 @@ cargo run --release -- --help
 cargo run --release -- --version
 ```
 
+### 包管理器状态
+
+Homebrew 和 Scoop 目前只有维护中的分发草案，尚未建立稳定的 Homebrew
+tap；两者也不是当前优先级。需要可靠安装时，请使用平台安装脚本或 GitHub
+Release 中的二进制文件。不要将仓库内的 Homebrew formula 或 Scoop manifest
+视为正式兼容性保证。
+
 ## 初始化持久化目录
 
 运行 `aria2c --init`，可选择系统目录、当前目录、程序目录、便携模式或自定义目录。

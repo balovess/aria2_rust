@@ -34,6 +34,8 @@ jobs:
         include:
           - os: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+          - os: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04
           - os: x86_64-pc-windows-msvc
             runner: windows-latest
           - os: aarch64-apple-darwin
@@ -41,8 +43,27 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.os }}
+      - name: Install Linux ARM64 cross compiler
+        if: matrix.os == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install --yes gcc-aarch64-linux-gnu
+      - name: Configure Linux ARM64 linker
+        if: matrix.os == 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.cargo"
+          cat >> "$HOME/.cargo/config.toml" <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.os }}
       - name: Run tests
-        run: cargo test --workspace -j 1 --lib --tests -- --test-threads=1
+        run: |
+          if [ "${{ matrix.os }}" = "aarch64-unknown-linux-gnu" ]; then
+            cargo check --workspace --all-targets --target "${{ matrix.os }}"
+          else
+            cargo test --workspace -j 1 --lib --tests -- --test-threads=1
+          fi

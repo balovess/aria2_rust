@@ -334,7 +334,7 @@ impl ServerStat {
     /// };
     ///
     /// let stat = ServerStat::from_snapshot(&snapshot);
-    /// assert_eq!(stat.host, "restored.mirror.com");
+    /// assert_eq!(stat.host.as_ref(), "restored.mirror.com");
     /// assert_eq!(stat.get_counter(), 10);
     /// ```
     pub fn from_snapshot(snapshot: &ServerStatSnapshot) -> Self {

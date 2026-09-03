@@ -513,8 +513,8 @@ async fn test_metalink_torrent_graph_is_rebuilt_after_session_load() {
         .find(|group| group.recover().gid() == GroupId::new(0x111))
         .expect("metadata prerequisite should be restored");
     assert_eq!(
-        metadata.recover().uris(),
-        &["https://example.test/payload.torrent".to_string()]
+        metadata.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+        ["https://example.test/payload.torrent"]
     );
     assert_eq!(
         metadata.recover().belongs_to_gid(),

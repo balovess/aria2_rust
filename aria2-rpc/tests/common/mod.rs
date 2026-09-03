@@ -349,6 +349,9 @@ impl RpcBackend for FakeBackend {
 
     async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
         match request {
+            BackendRequest::UpdateBrowserContext { .. } | BackendRequest::ClearBrowserContext => {
+                Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+            }
             BackendRequest::AddUri {
                 uris,
                 options,

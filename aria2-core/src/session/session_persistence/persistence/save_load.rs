@@ -524,7 +524,7 @@ fn restore_metalink_graphs(
 
         let metadata_group = if let Some(existing) = groups.iter().find(|group| {
             let group = group.recover();
-            group.gid() == metadata_gid && group.uris().iter().any(|uri| uri == info.uri())
+            group.gid() == metadata_gid && group.uris().iter().any(|uri| uri.as_ref() == info.uri())
         }) {
             Arc::clone(existing)
         } else if existing_gids.contains(&metadata_gid)

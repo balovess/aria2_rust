@@ -829,7 +829,10 @@ mod tests {
             .iter()
             .find(|command| command.output_path().ends_with("file2"))
             .expect("file2 should remain independent");
-        assert_eq!(independent.group().uris(), &["http://file2p1"]);
+        assert_eq!(
+            independent.group().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["http://file2p1"]
+        );
     }
 
     #[test]
@@ -921,11 +924,8 @@ mod tests {
         let group = groups[0].recover();
         assert_eq!(group.output_name().as_deref(), Some("second.bin"));
         assert_eq!(
-            group.uris(),
-            &[
-                "https://us.example/second".to_string(),
-                "https://de.example/second".to_string()
-            ]
+            group.uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["https://us.example/second", "https://de.example/second"]
         );
     }
 
@@ -980,8 +980,8 @@ mod tests {
             .expect("shared torrent metaurl should create one graph");
         assert_eq!(graphs.len(), 1);
         assert_eq!(
-            graphs[0].metadata.recover().uris(),
-            &["https://example.test/shared.torrent"]
+            graphs[0].metadata.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["https://example.test/shared.torrent"]
         );
         assert_eq!(
             graphs[0].payload.recover().gid(),
@@ -1011,10 +1011,25 @@ mod tests {
             Some("file2")
         );
         assert_eq!(graphs.len(), 1);
-        assert_eq!(graphs[0].metadata.recover().uris(), &["http://torrent"]);
         assert_eq!(
-            graphs[0].payload.recover().uris(),
-            &["bt://0000000000000002"]
+            graphs[0]
+                .metadata
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
+            ["http://torrent"]
+        );
+        assert_eq!(
+            graphs[0]
+                .payload
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
+            ["bt://0000000000000002"]
         );
 
         use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
@@ -1202,8 +1217,8 @@ mod tests {
             crate::request::request_group::GroupId::new(92)
         );
         assert_eq!(
-            graphs[0].payload.recover().uris(),
-            &["bt://000000000000005c"]
+            graphs[0].payload.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["bt://000000000000005c"]
         );
     }
 
@@ -1222,8 +1237,8 @@ mod tests {
 
         assert_eq!(graphs.len(), 1);
         assert_eq!(
-            graphs[0].metadata.recover().uris(),
-            &["https://example.test/payload.torrent".to_string()]
+            graphs[0].metadata.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            ["https://example.test/payload.torrent"]
         );
     }
 
@@ -1252,7 +1267,7 @@ mod tests {
         assert_eq!(commands.len(), 1);
         assert_eq!(
             commands[0].group.read().unwrap().uris(),
-            Vec::<String>::new()
+            Vec::<Box<str>>::new()
         );
 
         let info = commands[0].file_info.as_ref().unwrap();

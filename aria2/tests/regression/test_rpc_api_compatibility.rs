@@ -1269,6 +1269,8 @@ async fn regression_list_methods_returns_feature_specific_methods() {
         "aria2.forceShutdown",
         "aria2.getGlobalStat",
         "aria2.saveSession",
+        "aria2.updateBrowserContext",
+        "aria2.clearBrowserContext",
         "system.multicall",
         "system.listMethods",
         "system.listNotifications",

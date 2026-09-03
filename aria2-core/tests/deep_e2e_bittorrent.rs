@@ -131,7 +131,7 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
     );
     {
         let child = children[0].recover();
-        assert_eq!(child.uris(), &[tracker_url.to_string()]);
+        assert_eq!(child.uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(), [tracker_url]);
         assert_eq!(child.get_bt_num_pieces(), 2);
         assert_eq!(child.get_bt_piece_length(), 512);
         assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));
@@ -1085,7 +1085,7 @@ async fn bt_lpd_register_announce_packet() {
     let parsed = parse_lpd_announcement(valid_msg, sender_ip);
     assert!(parsed.is_some(), "Valid BEP 14 LPD message should parse");
     let peer = parsed.unwrap();
-    assert_eq!(peer.info_hash, info_hex);
+    assert_eq!(peer.info_hash.as_ref(), info_hex);
     assert_eq!(peer.port, 6881);
     assert_eq!(peer.addr, sender_ip);
     assert!(peer.is_local, "10.x.x.x should be local");
