@@ -86,6 +86,21 @@ impl App {
                     !matches!(source, aria2_core::config::ConfigSource::Defaults)
                 });
 
+        // Scoop normally owns the download cache and may omit `dir` from its
+        // generated config. Preserve that integration when the option is
+        // otherwise still at the registry default; an explicit user setting
+        // must continue to win.
+        if conf
+            .global_option_source("dir")
+            .await
+            .is_some_and(|source| matches!(source, aria2_core::config::ConfigSource::Defaults))
+            && let Some(dir) = scoop_cache_dir()
+        {
+            conf.set_global_option("dir", OptionValue::Str(dir))
+                .await
+                .map_err(|e| format!("--dir: {}", e))?;
+        }
+
         // Helper macros: set option only if value is present and propagate the
         // registry's validation error back to the CLI entry point.
         macro_rules! set_str {
@@ -632,5 +647,55 @@ impl App {
     /// Get a boolean option value.
     pub(super) async fn get_opt_bool(&self, name: &str) -> Option<bool> {
         self.config.read().await.get_global_bool(name).await
+    }
+}
+
+#[cfg(windows)]
+fn scoop_cache_dir() -> Option<String> {
+    scoop_cache_dir_from_env(std::env::var_os("SCOOP_CACHE"), std::env::var_os("SCOOP"))
+}
+
+#[cfg(not(windows))]
+fn scoop_cache_dir() -> Option<String> {
+    None
+}
+
+fn scoop_cache_dir_from_env(
+    cache: Option<std::ffi::OsString>,
+    scoop_root: Option<std::ffi::OsString>,
+) -> Option<String> {
+    let cache = cache
+        .map(std::path::PathBuf::from)
+        .or_else(|| scoop_root.map(|root| std::path::PathBuf::from(root).join("cache")))?;
+    Some(cache.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoop_cache_dir_from_env;
+    use std::ffi::OsString;
+
+    #[test]
+    fn scoop_cache_prefers_explicit_cache_variable() {
+        assert_eq!(
+            scoop_cache_dir_from_env(
+                Some(OsString::from(r"D:\scoop-cache")),
+                Some(OsString::from(r"D:\scoop")),
+            ),
+            Some(r"D:\scoop-cache".to_string())
+        );
+    }
+
+    #[test]
+    fn scoop_cache_falls_back_to_scoop_root() {
+        assert_eq!(
+            scoop_cache_dir_from_env(None, Some(OsString::from(r"D:\scoop"))),
+            Some(r"D:\scoop\cache".to_string())
+        );
+    }
+
+    #[test]
+    fn scoop_cache_is_disabled_without_scoop_environment() {
+        assert_eq!(scoop_cache_dir_from_env(None, None), None);
     }
 }
