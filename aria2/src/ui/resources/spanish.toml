@@ -1,0 +1,13 @@
+title = "aria2c TUI"
+empty = "No hay descargas."
+footer = "↑/↓ Seleccionar  a Añadir  p Pausar/Reanudar  r Eliminar  d Detalles  / Filtrar  q Salir"
+add_prompt = "URL (Enter para añadir, Esc para cancelar)"
+filter_prompt = "Filtro (Enter para aplicar, Esc para cancelar)"
+filtered = "Filtro"
+details = "Detalles de la tarea"
+headers = ["GID", "Estado", "Progreso", "Velocidad", "Conexiones", "Entrada"]
+remote_headers = ["GID", "Estado", "Progreso", "Velocidad", "Entrada"]
+detail_labels = ["GID", "Estado", "Completado", "Velocidad de descarga", "Entrada"]
+statuses = ["en espera", "activo", "pausado", "error", "completado", "eliminado"]
+page = "Página {page}{next}  [/] Anterior/Siguiente  PgUp/PgDn Saltar"
+error = "Error RPC: {message} (reintentando)"

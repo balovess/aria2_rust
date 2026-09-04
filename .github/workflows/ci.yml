@@ -7,6 +7,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  feature-matrix:
+    name: Feature build (${{ matrix.name }})
+    if: github.ref != 'refs/heads/master'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimal
+            features: http
+          - name: standard
+            features: standard
+          - name: tui
+            features: tui
+          - name: full
+            features: full
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: feature-${{ matrix.name }}
+      - name: Check feature build
+        run: cargo check --package aria2 --no-default-features --features "${{ matrix.features }}"
+
   # ── Lint & format (fast, single platform) ─────────────────
   lint:
     name: Lint & Format

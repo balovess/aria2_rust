@@ -1,8 +1,8 @@
 name: Release
 
 on:
-  push:
-    branches: [master]
+  pull_request:
+    types: [closed]
 
 permissions:
   contents: write
@@ -14,16 +14,17 @@ concurrency:
 jobs:
   prepare:
     name: Prepare binary release
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'master'
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ github.sha }}
+      sha: ${{ github.event.pull_request.merge_commit_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
       - id: release
         shell: bash
@@ -98,37 +99,78 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
-      - name: Build release binary
-        run: cargo build --release --package aria2 --target ${{ matrix.target }}
-      - name: Package artifact (Linux/macOS)
+      - name: Build minimal release binary
+        run: cargo build --release --package aria2 --target ${{ matrix.target }} --no-default-features --features http
+      - name: Package minimal artifact (Linux/macOS)
         if: runner.os != 'Windows'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../${{ matrix.artifact }}.tar.gz aria2c${{ matrix.extension }}
-      - name: Package artifact (Windows)
+          tar czf ../../../${{ matrix.artifact }}-minimal.tar.gz aria2c${{ matrix.extension }}
+      - name: Package minimal artifact (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../${{ matrix.artifact }}.zip aria2c${{ matrix.extension }}
-      - name: Generate artifact checksum (Windows)
+          7z a ../../../${{ matrix.artifact }}-minimal.zip aria2c${{ matrix.extension }}
+      - name: Build standard release binary
+        run: cargo build --release --package aria2 --target ${{ matrix.target }} --no-default-features --features standard
+      - name: Package standard artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}-standard.tar.gz aria2c${{ matrix.extension }}
+      - name: Package standard artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.artifact }}-standard.zip aria2c${{ matrix.extension }}
+      - name: Build TUI release binary
+        run: cargo build --release --package aria2 --target ${{ matrix.target }} --no-default-features --features tui
+      - name: Package TUI artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}-tui.tar.gz aria2c${{ matrix.extension }}
+      - name: Package TUI artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.artifact }}-tui.zip aria2c${{ matrix.extension }}
+      - name: Build full release binary
+        run: cargo build --release --package aria2 --target ${{ matrix.target }} --no-default-features --features full
+      - name: Package full artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}-full.tar.gz aria2c${{ matrix.extension }}
+      - name: Package full artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          7z a ../../../${{ matrix.artifact }}-full.zip aria2c${{ matrix.extension }}
+      - name: Generate Windows artifact checksums
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $artifact = "${{ matrix.artifact }}.zip"
-          $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
-      - name: Generate artifact checksum (Linux/macOS)
+          foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-tui.zip", "${{ matrix.artifact }}-full.zip")) {
+            $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
+          }
+      - name: Generate Linux/macOS artifact checksums
         if: runner.os != 'Windows'
         shell: pwsh
         run: |
-          $artifact = "${{ matrix.artifact }}.tar.gz"
-          $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
+          foreach ($artifact in @("${{ matrix.artifact }}-minimal.tar.gz", "${{ matrix.artifact }}-standard.tar.gz", "${{ matrix.artifact }}-tui.tar.gz", "${{ matrix.artifact }}-full.tar.gz")) {
+            $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
+          }
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.*
+          path: ${{ matrix.artifact }}-*
           if-no-files-found: error
 
   publish-crates:
@@ -363,13 +405,45 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           path: artifacts
+      - name: Generate release download table
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+          RELEASE_CHANGELOG: ${{ steps.changelog.outputs.changelog }}
+        run: |
+          set -euo pipefail
+          {
+            echo "# aria2_rust ${RELEASE_VERSION}"
+            echo
+            echo "## Changes"
+            echo "${RELEASE_CHANGELOG}"
+            echo
+            echo "## Choose a binary"
+            echo
+            echo "| Platform | minimal | standard | tui | full |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| Linux x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-linux-full.tar.gz) |"
+            echo "| Linux ARM64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-linux-full.tar.gz) |"
+            echo "| Windows x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-minimal.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-standard.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-tui.zip) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-windows-full.zip) |"
+            echo "| macOS ARM64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-aarch64-macos-full.tar.gz) |"
+            echo "| macOS x86_64 | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-minimal.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-standard.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-tui.tar.gz) | [Download](https://${RELEASE_REPOSITORY}/releases/download/${RELEASE_TAG}/aria2-x86_64-macos-full.tar.gz) |"
+            echo
+            echo "### Variants"
+            echo
+            echo "- **minimal**: HTTP/FTP base download, without TUI"
+            echo "- **standard**: HTTP/FTP + BitTorrent + RPC, without TUI"
+            echo "- **tui**: standard + local and RPC TUI"
+            echo "- **full**: standard + Metalink + SFTP + TUI"
+            echo
+            echo "Each archive has a matching `.sha256` checksum file."
+          } > release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ needs.prepare.outputs.sha }}
           name: aria2 ${{ needs.prepare.outputs.version }}
-          body: |
-            ## Changes
-            ${{ steps.changelog.outputs.changelog }}
+          body_path: release-notes.md
           files: artifacts/*/*
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}

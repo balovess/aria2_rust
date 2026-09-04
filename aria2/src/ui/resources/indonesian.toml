@@ -1,0 +1,13 @@
+title = "aria2c TUI"
+empty = "Tidak ada unduhan."
+footer = "↑/↓ Pilih  a Tambah  p Jeda/Lanjutkan  r Hapus  d Detail  / Filter  q Keluar"
+add_prompt = "URL (Enter untuk menambah, Esc untuk membatalkan)"
+filter_prompt = "Filter (Enter untuk menerapkan, Esc untuk membatalkan)"
+filtered = "Filter"
+details = "Detail tugas"
+headers = ["GID", "Status", "Progres", "Kecepatan", "Koneksi", "Input"]
+remote_headers = ["GID", "Status", "Progres", "Kecepatan", "Input"]
+detail_labels = ["GID", "Status", "Selesai", "Kecepatan unduhan", "Input"]
+statuses = ["menunggu", "aktif", "dijeda", "galat", "selesai", "dihapus"]
+page = "Halaman {page}{next}  [/] Sebelumnya/Berikutnya  PgUp/PgDn Lompat"
+error = "Kesalahan RPC: {message} (mencoba lagi)"

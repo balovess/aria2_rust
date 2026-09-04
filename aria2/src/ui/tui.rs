@@ -859,6 +859,39 @@ mod tests {
     }
 
     #[test]
+    fn locale_selects_regional_languages() {
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("zh-TW")),
+            Locale::TraditionalChinese
+        );
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("ru-RU")),
+            Locale::Russian
+        );
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("hi-IN")),
+            Locale::Hindi
+        );
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("vi-VN")),
+            Locale::Vietnamese
+        );
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("id-ID")),
+            Locale::Indonesian
+        );
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("bn-BD")),
+            Locale::Bengali
+        );
+        assert_eq!(
+            Locale::from_arg_or_environment(Some("ta-IN")),
+            Locale::Tamil
+        );
+        assert_eq!(Locale::from_arg_or_environment(Some("th-TH")), Locale::Thai);
+    }
+
+    #[test]
     fn unknown_locale_falls_back_to_english() {
         assert_eq!(
             Locale::from_arg_or_environment(Some("fr-FR")),
@@ -869,5 +902,29 @@ mod tests {
     #[test]
     fn locale_has_add_task_prompt() {
         assert!(Locale::SimplifiedChinese.add_prompt().contains("URL"));
+    }
+
+    #[test]
+    fn every_locale_has_complete_display_resources() {
+        let locales = [
+            Locale::English,
+            Locale::SimplifiedChinese,
+            Locale::TraditionalChinese,
+            Locale::Japanese,
+            Locale::Spanish,
+            Locale::Russian,
+            Locale::Hindi,
+            Locale::Bengali,
+            Locale::Tamil,
+            Locale::Vietnamese,
+            Locale::Thai,
+            Locale::Indonesian,
+        ];
+        for locale in locales {
+            assert!(locale.headers().iter().all(|text| !text.is_empty()));
+            assert!(locale.remote_headers().iter().all(|text| !text.is_empty()));
+            assert!(!locale.page(1, true).contains("{page}"));
+            assert!(!locale.error("test").contains("{message}"));
+        }
     }
 }

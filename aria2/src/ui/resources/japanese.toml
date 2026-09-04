@@ -1,0 +1,13 @@
+title = "aria2c ターミナル画面"
+empty = "ダウンロードはありません。"
+footer = "↑/↓ 選択  a 追加  p 一時停止/再開  r 削除  d 詳細  / 絞り込み  q 終了"
+add_prompt = "URL（Enter で追加、Esc でキャンセル）"
+filter_prompt = "絞り込み（Enter で適用、Esc でキャンセル）"
+filtered = "絞り込み"
+details = "タスク詳細"
+headers = ["GID", "状態", "進捗", "速度", "接続数", "入力"]
+remote_headers = ["GID", "状態", "進捗", "速度", "入力"]
+detail_labels = ["GID", "状態", "完了", "ダウンロード速度", "入力"]
+statuses = ["待機中", "ダウンロード中", "一時停止", "エラー", "完了", "削除済み"]
+page = "{page} ページ{next}  [/] 前/次  PgUp/PgDn ページ移動"
+error = "RPC エラー: {message}（再試行中）"

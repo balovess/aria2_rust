@@ -1,0 +1,13 @@
+title = "aria2c TUI"
+empty = "Không có lượt tải."
+footer = "↑/↓ Chọn  a Thêm  p Tạm dừng/Tiếp tục  r Xóa  d Chi tiết  / Lọc  q Thoát"
+add_prompt = "URL (Enter để thêm, Esc để hủy)"
+filter_prompt = "Bộ lọc (Enter để áp dụng, Esc để hủy)"
+filtered = "Bộ lọc"
+details = "Chi tiết tác vụ"
+headers = ["GID", "Trạng thái", "Tiến độ", "Tốc độ", "Kết nối", "Đầu vào"]
+remote_headers = ["GID", "Trạng thái", "Tiến độ", "Tốc độ", "Đầu vào"]
+detail_labels = ["GID", "Trạng thái", "Đã tải", "Tốc độ tải", "Đầu vào"]
+statuses = ["đang chờ", "đang hoạt động", "tạm dừng", "lỗi", "hoàn tất", "đã xóa"]
+page = "Trang {page}{next}  [/] Trước/Tiếp  PgUp/PgDn Chuyển"
+error = "Lỗi RPC: {message} (đang thử lại)"

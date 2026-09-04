@@ -17,6 +17,8 @@ bindings/python/tests/__pycache__/
 !docs/browser-bridge-guide-en.md
 !docs/tui-guide-cn.md
 !docs/tui-guide-en.md
+!docs/release-artifacts-cn.md
+!docs/release-artifacts-en.md
 *.7z
 *.bak
 *.bin

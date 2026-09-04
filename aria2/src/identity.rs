@@ -1,13 +1,13 @@
-//! Identity owned by the `aria2` binary product.
+//! Identity owned by the `aria2c` binary product.
 
 /// Product name used in user-visible identity strings.
-pub const PRODUCT_NAME: &str = "aria2-rust";
+pub const PRODUCT_NAME: &str = "aria2_rust";
 
 /// Release version of the `aria2` binary package.
 pub const PRODUCT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default HTTP User-Agent emitted by the binary product.
-pub const DEFAULT_USER_AGENT: &str = concat!("aria2-rust/", env!("CARGO_PKG_VERSION"));
+pub const DEFAULT_USER_AGENT: &str = concat!("aria2_rust/", env!("CARGO_PKG_VERSION"));
 
 /// Default BitTorrent extended-handshake peer agent emitted by the binary.
 pub const DEFAULT_PEER_AGENT: &str = DEFAULT_USER_AGENT;

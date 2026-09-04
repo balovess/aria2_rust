@@ -1,4 +1,4 @@
-# aria2-rust Documentation
+# aria2_rust Documentation
 
 中文：[`README-cn.md`](README-cn.md)
 
@@ -9,6 +9,7 @@
 - [Configuration](configuration-guide-en.md): complete configuration option reference
 - [RPC Guide](rpc-guide-en.md): JSON-RPC, XML-RPC, WebSocket, authentication, and HTTPS
 - [TUI Guide](tui-guide-en.md): local and remote modes, paging, filtering, details, and controls
+- [Release Artifacts](release-artifacts-en.md): platforms, minimal/TUI variants, checksums, and selection guidance
 - [Troubleshooting](troubleshooting-en.md): startup, configuration, RPC, feature, and recovery issues
 - [0.3.4 Binary Release Notes](binary-release-0.3.4-en.md): artifacts, checksums, installation, upgrade, and compatibility boundaries
 

@@ -1,4 +1,4 @@
-# aria2-rust 文档
+# aria2_rust 文档
 
 English: [`README-en.md`](README-en.md)
 
@@ -9,6 +9,7 @@ English: [`README-en.md`](README-en.md)
 - [参数配置](configuration-guide-cn.md)：完整配置选项参考
 - [RPC 使用说明](rpc-guide-cn.md)：JSON-RPC、XML-RPC、WebSocket、认证和 HTTPS
 - [TUI 使用指南](tui-guide-cn.md)：本地与远程模式、分页、筛选、详情和快捷键
+- [Release 产物说明](release-artifacts-cn.md)：平台、minimal/TUI 版本、校验文件和选择建议
 - [常见问题](troubleshooting-cn.md)：启动、配置、RPC、feature 和恢复问题
 
 ## 开发者文档

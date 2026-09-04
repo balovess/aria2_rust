@@ -1,4 +1,4 @@
-# aria2-rust
+# aria2_rust
 
 English: [`README.md`](README.md)
 
@@ -12,6 +12,8 @@ English: [`README.md`](README.md)
 - [快速开始](docs/quickstart-cn.md)
 - [参数配置说明](docs/configuration-guide-cn.md)
 - [RPC 使用说明](docs/rpc-guide-cn.md)
+- [TUI 使用指南](docs/tui-guide-cn.md)
+- [Release 产物说明](docs/release-artifacts-cn.md)
 - [常见问题](docs/troubleshooting-cn.md)
 
 <p align="center">
@@ -30,12 +32,15 @@ English: [`README.md`](README.md)
 
 ***
 
-**aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
+**aria2_rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
 实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。默认构建支持
 HTTP/HTTPS、FTP、BitTorrent 协议，并提供
 JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 SFTP 和 Metalink 需要分别启用对应 Cargo feature。
+
+二进制 Release 提供 `minimal`、`standard`、`tui` 和 `full` 四种功能档位，
+详见 [Release 产物说明](docs/release-artifacts-cn.md)。
 
 ## 特性
 

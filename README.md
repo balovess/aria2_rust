@@ -1,4 +1,4 @@
-# aria2-rust
+# aria2_rust
 
 中文：[`README_CN.md`](README_CN.md)
 
@@ -13,6 +13,8 @@ Start with the [documentation index](docs/README-en.md). The main user paths are
 - [Quick Start](docs/quickstart-en.md)
 - [Configuration Guide](docs/configuration-guide-en.md)
 - [RPC Guide](docs/rpc-guide-en.md)
+- [TUI Guide](docs/tui-guide-en.md)
+- [Release Artifacts](docs/release-artifacts-en.md)
 - [Troubleshooting](docs/troubleshooting-en.md)
 
 <p align="center">
@@ -31,7 +33,7 @@ Start with the [documentation index](docs/README-en.md). The main user paths are
 
 ---
 
-**aria2-rust** is an independent Rust download engine. It provides practical
+**aria2_rust** is an independent Rust download engine. It provides practical
 compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
 users and tools can migrate easily, while its architecture, safety,
 performance, and product direction are its own. The default build supports
@@ -39,6 +41,10 @@ HTTP/HTTPS, FTP, BitTorrent, and JSON-RPC/XML-RPC/WebSocket paths;
 Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
+
+Binary releases are available in four feature tiers; see the
+[release artifact guide](docs/release-artifacts-en.md) to choose between
+`minimal`, `standard`, `tui`, and `full`.
 
 ## Implemented Capabilities
 
