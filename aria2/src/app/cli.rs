@@ -114,7 +114,8 @@ impl FromStr for HelpRequest {
     disable_help_subcommand = true,
     about = "aria2-rust - The ultra fast download utility",
     long_about = None,
-    after_help = "Examples:\n  aria2c https://example.com/file.zip\n  aria2c -d C:\\Downloads -o file.zip https://example.com/file.zip\n  aria2c -i urls.txt\n  aria2c --conf-path C:\\Apps\\Aria2\\aria2.conf https://example.com/file.zip\n\nBoolean options accept --option, --option=true, and --option=false.\nUse --help=KEYWORD or --help=#basic, --help=#advanced, or --help=#http to narrow the help output."
+    before_help = "Start here:\n  Download one URL:       aria2c https://example.com/file.zip\n  Choose folder/name:      aria2c -d DIR -o NAME URL\n  Download a URL list:     aria2c -i urls.txt\n  Resume a download:       aria2c -c URL\n  Download a torrent:      aria2c file.torrent\n  Download a magnet:       aria2c 'magnet:?xt=...'\n\nINPUT\n  URL, magnet URI, .torrent, or .metalink file path can be used as input.\n  A .metalink input requires a build with the `metalink` feature.\n\nCommon next steps:\n  --help=#basic       Show the options most users need first\n  --help=#http        Show HTTP/HTTPS options\n  --help=#bittorrent  Show BitTorrent options\n  --help=OPTION       Search options by name, for example --help=proxy\n  --init              Create a persistent configuration and state layout",
+    after_help = "Examples:\n  aria2c https://example.com/file.zip\n  aria2c -d C:\\Downloads -o file.zip https://example.com/file.zip\n  aria2c -x 16 -s 16 https://example.com/large.iso\n  aria2c -i urls.txt\n  aria2c --conf-path C:\\Apps\\Aria2\\aria2.conf https://example.com/file.zip\n\nOption values can use either --option=value or --option value. Boolean options accept --option, --option=true, and --option=false.\nUse --help=KEYWORD or --help=#basic, --help=#advanced, or --help=#http to narrow the help output."
 )]
 pub struct CliArgs {
     /// General options

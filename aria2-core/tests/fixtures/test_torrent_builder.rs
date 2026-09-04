@@ -280,7 +280,9 @@ fn v2_root_from_layer(layer: &[[u8; 32]]) -> [u8; 32] {
 fn v2_reduce_tree(mut hashes: Vec<[u8; 32]>) -> [u8; 32] {
     while hashes.len() > 1 {
         hashes = hashes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let mut input = [0u8; 64];
                 input[..32].copy_from_slice(&pair[0]);

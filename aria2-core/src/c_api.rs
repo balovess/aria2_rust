@@ -1069,7 +1069,7 @@ mod tests {
         let mut info_result = -1;
         for _ in 0..100 {
             info_result = unsafe { aria2_rust_get_download_info(session, gid, &mut info) };
-            if info_result == 0 {
+            if info_result == 0 && info.status == Aria2RustDownloadStatus::Paused as u32 {
                 break;
             }
             std::thread::yield_now();

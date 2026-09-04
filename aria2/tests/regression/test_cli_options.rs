@@ -593,6 +593,12 @@ fn regression_help_rendering_filters_options() {
 fn regression_basic_help_includes_copyable_examples() {
     let help = render_help(&HelpRequest::Basic);
 
+    assert!(help.contains("Start here:"));
+    assert!(help.contains("aria2c -d DIR -o NAME URL"));
+    assert!(help.contains("aria2c -i urls.txt"));
+    assert!(help.contains("aria2c file.torrent"));
+    assert!(help.contains("aria2c 'magnet:?xt=...'"));
+    assert!(help.contains("--init"));
     assert!(help.contains("https://example.com/file.zip"));
     assert!(help.contains("C:\\Downloads"));
     assert!(help.contains("--option=true"));
