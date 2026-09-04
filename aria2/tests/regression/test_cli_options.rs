@@ -810,7 +810,23 @@ fn regression_completions_all_shells() {
 #[test]
 fn regression_tui_subcommand_accepts_language() {
     let cli = parse(&["tui", "--language=zh-CN"]);
-    assert!(matches!(cli.command, Some(Commands::Tui { language: Some(value) }) if value == "zh-CN"));
+    assert!(
+        matches!(cli.command, Some(Commands::Tui { language: Some(value) }) if value == "zh-CN")
+    );
+}
+
+#[test]
+fn regression_remote_tui_options() {
+    let cli = parse(&[
+        "--rpc-url",
+        "http://127.0.0.1:6800/jsonrpc",
+        "--rpc-token=secret",
+    ]);
+    assert_eq!(
+        cli.general.rpc_url.as_deref(),
+        Some("http://127.0.0.1:6800/jsonrpc")
+    );
+    assert_eq!(cli.general.remote_rpc_secret.as_deref(), Some("secret"));
 }
 
 /// Test: update checks expose an explicit opt-out, interval, and command.

@@ -15,6 +15,8 @@ bindings/python/tests/__pycache__/
 !docs/performance-differentiators.md
 !docs/browser-bridge-guide-cn.md
 !docs/browser-bridge-guide-en.md
+!docs/tui-guide-cn.md
+!docs/tui-guide-en.md
 *.7z
 *.bak
 *.bin

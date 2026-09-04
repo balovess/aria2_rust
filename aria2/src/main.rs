@@ -81,6 +81,20 @@ async fn async_main() {
         std::process::exit(0);
     }
 
+    if let Some(rpc_url) = cli.general.rpc_url.clone() {
+        let result = aria2::ui::tui::run_remote(
+            rpc_url,
+            cli.general.remote_rpc_secret.clone(),
+            cli.general.language.clone(),
+        )
+        .await;
+        if let Err(error) = result {
+            eprintln!("TUI RPC error: {error}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     if cli.general.init {
         match init::initialize(init::InitRequest {
             profile: cli

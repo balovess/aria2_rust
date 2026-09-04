@@ -8,6 +8,7 @@ English: [`README-en.md`](README-en.md)
 - [用户指南](user-guide.md)：常用下载、会话、更新检查和配置维护
 - [参数配置](configuration-guide-cn.md)：完整配置选项参考
 - [RPC 使用说明](rpc-guide-cn.md)：JSON-RPC、XML-RPC、WebSocket、认证和 HTTPS
+- [TUI 使用指南](tui-guide-cn.md)：本地与远程模式、分页、筛选、详情和快捷键
 - [常见问题](troubleshooting-cn.md)：启动、配置、RPC、feature 和恢复问题
 
 ## 开发者文档

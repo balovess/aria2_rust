@@ -115,7 +115,7 @@ impl FromStr for HelpRequest {
     about = "aria2-rust - The ultra fast download utility",
     long_about = None,
     before_help = "Start here:\n  Download one URL:       aria2c https://example.com/file.zip\n  Choose folder/name:      aria2c -d DIR -o NAME URL\n  Download a URL list:     aria2c -i urls.txt\n  Resume a download:       aria2c -c URL\n  Download a torrent:      aria2c file.torrent\n  Download a magnet:       aria2c 'magnet:?xt=...'\n\nINPUT\n  URL, magnet URI, .torrent, or .metalink file path can be used as input.\n  A .metalink input requires a build with the `metalink` feature.\n\nCommon next steps:\n  --help=#basic       Show the options most users need first\n  --help=#http        Show HTTP/HTTPS options\n  --help=#bittorrent  Show BitTorrent options\n  --help=OPTION       Search options by name, for example --help=proxy\n  --init              Create a persistent configuration and state layout",
-    after_help = "Examples:\n  aria2c https://example.com/file.zip\n  aria2c -d C:\\Downloads -o file.zip https://example.com/file.zip\n  aria2c -x 16 -s 16 https://example.com/large.iso\n  aria2c -i urls.txt\n  aria2c --conf-path C:\\Apps\\Aria2\\aria2.conf https://example.com/file.zip\n  aria2c tui --language=zh-CN\n\nOption values can use either --option=value or --option value. Boolean options accept --option, --option=true, and --option=false.\nUse --help=KEYWORD or --help=#basic, --help=#advanced, or --help=#http to narrow the help output. Use `aria2c tui` for interactive controls."
+    after_help = "Examples:\n  aria2c https://example.com/file.zip\n  aria2c -d C:\\Downloads -o file.zip https://example.com/file.zip\n  aria2c -x 16 -s 16 https://example.com/large.iso\n  aria2c -i urls.txt\n  aria2c --conf-path C:\\Apps\\Aria2\\aria2.conf https://example.com/file.zip\n  aria2c tui --language=zh-CN\n  aria2c --rpc-url http://127.0.0.1:6800/jsonrpc --rpc-token SECRET\n\nOption values can use either --option=value or --option value. Boolean options accept --option, --option=true, and --option=false.\nUse --help=KEYWORD or --help=#basic, --help=#advanced, or --help=#http to narrow the help output. Use `aria2c tui` for interactive controls."
 )]
 pub struct CliArgs {
     /// General options
@@ -466,6 +466,14 @@ pub enum Commands {
 #[derive(Args, Debug)]
 #[command(next_help_heading = "General options")]
 pub struct GeneralArgs {
+    /// Connect the TUI to an existing JSON-RPC endpoint instead of a local engine.
+    #[arg(long = "rpc-url", value_name = "URL")]
+    pub rpc_url: Option<String>,
+
+    /// Secret token for the remote JSON-RPC endpoint.
+    #[arg(long = "rpc-token", value_name = "TOKEN")]
+    pub remote_rpc_secret: Option<String>,
+
     /// Run the interactive terminal user interface.
     #[arg(long = "tui")]
     pub tui: bool,

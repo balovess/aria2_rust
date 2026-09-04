@@ -8,6 +8,7 @@
 - [User Guide](user-guide.md): common downloads, sessions, update checks, and configuration maintenance
 - [Configuration](configuration-guide-en.md): complete configuration option reference
 - [RPC Guide](rpc-guide-en.md): JSON-RPC, XML-RPC, WebSocket, authentication, and HTTPS
+- [TUI Guide](tui-guide-en.md): local and remote modes, paging, filtering, details, and controls
 - [Troubleshooting](troubleshooting-en.md): startup, configuration, RPC, feature, and recovery issues
 - [0.3.4 Binary Release Notes](binary-release-0.3.4-en.md): artifacts, checksums, installation, upgrade, and compatibility boundaries
 

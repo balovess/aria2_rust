@@ -5,4 +5,5 @@
 
 pub mod console_progress;
 pub mod progress_bar;
+pub mod resources;
 pub mod tui;
