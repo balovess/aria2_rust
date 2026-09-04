@@ -50,7 +50,11 @@ pub async fn run_remote(
     secret: Option<String>,
     language: Option<String>,
 ) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| format!("failed to initialize RPC client: {error}"))?;
     let locale = Locale::from_arg_or_environment(language.as_deref());
     let mut terminal = setup_terminal()?;
     let mut selected = 0usize;
@@ -247,13 +251,18 @@ async fn remote_tasks(
                 "aria2.tellWaiting",
                 serde_json::json!([page as u64 * REMOTE_PAGE_SIZE, REMOTE_PAGE_SIZE]),
             ),
+            (
+                "aria2.tellStopped",
+                serde_json::json!([page as u64 * REMOTE_PAGE_SIZE, REMOTE_PAGE_SIZE]),
+            ),
         ],
     )
     .await?;
-    let has_next_page = responses
-        .get(1)
-        .and_then(|value| value.as_array())
-        .is_some_and(|items| items.len() == REMOTE_PAGE_SIZE as usize);
+    let has_next_page = responses.iter().skip(1).any(|value| {
+        value
+            .as_array()
+            .is_some_and(|items| items.len() == REMOTE_PAGE_SIZE as usize)
+    });
     for value in responses {
         if let Some(items) = value.as_array() {
             tasks.extend(items.iter().map(remote_task));

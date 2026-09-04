@@ -34,7 +34,7 @@ aria2c --enable-rpc=true --rpc-listen-port=6800 --rpc-secret=SECRET
 aria2c --rpc-url http://127.0.0.1:6800/jsonrpc --rpc-token SECRET
 ```
 
-RPC TUI 使用标准 JSON-RPC 2.0。状态查询会将 active 和 waiting 合并为一个 HTTP 批量请求；活动任务约每 750ms 刷新，空闲时约每 3s 刷新。网络错误会显示在底部并自动重试。
+RPC TUI 使用标准 JSON-RPC 2.0。状态查询会将 active、waiting 和 stopped 合并为一个 HTTP 批量请求；活动任务约每 750ms 刷新，空闲时约每 3s 刷新。网络错误会显示在底部并自动重试，连接超时为 3 秒，请求超时为 10 秒。
 
 ## 操作
 
@@ -50,11 +50,11 @@ RPC TUI 使用标准 JSON-RPC 2.0。状态查询会将 active 和 waiting 合并
 | `PageUp` / `PageDown` | 快速翻页 |
 | `q` / `Esc` | 退出 |
 
-RPC 模式每页读取 100 个 waiting 任务。筛选只作用于当前页；切换页面后会重新从 RPC 服务端读取数据。
+RPC 模式每页读取 100 个 waiting 和 100 个 stopped 历史任务，active 任务会显示在每一页。筛选只作用于当前页；切换页面后会重新从 RPC 服务端读取数据。
 
 ## 兼容性和限制
 
 - TUI 不修改 aria2 RPC 方法、认证 token 格式或返回结构。
 - RPC 模式需要服务端支持 HTTP JSON-RPC 批量请求；aria2-rust 内置 RPC 服务支持该格式。
-- 当前界面默认展示 active 和 waiting 任务，不展示 stopped 历史任务。
+- 当前界面默认展示 active、waiting 和 stopped 历史任务。
 - RPC 地址不应暴露到公网；应同时使用 token 和防火墙规则。
