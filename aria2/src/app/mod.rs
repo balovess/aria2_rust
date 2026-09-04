@@ -39,7 +39,7 @@ use crate::daemon::{DaemonConfig, Daemonizer, PidFileGuard, PidFileManager, is_d
 
 // Sub-modules
 pub mod cli;
-use cli::CliArgs;
+use cli::{CliArgs, Commands};
 mod browser_context_rpc;
 mod config;
 mod config_maintenance;
@@ -114,6 +114,17 @@ impl App {
     ///
     /// Returns exit code: `0` = success, `1` = error.
     pub async fn run(&mut self, cli: CliArgs) -> i32 {
+        let tui_language = cli.general.language.clone().or_else(|| match cli.command.as_ref() {
+            Some(Commands::Tui { language }) => language.clone(),
+            _ => None,
+        });
+        let tui_enabled = cli.general.tui || matches!(cli.command, Some(Commands::Tui { .. }));
+        let tui_options = if tui_enabled {
+            Some(self.download_options_with_snapshot().await.0)
+        } else {
+            None
+        };
+
         // Apply --no-color flag + TTY detection: disable colored output when
         // the user requests it OR when stdout is not a terminal (e.g. piped).
         if cli.no_color.unwrap_or(false) || !std::io::stdout().is_terminal() {
@@ -371,6 +382,7 @@ impl App {
             has_initial_downloads: !self.detected_inputs.is_empty(),
             has_input_file: self.get_opt_str("input-file").await.is_some(),
             restored_tasks: restored_task_count,
+            tui: tui_enabled,
             configured_rpc: self.get_opt_bool("enable-rpc").await.unwrap_or(false),
             explicit_rpc: self.explicit_rpc,
         }) {
@@ -449,7 +461,15 @@ impl App {
                 .unwrap_or(true),
             self.get_opt_bool("quiet").await.unwrap_or(false),
         );
-        let run_result = self.run_engine(startup_plan, show_progress).await;
+        let run_result = self
+            .run_engine(
+                startup_plan,
+                show_progress && !tui_enabled,
+                tui_enabled,
+                tui_language,
+                tui_options,
+            )
+            .await;
 
         // Step 8: Shutdown RPC server
         if let Some(handle) = rpc_handle {

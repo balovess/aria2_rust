@@ -570,6 +570,7 @@ async fn application_rpc_does_not_enable_cors_by_default() {
                 has_initial_downloads: false,
                 has_input_file: false,
                 restored_tasks: 0,
+                tui: false,
                 configured_rpc: true,
                 explicit_rpc: None,
             })
@@ -1197,6 +1198,7 @@ async fn test_process_restart_executes_restored_metalink_graph() {
                 has_initial_downloads: true,
                 has_input_file: false,
                 restored_tasks: 0,
+                tui: false,
                 configured_rpc: false,
                 explicit_rpc: None,
             })
@@ -1355,6 +1357,7 @@ async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() 
                 has_initial_downloads: true,
                 has_input_file: false,
                 restored_tasks: 0,
+                tui: false,
                 configured_rpc: false,
                 explicit_rpc: None,
             })
@@ -1521,6 +1524,7 @@ async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
                 has_initial_downloads: true,
                 has_input_file: false,
                 restored_tasks: 0,
+                tui: false,
                 configured_rpc: false,
                 explicit_rpc: None,
             })

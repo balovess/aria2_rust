@@ -5,3 +5,4 @@
 
 pub mod console_progress;
 pub mod progress_bar;
+pub mod tui;

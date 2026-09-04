@@ -785,6 +785,7 @@ fn regression_completions_subcommand() {
         }
         None => panic!("expected Completions subcommand"),
         Some(Commands::CheckUpdate) => panic!("expected Completions subcommand"),
+        Some(Commands::Tui { .. }) => panic!("expected Completions subcommand"),
     }
 }
 
@@ -799,8 +800,17 @@ fn regression_completions_all_shells() {
             Some(Commands::CheckUpdate) => {
                 panic!("expected Completions subcommand for {}", shell)
             }
+            Some(Commands::Tui { .. }) => {
+                panic!("expected Completions subcommand for {}", shell)
+            }
         }
     }
+}
+
+#[test]
+fn regression_tui_subcommand_accepts_language() {
+    let cli = parse(&["tui", "--language=zh-CN"]);
+    assert!(matches!(cli.command, Some(Commands::Tui { language: Some(value) }) if value == "zh-CN"));
 }
 
 /// Test: update checks expose an explicit opt-out, interval, and command.
