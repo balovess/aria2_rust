@@ -124,13 +124,8 @@ impl TransactionTracker {
         info_hash: Option<[u8; 20]>,
         timeout: Duration,
     ) -> (Vec<u8>, tokio::sync::oneshot::Receiver<TrackedResponse>) {
-        let (transaction_id, response_rx) = self.allocate_inner(
-            query_type,
-            target_addr,
-            target_id,
-            info_hash,
-            timeout,
-        );
+        let (transaction_id, response_rx) =
+            self.allocate_inner(query_type, target_addr, target_id, info_hash, timeout);
         (transaction_id.to_vec(), response_rx)
     }
 

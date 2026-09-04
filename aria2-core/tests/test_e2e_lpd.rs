@@ -125,7 +125,10 @@ fn test_lpd_announcement_format_whitespace_handling() {
     assert!(result.is_some(), "Should handle extra whitespace");
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash.as_ref(), "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        peer.info_hash.as_ref(),
+        "0123456789abcdef0123456789abcdef01234567"
+    );
     assert_eq!(peer.port, 6881);
 }
 
@@ -232,7 +235,10 @@ fn test_lpd_announcement_legacy_format_accepted() {
     );
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash.as_ref(), "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        peer.info_hash.as_ref(),
+        "0123456789abcdef0123456789abcdef01234567"
+    );
     assert_eq!(peer.port, 6881);
 
     // Legacy format without Token should also parse
@@ -781,8 +787,11 @@ async fn test_lpd_bittorrent_peer_simulation() {
         .expect("Failed to register");
 
     // Simulate LPD discovering a peer that has the torrent
-    let discovered_peer =
-        LpdPeer::new(info_hash.as_str(), 6881, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)));
+    let discovered_peer = LpdPeer::new(
+        info_hash.as_str(),
+        6881,
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+    );
 
     // Update peer registry
     manager

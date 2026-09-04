@@ -400,8 +400,7 @@ impl Command for BtDownloadCommand {
             }
         }
 
-        let (mut meta, piece_length, total_size, num_pieces) =
-            self.prepare_environment().await?;
+        let (mut meta, piece_length, total_size, num_pieces) = self.prepare_environment().await?;
         let network_info_hash = meta.network_info_hash();
         self.group
             .recover()

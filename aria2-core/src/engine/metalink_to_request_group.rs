@@ -830,7 +830,12 @@ mod tests {
             .find(|command| command.output_path().ends_with("file2"))
             .expect("file2 should remain independent");
         assert_eq!(
-            independent.group().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            independent
+                .group()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
             ["http://file2p1"]
         );
     }
@@ -924,7 +929,11 @@ mod tests {
         let group = groups[0].recover();
         assert_eq!(group.output_name().as_deref(), Some("second.bin"));
         assert_eq!(
-            group.uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            group
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
             ["https://us.example/second", "https://de.example/second"]
         );
     }
@@ -980,7 +989,13 @@ mod tests {
             .expect("shared torrent metaurl should create one graph");
         assert_eq!(graphs.len(), 1);
         assert_eq!(
-            graphs[0].metadata.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            graphs[0]
+                .metadata
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
             ["https://example.test/shared.torrent"]
         );
         assert_eq!(
@@ -1217,7 +1232,13 @@ mod tests {
             crate::request::request_group::GroupId::new(92)
         );
         assert_eq!(
-            graphs[0].payload.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            graphs[0]
+                .payload
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
             ["bt://000000000000005c"]
         );
     }
@@ -1237,7 +1258,13 @@ mod tests {
 
         assert_eq!(graphs.len(), 1);
         assert_eq!(
-            graphs[0].metadata.recover().uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(),
+            graphs[0]
+                .metadata
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
             ["https://example.test/payload.torrent"]
         );
     }

@@ -310,11 +310,7 @@ impl CookieStorage {
     /// Remove a domain from the LRU tracker.
     fn remove_from_lru(&self, domain: &str) {
         let mut lru = self.lru_tracker.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = lru
-            .iter()
-            .find(|(_, d)| d.as_ref() == domain)
-            .cloned()
-        {
+        if let Some(old) = lru.iter().find(|(_, d)| d.as_ref() == domain).cloned() {
             lru.remove(&old);
         }
     }

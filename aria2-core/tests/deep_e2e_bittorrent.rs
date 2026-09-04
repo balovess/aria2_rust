@@ -131,7 +131,14 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
     );
     {
         let child = children[0].recover();
-        assert_eq!(child.uris().iter().map(|uri| uri.as_ref()).collect::<Vec<_>>(), [tracker_url]);
+        assert_eq!(
+            child
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
+            [tracker_url]
+        );
         assert_eq!(child.get_bt_num_pieces(), 2);
         assert_eq!(child.get_bt_piece_length(), 512);
         assert_eq!(child.following_gid(), Some(GroupId::new(0x700)));

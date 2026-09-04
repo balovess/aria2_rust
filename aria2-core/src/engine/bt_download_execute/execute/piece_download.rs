@@ -1092,40 +1092,39 @@ impl BtDownloadCommand {
 
             tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
 
-            let actual_piece_len =
-                if meta.info.meta_version == Some(2) && !has_v1_piece_hashes {
-                    self.multi_file_layout
-                        .as_ref()
-                        .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
-                        .filter(|&length| length > 0)
-                        .map(|length| length as u32)
-                        .unwrap_or_else(|| {
-                            piece_selector.calculate_piece_length(
-                                next_piece_idx,
-                                piece_length,
-                                total_size,
-                            )
-                        })
-                } else if meta.info.meta_version == Some(2) {
-                    self.multi_file_layout
-                        .as_ref()
-                        .map(|layout| {
-                            piece_selector.calculate_piece_length(
-                                next_piece_idx,
-                                piece_length,
-                                layout.piece_space_size(),
-                            )
-                        })
-                        .unwrap_or_else(|| {
-                            piece_selector.calculate_piece_length(
-                                next_piece_idx,
-                                piece_length,
-                                total_size,
-                            )
-                        })
-                } else {
-                    piece_selector.calculate_piece_length(next_piece_idx, piece_length, total_size)
-                };
+            let actual_piece_len = if meta.info.meta_version == Some(2) && !has_v1_piece_hashes {
+                self.multi_file_layout
+                    .as_ref()
+                    .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
+                    .filter(|&length| length > 0)
+                    .map(|length| length as u32)
+                    .unwrap_or_else(|| {
+                        piece_selector.calculate_piece_length(
+                            next_piece_idx,
+                            piece_length,
+                            total_size,
+                        )
+                    })
+            } else if meta.info.meta_version == Some(2) {
+                self.multi_file_layout
+                    .as_ref()
+                    .map(|layout| {
+                        piece_selector.calculate_piece_length(
+                            next_piece_idx,
+                            piece_length,
+                            layout.piece_space_size(),
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        piece_selector.calculate_piece_length(
+                            next_piece_idx,
+                            piece_length,
+                            total_size,
+                        )
+                    })
+            } else {
+                piece_selector.calculate_piece_length(next_piece_idx, piece_length, total_size)
+            };
 
             let num_blocks = BtPieceSelector::calculate_num_blocks(actual_piece_len, BLOCK_SIZE);
             tracing::debug!(

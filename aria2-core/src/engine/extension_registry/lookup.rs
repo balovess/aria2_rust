@@ -5,10 +5,7 @@ use aria2_protocol::bittorrent::message::extension::{
 };
 use tracing::{trace, warn};
 
-use super::{
-    ExtensionRegistry, ExtensionUpdate,
-    UT_METADATA_NAME, UT_PEX_NAME,
-};
+use super::{ExtensionRegistry, ExtensionUpdate, UT_METADATA_NAME, UT_PEX_NAME};
 
 // ---------------------------------------------------------------------------
 // Lookup methods on ExtensionRegistry

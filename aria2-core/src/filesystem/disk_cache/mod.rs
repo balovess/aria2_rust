@@ -54,9 +54,7 @@ fn coalesce_flush_entries(pending: &[(u64, Bytes, u64)]) -> Vec<(u64, Bytes)> {
                     // copied once into a growing buffer instead of once per
                     // merge (which would make the flush O(n^2)).
                     let required = current.len() + data.len();
-                    let capacity = required
-                        .next_power_of_two()
-                        .min(MAX_COALESCED_FLUSH_BYTES);
+                    let capacity = required.next_power_of_two().min(MAX_COALESCED_FLUSH_BYTES);
                     let mut merged = BytesMut::with_capacity(capacity);
                     merged.extend_from_slice(&current);
                     merged

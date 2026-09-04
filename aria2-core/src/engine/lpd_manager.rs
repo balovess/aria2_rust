@@ -557,9 +557,7 @@ impl LpdManager {
     pub async fn update_peers(&self, info_hash: &str, new_peers: Vec<LpdPeer>) {
         let mut peers_map = self.peers.write().await;
         let shared_hash: Arc<str> = Arc::from(info_hash);
-        let entry = peers_map
-            .entry(Arc::clone(&shared_hash))
-            .or_default();
+        let entry = peers_map.entry(Arc::clone(&shared_hash)).or_default();
 
         for peer in new_peers {
             let mut peer = peer;

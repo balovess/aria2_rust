@@ -114,10 +114,14 @@ impl App {
     ///
     /// Returns exit code: `0` = success, `1` = error.
     pub async fn run(&mut self, cli: CliArgs) -> i32 {
-        let tui_language = cli.general.language.clone().or_else(|| match cli.command.as_ref() {
-            Some(Commands::Tui { language }) => language.clone(),
-            _ => None,
-        });
+        let tui_language = cli
+            .general
+            .language
+            .clone()
+            .or_else(|| match cli.command.as_ref() {
+                Some(Commands::Tui { language }) => language.clone(),
+                _ => None,
+            });
         let tui_enabled = cli.general.tui || matches!(cli.command, Some(Commands::Tui { .. }));
         let tui_options = if tui_enabled {
             Some(self.download_options_with_snapshot().await.0)

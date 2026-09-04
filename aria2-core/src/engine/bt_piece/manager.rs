@@ -85,13 +85,7 @@ impl PieceManager {
         files: Vec<(u64, Vec<[u8; 32]>)>,
     ) -> Self {
         assert_eq!(num_pieces as usize, sha1.len());
-        Self::new_hybrid_owned(
-            num_pieces,
-            piece_length,
-            total_size,
-            sha1.to_vec(),
-            files,
-        )
+        Self::new_hybrid_owned(num_pieces, piece_length, total_size, sha1.to_vec(), files)
     }
 
     /// Construct a hybrid manager by taking ownership of v1 piece hashes.
@@ -138,10 +132,9 @@ impl PieceManager {
             result.extend(hashes.into_iter().take(count).map(Some));
             content_lengths.extend((0..count).map(|index| {
                 u32::try_from(
-                    (length - index as u64 * piece_length as u64)
-                        .min(piece_length as u64),
+                    (length - index as u64 * piece_length as u64).min(piece_length as u64),
                 )
-                    .expect("v2 piece content length must fit in u32")
+                .expect("v2 piece content length must fit in u32")
             }));
             address = start_piece as u64 * piece_length as u64 + length;
         }
