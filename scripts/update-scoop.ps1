@@ -4,7 +4,7 @@
     Update or validate the Scoop manifest for aria2-rust.
 
 .EXAMPLE
-    ./scripts/update-scoop.ps1 -Version v0.3.2
+    ./scripts/update-scoop.ps1 -Version v0.3.7
 
 .EXAMPLE
     ./scripts/update-scoop.ps1 -Check

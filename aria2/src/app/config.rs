@@ -38,7 +38,9 @@ impl App {
         Ok(update.backup_path)
     }
 
-    async fn global_option_values(&self) -> std::collections::HashMap<String, OptionValue> {
+    pub(super) async fn global_option_values(
+        &self,
+    ) -> std::collections::HashMap<String, OptionValue> {
         let config = self.config.read().await;
         config.get_all_global_options().await
     }
@@ -473,7 +475,7 @@ impl App {
                     Ok(uri_list) => {
                         for entry in uri_list.entries() {
                             for uri in &entry.uris {
-                                positional_uris.push(uri.clone());
+                                positional_uris.push((uri.clone(), entry.options.clone()));
                             }
                         }
                     }
@@ -482,7 +484,7 @@ impl App {
                     }
                 }
             } else {
-                positional_uris.push(uri);
+                positional_uris.push((uri, std::collections::HashMap::new()));
             }
         }
 
@@ -497,7 +499,7 @@ impl App {
                 Ok(uri_list) => {
                     for entry in uri_list.entries() {
                         for uri in &entry.uris {
-                            positional_uris.push(uri.clone());
+                            positional_uris.push((uri.clone(), entry.options.clone()));
                         }
                     }
                 }
@@ -512,14 +514,17 @@ impl App {
         // positional metadata paths so the engine receives their file data.
         for option_name in ["torrent-file", "metalink-file"] {
             if let Some(path) = self.get_opt_str(option_name).await {
-                positional_uris.push(path);
+                positional_uris.push((path, std::collections::HashMap::new()));
             }
         }
 
         self.detected_inputs = positional_uris
             .into_iter()
-            .map(|uri| {
-                detect(&uri).map_err(|e| format!("Cannot detect input type '{}': {}", uri, e))
+            .map(|(uri, options)| {
+                let mut input = detect(&uri)
+                    .map_err(|e| format!("Cannot detect input type '{}': {}", uri, e))?;
+                input.options = options;
+                Ok(input)
             })
             .collect::<std::result::Result<Vec<_>, String>>()?;
         Ok(())
