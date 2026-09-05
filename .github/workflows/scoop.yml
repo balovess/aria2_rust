@@ -3,24 +3,18 @@ name: Update Scoop manifest
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Release tag to validate, for example v0.3.7
-        required: true
-        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: scoop-manifest
+  group: package-manifests
   cancel-in-progress: false
 
 jobs:
   update:
     name: Update Scoop manifest
-    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft) }}
+    if: ${{ !github.event.release.prerelease && !github.event.release.draft }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -30,15 +24,38 @@ jobs:
       - name: Update and validate manifest
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
           ./scripts/update-scoop.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
           ./scripts/update-scoop.ps1 -Check
+      - name: Verify packaged aria2c entry point
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $manifest = Get-Content -Raw scoop/aria2-rust.json | ConvertFrom-Json
+          $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("aria2-scoop-smoke-" + [guid]::NewGuid().ToString("N"))
+          $archive = Join-Path $tempRoot 'aria2-rust.zip'
+          $extract = Join-Path $tempRoot 'extract'
+          try {
+            New-Item -ItemType Directory -Path $extract | Out-Null
+            Invoke-WebRequest -Uri $manifest.architecture.'64bit'.url -OutFile $archive -UseBasicParsing
+            Expand-Archive -LiteralPath $archive -DestinationPath $extract
+            $binary = Join-Path $extract 'aria2c.exe'
+            if (-not (Test-Path -LiteralPath $binary)) { throw "Scoop archive does not contain aria2c.exe" }
+            $versionOutput = (& $binary --version | Out-String)
+            if ($versionOutput -notmatch [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))) {
+              throw "Scoop binary version does not match $env:RELEASE_TAG: $versionOutput"
+            }
+            Write-Host $versionOutput
+          } finally {
+            if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
+          }
       - name: Commit manifest update
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name "github-actions[bot]"

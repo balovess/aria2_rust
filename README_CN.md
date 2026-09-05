@@ -95,10 +95,12 @@ cargo run --release -- --version
 
 ### 包管理器状态
 
-Homebrew 和 Scoop 目前只有维护中的分发草案，尚未建立稳定的 Homebrew
-tap；两者也不是当前优先级。需要可靠安装时，请使用平台安装脚本或 GitHub
-Release 中的二进制文件。不要将仓库内的 Homebrew formula 或 Scoop manifest
-视为正式兼容性保证。
+Homebrew 和 Scoop 目前仍未建立稳定的公共 tap/bucket。Homebrew formula 和
+Scoop manifest 会在 Release 后自动更新，但需要可靠安装时，仍建议使用平台
+安装脚本或 GitHub Release 中的二进制文件。
+
+Chocolatey 包会由 GitHub Actions 根据 Windows full 发布包自动构建并校验。
+只有配置仓库 `CHOCO_API_KEY` secret 后，workflow 才会自动推送到 Chocolatey。
 
 ## 初始化持久化目录
 

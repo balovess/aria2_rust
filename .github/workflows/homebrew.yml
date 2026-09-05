@@ -3,19 +3,17 @@ name: Update Homebrew formula
 on:
   release:
     types: [published]
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Release tag to update, for example v0.3.6
-        required: true
-        type: string
 
 permissions:
   contents: write
 
+concurrency:
+  group: package-manifests
+  cancel-in-progress: false
+
 jobs:
   update:
-    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft) }}
+    if: ${{ !github.event.release.prerelease && !github.event.release.draft }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -24,7 +22,7 @@ jobs:
       - name: Update and validate formula
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
           REPOSITORY: ${{ github.repository }}
         run: |
           ./scripts/update-homebrew.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
@@ -32,7 +30,7 @@ jobs:
       - name: Commit formula update
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           git config user.name "github-actions[bot]"
@@ -41,3 +39,23 @@ jobs:
           if (git diff --cached --quiet) { exit 0 }
           git commit -m "chore: update Homebrew formula for $env:RELEASE_TAG"
           git push origin "HEAD:$env:DEFAULT_BRANCH"
+
+  smoke-test:
+    name: Install and verify Homebrew formula
+    needs: update
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Install formula and verify aria2c
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          brew install --formula ./homebrew/aria2-rust.rb
+          brew test aria2-rust
+          VERSION_OUTPUT="$(aria2c --version)"
+          echo "$VERSION_OUTPUT"
+          echo "$VERSION_OUTPUT" | grep -F "${RELEASE_TAG#v}"

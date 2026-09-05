@@ -6,6 +6,11 @@ $path = Join-Path (Split-Path -Parent $PSScriptRoot) "homebrew/aria2-rust.rb"
 $formula = [IO.File]::ReadAllText($path)
 if ($Check) {
     if ($formula -match 'PLACEHOLDER_SHA256') { throw "Formula contains placeholder hashes" }
+    foreach ($artifact in @("aria2-x86_64-macos-full.tar.gz", "aria2-aarch64-macos-full.tar.gz", "aria2-x86_64-linux-full.tar.gz", "aria2-aarch64-linux-full.tar.gz")) {
+        if ($formula -notmatch [regex]::Escape("releases/download/v#{version}/$artifact")) {
+            throw "Formula does not reference the full release artifact: $artifact"
+        }
+    }
     Write-Host "Homebrew formula is valid."
     exit 0
 }
@@ -14,7 +19,7 @@ $tag = $Version.TrimStart('v')
 if ($tag -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release version: $Version" }
 $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/v$tag" -Headers @{ "User-Agent" = "aria2-rust-homebrew" }
 $formula = $formula -replace 'version "[^"]+"', "version `"$tag`""
-foreach ($artifact in @("aria2-x86_64-macos.tar.gz", "aria2-aarch64-macos.tar.gz", "aria2-x86_64-linux.tar.gz", "aria2-aarch64-linux.tar.gz")) {
+foreach ($artifact in @("aria2-x86_64-macos-full.tar.gz", "aria2-aarch64-macos-full.tar.gz", "aria2-x86_64-linux-full.tar.gz", "aria2-aarch64-linux-full.tar.gz")) {
     $asset = @($release.assets | Where-Object { $_.name -eq "$artifact.sha256" })
     if ($asset.Count -ne 1) { throw "Missing checksum asset: $artifact.sha256" }
     $text = (Invoke-WebRequest -Uri $asset[0].browser_download_url -UseBasicParsing).Content
