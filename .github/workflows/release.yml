@@ -372,7 +372,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Cache export is best-effort; a cache quota/reservation failure must
+          # not fail an image that was already pushed to GHCR.
+          cache-to: type=gha,mode=max,ignore-error=true
           platforms: linux/amd64
 
   github-release:
