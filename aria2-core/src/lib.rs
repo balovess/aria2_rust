@@ -71,7 +71,7 @@
 //! peers.update_peer_bitfield("peer-1", &[0xff; 16]);
 //!
 //! let hashes = vec![[0u8; 20]; 128];
-//! let manager = PieceManager::new(128, 262_144, 128 * 262_144, hashes);
+//! let manager = PieceManager::new(128, 262_144, 128 * 262_144, &hashes);
 //! let validator = BtMessageValidator::new(manager.num_pieces(), manager.piece_length());
 //! assert!(validator.validate_index(0).is_ok());
 //! # let _ = (picker, peers);

@@ -591,8 +591,13 @@ mod tests {
         );
         assert!(dependency.resolve());
         assert_eq!(
-            payload.recover().uris(),
-            &["https://mirror.test/payload.bin".to_string()]
+            payload
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["https://mirror.test/payload.bin"]
         );
     }
 

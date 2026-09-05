@@ -15,6 +15,9 @@ impl DhtQueryMethod {
     pub const FIND_NODE: &'static str = "find_node";
     pub const GET_PEERS: &'static str = "get_peers";
     pub const ANNOUNCE_PEER: &'static str = "announce_peer";
+    pub const GET: &'static str = "get";
+    pub const PUT: &'static str = "put";
+    pub const SAMPLE_INFOHASHES: &'static str = "sample_infohashes";
 }
 
 #[derive(Debug, Clone)]

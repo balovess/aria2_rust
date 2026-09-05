@@ -115,10 +115,11 @@ async fn test_stats_track_hits_flushes_and_safe_eviction() {
 
 #[test]
 fn test_coalesce_flush_entries_only_merges_contiguous_ranges() {
+    let second_data = bytes::Bytes::from_static(b"ef");
     let adjacent = vec![
         (0, bytes::Bytes::from_static(b"ab"), 1),
         (2, bytes::Bytes::from_static(b"cd"), 2),
-        (10, bytes::Bytes::from_static(b"ef"), 3),
+        (10, second_data.clone(), 3),
     ];
 
     let coalesced = super::coalesce_flush_entries(&adjacent);
@@ -128,6 +129,7 @@ fn test_coalesce_flush_entries_only_merges_contiguous_ranges() {
     assert_eq!(&coalesced[0].1[..], b"abcd");
     assert_eq!(coalesced[1].0, 10);
     assert_eq!(&coalesced[1].1[..], b"ef");
+    assert_eq!(coalesced[1].1.as_ptr(), second_data.as_ptr());
 }
 
 #[tokio::test]

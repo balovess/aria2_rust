@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod auth_challenge_handler;
+pub mod browser_context;
 pub(crate) mod client_identity;
 pub mod client_pool;
 pub mod conditional_get;
@@ -69,7 +70,10 @@ pub use auth::{
 // Re-export netrc parser types for direct access
 pub use auth::netrc::{NetrcEntry as NetrcParserEntry, NetrcError, NetrcParser, find_netrc_file};
 
-pub use request_policy::HttpRequestPolicy;
+pub use browser_context::{
+    BrowserContext, BrowserContextUpdate, global as global_browser_context, update_global_json,
+};
+pub use request_policy::{HttpRequestPolicy, RequestPacing};
 
 // Re-export response processor types for convenient access
 pub use response_processor::{

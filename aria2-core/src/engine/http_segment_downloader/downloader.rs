@@ -135,6 +135,7 @@ impl HttpSegmentDownloader {
         cookie_header: Option<&str>,
         headers: &[(String, String)],
     ) -> Result<bool> {
+        self.request_policy.wait_before_request().await;
         let authorization = self.auth_options.as_ref().and_then(|auth_options| {
             let mut auth_factory = AuthConfigFactory::new();
             if let Some(path) = &self.netrc_path {
@@ -222,6 +223,7 @@ impl HttpSegmentDownloader {
         });
 
         loop {
+            self.request_policy.wait_before_request().await;
             let dynamic_cookie_header = self
                 .cookie_helper
                 .as_ref()
@@ -339,6 +341,7 @@ impl HttpSegmentDownloader {
                     retry_cookie_header,
                     &[(header_name.to_string(), authorization_header)],
                 );
+                self.request_policy.wait_before_request().await;
                 let retry_response = retry_request.send().await.map_err(|error| {
                     Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                         message: format!("HTTP Range auth retry failed: {error}"),

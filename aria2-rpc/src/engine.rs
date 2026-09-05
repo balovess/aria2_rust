@@ -70,6 +70,8 @@ pub(crate) fn rpc_method_is_mutating(method: &str) -> bool {
             | "aria2.forceRemove"
             | "aria2.shutdown"
             | "aria2.forceShutdown"
+            | "aria2.updateBrowserContext"
+            | "aria2.clearBrowserContext"
     )
 }
 
@@ -383,6 +385,12 @@ impl RpcEngine {
             "aria2.forceRemove" => handlers::task::parse_force_remove(&mut req),
             "aria2.shutdown" => Ok(handlers::task::parse_shutdown(&mut req, false)),
             "aria2.forceShutdown" => Ok(handlers::task::parse_shutdown(&mut req, true)),
+            "aria2.updateBrowserContext" => {
+                handlers::options::parse_update_browser_context(&mut req)
+            }
+            "aria2.clearBrowserContext" => {
+                Ok(handlers::options::parse_clear_browser_context(&mut req))
+            }
             "aria2.getVersion" => {
                 return Ok(JsonRpcResponse::success(
                     id,

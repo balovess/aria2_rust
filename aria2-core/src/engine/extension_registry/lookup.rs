@@ -5,10 +5,7 @@ use aria2_protocol::bittorrent::message::extension::{
 };
 use tracing::{trace, warn};
 
-use super::{
-    DEFAULT_LOCAL_UT_METADATA_ID, DEFAULT_LOCAL_UT_PEX_ID, ExtensionRegistry, ExtensionUpdate,
-    UT_METADATA_NAME, UT_PEX_NAME,
-};
+use super::{ExtensionRegistry, ExtensionUpdate, UT_METADATA_NAME, UT_PEX_NAME};
 
 // ---------------------------------------------------------------------------
 // Lookup methods on ExtensionRegistry
@@ -17,28 +14,28 @@ use super::{
 impl ExtensionRegistry {
     /// Get the peer's ext_id for ut_metadata, if the peer supports it.
     pub fn peer_ut_metadata_id(&self) -> Option<u8> {
-        self.peer_extensions.get(UT_METADATA_NAME).copied()
+        self.peer_id_to_name
+            .iter()
+            .find(|(_, name)| name.as_ref() == UT_METADATA_NAME)
+            .map(|(&id, _)| id)
     }
 
     /// Get the peer's ext_id for ut_pex, if the peer supports it.
     pub fn peer_ut_pex_id(&self) -> Option<u8> {
-        self.peer_extensions.get(UT_PEX_NAME).copied()
+        self.peer_id_to_name
+            .iter()
+            .find(|(_, name)| name.as_ref() == UT_PEX_NAME)
+            .map(|(&id, _)| id)
     }
 
     /// Get our local ext_id for ut_metadata (always present).
     pub fn local_ut_metadata_id(&self) -> u8 {
-        self.local_extensions
-            .get(UT_METADATA_NAME)
-            .copied()
-            .unwrap_or(DEFAULT_LOCAL_UT_METADATA_ID)
+        self.local_ut_metadata_id
     }
 
     /// Get our local ext_id for ut_pex (always present).
     pub fn local_ut_pex_id(&self) -> u8 {
-        self.local_extensions
-            .get(UT_PEX_NAME)
-            .copied()
-            .unwrap_or(DEFAULT_LOCAL_UT_PEX_ID)
+        self.local_ut_pex_id
     }
 
     /// Check if the peer supports an extension with the given ext_id.
@@ -52,7 +49,7 @@ impl ExtensionRegistry {
     ///
     /// Returns `None` if the ext_id is not recognized.
     pub fn extension_name_for_id(&self, ext_id: u8) -> Option<&[u8]> {
-        self.peer_id_to_name.get(&ext_id).map(|v| v.as_slice())
+        self.peer_id_to_name.get(&ext_id).map(Box::as_ref)
     }
 
     /// Get the reqq value from the peer's handshake.

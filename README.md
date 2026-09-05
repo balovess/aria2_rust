@@ -1,4 +1,4 @@
-# aria2-rust
+# aria2_rust
 
 中文：[`README_CN.md`](README_CN.md)
 
@@ -13,6 +13,8 @@ Start with the [documentation index](docs/README-en.md). The main user paths are
 - [Quick Start](docs/quickstart-en.md)
 - [Configuration Guide](docs/configuration-guide-en.md)
 - [RPC Guide](docs/rpc-guide-en.md)
+- [TUI Guide](docs/tui-guide-en.md)
+- [Release Artifacts](docs/release-artifacts-en.md)
 - [Troubleshooting](docs/troubleshooting-en.md)
 
 <p align="center">
@@ -31,7 +33,7 @@ Start with the [documentation index](docs/README-en.md). The main user paths are
 
 ---
 
-**aria2-rust** is an independent Rust download engine. It provides practical
+**aria2_rust** is an independent Rust download engine. It provides practical
 compatibility with the [aria2](https://aria2.github.io/) ecosystem so existing
 users and tools can migrate easily, while its architecture, safety,
 performance, and product direction are its own. The default build supports
@@ -39,6 +41,10 @@ HTTP/HTTPS, FTP, BitTorrent, and JSON-RPC/XML-RPC/WebSocket paths;
 Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
+
+Binary releases are available in four feature tiers; see the
+[release artifact guide](docs/release-artifacts-en.md) to choose between
+`minimal`, `standard`, `tui`, and `full`.
 
 ## Implemented Capabilities
 
@@ -92,13 +98,14 @@ docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balove
 
 | Platform | Command |
 |----------|---------|
-| Homebrew (macOS/Linux) | `brew install ./homebrew/aria2-rust.rb` |
-| Scoop (Windows) | `scoop install https://raw.githubusercontent.com/balovess/aria2_rust/master/scoop/aria2-rust.json` |
-| Cargo (from source) | `cargo install --path aria2` |
+| Homebrew (macOS/Linux) | Formula draft only; tap and stable automated updates are not yet available |
+| Scoop (Windows) | Experimental manifest; stable Windows x64 releases are checked in CI |
+| Cargo (from source) | Supported: `cargo install --path aria2` |
 
-To update an existing Scoop installation, run `scoop update aria2-rust`. The
-manifest is checked against the published Windows ZIP and its SHA-256 asset in
-CI before each stable release.
+Homebrew and Scoop packaging are distribution work in progress and are not a
+current priority. For reliable installation, use the platform installer
+scripts or the binaries attached to a GitHub Release. Do not treat the local
+Homebrew formula or Scoop manifest as a compatibility or release guarantee.
 
 ### First Download
 
@@ -117,6 +124,22 @@ aria2c file.torrent
 # Download with custom directory
 aria2c -d ~/downloads http://example.com/file.zip
 ```
+
+### Initialize Persistent Paths
+
+Run `aria2c --init` to choose system, current-directory, executable-directory,
+portable, or custom storage. Existing configuration is backed up before reset.
+Use `--non-interactive` with an explicit profile in automation:
+
+```bash
+aria2c --init
+aria2c --init --profile=system --non-interactive
+aria2c --init --profile=custom --state-dir="$HOME/.aria2" --download-dir="$HOME/Downloads" --non-interactive
+aria2c --show-paths --profile=system
+```
+
+The generated configuration is intentionally minimal. Session, logging, PID,
+cookies, DHT state, and server statistics are enabled only by explicit options.
 
 ### Build from Source
 
@@ -163,7 +186,7 @@ We provide ready-to-use configuration templates in `examples/configs/`:
 | [basic.conf](examples/configs/basic.conf) | Basic configuration with common options |
 | [advanced.conf](examples/configs/advanced.conf) | Advanced configuration with RPC, proxy, etc. |
 | [bittorrent.conf](examples/configs/bittorrent.conf) | Optimized for BitTorrent downloads |
-| [windows.conf](examples/configs/windows.conf) | Windows configuration using relative paths |
+| [windows.conf](examples/configs/windows.conf) | Windows manual configuration template |
 
 **Usage:**
 ```bash

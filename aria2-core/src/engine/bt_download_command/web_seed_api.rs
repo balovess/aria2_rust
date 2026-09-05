@@ -1,19 +1,34 @@
 use tracing::info;
 
 use super::BtDownloadCommand;
+use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
+    pub(crate) fn configured_web_seed_urls(&self) -> Vec<String> {
+        self.group
+            .recover()
+            .get_download_context()
+            .and_then(|context| {
+                context
+                    .get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|attribute| attribute.downcast_ref::<TorrentAttribute>())
+                    .map(|torrent| torrent.url_list.clone())
+            })
+            .unwrap_or_default()
+    }
+
     /// Initialize the web seed manager if web seeds are configured.
     pub fn init_web_seed_manager(&mut self, piece_length: u32, total_length: u64) {
+        let web_seed_urls = self.configured_web_seed_urls();
         if self.group.recover().options().bt_enable_web_seed
-            && !self.web_seed_urls.is_empty()
+            && !web_seed_urls.is_empty()
             && self.web_seed_manager.is_none()
         {
             info!(
-                count = self.web_seed_urls.len(),
+                count = web_seed_urls.len(),
                 "Initializing web seed manager with {} URL(s)",
-                self.web_seed_urls.len()
+                web_seed_urls.len()
             );
             let tls = {
                 let group = self.group.recover();
@@ -22,7 +37,7 @@ impl BtDownloadCommand {
                 )
             };
             match crate::engine::bt_web_seed::WebSeedManager::new_with_tls(
-                self.web_seed_urls.clone(),
+                web_seed_urls,
                 piece_length,
                 total_length,
                 &tls,
@@ -50,7 +65,8 @@ impl BtDownloadCommand {
 
     /// Check if web seeds are available.
     pub fn has_web_seeds(&self) -> bool {
-        self.group.recover().options().bt_enable_web_seed && !self.web_seed_urls.is_empty()
+        self.group.recover().options().bt_enable_web_seed
+            && !self.configured_web_seed_urls().is_empty()
     }
 
     /// Get web seed download statistics.

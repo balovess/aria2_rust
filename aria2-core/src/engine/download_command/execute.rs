@@ -235,7 +235,10 @@ impl DownloadCommand {
                     .get_download_context()
                     .map(|ctx| {
                         (
-                            ctx.get_piece_hashes().to_vec(),
+                            ctx.get_piece_hashes()
+                                .iter()
+                                .map(|hash| hash.to_string())
+                                .collect(),
                             ctx.get_piece_length() as u64,
                             ctx.get_piece_hash_type().to_string(),
                         )
@@ -626,8 +629,8 @@ impl DownloadCommand {
 
         let group_uris = self.group.recover().uris().to_vec();
         for uri in group_uris {
-            if !uri.is_empty() && !candidates.iter().any(|candidate| candidate == &uri) {
-                candidates.push(uri);
+            if !uri.is_empty() && !candidates.iter().any(|candidate| candidate == uri.as_ref()) {
+                candidates.push(uri.to_string());
             }
         }
         candidates

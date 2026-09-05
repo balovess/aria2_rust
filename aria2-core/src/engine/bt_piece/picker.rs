@@ -3,6 +3,8 @@
 //! Implements piece selection strategies for BitTorrent downloads.
 //! Based on BEP 0019 (WebSeed) and various piece picking algorithms.
 
+use crate::segment::Bitfield;
+
 /// Piece selection strategy — determines the algorithm used to pick the next
 /// piece to request from peers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,16 +122,16 @@ pub struct PiecePicker {
     /// Per-piece availability frequency (from peer bitfields)
     frequencies: Vec<u32>,
     /// Piece indexes sorted by availability, then by index for stable ties.
-    rarest_order: Vec<usize>,
+    rarest_order: Vec<u32>,
     /// Cursor into `rarest_order` for unrestricted normal-mode selection.
     rarest_cursor: usize,
     /// Per-piece completion tracking (true = piece verified and written)
-    completed: Vec<bool>,
+    completed: Bitfield,
     /// Per-piece selection filter (true = piece is requested by this task).
     /// Every selection strategy consults this same fact.
-    allowed: Vec<bool>,
+    allowed: Bitfield,
     /// Per-piece in-progress tracking (true = piece is being downloaded)
-    in_progress: Vec<bool>,
+    in_progress: Bitfield,
     /// Per-piece priority (0 = default, higher = more important)
     priorities: Vec<u8>,
     /// Explicitly prioritized pieces, in the order in which they are tried.
@@ -162,11 +164,11 @@ impl PiecePicker {
             strategy: PieceSelectionStrategy::RarestFirst,
             priority_mode: PiecePriorityMode::RarestFirst,
             frequencies: vec![0; n],
-            rarest_order: (0..n).collect(),
+            rarest_order: (0..num_pieces).collect(),
             rarest_cursor: 0,
-            completed: vec![false; n],
-            allowed: vec![true; n],
-            in_progress: vec![false; n],
+            completed: Bitfield::new(n),
+            allowed: Bitfield::all_set(n),
+            in_progress: Bitfield::new(n),
             priorities: vec![0; n],
             priority_pieces: Vec::new(),
             endgame_candidates: Vec::new(),
@@ -233,18 +235,15 @@ impl PiecePicker {
     /// already present can still be persisted and reported, but they do not
     /// contribute to selective-download completion or future selection.
     pub fn set_allowed_pieces(&mut self, pieces: &[u32]) {
-        self.allowed.fill(false);
+        self.allowed.clear_all();
         for &piece in pieces {
-            if let Some(allowed) = self.allowed.get_mut(piece as usize) {
-                *allowed = true;
-            }
+            self.allowed.set(piece as usize);
         }
-        self.allowed_count = self.allowed.iter().filter(|allowed| **allowed).count();
-        self.completed_allowed_count = self
-            .completed
-            .iter()
-            .zip(&self.allowed)
-            .filter(|(completed, allowed)| **completed && **allowed)
+        self.allowed_count = (0..self.num_pieces as usize)
+            .filter(|&i| self.allowed.test(i))
+            .count();
+        self.completed_allowed_count = (0..self.num_pieces as usize)
+            .filter(|&i| self.completed.test(i) && self.allowed.test(i))
             .count();
         self.head_cursor = 0;
         self.tail_cursor = self.num_pieces as usize;
@@ -254,7 +253,7 @@ impl PiecePicker {
 
     /// Whether a piece belongs to the current selective-download set.
     pub fn is_allowed(&self, index: u32) -> bool {
-        self.allowed.get(index as usize).copied().unwrap_or(false)
+        self.allowed.test(index as usize)
     }
 
     /// Number of pieces selected by the current filter.
@@ -296,7 +295,7 @@ impl PiecePicker {
     /// being downloaded by another request.
     #[inline]
     fn is_available(&self, i: usize) -> bool {
-        self.allowed[i] && !self.completed[i] && !self.in_progress[i]
+        self.allowed.test(i) && !self.completed.test(i) && !self.in_progress.test(i)
     }
 
     /// Test bit `i` of an MSB-first bitfield. `None` means "peer has everything".
@@ -369,9 +368,9 @@ impl PiecePicker {
         for &piece in &self.priority_pieces {
             let index = piece as usize;
             if index < n
-                && self.allowed[index]
-                && !self.completed[index]
-                && (allow_in_progress || !self.in_progress[index])
+                && self.allowed.test(index)
+                && !self.completed.test(index)
+                && (allow_in_progress || !self.in_progress.test(index))
                 && Self::peer_has(bitfield, index)
             {
                 return Some(piece);
@@ -385,7 +384,7 @@ impl PiecePicker {
         // rescanning every completed piece on every selection.
         if bitfield.is_none() && !allow_in_progress && matches!(order, ScanOrder::Rarest) {
             while self.rarest_cursor < self.rarest_order.len() {
-                let i = self.rarest_order[self.rarest_cursor];
+                let i = self.rarest_order[self.rarest_cursor] as usize;
                 self.rarest_cursor += 1;
                 if i < n && self.is_available(i) {
                     return Some(i as u32);
@@ -423,9 +422,9 @@ impl PiecePicker {
         }
 
         let usable = |p: &Self, i: usize| -> bool {
-            p.allowed[i]
-                && !p.completed[i]
-                && (allow_in_progress || !p.in_progress[i])
+            p.allowed.test(i)
+                && !p.completed.test(i)
+                && (allow_in_progress || !p.in_progress.test(i))
                 && Self::peer_has(bitfield, i)
         };
 
@@ -550,7 +549,7 @@ impl PiecePicker {
             return;
         }
         for i in 0..self.num_pieces as usize {
-            if self.allowed[i] && !self.completed[i] {
+            if self.allowed.test(i) && !self.completed.test(i) {
                 self.endgame_candidates.push(i);
             }
         }
@@ -567,8 +566,10 @@ impl PiecePicker {
         for (dst, src) in self.frequencies.iter_mut().zip(freqs.iter()).take(len) {
             *dst = *src as u32;
         }
-        self.rarest_order
-            .sort_unstable_by_key(|&index| (self.frequencies[index], index));
+        self.rarest_order.sort_unstable_by_key(|&index| {
+            let index = index as usize;
+            (self.frequencies[index], index)
+        });
         self.rarest_cursor = 0;
     }
 
@@ -578,9 +579,9 @@ impl PiecePicker {
         (0..n).map(move |i| PieceInfo {
             index: i as u32,
             frequency: self.frequencies[i],
-            is_completed: self.completed[i],
-            completed: self.completed[i],
-            in_progress: self.in_progress[i],
+            is_completed: self.completed.test(i),
+            completed: self.completed.test(i),
+            in_progress: self.in_progress.test(i),
             priority: self.priorities[i],
         })
     }
@@ -594,9 +595,9 @@ impl PiecePicker {
         Some(PieceInfo {
             index,
             frequency: self.frequencies[i],
-            is_completed: self.completed[i],
-            completed: self.completed[i],
-            in_progress: self.in_progress[i],
+            is_completed: self.completed.test(i),
+            completed: self.completed.test(i),
+            in_progress: self.in_progress.test(i),
             priority: self.priorities[i],
         })
     }
@@ -628,13 +629,13 @@ impl PiecePicker {
         if i >= self.num_pieces as usize {
             return;
         }
-        if !self.completed[i] {
-            self.completed[i] = true;
-            if self.allowed[i] {
+        if !self.completed.test(i) {
+            self.completed.set(i);
+            if self.allowed.test(i) {
                 self.completed_allowed_count += 1;
             }
         }
-        self.in_progress[i] = false;
+        self.in_progress.clear(i);
         self.refresh_endgame_candidates();
     }
 
@@ -654,7 +655,11 @@ impl PiecePicker {
         if i >= self.num_pieces as usize {
             return;
         }
-        self.in_progress[i] = in_progress;
+        if in_progress {
+            self.in_progress.set(i);
+        } else {
+            self.in_progress.clear(i);
+        }
         if !in_progress {
             self.reopen(i);
         }
@@ -663,28 +668,18 @@ impl PiecePicker {
     /// Whether a piece is currently being downloaded.
     pub fn is_in_progress(&self, index: u32) -> bool {
         let i = index as usize;
-        i < self.num_pieces as usize && self.in_progress[i]
+        i < self.num_pieces as usize && self.in_progress.test(i)
     }
 
     /// Whether a piece has been completed and verified.
     pub fn is_completed(&self, index: u32) -> bool {
         let i = index as usize;
-        i < self.num_pieces as usize && self.completed[i]
+        i < self.num_pieces as usize && self.completed.test(i)
     }
 
     /// Export completed pieces as a bitfield byte vector (MSB-first).
     pub fn export_bitfield(&self) -> Vec<u8> {
-        let n = self.num_pieces as usize;
-        let bf_len = n.div_ceil(8);
-        let mut bitfield = vec![0u8; bf_len];
-        for (i, &done) in self.completed.iter().enumerate() {
-            if done {
-                let byte_idx = i / 8;
-                let bit_idx = 7 - (i % 8);
-                bitfield[byte_idx] |= 1 << bit_idx;
-            }
-        }
-        bitfield
+        self.completed.as_bytes().to_vec()
     }
 
     /// Check if all pieces are completed. O(1).

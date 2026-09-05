@@ -359,8 +359,14 @@ impl DhtEngineContext {
                 let (response, mark_good, sender_id) = {
                     let routing_table = self.routing_table.read().await;
                     let tt = self.token_tracker.lock().unwrap_or_else(|e| e.into_inner());
-                    let result =
-                        handler.handle_query(&msg, from, &routing_table, &tt, &self.peer_storage);
+                    let result = handler.handle_query_with_store(
+                        &msg,
+                        from,
+                        &routing_table,
+                        &tt,
+                        &self.peer_storage,
+                        Some(&self.item_store),
+                    );
                     (result.response, result.mark_good, result.sender_id)
                 };
                 // tt lock is released here, before any .await
@@ -486,7 +492,9 @@ impl DhtEngineContext {
             let save_path = path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _save_guard = save_guard;
-                super::persistence::DhtPersistence::save_to_file_sync(&save_path, &self_id, &nodes)
+                super::persistence::DhtPersistence::merge_and_save_to_file_sync(
+                    &save_path, &self_id, &nodes,
+                )
             })
             .await;
             match result {
@@ -497,6 +505,26 @@ impl DhtEngineContext {
                 Err(e) => {
                     warn!(path = %path.display(), "DHT routing table save task failed: {}", e)
                 }
+            }
+
+            // Persist BEP 44 items with the routing-table checkpoint so a
+            // periodic shutdown or interruption cannot split their lifecycles.
+            let item_path = path.with_extension("items");
+            let item_save_guard = Arc::clone(&self.routing_table_save_lock).lock_owned().await;
+            let save_path = item_path.clone();
+            let item_store = self.item_store.clone();
+            let item_result = tokio::task::spawn_blocking(move || {
+                let _save_guard = item_save_guard;
+                item_store.save_to_file_sync(&save_path)
+            })
+            .await;
+            match item_result {
+                Ok(Ok(())) => trace!(path = %item_path.display(), "Auto-saved BEP 44 item store"),
+                Ok(Err(error)) => warn!(
+                    path = %item_path.display(),
+                    "Failed to auto-save BEP 44 item store: {error}"
+                ),
+                Err(error) => warn!("BEP 44 item store save task failed: {error}"),
             }
         }
     }

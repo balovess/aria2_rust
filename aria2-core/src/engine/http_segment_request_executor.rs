@@ -56,7 +56,7 @@ struct AuthorityState {
 }
 
 struct ExecutorState {
-    authorities: DashMap<String, Arc<AuthorityState>>,
+    authorities: DashMap<Box<str>, Arc<AuthorityState>>,
     total_in_flight: AtomicUsize,
 }
 
@@ -275,7 +275,7 @@ impl ExecutorState {
         let authorities = DashMap::new();
         for key in authority_keys {
             authorities.insert(
-                key.clone(),
+                key.clone().into_boxed_str(),
                 Arc::new(AuthorityState {
                     hard_limit,
                     target: AtomicUsize::new(hard_limit),

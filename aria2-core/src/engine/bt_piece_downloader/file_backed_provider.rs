@@ -1,5 +1,6 @@
 use crate::engine::bt_upload_session::PieceDataProvider;
 use crate::engine::multi_file_layout::MultiFileLayout;
+use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 
 /// Provides piece data from local files, used during seeding phase.
 ///
@@ -9,10 +10,8 @@ pub struct FileBackedPieceProvider {
     piece_length: u32,
     num_pieces: u32,
     multi_file_layout: Option<MultiFileLayout>,
-    /// Per-piece availability: `pieces[i]` is `true` if piece i is available
-    /// for upload. For a complete seed this is all-true; for a partial seed
-    /// only the completed pieces are marked true.
-    pieces: Vec<bool>,
+    /// Per-piece availability, stored as one bit per piece.
+    pieces: Bitfield,
 }
 
 impl FileBackedPieceProvider {
@@ -24,7 +23,7 @@ impl FileBackedPieceProvider {
         num_pieces: u32,
         multi_file_layout: Option<MultiFileLayout>,
     ) -> Self {
-        let pieces = vec![true; num_pieces as usize];
+        let pieces = Bitfield::all_set(num_pieces as usize);
         Self {
             file_path,
             piece_length,
@@ -45,20 +44,24 @@ impl FileBackedPieceProvider {
         pieces: Vec<bool>,
     ) -> Self {
         debug_assert_eq!(pieces.len(), num_pieces as usize);
+        let mut available = Bitfield::new(num_pieces as usize);
+        for (index, is_available) in pieces.into_iter().enumerate() {
+            if is_available {
+                let _ = available.set(index);
+            }
+        }
         Self {
             file_path,
             piece_length,
             num_pieces,
             multi_file_layout,
-            pieces,
+            pieces: available,
         }
     }
 
     /// Mark a piece as available (completed).
     pub fn mark_piece_available(&mut self, piece_index: u32) {
-        if let Some(available) = self.pieces.get_mut(piece_index as usize) {
-            *available = true;
-        }
+        let _ = self.pieces.set(piece_index as usize);
     }
 }
 
@@ -97,11 +100,12 @@ impl PieceDataProvider for FileBackedPieceProvider {
         if let Some(ref layout) = self.multi_file_layout {
             let global_start = piece_index as u64 * layout.piece_length() as u64 + offset as u64;
 
-            if global_start >= layout.total_size() {
+            if global_start >= layout.piece_space_size() {
                 return None;
             }
 
-            let actual_length = (length as u64).min(layout.total_size() - global_start) as u32;
+            let actual_length =
+                (length as u64).min(layout.piece_space_size() - global_start) as u32;
             let mut result = Vec::with_capacity(actual_length as usize);
             let mut current_global = global_start;
             let mut remaining = actual_length as u64;
@@ -111,8 +115,17 @@ impl PieceDataProvider for FileBackedPieceProvider {
                 let current_offset_in_piece =
                     (current_global % layout.piece_length() as u64) as u32;
 
-                let (file_idx, file_offset) =
-                    layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)?;
+                let Some((file_idx, file_offset)) =
+                    layout.resolve_file_offset(current_piece_idx, current_offset_in_piece)
+                else {
+                    let next =
+                        layout.next_content_offset(current_piece_idx, current_offset_in_piece);
+                    let skip = (next - current_offset_in_piece).min(remaining as u32) as usize;
+                    result.resize(result.len() + skip, 0);
+                    current_global += skip as u64;
+                    remaining -= skip as u64;
+                    continue;
+                };
                 let file_path = layout.file_absolute_path(file_idx)?.to_path_buf();
 
                 let file_info = layout.get_file_info(file_idx)?;
@@ -137,9 +150,7 @@ impl PieceDataProvider for FileBackedPieceProvider {
     }
 
     fn has_piece(&self, piece_index: u32) -> bool {
-        self.pieces
-            .get(piece_index as usize)
-            .is_some_and(|&available| available)
+        self.pieces.test(piece_index as usize)
     }
 
     fn num_pieces(&self) -> u32 {

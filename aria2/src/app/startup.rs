@@ -14,6 +14,8 @@ pub(super) enum RunMode {
     RpcService,
     /// Run initial downloads while continuing to accept RPC requests.
     DownloadWithRpc,
+    /// Run initial downloads under the local interactive terminal UI.
+    Tui,
 }
 
 /// Facts collected by the configuration/input phase before the engine starts.
@@ -22,6 +24,7 @@ pub(super) struct StartupInputs {
     pub(super) has_initial_downloads: bool,
     pub(super) has_input_file: bool,
     pub(super) restored_tasks: usize,
+    pub(super) tui: bool,
     pub(super) configured_rpc: bool,
     pub(super) explicit_rpc: Option<bool>,
 }
@@ -46,7 +49,9 @@ impl StartupPlan {
             .explicit_rpc
             .unwrap_or(inputs.configured_rpc && !has_download_request);
 
-        let mode = if has_download_work {
+        let mode = if inputs.tui {
+            RunMode::Tui
+        } else if has_download_work {
             if rpc_requested {
                 RunMode::DownloadWithRpc
             } else {
@@ -69,7 +74,7 @@ impl StartupPlan {
     }
 
     pub(super) const fn keeps_engine_alive(self) -> bool {
-        self.starts_rpc()
+        self.starts_rpc() || matches!(self.mode, RunMode::Tui)
     }
 
     pub(super) const fn is_rpc_service(self) -> bool {
@@ -92,6 +97,7 @@ mod tests {
             has_initial_downloads: true,
             has_input_file: false,
             restored_tasks: 0,
+            tui: false,
             configured_rpc: true,
             explicit_rpc: None,
         })
@@ -107,6 +113,7 @@ mod tests {
             has_initial_downloads: true,
             has_input_file: false,
             restored_tasks: 0,
+            tui: false,
             configured_rpc: false,
             explicit_rpc: Some(true),
         })
@@ -122,6 +129,7 @@ mod tests {
             has_initial_downloads: false,
             has_input_file: false,
             restored_tasks: 0,
+            tui: false,
             configured_rpc: true,
             explicit_rpc: None,
         })
@@ -136,6 +144,7 @@ mod tests {
             has_initial_downloads: false,
             has_input_file: true,
             restored_tasks: 1,
+            tui: false,
             configured_rpc: true,
             explicit_rpc: None,
         })
@@ -150,9 +159,26 @@ mod tests {
             has_initial_downloads: false,
             has_input_file: false,
             restored_tasks: 0,
+            tui: false,
             configured_rpc: true,
             explicit_rpc: Some(false),
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tui_mode_keeps_engine_alive_without_starting_rpc() {
+        let plan = StartupPlan::resolve(StartupInputs {
+            has_initial_downloads: false,
+            has_input_file: false,
+            restored_tasks: 0,
+            tui: true,
+            configured_rpc: false,
+            explicit_rpc: None,
+        })
+        .unwrap();
+        assert_eq!(plan.mode(), RunMode::Tui);
+        assert!(!plan.starts_rpc());
+        assert!(plan.keeps_engine_alive());
     }
 }

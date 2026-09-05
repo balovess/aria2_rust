@@ -593,6 +593,12 @@ fn regression_help_rendering_filters_options() {
 fn regression_basic_help_includes_copyable_examples() {
     let help = render_help(&HelpRequest::Basic);
 
+    assert!(help.contains("Start here:"));
+    assert!(help.contains("aria2c -d DIR -o NAME URL"));
+    assert!(help.contains("aria2c -i urls.txt"));
+    assert!(help.contains("aria2c file.torrent"));
+    assert!(help.contains("aria2c 'magnet:?xt=...'"));
+    assert!(help.contains("--init"));
     assert!(help.contains("https://example.com/file.zip"));
     assert!(help.contains("C:\\Downloads"));
     assert!(help.contains("--option=true"));
@@ -779,6 +785,7 @@ fn regression_completions_subcommand() {
         }
         None => panic!("expected Completions subcommand"),
         Some(Commands::CheckUpdate) => panic!("expected Completions subcommand"),
+        Some(Commands::Tui { .. }) => panic!("expected Completions subcommand"),
     }
 }
 
@@ -793,8 +800,33 @@ fn regression_completions_all_shells() {
             Some(Commands::CheckUpdate) => {
                 panic!("expected Completions subcommand for {}", shell)
             }
+            Some(Commands::Tui { .. }) => {
+                panic!("expected Completions subcommand for {}", shell)
+            }
         }
     }
+}
+
+#[test]
+fn regression_tui_subcommand_accepts_language() {
+    let cli = parse(&["tui", "--language=zh-CN"]);
+    assert!(
+        matches!(cli.command, Some(Commands::Tui { language: Some(value) }) if value == "zh-CN")
+    );
+}
+
+#[test]
+fn regression_remote_tui_options() {
+    let cli = parse(&[
+        "--rpc-url",
+        "http://127.0.0.1:6800/jsonrpc",
+        "--rpc-token=secret",
+    ]);
+    assert_eq!(
+        cli.general.rpc_url.as_deref(),
+        Some("http://127.0.0.1:6800/jsonrpc")
+    );
+    assert_eq!(cli.general.remote_rpc_secret.as_deref(), Some("secret"));
 }
 
 /// Test: update checks expose an explicit opt-out, interval, and command.

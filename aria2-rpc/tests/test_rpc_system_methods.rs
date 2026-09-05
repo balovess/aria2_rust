@@ -13,7 +13,7 @@ async fn test_list_methods_returns_all_methods() {
     assert!(resp.is_success());
 
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    let expected_count = 33
+    let expected_count = 35
         + ["aria2.addTorrent", "aria2.getPeers", "aria2.addMetalink"]
             .into_iter()
             .filter(|method| methods.iter().any(|actual| actual == method))

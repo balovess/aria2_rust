@@ -16,7 +16,7 @@ use super::constants::{
 /// tracker, DHT, PEX, and piece verification need to share.
 #[derive(Debug)]
 pub struct PeerRejectionState {
-    rejected: HashMap<String, Instant>,
+    rejected: HashMap<Box<str>, Instant>,
     last_cleanup: Instant,
 }
 
@@ -56,7 +56,7 @@ impl PeerRejectionState {
         }
         let extra = rand::thread_rng().gen_range(0..TEMP_REJECT_TIMEOUT_RANGE_SECS);
         self.rejected.insert(
-            ipaddr.to_string(),
+            ipaddr.to_owned().into_boxed_str(),
             now + Duration::from_secs(TEMP_REJECT_TIMEOUT_MIN_SECS + extra),
         );
     }

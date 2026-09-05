@@ -7,7 +7,6 @@ use tracing::{debug, trace, warn};
 
 use super::{
     DEFAULT_LOCAL_UT_METADATA_ID, DEFAULT_LOCAL_UT_PEX_ID, DEFAULT_REQQ, ExtensionRegistry,
-    UT_METADATA_NAME, UT_PEX_NAME,
 };
 
 impl ExtensionRegistry {
@@ -16,13 +15,9 @@ impl ExtensionRegistry {
     /// Local assignments: ut_metadata = 1, ut_pex = 2.
     /// Peer assignments are empty until a handshake is received.
     pub fn new() -> Self {
-        let mut local_extensions = HashMap::new();
-        local_extensions.insert(UT_METADATA_NAME.to_vec(), DEFAULT_LOCAL_UT_METADATA_ID);
-        local_extensions.insert(UT_PEX_NAME.to_vec(), DEFAULT_LOCAL_UT_PEX_ID);
-
         Self {
-            local_extensions,
-            peer_extensions: HashMap::new(),
+            local_ut_metadata_id: DEFAULT_LOCAL_UT_METADATA_ID,
+            local_ut_pex_id: DEFAULT_LOCAL_UT_PEX_ID,
             peer_id_to_name: HashMap::new(),
             reqq: DEFAULT_REQQ,
         }
@@ -30,14 +25,13 @@ impl ExtensionRegistry {
 
     /// Update peer extension assignments from a received extension handshake.
     ///
-    /// Parses the `m` dict from the handshake and populates `peer_extensions`
-    /// and the reverse map `peer_id_to_name`. Also stores the `reqq` value.
+    /// Parses the `m` dict from the handshake and populates `peer_id_to_name`.
+    /// Also stores the `reqq` value.
     ///
     /// This should be called exactly once, when the extension handshake
     /// (ext_id = 0) is received from the peer.
     pub fn update_from_peer_handshake(&mut self, handshake: &ExtensionHandshake) {
         // Clear previous peer mappings (shouldn't happen, but be safe)
-        self.peer_extensions.clear();
         self.peer_id_to_name.clear();
 
         // Walk the m_dict and register each extension
@@ -56,8 +50,8 @@ impl ExtensionRegistry {
                     String::from_utf8_lossy(name),
                     ext_id
                 );
-                self.peer_extensions.insert(name.clone(), ext_id);
-                self.peer_id_to_name.insert(ext_id, name.clone());
+                self.peer_id_to_name
+                    .insert(ext_id, name.clone().into_boxed_slice());
             }
         }
 

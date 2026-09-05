@@ -46,16 +46,71 @@ impl BtPeerConn {
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
+        Self::connect_mse_with_hashes(
             addr,
             info_hash,
+            None,
             force_encryption,
             prefer_encryption,
             local_peer_id,
             timeout,
         )
         .await
-        {
+    }
+
+    /// Connect via MSE using the BEP 52 hybrid upgrade path.
+    pub async fn connect_mse_hybrid_with_options(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        Self::connect_mse_with_hashes(
+            addr,
+            info_hash_v1,
+            Some(info_hash_v2),
+            force_encryption,
+            prefer_encryption,
+            local_peer_id,
+            timeout,
+        )
+        .await
+    }
+
+    async fn connect_mse_with_hashes(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        let connection = match info_hash_v2 {
+            Some(info_hash_v2) => aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_hybrid_with_options(
+                addr,
+                info_hash_v1,
+                info_hash_v2,
+                force_encryption,
+                prefer_encryption,
+                local_peer_id,
+                timeout,
+            )
+            .await,
+            None => aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
+                addr,
+                info_hash_v1,
+                force_encryption,
+                prefer_encryption,
+                local_peer_id,
+                timeout,
+            )
+            .await,
+        };
+        match connection {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
@@ -76,15 +131,18 @@ impl BtPeerConn {
                     last_message_received: now,
                     keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
                     peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-                    stats: PeerStats::new([0u8; 20], std::net::SocketAddr::new(
-                        addr.ip.parse().map_err(|_| {
+                    stats: PeerStats::new(
+                        [0u8; 20],
+                        std::net::SocketAddr::new(
+                            addr.ip.parse().map_err(|_| {
                                 Aria2Error::Fatal(FatalError::Config(format!(
                                     "Invalid peer IP address: {}",
                                     addr.ip
                                 )))
                             })?,
                             addr.port,
-                    )),
+                        ),
+                    ),
                     pending_pex_peers: Vec::new(),
                     pex_enabled: true,
                 })
@@ -115,14 +173,45 @@ impl BtPeerConn {
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
     ) -> Result<Self> {
-        match aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout(
+        Self::connect_plain_with_hashes(addr, info_hash, None, local_peer_id, timeout).await
+    }
+
+    /// Connect via plain TCP, optionally using the BEP 52 hybrid upgrade.
+    pub async fn connect_plain_hybrid_with_options(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        Self::connect_plain_with_hashes(
             addr,
-            info_hash,
+            info_hash_v1,
+            Some(info_hash_v2),
             local_peer_id,
             timeout,
         )
         .await
-        {
+    }
+
+    async fn connect_plain_with_hashes(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        let result = match info_hash_v2 {
+            Some(info_hash_v2) => aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_hybrid_with_timeout(
+                addr, info_hash_v1, info_hash_v2, local_peer_id, timeout,
+            )
+            .await,
+            None => aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout(
+                addr, info_hash_v1, local_peer_id, timeout,
+            )
+            .await,
+        };
+        match result {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
@@ -310,27 +399,84 @@ impl BtPeerConn {
         listen_port: Option<u16>,
         shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
     ) -> Result<Self> {
+        Self::connect_utp_with_hashes(
+            addr,
+            info_hash,
+            None,
+            local_peer_id,
+            timeout,
+            listen_port,
+            shared_socket,
+        )
+        .await
+    }
+
+    /// Connect via uTP using the BEP 52 hybrid upgrade path.
+    pub async fn connect_utp_hybrid_with_options(
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    ) -> Result<Self> {
+        Self::connect_utp_with_hashes(
+            addr,
+            info_hash_v1,
+            Some(info_hash_v2),
+            local_peer_id,
+            timeout,
+            listen_port,
+            shared_socket,
+        )
+        .await
+    }
+
+    async fn connect_utp_with_hashes(
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    ) -> Result<Self> {
         let utp_conn = match shared_socket {
             Some(socket) => {
-                UtpPeerConnection::connect_with_shared_socket(
+                UtpPeerConnection::connect_with_shared_socket_hybrid(
                     socket,
                     addr,
-                    info_hash,
+                    info_hash_v1,
+                    info_hash_v2,
                     local_peer_id,
                     timeout,
                 )
                 .await?
             }
-            None => {
-                UtpPeerConnection::connect_with_options(
-                    addr,
-                    info_hash,
-                    local_peer_id,
-                    timeout,
-                    listen_port,
-                )
-                .await?
-            }
+            None => match info_hash_v2 {
+                Some(info_hash_v2) => {
+                    UtpPeerConnection::connect_with_hybrid_options(
+                        addr,
+                        info_hash_v1,
+                        info_hash_v2,
+                        local_peer_id,
+                        timeout,
+                        listen_port,
+                    )
+                    .await?
+                }
+                None => {
+                    UtpPeerConnection::connect_with_options(
+                        addr,
+                        info_hash_v1,
+                        local_peer_id,
+                        timeout,
+                        listen_port,
+                    )
+                    .await?
+                }
+            },
         };
         let now = Instant::now();
 

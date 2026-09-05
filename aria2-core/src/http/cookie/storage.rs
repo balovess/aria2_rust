@@ -55,8 +55,8 @@ impl DomainBucket {
 
 /// Thread-safe cookie storage using RwLock for concurrent access.
 ///
-/// Uses a `HashMap<String, DomainBucket>` keyed by domain name, plus a
-/// `BTreeSet<(seq, domain)>` tracker for efficient domain-level LRU eviction.
+/// Uses a `HashMap<Arc<str>, DomainBucket>` keyed by domain name, plus a
+/// `BTreeSet<(seq, Arc<str>)>` tracker for efficient domain-level LRU eviction.
 /// This mirrors the C++ aria2 domain-tree + LRU tracker design without
 /// requiring raw-pointer tree navigation.
 ///
@@ -67,12 +67,12 @@ impl DomainBucket {
 pub struct CookieStorage {
     /// Domain → bucket of cookies. Replaces the C++ DomainNode tree;
     /// the HashMap gives O(1) domain lookup instead of O(depth) tree traversal.
-    domains: RwLock<HashMap<String, DomainBucket>>,
+    domains: RwLock<HashMap<Arc<str>, DomainBucket>>,
     /// LRU tracker: sorted by (seq, domain) so the least-recently-accessed
     /// domain is always at the front. Replaces the C++ `std::set<pair<time_t, DomainNode*>>`.
     /// A monotonically-increasing sequence number is used instead of `time_t`
     /// to guarantee strict ordering even for operations within the same second.
-    lru_tracker: RwLock<BTreeSet<(u64, String)>>,
+    lru_tracker: RwLock<BTreeSet<(u64, Arc<str>)>>,
     /// Monotonic sequence counter for LRU tracker keys.
     lru_seq: AtomicU64,
 }
@@ -167,10 +167,14 @@ impl CookieStorage {
         let mut domains = self.domains.write().unwrap_or_else(|e| e.into_inner());
 
         // Ensure the domain bucket exists
-        if !domains.contains_key(&domain) {
-            domains.insert(domain.clone(), DomainBucket::new());
+        if !domains.contains_key(domain.as_str()) {
+            domains.insert(Arc::from(domain.as_str()), DomainBucket::new());
         }
-        let bucket = domains.get_mut(&domain).unwrap();
+        let domain_key = domains
+            .get_key_value(domain.as_str())
+            .map(|(key, _)| Arc::clone(key))
+            .expect("domain bucket must exist after insertion");
+        let bucket = domains.get_mut(&domain_key).unwrap();
 
         // Check for existing cookie with same name+domain+path
         if let Some(pos) = bucket.cookies.iter().position(|c| c == &cookie) {
@@ -179,10 +183,10 @@ impl CookieStorage {
                 bucket.cookies.remove(pos);
                 // If bucket is now empty, remove from LRU tracker
                 if bucket.cookies.is_empty() {
-                    self.remove_from_lru(&domain);
-                    domains.remove(&domain);
+                    self.remove_from_lru(&domain_key);
+                    domains.remove(&domain_key);
                 } else {
-                    self.update_lru(&domain);
+                    self.update_lru(Arc::clone(&domain_key));
                 }
                 return;
             }
@@ -190,7 +194,7 @@ impl CookieStorage {
             let mut updated = cookie;
             updated.creation_time = bucket.cookies[pos].creation_time;
             bucket.cookies[pos] = updated;
-            self.update_lru(&domain);
+            self.update_lru(Arc::clone(&domain_key));
             return;
         }
 
@@ -198,8 +202,8 @@ impl CookieStorage {
         if cookie.is_delete_cookie() {
             // Remove empty bucket if we just created one
             if bucket.cookies.is_empty() {
-                self.remove_from_lru(&domain);
-                domains.remove(&domain);
+                self.remove_from_lru(&domain_key);
+                domains.remove(&domain_key);
             }
             return;
         }
@@ -221,7 +225,7 @@ impl CookieStorage {
                     .map(|(i, _)| i)
                 {
                     bucket.cookies[lru_pos] = cookie;
-                    self.update_lru(&domain);
+                    self.update_lru(Arc::clone(&domain_key));
                     return;
                 }
             }
@@ -229,7 +233,7 @@ impl CookieStorage {
         }
 
         bucket.cookies.push(cookie);
-        self.update_lru(&domain);
+        self.update_lru(domain_key);
     }
 
     /// Evict domains when the LRU tracker size reaches DOMAIN_EVICTION_TRIGGER.
@@ -287,22 +291,26 @@ impl CookieStorage {
     /// Per C++ `CookieStorage::updateLru()`. The sequence counter ensures
     /// strict ordering even for rapid successive updates within the same
     /// wall-clock second, which is critical for correct LRU eviction.
-    fn update_lru(&self, domain: &str) {
+    fn update_lru(&self, domain: Arc<str>) {
         let seq = self.next_lru_seq();
         let mut lru = self.lru_tracker.write().unwrap_or_else(|e| e.into_inner());
         // Remove old entry by scanning for matching domain.
         // (In C++, the node stores its own lruAccessTime for O(log n) removal;
         // we do a linear scan here which is fine for typical domain counts.)
-        if let Some(old) = lru.iter().find(|(_, d)| d == domain).cloned() {
+        if let Some(old) = lru
+            .iter()
+            .find(|(_, d)| d.as_ref() == domain.as_ref())
+            .cloned()
+        {
             lru.remove(&old);
         }
-        lru.insert((seq, domain.to_string()));
+        lru.insert((seq, domain));
     }
 
     /// Remove a domain from the LRU tracker.
     fn remove_from_lru(&self, domain: &str) {
         let mut lru = self.lru_tracker.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = lru.iter().find(|(_, d)| d == domain).cloned() {
+        if let Some(old) = lru.iter().find(|(_, d)| d.as_ref() == domain).cloned() {
             lru.remove(&old);
         }
     }
@@ -333,10 +341,10 @@ impl CookieStorage {
         // total number of domains in the process-wide jar.
         let domains = self.domains.read().unwrap_or_else(|e| e.into_inner());
         let mut matching: Vec<Cookie> = Vec::new();
-        let mut accessed_domains: Vec<String> = Vec::new();
+        let mut accessed_domains: Vec<Arc<str>> = Vec::new();
 
         for domain_key in Self::domain_candidates(host) {
-            let Some(bucket) = domains.get(&domain_key) else {
+            let Some((stored_key, bucket)) = domains.get_key_value(domain_key.as_str()) else {
                 continue;
             };
             let mut domain_accessed = false;
@@ -347,7 +355,7 @@ impl CookieStorage {
                 }
             }
             if domain_accessed {
-                accessed_domains.push(domain_key.clone());
+                accessed_domains.push(Arc::clone(stored_key));
             }
         }
         drop(domains);
@@ -366,7 +374,7 @@ impl CookieStorage {
             }
         }
         for domain_key in &accessed_domains {
-            self.update_lru(domain_key);
+            self.update_lru(Arc::clone(domain_key));
         }
 
         // Sort per RFC 6265 Section 5.4: longer paths first, then earlier creation
@@ -402,14 +410,14 @@ impl CookieStorage {
     pub fn expire_cookies(&self, base_time: i64) -> usize {
         let mut domains = self.domains.write().unwrap_or_else(|e| e.into_inner());
         let mut removed_total = 0;
-        let mut empty_domains: Vec<String> = Vec::new();
+        let mut empty_domains: Vec<Arc<str>> = Vec::new();
 
         for (domain_key, bucket) in domains.iter_mut() {
             let before = bucket.cookies.len();
             bucket.cookies.retain(|c| !c.is_expired(base_time));
             removed_total += before - bucket.cookies.len();
             if bucket.cookies.is_empty() {
-                empty_domains.push(domain_key.clone());
+                empty_domains.push(Arc::clone(domain_key));
             }
         }
 
@@ -444,7 +452,7 @@ impl CookieStorage {
     /// Equivalent to C++ `CookieStorage::contains()`.
     pub fn contains(&self, cookie: &Cookie) -> bool {
         let domains = self.domains.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(bucket) = domains.get(&cookie.domain) {
+        if let Some(bucket) = domains.get(cookie.domain.as_str()) {
             return bucket.cookies.iter().any(|c| c == cookie);
         }
         false
@@ -588,7 +596,7 @@ impl CookieStorage {
         // Check if this is a delete cookie with no existing match
         if cookie.is_delete_cookie() {
             let mut domains = self.domains.write().unwrap_or_else(|e| e.into_inner());
-            if let Some(bucket) = domains.get_mut(&cookie.domain)
+            if let Some(bucket) = domains.get_mut(cookie.domain.as_str())
                 && let Some(pos) = bucket.cookies.iter().position(|c| c == &cookie)
             {
                 bucket.cookies.remove(pos);
@@ -599,7 +607,7 @@ impl CookieStorage {
                     self.domains
                         .write()
                         .unwrap_or_else(|e| e.into_inner())
-                        .remove(&domain);
+                        .remove(domain.as_str());
                 }
                 return false; // C++ returns false for expired cookies
             }

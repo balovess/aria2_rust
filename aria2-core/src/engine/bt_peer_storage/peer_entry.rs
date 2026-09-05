@@ -1,6 +1,7 @@
 //! PeerEntry — lightweight peer descriptor for peer storage tracking.
 
 use crate::engine::peer_stats::PeerStats;
+use std::sync::Arc;
 
 /// Lightweight peer descriptor for peer storage tracking.
 ///
@@ -16,7 +17,7 @@ use crate::engine::peer_stats::PeerStats;
 #[derive(Clone, Debug)]
 pub struct PeerEntry {
     /// IP address (or hostname) of the peer.
-    pub ip: String,
+    pub ip: Arc<str>,
     /// Port number of the peer.
     pub port: u16,
     /// Caretaker unique ID that "owns" this peer (0 = not checked out).
@@ -37,7 +38,7 @@ impl PeerEntry {
     /// Create a new `PeerEntry` with default state (not checked out, not active).
     pub fn new(ip: String, port: u16) -> Self {
         Self {
-            ip,
+            ip: Arc::from(ip),
             port,
             used_by: 0,
             is_active: false,
@@ -54,7 +55,7 @@ impl PeerEntry {
     /// output back into peer storage.
     pub fn from_peer_stats(ip: String, port: u16, stats: &PeerStats) -> Self {
         Self {
-            ip,
+            ip: Arc::from(ip),
             port,
             used_by: 0,
             is_active: !stats.is_banned,

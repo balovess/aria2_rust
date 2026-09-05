@@ -63,7 +63,7 @@ impl ConcurrentSegmentManager {
             segments.push(Segment::new(i as u32, offset, length));
         }
 
-        let mirrors = urls.iter().cloned().map(MirrorState::new).collect();
+        let mirrors = urls.iter().map(|_| MirrorState::new()).collect();
 
         Self {
             total_size,
@@ -134,7 +134,7 @@ impl ConcurrentSegmentManager {
             segments.push(Segment::new(i as u32, offset, length));
         }
 
-        let mirrors = urls.iter().cloned().map(MirrorState::new).collect();
+        let mirrors = urls.iter().map(|_| MirrorState::new()).collect();
 
         Self {
             total_size,
@@ -330,7 +330,7 @@ impl ConcurrentSegmentManager {
     }
 
     pub fn mirror_url(&self, index: usize) -> Option<&str> {
-        self.mirrors.get(index).map(|m| m.url.as_str())
+        self.mirror_urls.get(index).map(String::as_str)
     }
 
     pub fn available_mirrors(&self) -> Vec<usize> {

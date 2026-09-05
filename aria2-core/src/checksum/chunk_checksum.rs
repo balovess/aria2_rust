@@ -3,15 +3,19 @@ use super::message_digest::{HashType, MessageDigest};
 #[derive(Debug, Clone)]
 pub struct ChunkChecksum {
     hash_type: HashType,
-    piece_hashes: Vec<String>,
+    piece_hashes: Vec<Box<str>>,
     piece_length: u64,
 }
 
 impl ChunkChecksum {
-    pub fn new(hash_type: HashType, piece_hashes: Vec<String>, piece_length: u64) -> Self {
+    pub fn new<I, S>(hash_type: HashType, piece_hashes: I, piece_length: u64) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Box<str>>,
+    {
         ChunkChecksum {
             hash_type,
-            piece_hashes,
+            piece_hashes: piece_hashes.into_iter().map(Into::into).collect(),
             piece_length,
         }
     }
@@ -41,11 +45,11 @@ impl ChunkChecksum {
             return false;
         }
         let computed = MessageDigest::hash_hex(self.hash_type, chunk_data);
-        computed == self.piece_hashes[index]
+        computed.as_str() == self.piece_hashes[index].as_ref()
     }
 
-    pub fn piece_hash(&self, index: usize) -> Option<&String> {
-        self.piece_hashes.get(index)
+    pub fn piece_hash(&self, index: usize) -> Option<&str> {
+        self.piece_hashes.get(index).map(AsRef::as_ref)
     }
 }
 
@@ -97,7 +101,7 @@ mod tests {
 
     #[test]
     fn test_chunk_checksum_empty() {
-        let cc = ChunkChecksum::new(HashType::Md5, vec![], 16384);
+        let cc = ChunkChecksum::new(HashType::Md5, Vec::<String>::new(), 16384);
         assert_eq!(cc.piece_count(), 0);
         assert_eq!(cc.estimated_data_length(), 0);
     }

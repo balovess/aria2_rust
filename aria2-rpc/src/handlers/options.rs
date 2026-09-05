@@ -18,6 +18,18 @@ pub(crate) fn parse_change_global_option(
     })
 }
 
+pub(crate) fn parse_update_browser_context(
+    req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::UpdateBrowserContext {
+        context: req.take_param(0)?,
+    })
+}
+
+pub(crate) fn parse_clear_browser_context(_req: &mut JsonRpcRequest) -> BackendRequest {
+    BackendRequest::ClearBrowserContext
+}
+
 pub(crate) fn parse_get_option(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     Ok(BackendRequest::GetOption {
         gid: req.take_param(0)?,

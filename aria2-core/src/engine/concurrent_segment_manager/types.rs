@@ -36,7 +36,6 @@ impl Segment {
 /// Runtime state tracked per mirror URL.
 #[derive(Debug)]
 pub struct MirrorState {
-    pub url: String,
     pub speed: f64,
     pub active_segments: usize,
     pub max_connections: usize,
@@ -45,9 +44,8 @@ pub struct MirrorState {
 }
 
 impl MirrorState {
-    pub(crate) fn new(url: String) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            url,
             speed: 0.0,
             active_segments: 0,
             max_connections: constants::DEFAULT_MAX_CONNECTIONS_PER_MIRROR,

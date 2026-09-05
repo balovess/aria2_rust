@@ -1314,6 +1314,7 @@ impl DownloadOptions {
             self.enable_http_keep_alive,
             self.enable_http_pipelining,
         )
+        .with_browser_context(crate::http::global_browser_context())
     }
 
     /// Resolve proxy credentials using aria2's protocol-specific precedence.

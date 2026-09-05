@@ -210,6 +210,7 @@ impl BtDownloadCommand {
             ClientTlsConfig::from_download_options(group.options())
         };
         let public_tracker_catalog = self.public_trackers.clone();
+        let mut public_tracker_urls = HashSet::new();
         if enable_public_trackers && let Some(catalog) = public_tracker_catalog.as_ref() {
             let public_entries = catalog.available_snapshot().await;
             let existing_urls: HashSet<String> = tracker_tiers
@@ -227,7 +228,7 @@ impl BtDownloadCommand {
                 .take(MAX_PUBLIC_TRACKERS_TO_TRY)
                 .collect();
             for url in public_urls {
-                self.public_tracker_urls.insert(url.clone());
+                public_tracker_urls.insert(url.clone());
                 tracker_tiers.push(vec![url]);
             }
         }
@@ -243,7 +244,7 @@ impl BtDownloadCommand {
         announcer.set_user_defined_interval(Duration::from_secs(tracker_interval));
         announcer.set_announce_options(force_encryption, external_ip);
         if let Some(catalog) = public_tracker_catalog {
-            announcer.set_public_tracker_catalog(catalog, self.public_tracker_urls.clone());
+            announcer.set_public_tracker_catalog(catalog, public_tracker_urls);
         }
 
         // Set up UDP client for UDP tracker support
@@ -308,7 +309,7 @@ impl BtDownloadCommand {
             && let Some(lpd) = self.lpd_manager.as_ref().cloned()
         {
             let info_hash_hex = hex::encode(*info_hash_raw);
-            if self.lpd_registered_info_hash.as_deref() != Some(info_hash_hex.as_str()) {
+            if self.lpd_registered_info_hash.as_ref() != Some(info_hash_raw) {
                 let registration = if self.listen_port > 0 {
                     lpd.register_torrent_with_port(&info_hash_hex, false, self.listen_port)
                         .await
@@ -323,7 +324,7 @@ impl BtDownloadCommand {
                         "LPD torrent registration failed: {error}"
                     )))
                 })?;
-                self.lpd_registered_info_hash = Some(info_hash_hex.clone());
+                self.lpd_registered_info_hash = Some(*info_hash_raw);
             }
             lpd.ensure_runtime_started().await;
             if self.listen_port > 0
@@ -461,13 +462,17 @@ impl BtDownloadCommand {
         &mut self,
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
+        info_hash_v2: Option<[u8; 32]>,
         num_pieces: u32,
         piece_length: u32,
         total_size: u64,
     ) -> Result<Vec<BtPeerConn>> {
         let connection_options = {
             let group = self.group.recover();
-            BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id)
+            let mut options =
+                BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
+            options.hybrid_info_hash_v2 = info_hash_v2;
+            options
         };
 
         // Generate our local peer ID for this session. This is used for
@@ -819,7 +824,7 @@ mod tests {
         command.set_lpd_manager(Arc::clone(&manager));
 
         let peers = command
-            .discover_peers(&meta, meta.total_size(), &meta.info_hash.bytes)
+            .discover_peers(&meta, meta.total_size(), &meta.network_info_hash())
             .await
             .expect("discovery without network trackers should succeed");
 
@@ -829,7 +834,7 @@ mod tests {
                 .active_hashes
                 .read()
                 .await
-                .contains(&meta.info_hash.as_hex()),
+                .contains(meta.info_hash.as_hex().as_str()),
             "LPD must register a public torrent even when no peer is discovered"
         );
     }

@@ -563,6 +563,7 @@ mod bridge_tests {
                     has_initial_downloads: false,
                     has_input_file: false,
                     restored_tasks: 0,
+                    tui: false,
                     configured_rpc: true,
                     explicit_rpc: None,
                 })

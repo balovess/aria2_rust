@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tracing::{debug, warn};
@@ -245,7 +246,7 @@ impl LpdAnnouncer {
     pub fn receive_announcements(&self, timeout: Duration) -> Vec<LpdPeer> {
         let mut buf = [0u8; constants::LPD_RECEIVE_BUFFER_SIZE];
         let mut peers = Vec::new();
-        let mut seen: HashSet<(String, IpAddr)> = HashSet::new();
+        let mut seen: HashSet<(Arc<str>, IpAddr)> = HashSet::new();
 
         self.socket
             .set_read_timeout(Some(timeout))

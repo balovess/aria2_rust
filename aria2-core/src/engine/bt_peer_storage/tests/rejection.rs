@@ -37,7 +37,7 @@ fn test_temporary_rejection_expiry() {
     let expired = instant_past(1);
     storage
         .temporarily_rejected_peers
-        .insert("192.168.1.1".to_string(), expired);
+        .insert("192.168.1.1".to_string().into_boxed_str(), expired);
 
     // Should return false and remove the entry.
     assert!(!storage.is_temporarily_rejected("192.168.1.1"));
@@ -68,7 +68,7 @@ fn test_reject_peer_temporarily_cleanup() {
     let expired = instant_past(1);
     storage
         .temporarily_rejected_peers
-        .insert("10.0.0.1".to_string(), expired);
+        .insert("10.0.0.1".to_string().into_boxed_str(), expired);
 
     // Force the cleanup timer to trigger by setting it far enough in the
     // past. Use a small offset (2ms) that won't overflow on Windows,

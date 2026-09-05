@@ -63,7 +63,9 @@ impl DefaultPeerStorage {
 
         debug!("Temporarily rejected peer {} for {}s", ipaddr, timeout_secs);
 
-        self.temporarily_rejected_peers
-            .insert(ipaddr.to_string(), now + Duration::from_secs(timeout_secs));
+        self.temporarily_rejected_peers.insert(
+            ipaddr.to_owned().into_boxed_str(),
+            now + Duration::from_secs(timeout_secs),
+        );
     }
 }

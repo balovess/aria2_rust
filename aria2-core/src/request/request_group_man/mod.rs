@@ -1525,8 +1525,13 @@ mod tests {
         let payload = man.find_group(GroupId::new(31)).expect("payload retained");
         assert!(payload.recover().is_dependency_resolved());
         assert_eq!(
-            payload.recover().uris(),
-            &["https://mirror.test/file.bin".to_string()]
+            payload
+                .recover()
+                .uris()
+                .iter()
+                .map(|uri| uri.as_ref())
+                .collect::<Vec<_>>(),
+            ["https://mirror.test/file.bin"]
         );
     }
 

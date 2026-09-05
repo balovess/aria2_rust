@@ -4,16 +4,18 @@ use std::time::Instant;
 use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 
 pub struct PeerBitfieldEntry {
-    pub peer_id: String,
     pub have_pieces: Bitfield,
-    pub raw_bitfield: Vec<u8>,
     pub last_updated: Instant,
 }
 
 pub struct PeerBitfieldTracker {
     total_pieces: u32,
-    peers: HashMap<String, PeerBitfieldEntry>,
-    piece_peer_count: Vec<usize>,
+    // Peer IDs are immutable map keys. Box<str> removes String's capacity
+    // word and stores exactly the key length.
+    peers: HashMap<Box<str>, PeerBitfieldEntry>,
+    // Peer counts cannot exceed the number of active peers, so u32 is enough
+    // and saves 4 bytes per piece on 64-bit targets.
+    piece_peer_count: Vec<u32>,
 }
 
 pub struct PeerTrackerStats {
@@ -26,10 +28,12 @@ pub struct PeerTrackerStats {
 
 impl PeerBitfieldTracker {
     pub fn new(total_pieces: u32) -> Self {
+        let piece_count = usize::try_from(total_pieces)
+            .expect("piece count does not fit in the target platform's usize");
         Self {
             total_pieces,
             peers: HashMap::new(),
-            piece_peer_count: vec![0usize; total_pieces as usize],
+            piece_peer_count: vec![0u32; piece_count],
         }
     }
 
@@ -43,29 +47,26 @@ impl PeerBitfieldTracker {
             }
 
             // Update with new bitfield
-            let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
+            let have = Bitfield::from_bytes(bitfield, self.piece_peer_count.len());
             for i in have.iter_set() {
                 if i < self.piece_peer_count.len() {
-                    self.piece_peer_count[i] += 1;
+                    self.piece_peer_count[i] = self.piece_peer_count[i].saturating_add(1);
                 }
             }
 
             existing.have_pieces = have;
-            existing.raw_bitfield = bitfield.to_vec();
             existing.last_updated = Instant::now();
         } else {
-            let have = Bitfield::from_bytes(bitfield, self.total_pieces as usize);
+            let have = Bitfield::from_bytes(bitfield, self.piece_peer_count.len());
             for i in have.iter_set() {
                 if i < self.piece_peer_count.len() {
-                    self.piece_peer_count[i] += 1;
+                    self.piece_peer_count[i] = self.piece_peer_count[i].saturating_add(1);
                 }
             }
             self.peers.insert(
-                peer_id.to_string(),
+                peer_id.into(),
                 PeerBitfieldEntry {
-                    peer_id: peer_id.to_string(),
                     have_pieces: have,
-                    raw_bitfield: bitfield.to_vec(),
                     last_updated: Instant::now(),
                 },
             );
@@ -87,7 +88,7 @@ impl PeerBitfieldTracker {
         self.peers
             .iter()
             .filter(|(_, e)| e.have_pieces.test(idx))
-            .map(|(id, _)| id.clone())
+            .map(|(id, _)| id.to_string())
             .collect()
     }
 
@@ -99,7 +100,10 @@ impl PeerBitfieldTracker {
     }
 
     pub fn piece_frequencies(&self) -> Vec<usize> {
-        self.piece_peer_count.clone()
+        self.piece_peer_count
+            .iter()
+            .map(|&count| count as usize)
+            .collect()
     }
 
     pub fn should_enter_endgame(&self, threshold: u32, completed: &Bitfield) -> bool {
@@ -110,13 +114,17 @@ impl PeerBitfieldTracker {
     pub fn missing_pieces(&self, completed: &Bitfield) -> Vec<u32> {
         completed
             .iter_clear()
-            .take(self.total_pieces as usize)
+            .take(self.piece_peer_count.len())
             .map(|i| i as u32)
             .collect()
     }
 
     pub fn stats(&self, completed: Option<&Bitfield>) -> PeerTrackerStats {
-        let total_have: usize = self.piece_peer_count.iter().sum();
+        let total_have: usize = self
+            .piece_peer_count
+            .iter()
+            .map(|&count| count as usize)
+            .sum();
         let avg = if self.peers.is_empty() {
             0.0
         } else {
@@ -136,7 +144,7 @@ impl PeerBitfieldTracker {
     }
 
     pub fn get_peer_bitfield_raw(&self, peer_id: &str) -> Option<&[u8]> {
-        self.peers.get(peer_id).map(|e| e.raw_bitfield.as_slice())
+        self.peers.get(peer_id).map(|e| e.have_pieces.as_bytes())
     }
 
     pub fn get_peer_bitfield_or_empty(&self, peer_id: &str) -> Vec<u8> {
@@ -327,5 +335,15 @@ mod tests {
         );
         assert_eq!(tracker.piece_frequencies()[3], 1, "new piece 3 now counted");
         assert_eq!(tracker.peer_count(), 1, "still only 1 peer");
+    }
+
+    #[test]
+    fn test_piece_count_saturates_at_u32_limit() {
+        let mut tracker = PeerBitfieldTracker::new(1);
+        tracker.piece_peer_count[0] = u32::MAX;
+
+        tracker.update_peer_bitfield("peer", &make_bf(1, &[0]));
+
+        assert_eq!(tracker.piece_peer_count[0], u32::MAX);
     }
 }

@@ -70,16 +70,14 @@ pub(super) const UT_PEX_NAME: &[u8] = b"ut_pex";
 ///   against the peer's IDs to determine which extension it is.
 #[derive(Debug, Clone)]
 pub struct ExtensionRegistry {
-    /// Our local ext_id assignments (what we told the peer in our handshake).
-    /// Key = extension name bytes (e.g. b"ut_metadata"), Value = our ext_id.
-    pub(super) local_extensions: HashMap<Vec<u8>, u8>,
+    /// Our local ext_id assignments. These are fixed by the protocol
+    /// implementation and do not need per-peer hash tables or allocations.
+    pub(super) local_ut_metadata_id: u8,
+    pub(super) local_ut_pex_id: u8,
 
-    /// Peer's ext_id assignments (what the peer told us in their handshake).
-    /// Key = extension name bytes (e.g. b"ut_metadata"), Value = peer's ext_id.
-    pub(super) peer_extensions: HashMap<Vec<u8>, u8>,
-
-    /// Reverse map: peer's ext_id -> extension name (for dispatch).
-    pub(super) peer_id_to_name: HashMap<u8, Vec<u8>>,
+    /// Peer's ext_id -> extension name (for dispatch and capability lookup).
+    /// A single map avoids storing every negotiated name in both directions.
+    pub(super) peer_id_to_name: HashMap<u8, Box<[u8]>>,
 
     /// The reqq value from the peer's handshake (max outstanding metadata reqs).
     pub(super) reqq: u32,

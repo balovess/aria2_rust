@@ -10,7 +10,7 @@
 //! - When `DownloadContext` is not yet set, queries fall back to
 //!   `RequestGroup.uris` (the initial URI list).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tracing::{debug, trace};
@@ -21,7 +21,60 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_CONNECTION_CONTEXTS: usize = 32;
 
+/// Storage accounting for URI strings retained by a request group.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UriMemoryStats {
+    /// Number of URI string values currently retained by the group/context.
+    pub stored_count: usize,
+    /// Sum of string lengths, excluding allocator overhead.
+    pub logical_bytes: usize,
+    /// Sum of `String::capacity()` values.
+    pub capacity_bytes: usize,
+    /// Logical bytes belonging to repeated URI values.
+    pub duplicate_logical_bytes: usize,
+    /// Capacity bytes belonging to repeated URI values.
+    pub duplicate_capacity_bytes: usize,
+}
+
 impl super::RequestGroup {
+    /// Measure URI duplication across the group's fallback list and its
+    /// download-context URI lifecycle lists. This is diagnostic only and
+    /// does not change URI ownership or ordering.
+    pub fn uri_memory_stats(&self) -> UriMemoryStats {
+        let mut stats = UriMemoryStats::default();
+        let mut seen: HashMap<String, usize> = HashMap::new();
+
+        let mut account = |uri: &str, capacity: usize| {
+            stats.stored_count += 1;
+            stats.logical_bytes += uri.len();
+            stats.capacity_bytes += capacity;
+            if seen.insert(uri.to_owned(), uri.len()).is_some() {
+                stats.duplicate_logical_bytes += uri.len();
+                stats.duplicate_capacity_bytes += capacity;
+            }
+        };
+
+        for uri in &self.uris {
+            account(uri, uri.len());
+        }
+
+        if let Some(ctx) = self.download_context.recover().as_ref() {
+            for entry in ctx.get_file_entries() {
+                for uri in entry.remaining_uris() {
+                    account(uri, uri.capacity());
+                }
+                for uri in entry.spent_uris() {
+                    account(uri, uri.capacity());
+                }
+                for result in entry.uri_results() {
+                    account(&result.uri, result.uri.capacity());
+                }
+            }
+        }
+
+        stats
+    }
+
     // ── DownloadContext Accessors ────────────────────────────────────────
 
     /// Get a shared reference to the `DownloadContext`, if set.
@@ -124,7 +177,7 @@ impl super::RequestGroup {
             uris
         } else {
             // Fallback: return initial URIs (none have been dispatched yet)
-            self.uris.clone()
+            self.uris.iter().map(|uri| uri.to_string()).collect()
         }
     }
 
@@ -165,7 +218,7 @@ impl super::RequestGroup {
             }
             uris
         } else {
-            self.uris.clone()
+            self.uris.iter().map(|uri| uri.to_string()).collect()
         }
     }
 
@@ -195,7 +248,7 @@ impl super::RequestGroup {
         } else {
             self.uris
                 .iter()
-                .cloned()
+                .map(|uri| uri.to_string())
                 .map(|uri| super::UriEntry {
                     uri,
                     status: "waiting".to_string(),
@@ -262,7 +315,10 @@ impl super::RequestGroup {
             ));
         }
         self.uris.retain(|uri| {
-            if del_uris.iter().any(|deleted_uri| deleted_uri == uri) {
+            if del_uris
+                .iter()
+                .any(|deleted_uri| deleted_uri == uri.as_ref())
+            {
                 deleted += 1;
                 false
             } else {
@@ -277,7 +333,8 @@ impl super::RequestGroup {
                         continue;
                     }
                     let insert_position = position.min(self.uris.len());
-                    self.uris.insert(insert_position, uri.clone());
+                    self.uris
+                        .insert(insert_position, uri.clone().into_boxed_str());
                     position = position.saturating_add(1);
                     added += 1;
                 }
@@ -287,7 +344,7 @@ impl super::RequestGroup {
                 .iter()
                 .filter(|uri| url::Url::parse(uri).is_ok())
                 .map(|uri| {
-                    self.uris.push(uri.clone());
+                    self.uris.push(uri.clone().into_boxed_str());
                     1
                 })
                 .sum(),
@@ -437,14 +494,14 @@ impl super::RequestGroup {
             // initial URI list. The URI will be available for the next
             // download attempt via reuse_uri().
             drop(guard);
-            self.uris.push(uri.to_string());
+            self.uris.push(uri.to_owned().into_boxed_str());
             trace!(
                 "Added redirect URI to initial URI list (shared Arc): {}",
                 uri
             );
         } else {
             drop(guard);
-            self.uris.push(uri.to_string());
+            self.uris.push(uri.to_owned().into_boxed_str());
             trace!(
                 "Added redirect URI to initial URI list (no context): {}",
                 uri

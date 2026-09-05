@@ -141,21 +141,11 @@ fn release_version_from_text(text: &str) -> Option<String> {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    home_dir().map(|home| {
-        home.join(crate::constants::CONFIG_DIR_NAME)
-            .join(CACHE_FILE_NAME)
-    })
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .or_else(|| {
-            let drive = std::env::var_os("HOMEDRIVE")?;
-            let path = std::env::var_os("HOMEPATH")?;
-            Some(Path::new(&drive).join(path).into_os_string())
-        })
-        .map(PathBuf::from)
+    Some(
+        crate::app::paths::system_layout()
+            .cache_dir
+            .join(CACHE_FILE_NAME),
+    )
 }
 
 #[derive(Debug, Default)]

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -35,21 +34,54 @@ pub(crate) fn build_download_context_from_meta(
         let base_dir = std::path::Path::new(&path)
             .parent()
             .unwrap_or_else(|| std::path::Path::new("."));
-        let mut entries = Vec::with_capacity(meta.info.files.as_ref().map_or(0, Vec::len));
+        let v1_files = meta.info.files.as_deref();
+        let v2_files = meta.info.v2_files.as_deref();
+        let file_count = v1_files
+            .map(|files| {
+                files
+                    .iter()
+                    .filter(|file| {
+                        !file
+                            .path
+                            .first()
+                            .is_some_and(|component| component == ".pad")
+                    })
+                    .count()
+            })
+            .or_else(|| v2_files.map(|files| files.len()))
+            .unwrap_or(0);
+        let mut entries = Vec::with_capacity(file_count);
         let mut offset = 0u64;
-        for torrent_file in meta.info.files.as_deref().unwrap_or_default() {
-            let original_name = torrent_file.path.join("/");
+        let mut add_entry = |length: u64, path: &Vec<String>, offset: &mut u64| {
+            let original_name = path.join("/");
             let file_path = base_dir.join(std::path::Path::new(&original_name));
             let mut entry = FileEntry::new(
                 file_path.to_string_lossy().into_owned(),
-                torrent_file.length,
-                offset,
+                length,
+                *offset,
                 Vec::new(),
             );
             entry.set_original_name(original_name.clone());
             entry.set_suffix_path(original_name);
             entries.push(entry);
-            offset = offset.saturating_add(torrent_file.length);
+            *offset = offset.saturating_add(length);
+        };
+        if let Some(files) = v1_files {
+            for file in files {
+                if file
+                    .path
+                    .first()
+                    .is_some_and(|component| component == ".pad")
+                {
+                    offset = offset.saturating_add(file.length);
+                    continue;
+                }
+                add_entry(file.length, &file.path, &mut offset);
+            }
+        } else if let Some(files) = v2_files {
+            for file in files {
+                add_entry(file.length, &file.path, &mut offset);
+            }
         }
         let mut context = DownloadContext::new_default();
         context.set_piece_length(meta.info.piece_length);
@@ -62,8 +94,10 @@ pub(crate) fn build_download_context_from_meta(
         entry.set_original_name(meta.info.name.clone());
         entry.set_suffix_path(meta.info.name.clone());
     }
-    let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
-    ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
+    if meta.info.meta_version != Some(2) {
+        let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
+        ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
+    }
 
     let torrent_attr = TorrentAttribute {
         name: meta.info.name.clone(),
@@ -508,7 +542,6 @@ impl BtDownloadCommand {
             ),
             dht_engine: None,
             public_trackers: None,
-            public_tracker_urls: HashSet::new(),
             choking_algo,
             multi_file_layout,
             file_allocation: options
@@ -548,8 +581,6 @@ impl BtDownloadCommand {
             // Tracker event state machine default
             tracker_state: TrackerState::new(),
 
-            // Web-seed URLs (extracted from torrent url-list field)
-            web_seed_urls: meta.web_seeds.clone(),
             // Web seed manager (initialized lazily when needed)
             web_seed_manager: None,
 

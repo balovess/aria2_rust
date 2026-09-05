@@ -105,6 +105,8 @@ fn base_method_names() -> Vec<String> {
         "aria2.forceShutdown",
         "aria2.getGlobalStat",
         "aria2.saveSession",
+        "aria2.updateBrowserContext",
+        "aria2.clearBrowserContext",
         "system.multicall",
         "system.listMethods",
         "system.listNotifications",
@@ -136,6 +138,10 @@ pub enum PositionMode {
 /// One operation requested from a backend.
 #[derive(Debug, Clone)]
 pub enum BackendRequest {
+    UpdateBrowserContext {
+        context: serde_json::Value,
+    },
+    ClearBrowserContext,
     AddUri {
         uris: Vec<String>,
         options: HashMap<String, serde_json::Value>,

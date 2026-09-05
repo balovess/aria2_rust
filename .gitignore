@@ -13,6 +13,12 @@ bindings/python/tests/__pycache__/
 !aria2-core/tests/fixtures/compatibility_option_policies.txt
 *.md
 !docs/performance-differentiators.md
+!docs/browser-bridge-guide-cn.md
+!docs/browser-bridge-guide-en.md
+!docs/tui-guide-cn.md
+!docs/tui-guide-en.md
+!docs/release-artifacts-cn.md
+!docs/release-artifacts-en.md
 *.7z
 *.bak
 *.bin

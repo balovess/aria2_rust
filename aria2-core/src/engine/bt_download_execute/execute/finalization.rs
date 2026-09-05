@@ -54,7 +54,7 @@ impl BtDownloadCommand {
         if let Some(ref engine) = self.dht_engine
             && let Some(port) = dht_announce_port(self.listen_port)
         {
-            if let Err(error) = engine.announce_peer(&meta.info_hash.bytes, port).await {
+            if let Err(error) = engine.announce_peer(&meta.network_info_hash(), port).await {
                 warn!(%error, "BT DHT announce failed");
             } else {
                 info!(
@@ -66,7 +66,7 @@ impl BtDownloadCommand {
         }
 
         if let Some(ref manager) = self.progress_manager
-            && let Err(error) = manager.remove_progress(&meta.info_hash.bytes)
+            && let Err(error) = manager.remove_progress(&meta.network_info_hash())
         {
             warn!(%error, "Failed to remove progress file after completion");
         }
@@ -78,7 +78,8 @@ impl BtDownloadCommand {
         if let (Some(manager), Some(info_hash)) =
             (&self.lpd_manager, self.lpd_registered_info_hash.take())
         {
-            manager.unregister_torrent(&info_hash).await;
+            let info_hash_hex = hex::encode(info_hash);
+            manager.unregister_torrent(&info_hash_hex).await;
         }
 
         if let Some(ref hooks) = self.hook_manager {

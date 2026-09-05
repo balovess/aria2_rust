@@ -74,6 +74,36 @@ impl EncryptedConnection {
         Self::complete_mse_handshake(
             stream,
             info_hash,
+            None,
+            force_encryption,
+            prefer_encryption,
+            local_peer_id,
+            timeout,
+        )
+        .await
+    }
+
+    /// Connect with MSE while advertising and accepting the BEP 52 hybrid
+    /// upgrade response. MSE itself is keyed by the v1 hash; the peer wire
+    /// handshake may then switch to the truncated v2 hash.
+    pub async fn connect_with_mse_hybrid_with_options(
+        addr: &PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
+        let socket_addr = addr.to_socket_addr();
+        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+            .await
+            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
+            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
+        Self::complete_mse_handshake(
+            stream,
+            info_hash_v1,
+            Some(info_hash_v2),
             force_encryption,
             prefer_encryption,
             local_peer_id,
@@ -85,6 +115,7 @@ impl EncryptedConnection {
     async fn complete_mse_handshake(
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
         force_encryption: bool,
         prefer_encryption: bool,
         local_peer_id: &[u8; 20],
@@ -158,6 +189,7 @@ impl EncryptedConnection {
 
         let mut local_handshake = Handshake::new(info_hash, local_peer_id)
             .with_dht(true)
+            .with_bep52(info_hash_v2.is_some())
             .to_bytes();
         crypto.encrypt(&mut local_handshake);
         stream
@@ -182,7 +214,17 @@ impl EncryptedConnection {
             )
         })?;
         if remote_hs.info_hash != *info_hash {
-            return Err("info_hash mismatch".to_string());
+            let Some(info_hash_v2) = info_hash_v2 else {
+                return Err("info_hash mismatch".to_string());
+            };
+            let v2_truncated: [u8; 20] = info_hash_v2[..20]
+                .try_into()
+                .expect("SHA-256 hash is 32 bytes");
+            if remote_hs.info_hash != v2_truncated || !remote_hs.supports_bep52() {
+                return Err(
+                    "hybrid handshake info_hash mismatch or missing BEP 52 capability".to_string(),
+                );
+            }
         }
         let conn = PeerConnection::from_stream_with_peer(stream, remote_hs.peer_id);
 

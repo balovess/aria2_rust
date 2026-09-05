@@ -1,4 +1,5 @@
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 
 use crate::bittorrent::bencode::codec::BencodeValue;
 
@@ -14,6 +15,11 @@ impl InfoHash {
         let mut bytes = [0u8; 20];
         bytes.copy_from_slice(&hash);
         Self { bytes }
+    }
+
+    /// Compute the BEP 52 SHA-256 hash of the canonical info dictionary.
+    pub fn from_info_value_v2(info: &BencodeValue) -> [u8; 32] {
+        Sha256::digest(info.encode()).into()
     }
 
     pub fn from_bytes(bytes: [u8; 20]) -> Self {

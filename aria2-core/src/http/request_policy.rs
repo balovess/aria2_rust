@@ -7,6 +7,23 @@
 
 use reqwest::RequestBuilder;
 
+use super::browser_context::BrowserContext;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPacing {
+    pub min_interval: std::time::Duration,
+    pub jitter: std::time::Duration,
+}
+
+impl Default for RequestPacing {
+    fn default() -> Self {
+        Self {
+            min_interval: std::time::Duration::ZERO,
+            jitter: std::time::Duration::ZERO,
+        }
+    }
+}
+
 /// Request-level HTTP behavior derived from [`DownloadOptions`].
 ///
 /// The policy is cheap to clone and is passed to the sequential, segmented,
@@ -20,6 +37,8 @@ pub struct HttpRequestPolicy {
     pub want_digest: bool,
     pub keep_alive: bool,
     pub pipelining: bool,
+    browser_context: Option<BrowserContext>,
+    pacing: RequestPacing,
 }
 
 impl HttpRequestPolicy {
@@ -38,7 +57,32 @@ impl HttpRequestPolicy {
             want_digest,
             keep_alive,
             pipelining,
+            browser_context: None,
+            pacing: RequestPacing::default(),
         }
+    }
+
+    pub fn with_browser_context(mut self, context: BrowserContext) -> Self {
+        self.browser_context = Some(context);
+        self
+    }
+
+    pub fn with_pacing(mut self, pacing: RequestPacing) -> Self {
+        self.pacing = pacing;
+        self
+    }
+
+    pub async fn wait_before_request(&self) {
+        if self.pacing.min_interval.is_zero() && self.pacing.jitter.is_zero() {
+            return;
+        }
+        let jitter = if self.pacing.jitter.is_zero() {
+            std::time::Duration::ZERO
+        } else {
+            let max = self.pacing.jitter.as_millis().min(u128::from(u64::MAX)) as u64;
+            std::time::Duration::from_millis(rand::random::<u64>() % max.saturating_add(1))
+        };
+        tokio::time::sleep(self.pacing.min_interval + jitter).await;
     }
 
     pub fn has_custom_headers(&self) -> bool {
@@ -63,8 +107,27 @@ impl HttpRequestPolicy {
         cookie_header: Option<&str>,
         extra_headers: &[(String, String)],
     ) -> RequestBuilder {
+        let mut explicit_headers = self
+            .headers
+            .iter()
+            .chain(extra_headers.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(cookie) = cookie_header.filter(|value| !value.is_empty()) {
+            explicit_headers.push(("Cookie".to_string(), cookie.to_string()));
+        }
+        let dynamic_headers = self
+            .browser_context
+            .as_ref()
+            .map(|context| context.headers_for(&explicit_headers))
+            .unwrap_or_default();
         let mut names = Vec::with_capacity(self.headers.len() + extra_headers.len() + 8);
-        for (name, value) in self.headers.iter().chain(extra_headers.iter()) {
+        for (name, value) in self
+            .headers
+            .iter()
+            .chain(extra_headers.iter())
+            .chain(dynamic_headers.iter())
+        {
             if names
                 .iter()
                 .any(|known: &String| known.eq_ignore_ascii_case(name))

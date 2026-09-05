@@ -101,6 +101,27 @@ impl DhtPeerStorage {
         map.values().map(Vec::len).sum()
     }
 
+    /// Return the info-hash keys currently represented in the peer store.
+    pub fn info_hashes(&self) -> Vec<[u8; 20]> {
+        let mut map = self.inner.lock().expect("DhtPeerStorage mutex poisoned");
+        let now = Instant::now();
+        map.retain(|_, entries| {
+            entries.retain(|entry| now.duration_since(entry.last_seen) < PEER_TTL);
+            !entries.is_empty()
+        });
+        map.keys().copied().collect()
+    }
+
+    /// Return a bounded random sample of stored info-hash keys. `num` remains
+    /// available separately through `info_hashes().len()` for BEP 51.
+    pub fn sample_info_hashes(&self, limit: usize) -> Vec<[u8; 20]> {
+        use rand::seq::SliceRandom;
+        let mut hashes = self.info_hashes();
+        hashes.shuffle(&mut rand::thread_rng());
+        hashes.truncate(limit);
+        hashes
+    }
+
     /// Internal helper: insert or refresh a peer with an explicit timestamp.
     ///
     /// If the peer already exists for this info_hash its `last_seen` is updated.
@@ -200,6 +221,21 @@ mod tests {
 
         let peers = storage.get_peers(&info_hash);
         assert!(peers.is_empty(), "peer older than TTL must not be returned");
+    }
+
+    #[test]
+    fn info_hashes_excludes_expired_peer_entries() {
+        let storage = DhtPeerStorage::new();
+        let info_hash = [0x42u8; 20];
+        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        storage.add_peer_with_timestamp(
+            info_hash,
+            addr,
+            Instant::now() - PEER_TTL - Duration::from_secs(1),
+        );
+
+        assert!(storage.info_hashes().is_empty());
+        assert!(storage.get_peers(&info_hash).is_empty());
     }
 
     #[test]

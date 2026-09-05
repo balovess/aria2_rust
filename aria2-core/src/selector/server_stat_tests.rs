@@ -7,7 +7,7 @@ use std::time::SystemTime;
 #[test]
 fn test_creation() {
     let stat = ServerStat::new("example.com");
-    assert_eq!(stat.host, "example.com");
+    assert_eq!(stat.host.as_ref(), "example.com");
     assert_eq!(stat.get_download_speed(), 0);
     assert_eq!(stat.get_single_avg_speed(), 0);
     assert!(stat.is_ok());
@@ -182,7 +182,7 @@ fn test_snapshot_roundtrip_basic() {
     let snapshot = stat.to_snapshot();
     let restored = ServerStat::from_snapshot(&snapshot);
 
-    assert_eq!(restored.host, "snapshot.test");
+    assert_eq!(restored.host.as_ref(), "snapshot.test");
     assert_eq!(restored.get_download_speed(), 10000);
     assert_eq!(restored.get_counter(), 2);
     assert!(restored.get_single_avg_speed() > 0);
@@ -232,7 +232,7 @@ fn test_snapshot_preserves_all_fields() {
     assert_eq!(snapshot.consecutive_failures, 1);
 
     let restored = ServerStat::from_snapshot(&snapshot);
-    assert_eq!(restored.host, snapshot.host);
+    assert_eq!(restored.host.as_ref(), snapshot.host);
     assert_eq!(restored.get_download_speed(), snapshot.download_speed);
     assert_eq!(
         restored.get_single_avg_speed(),

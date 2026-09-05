@@ -32,13 +32,30 @@ pub struct MultiFileLayout {
     piece_length: u32,
     total_pieces: u32,
     total_size: u64,
+    piece_space_size: u64,
     is_single_file: bool,
 }
 
 impl MultiFileLayout {
     pub fn from_info_dict(info: &InfoDict, base_dir: &Path) -> Result<Self, String> {
         let piece_length = info.piece_length;
-        let total_pieces = info.pieces.len() as u32;
+        let total_pieces =
+            if info.meta_version == Some(2) {
+                let piece_length = info.piece_length as u64;
+                let piece_space = info.v2_files.as_deref().unwrap_or_default().iter().fold(
+                    0u64,
+                    |offset, file| {
+                        if file.length == 0 {
+                            offset
+                        } else {
+                            offset.div_ceil(piece_length) * piece_length + file.length
+                        }
+                    },
+                );
+                piece_space.div_ceil(piece_length) as u32
+            } else {
+                info.pieces.len() as u32
+            };
 
         if let Some(length) = info.length {
             let name = &info.name;
@@ -82,6 +99,7 @@ impl MultiFileLayout {
                 piece_length,
                 total_pieces,
                 total_size,
+                piece_space_size: total_size,
                 is_single_file: true,
             })
         } else if let Some(ref files) = info.files {
@@ -96,6 +114,15 @@ impl MultiFileLayout {
             for (i, entry) in files.iter().enumerate() {
                 let start_byte = running_offset;
                 let end_byte = start_byte + entry.length;
+
+                if entry
+                    .path
+                    .first()
+                    .is_some_and(|component| component == ".pad")
+                {
+                    running_offset = end_byte;
+                    continue;
+                }
 
                 let pl = piece_length as u64;
 
@@ -158,6 +185,48 @@ impl MultiFileLayout {
                 piece_length,
                 total_pieces,
                 total_size: computed_total_size,
+                piece_space_size: running_offset,
+                is_single_file: false,
+            })
+        } else if let Some(ref files) = info.v2_files {
+            if files.is_empty() {
+                return Err("v2 file tree contains no files".to_string());
+            }
+            let mut file_infos = Vec::with_capacity(files.len());
+            let mut running_offset = 0u64;
+            let mut computed_total_size = 0u64;
+            let pl = piece_length as u64;
+            for (i, entry) in files.iter().enumerate() {
+                if entry.length == 0 {
+                    continue;
+                }
+                running_offset = running_offset.div_ceil(pl) * pl;
+                let start_byte = running_offset;
+                let end_byte = start_byte + entry.length;
+                let mut path_buf = base_dir.to_path_buf();
+                for component in &entry.path {
+                    path_buf.push(component);
+                }
+                file_infos.push(FileInfo {
+                    path: entry.path.clone(),
+                    length: entry.length,
+                    start_piece: (start_byte / pl) as u32,
+                    end_piece: ((end_byte - 1) / pl) as u32,
+                    start_offset_in_piece: 0,
+                    end_offset_in_piece: ((end_byte - 1) % pl + 1) as u32,
+                    absolute_path: path_buf,
+                });
+                running_offset = end_byte;
+                computed_total_size += entry.length;
+                debug!(file_index = i, start_byte, end_byte, "v2 aligned file");
+            }
+            Ok(Self {
+                base_dir: base_dir.to_path_buf(),
+                files: file_infos,
+                piece_length,
+                total_pieces: running_offset.div_ceil(pl) as u32,
+                total_size: computed_total_size,
+                piece_space_size: running_offset,
                 is_single_file: false,
             })
         } else {
@@ -187,7 +256,7 @@ impl MultiFileLayout {
     ) -> Option<(usize, u64)> {
         let global_byte = piece_idx as u64 * self.piece_length as u64 + offset_in_piece as u64;
 
-        if global_byte >= self.total_size {
+        if global_byte >= self.piece_space_size {
             return None;
         }
 
@@ -303,6 +372,38 @@ impl MultiFileLayout {
         self.total_size
     }
 
+    /// Number of payload bytes represented by a logical v2 piece. Alignment
+    /// gaps are addressable but are not downloaded or written.
+    pub fn content_bytes_in_piece(&self, piece_idx: u32) -> u64 {
+        let start = piece_idx as u64 * self.piece_length as u64;
+        let end = start + self.piece_length as u64;
+        self.files
+            .iter()
+            .map(|file| {
+                let file_start = file.start_piece as u64 * self.piece_length as u64;
+                let file_end = file_start + file.length;
+                end.min(file_end).saturating_sub(start.max(file_start))
+            })
+            .sum()
+    }
+
+    /// Return the next logical byte in this piece that belongs to a file.
+    /// `piece_length` means the remainder is alignment padding.
+    pub fn next_content_offset(&self, piece_idx: u32, offset_in_piece: u32) -> u32 {
+        let current = piece_idx as u64 * self.piece_length as u64 + offset_in_piece as u64;
+        self.files
+            .iter()
+            .map(|file| file.start_piece as u64 * self.piece_length as u64)
+            .filter(|&start| start > current)
+            .map(|start| (start - piece_idx as u64 * self.piece_length as u64) as u32)
+            .min()
+            .unwrap_or(self.piece_length)
+    }
+
+    pub fn piece_space_size(&self) -> u64 {
+        self.piece_space_size
+    }
+
     pub fn piece_length(&self) -> u32 {
         self.piece_length
     }
@@ -329,6 +430,9 @@ mod tests {
             length: Some(1024),
             files: None,
             private: None,
+            meta_version: None,
+            v2_files: None,
+            pieces_root: None,
         }
     }
 
@@ -353,6 +457,9 @@ mod tests {
                 },
             ]),
             private: None,
+            meta_version: None,
+            v2_files: None,
+            pieces_root: None,
         }
     }
 
@@ -418,10 +525,45 @@ mod tests {
             length: None,
             files: Some(vec![]),
             private: None,
+            meta_version: None,
+            v2_files: None,
+            pieces_root: None,
         };
         let base = Path::new("/tmp/download");
         let result = MultiFileLayout::from_info_dict(&info, base);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn v2_files_are_piece_aligned_and_count_content_only() {
+        let info = InfoDict {
+            name: "root".to_string(),
+            piece_length: 16 * 1024,
+            pieces: Vec::new(),
+            length: None,
+            files: None,
+            private: None,
+            meta_version: Some(2),
+            v2_files: Some(vec![
+                aria2_protocol::bittorrent::torrent::parser::V2FileEntry {
+                    length: 1,
+                    path: vec!["a".to_string()],
+                    pieces_root: Some([1; 32]),
+                },
+                aria2_protocol::bittorrent::torrent::parser::V2FileEntry {
+                    length: 16 * 1024,
+                    path: vec!["b".to_string()],
+                    pieces_root: Some([2; 32]),
+                },
+            ]),
+            pieces_root: None,
+        };
+        let layout = MultiFileLayout::from_info_dict(&info, Path::new("/tmp")).unwrap();
+        assert_eq!(layout.total_size(), 16 * 1024 + 1);
+        assert_eq!(layout.piece_space_size(), 2 * 16 * 1024);
+        assert_eq!(layout.total_pieces(), 2);
+        assert_eq!(layout.content_bytes_in_piece(0), 1);
+        assert_eq!(layout.content_bytes_in_piece(1), 16 * 1024);
     }
 
     #[test]

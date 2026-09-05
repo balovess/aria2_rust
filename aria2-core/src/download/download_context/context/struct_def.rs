@@ -47,7 +47,7 @@ pub struct DownloadContext {
     pub(super) file_entries: Vec<FileEntry>,
 
     // -- Per-piece hash values for verification --
-    pub(super) piece_hashes: Vec<String>,
+    pub(super) piece_hashes: Vec<Box<str>>,
 
     // -- Per-download network statistics --
     pub(super) net_stat: NetStat,

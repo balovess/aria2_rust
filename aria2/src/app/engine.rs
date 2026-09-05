@@ -437,10 +437,14 @@ impl App {
         &self,
         startup_plan: StartupPlan,
         show_progress: bool,
+        tui_enabled: bool,
+        tui_language: Option<String>,
+        tui_options: Option<aria2_core::request::request_group::DownloadOptions>,
     ) -> std::result::Result<(), String> {
         let mut engine_lock: tokio::sync::MutexGuard<'_, Option<DownloadEngine>> =
             self.engine.lock().await;
         if let Some(mut engine) = engine_lock.take() {
+            let tui_command_tx = tui_enabled.then(|| engine.engine_command_sender());
             engine.set_keep_alive(startup_plan.keeps_engine_alive());
             if let Some(tx) = engine.take_shutdown_sender() {
                 let cmd_tx = engine.engine_cmd_tx();
@@ -485,6 +489,20 @@ impl App {
             // can observe its activity concurrently.
             let engine_handle = tokio::spawn(async move { engine.run().await });
 
+            let tui_handle = if tui_enabled {
+                let group_man = self.request_man.clone();
+                tui_command_tx.map(|command_tx| {
+                    tokio::spawn(crate::ui::tui::run(
+                        group_man,
+                        command_tx,
+                        tui_language,
+                        tui_options,
+                    ))
+                })
+            } else {
+                None
+            };
+
             // Wait for the engine to complete.
             let result = engine_handle
                 .await
@@ -495,6 +513,10 @@ impl App {
             // sufficient to close the oneshot channel).
             drop(_reporter_stop_tx);
             if let Some(handle) = reporter_handle {
+                let _ = handle.await;
+            }
+
+            if let Some(handle) = tui_handle {
                 let _ = handle.await;
             }
 

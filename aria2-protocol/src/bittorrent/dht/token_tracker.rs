@@ -37,11 +37,26 @@ impl TokenTracker {
     }
 
     pub fn validate_token(&self, token: &str, info_hash: &[u8; 20], addr: &SocketAddr) -> bool {
+        self.validate_token_bytes(token.as_bytes(), info_hash, addr)
+    }
+
+    /// Validate the opaque token bytes carried by BEP 44 and BEP 5 messages.
+    /// Tokens are not required to be UTF-8 by the wire protocol.
+    pub fn validate_token_bytes(
+        &self,
+        token: &[u8],
+        info_hash: &[u8; 20],
+        addr: &SocketAddr,
+    ) -> bool {
         if token.is_empty() {
             return false;
         }
         for secret in &self.secrets {
-            if self.generate_with_secret(info_hash, addr, secret) == token {
+            if self
+                .generate_with_secret(info_hash, addr, secret)
+                .as_bytes()
+                == token
+            {
                 return true;
             }
         }
@@ -201,5 +216,17 @@ mod tests {
 
         assert!(!tt.validate_token("", &hash, &addr));
         assert!(!tt.validate_token("not_a_valid_hex_sha1", &hash, &addr));
+    }
+
+    #[test]
+    fn test_opaque_token_bytes_are_validated_without_utf8() {
+        let tt = TokenTracker::with_secret([1, 2, 3, 4]);
+        let hash = [0x55u8; 20];
+        let addr: SocketAddr = "127.0.0.1:6881".parse().unwrap();
+        let generated = tt.generate_token(&hash, &addr);
+        let mut token = generated.into_bytes();
+        token[0] = 0xff;
+        assert!(!tt.validate_token_bytes(&token, &hash, &addr));
+        assert!(tt.validate_token_bytes(tt.generate_token(&hash, &addr).as_bytes(), &hash, &addr));
     }
 }

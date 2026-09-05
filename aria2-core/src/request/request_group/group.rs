@@ -61,7 +61,7 @@ pub struct RequestGroup {
     /// when `set_download_context()` is called. After transfer, this field
     /// is still available for RPC queries that need the original URI list,
     /// but URI lifecycle operations should go through `DownloadContext`.
-    pub(super) uris: Vec<String>,
+    pub(super) uris: Vec<Box<str>>,
     /// Metalink file name override, independent of the global `out` option.
     pub(super) output_name: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
@@ -252,7 +252,7 @@ impl RequestGroup {
 
         RequestGroup {
             gid,
-            uris,
+            uris: uris.into_iter().map(String::into_boxed_str).collect(),
             output_name: std::sync::RwLock::new(None),
             options: Arc::new(options),
             option_snapshot: None,

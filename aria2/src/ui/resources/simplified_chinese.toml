@@ -1,0 +1,13 @@
+title = "aria2c 终端界面"
+empty = "暂无下载任务。"
+footer = "↑/↓ 选择  a 添加  p 暂停/继续  r 删除  d 详情  / 筛选  q 退出"
+add_prompt = "URL（回车添加，Esc 取消）"
+filter_prompt = "筛选（回车应用，Esc 取消）"
+filtered = "筛选"
+details = "任务详情"
+headers = ["GID", "状态", "进度", "速度", "连接数", "输入"]
+remote_headers = ["GID", "状态", "进度", "速度", "输入"]
+detail_labels = ["GID", "状态", "已完成", "下载速度", "输入"]
+statuses = ["等待", "下载中", "已暂停", "错误", "完成", "已删除"]
+page = "第 {page} 页{next}  [/] 上一页/下一页  PgUp/PgDn 快速翻页"
+error = "RPC 错误：{message}（正在重试）"

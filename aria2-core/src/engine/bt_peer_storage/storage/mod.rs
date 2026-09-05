@@ -57,7 +57,7 @@ pub struct DefaultPeerStorage {
 
     /// Set of (ip, port) pairs currently tracked (unused + used).
     /// Ensures no duplicate peers across both lists.
-    pub(super) uniq_peers: HashSet<(String, u16)>,
+    pub(super) uniq_peers: HashSet<(Arc<str>, u16)>,
 
     /// Unused (not connected) peers, sorted by last-added (FIFO).
     pub(super) unused_peers: VecDeque<PeerEntry>,
@@ -75,7 +75,7 @@ pub struct DefaultPeerStorage {
     leecher_state_choke: BtLeecherStateChoke,
 
     /// Temporarily rejected peers: ip -> timeout instant.
-    pub(super) temporarily_rejected_peers: HashMap<String, Instant>,
+    pub(super) temporarily_rejected_peers: HashMap<Box<str>, Instant>,
 
     /// Last time we cleaned up expired entries from temporarily_rejected_peers.
     pub(super) last_temp_peer_cleanup: Instant,

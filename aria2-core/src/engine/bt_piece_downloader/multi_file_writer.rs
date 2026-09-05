@@ -137,7 +137,9 @@ pub async fn write_piece_to_multi_files(
 
             data_offset += write_len;
         } else {
-            break;
+            let next = layout.next_content_offset(piece_idx, piece_offset);
+            let skip = (next - piece_offset).min((piece_data.len() - data_offset) as u32);
+            data_offset += skip as usize;
         }
     }
 

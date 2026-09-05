@@ -1,4 +1,4 @@
-# aria2-rust
+# aria2_rust
 
 English: [`README.md`](README.md)
 
@@ -12,6 +12,8 @@ English: [`README.md`](README.md)
 - [快速开始](docs/quickstart-cn.md)
 - [参数配置说明](docs/configuration-guide-cn.md)
 - [RPC 使用说明](docs/rpc-guide-cn.md)
+- [TUI 使用指南](docs/tui-guide-cn.md)
+- [Release 产物说明](docs/release-artifacts-cn.md)
 - [常见问题](docs/troubleshooting-cn.md)
 
 <p align="center">
@@ -30,12 +32,15 @@ English: [`README.md`](README.md)
 
 ***
 
-**aria2-rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
+**aria2_rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
 实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。默认构建支持
 HTTP/HTTPS、FTP、BitTorrent 协议，并提供
 JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 SFTP 和 Metalink 需要分别启用对应 Cargo feature。
+
+二进制 Release 提供 `minimal`、`standard`、`tui` 和 `full` 四种功能档位，
+详见 [Release 产物说明](docs/release-artifacts-cn.md)。
 
 ## 特性
 
@@ -87,6 +92,25 @@ cargo run --release -- --help
 # 显示版本
 cargo run --release -- --version
 ```
+
+### 包管理器状态
+
+Homebrew 和 Scoop 目前只有维护中的分发草案，尚未建立稳定的 Homebrew
+tap；两者也不是当前优先级。需要可靠安装时，请使用平台安装脚本或 GitHub
+Release 中的二进制文件。不要将仓库内的 Homebrew formula 或 Scoop manifest
+视为正式兼容性保证。
+
+## 初始化持久化目录
+
+运行 `aria2c --init`，可选择系统目录、当前目录、程序目录、便携模式或自定义目录。
+已有配置会先备份为 `.bak`、`.bak.1` 等再重置。脚本环境使用：
+
+```text
+aria2c --init --profile=system --non-interactive
+aria2c --show-paths --profile=system
+```
+
+生成的配置保持最小化；会话、日志、PID、Cookie、DHT 和服务器统计文件，只有显式配置对应选项后才会生成。
 
 ## 使用方法
 

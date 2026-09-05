@@ -86,6 +86,21 @@ impl App {
                     !matches!(source, aria2_core::config::ConfigSource::Defaults)
                 });
 
+        // Scoop normally owns the download cache and may omit `dir` from its
+        // generated config. Preserve that integration when the option is
+        // otherwise still at the registry default; an explicit user setting
+        // must continue to win.
+        if conf
+            .global_option_source("dir")
+            .await
+            .is_some_and(|source| matches!(source, aria2_core::config::ConfigSource::Defaults))
+            && let Some(dir) = scoop_cache_dir()
+        {
+            conf.set_global_option("dir", OptionValue::Str(dir))
+                .await
+                .map_err(|e| format!("--dir: {}", e))?;
+        }
+
         // Helper macros: set option only if value is present and propagate the
         // registry's validation error back to the CLI entry point.
         macro_rules! set_str {
@@ -574,28 +589,12 @@ impl App {
             // 2. USERPROFILE (Windows fallback)
             // 3. HOMEDRIVE+HOMEPATH (last resort Windows fallback)
             // 4. "." (fallback if nothing works)
-            let home = std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .or_else(|| {
-                    let drive = std::env::var_os("HOMEDRIVE")?;
-                    let path = std::env::var_os("HOMEPATH")?;
-                    Some(std::path::Path::new(&drive).join(&path).into())
-                })
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| ".".to_string());
-
-            let candidate = format!(
-                "{}/{}/{}",
-                home,
-                crate::constants::CONFIG_DIR_NAME,
-                crate::constants::CONFIG_FILE_NAME
-            );
-
-            if std::path::Path::new(&candidate).exists() {
-                candidate
-            } else {
+            let candidates = crate::app::paths::default_config_candidates();
+            let Some(candidate) = candidates.into_iter().find(|candidate| candidate.exists())
+            else {
                 return Ok(());
-            }
+            };
+            candidate.to_string_lossy().into_owned()
         };
 
         let mut conf = self.config.write().await;
@@ -648,5 +647,60 @@ impl App {
     /// Get a boolean option value.
     pub(super) async fn get_opt_bool(&self, name: &str) -> Option<bool> {
         self.config.read().await.get_global_bool(name).await
+    }
+}
+
+#[cfg(windows)]
+fn scoop_cache_dir() -> Option<String> {
+    scoop_cache_dir_from_env(std::env::var_os("SCOOP_CACHE"), std::env::var_os("SCOOP"))
+}
+
+#[cfg(not(windows))]
+fn scoop_cache_dir() -> Option<String> {
+    None
+}
+
+#[cfg(any(windows, test))]
+fn scoop_cache_dir_from_env(
+    cache: Option<std::ffi::OsString>,
+    scoop_root: Option<std::ffi::OsString>,
+) -> Option<String> {
+    let cache = cache
+        .map(std::path::PathBuf::from)
+        .or_else(|| scoop_root.map(|root| std::path::PathBuf::from(root).join("cache")))?;
+    Some(cache.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scoop_cache_dir_from_env;
+    use std::ffi::OsString;
+
+    #[test]
+    fn scoop_cache_prefers_explicit_cache_variable() {
+        assert_eq!(
+            scoop_cache_dir_from_env(
+                Some(OsString::from(r"D:\scoop-cache")),
+                Some(OsString::from(r"D:\scoop")),
+            ),
+            Some(r"D:\scoop-cache".to_string())
+        );
+    }
+
+    #[test]
+    fn scoop_cache_falls_back_to_scoop_root() {
+        let expected = std::path::PathBuf::from(r"D:\scoop")
+            .join("cache")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            scoop_cache_dir_from_env(None, Some(OsString::from(r"D:\scoop"))),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn scoop_cache_is_disabled_without_scoop_environment() {
+        assert_eq!(scoop_cache_dir_from_env(None, None), None);
     }
 }

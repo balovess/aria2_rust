@@ -57,7 +57,15 @@ fn test_sftp_uri_without_user_preserves_host_and_path() {
         None,
     )
     .unwrap();
-    assert_eq!(result.group().uris(), &[uri.to_string()]);
+    assert_eq!(
+        result
+            .group()
+            .uris()
+            .iter()
+            .map(|value| value.as_ref())
+            .collect::<Vec<_>>(),
+        [uri]
+    );
     assert!(
         result.timeout().is_none(),
         "SFTP default options do not impose a command-level I/O timeout"

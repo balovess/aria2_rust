@@ -298,7 +298,7 @@ fn engine_owned_group_constructor_preserves_gid_and_options() {
     assert_eq!(cmd.group().gid(), gid);
     assert_eq!(
         cmd.group().uris()[0],
-        "sftp://user:pass@example.com:2222/path/file.bin"
+        "sftp://user:pass@example.com:2222/path/file.bin".into()
     );
     drop(cmd);
 }

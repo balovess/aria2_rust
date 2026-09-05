@@ -37,7 +37,7 @@ pub struct PeerSessionResource {
     /// Whether extended messaging is enabled.
     extended_messaging_enabled: bool,
     /// Extension message registry: key -> message ID.
-    extension_registry: HashMap<String, u8>,
+    extension_registry: HashMap<Box<str>, u8>,
 
     // DHT (BEP 5)
     /// Whether DHT is enabled for this peer.
@@ -259,7 +259,7 @@ impl PeerSessionResource {
 
     /// Register an extension with the given key and message ID.
     pub fn add_extension(&mut self, key: &str, id: u8) {
-        self.extension_registry.insert(key.to_string(), id);
+        self.extension_registry.insert(key.into(), id);
     }
 
     /// Look up the message ID for a given extension key.
@@ -272,7 +272,7 @@ impl PeerSessionResource {
         self.extension_registry
             .iter()
             .find(|&(_, &v)| v == id)
-            .map(|(k, _)| k.as_str())
+            .map(|(k, _)| &**k)
     }
 
     // -----------------------------------------------------------------------

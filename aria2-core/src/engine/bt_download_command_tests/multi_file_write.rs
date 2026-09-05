@@ -21,6 +21,9 @@ async fn test_write_piece_to_multi_files_basic() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("mf_test_{}", std::process::id()));
@@ -95,6 +98,9 @@ fn test_write_piece_resolve_logic() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base = std::path::PathBuf::from("d:/tmp/resolve_test");
@@ -173,6 +179,9 @@ async fn test_coalesced_multi_file_write_basic() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("coal_test_{}", std::process::id()));
@@ -262,6 +271,9 @@ async fn test_coalesced_multi_file_write_three_files() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let base_dir = std::env::temp_dir().join(format!("coal3_test_{}", std::process::id()));
@@ -320,6 +332,9 @@ async fn test_coalesced_matches_original_writer() {
             },
         ]),
         private: None,
+        meta_version: None,
+        v2_files: None,
+        pieces_root: None,
     };
 
     let piece_data: Vec<u8> = (0..384u64).map(|i| ((i * 7 + 13) % 256) as u8).collect();

@@ -35,6 +35,8 @@ pub struct BtPeerConnectionOptions {
     pub peer_agent: String,
     pub enable_utp: bool,
     pub utp_listen_port: Option<u16>,
+    /// v2 info-hash for a hybrid BEP 52 torrent. `None` keeps legacy behavior.
+    pub hybrid_info_hash_v2: Option<[u8; 32]>,
 }
 
 impl BtPeerConnectionOptions {
@@ -53,6 +55,7 @@ impl BtPeerConnectionOptions {
             peer_agent: options.peer_agent.clone(),
             enable_utp: options.enable_utp,
             utp_listen_port: options.utp_listen_port,
+            hybrid_info_hash_v2: None,
         }
     }
 }

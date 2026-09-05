@@ -1,0 +1,13 @@
+title = "aria2c TUI"
+empty = "No downloads."
+footer = "↑/↓ Select  a Add  p Pause/Resume  r Remove  d Details  / Filter  q Quit"
+add_prompt = "URL (Enter to add, Esc to cancel)"
+filter_prompt = "Filter (Enter to apply, Esc to cancel)"
+filtered = "Filter"
+details = "Task details"
+headers = ["GID", "Status", "Progress", "Speed", "Connections", "Input"]
+remote_headers = ["GID", "Status", "Progress", "Speed", "Input"]
+detail_labels = ["GID", "Status", "Completed", "Download speed", "Input"]
+statuses = ["waiting", "active", "paused", "error", "complete", "removed"]
+page = "Page {page}{next}  [/] Previous/Next  PgUp/PgDn Jump"
+error = "RPC error: {message} (retrying)"

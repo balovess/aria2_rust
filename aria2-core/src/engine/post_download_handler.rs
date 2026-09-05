@@ -271,7 +271,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
                     .cloned()
                     .or_else(|| entry.remaining_uris().front().cloned())
             });
-            let base_uri = base_uri.or(initial_source_uri.clone());
+            let base_uri = base_uri.or(initial_source_uri.as_ref().map(|uri| uri.to_string()));
 
             // C++ uses an explicit RequestGroup flag set by the memory
             // pre-download handler. Do not infer this from an empty path:
@@ -285,7 +285,7 @@ pub fn extract_download_info(group: &RequestGroup) -> CompletedDownloadInfo {
             (
                 group.content_type(),
                 None,
-                initial_source_uri,
+                initial_source_uri.map(|uri| uri.to_string()),
                 group.is_in_memory_download(),
                 group.in_memory_data(),
             )

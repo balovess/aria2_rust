@@ -64,13 +64,31 @@ impl IncomingHandshake {
     }
 
     pub async fn complete(self, local_peer_id: [u8; 20]) -> Result<IncomingConnection, String> {
+        self.complete_with_hybrid(local_peer_id, None).await
+    }
+
+    /// Complete the handshake and upgrade a hybrid responder to the v2
+    /// truncated hash when the remote advertised BEP 52.
+    pub async fn complete_with_hybrid(
+        self,
+        local_peer_id: [u8; 20],
+        info_hash_v2: Option<[u8; 32]>,
+    ) -> Result<IncomingConnection, String> {
         match self {
             Self::Plain {
                 mut stream,
                 handshake,
             } => {
+                let response_hash = info_hash_v2
+                    .filter(|_| handshake.supports_bep52())
+                    .map(|hash| hash[..20].try_into().expect("SHA-256 hash is 32 bytes"))
+                    .unwrap_or(handshake.info_hash);
                 stream
-                    .write_all(&Handshake::new(&handshake.info_hash, &local_peer_id).to_bytes())
+                    .write_all(
+                        &Handshake::new(&response_hash, &local_peer_id)
+                            .with_bep52(info_hash_v2.is_some())
+                            .to_bytes(),
+                    )
                     .await
                     .map_err(|error| format!("Failed to send handshake response: {error}"))?;
                 Ok(IncomingConnection::Plain(Box::new(
@@ -85,7 +103,13 @@ impl IncomingHandshake {
                 handshake,
                 mut crypto,
             } => {
-                let mut response = Handshake::new(&handshake.info_hash, &local_peer_id).to_bytes();
+                let response_hash = info_hash_v2
+                    .filter(|_| handshake.supports_bep52())
+                    .map(|hash| hash[..20].try_into().expect("SHA-256 hash is 32 bytes"))
+                    .unwrap_or(handshake.info_hash);
+                let mut response = Handshake::new(&response_hash, &local_peer_id)
+                    .with_bep52(info_hash_v2.is_some())
+                    .to_bytes();
                 crypto.encrypt(&mut response);
                 stream
                     .write_all(&response)
@@ -354,5 +378,42 @@ mod tests {
             .unwrap();
         let result = server.await.unwrap();
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn mse_hybrid_handshake_upgrades_to_v2_hash() {
+        let v1 = [0x41u8; 20];
+        let v2 = [0x42u8; 32];
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut policies = HashMap::new();
+            policies.insert(
+                v1,
+                IncomingCryptoPolicy {
+                    reject_plain: true,
+                    force_encryption: true,
+                    prefer_encryption: true,
+                },
+            );
+            let incoming = receive_with_policies(stream, &[v1], &policies).await?;
+            incoming.complete_with_hybrid([0x44; 20], Some(v2)).await
+        });
+
+        let connection = crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_hybrid_with_options(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &v1,
+            &v2,
+            true,
+            true,
+            &[0x43; 20],
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert!(connection.is_encrypted());
+        let server_connection = server.await.unwrap().unwrap();
+        assert_eq!(server_connection.remote_peer_id(), Some([0x43; 20]));
     }
 }

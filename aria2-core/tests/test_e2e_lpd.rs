@@ -113,7 +113,7 @@ fn test_lpd_announcement_format_case_normalization() {
 
     let peer = result.unwrap();
     // Hash should be normalized to lowercase
-    assert_eq!(peer.info_hash, uppercase_hash.to_lowercase());
+    assert_eq!(peer.info_hash.as_ref(), uppercase_hash.to_lowercase());
 }
 
 /// Test announcement format with extra whitespace around values (should be trimmed)
@@ -125,7 +125,10 @@ fn test_lpd_announcement_format_whitespace_handling() {
     assert!(result.is_some(), "Should handle extra whitespace");
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        peer.info_hash.as_ref(),
+        "0123456789abcdef0123456789abcdef01234567"
+    );
     assert_eq!(peer.port, 6881);
 }
 
@@ -232,7 +235,10 @@ fn test_lpd_announcement_legacy_format_accepted() {
     );
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, "0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        peer.info_hash.as_ref(),
+        "0123456789abcdef0123456789abcdef01234567"
+    );
     assert_eq!(peer.port, 6881);
 
     // Legacy format without Token should also parse
@@ -328,7 +334,7 @@ fn test_lpd_send_announcement_between_peers() {
             assert!(result.is_some(), "Should receive valid announcement");
 
             let peer = result.unwrap();
-            assert_eq!(peer.info_hash, test_info_hash());
+            assert_eq!(peer.info_hash.as_ref(), test_info_hash());
             assert_eq!(peer.port, 6881);
         }
         Err(e) => {
@@ -678,10 +684,10 @@ async fn test_lpd_multiple_torrents_independent_tracking() {
 
     // Verify peers belong to correct torrents
     for peer in &stored1 {
-        assert_eq!(peer.info_hash, test_info_hash());
+        assert_eq!(peer.info_hash.as_ref(), test_info_hash());
     }
     for peer in &stored2 {
-        assert_eq!(peer.info_hash, test_info_hash_2());
+        assert_eq!(peer.info_hash.as_ref(), test_info_hash_2());
     }
 }
 
@@ -720,7 +726,7 @@ fn test_lpd_announcement_message_building() {
     );
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, info_hash);
+    assert_eq!(peer.info_hash.as_ref(), info_hash);
     assert_eq!(peer.port, port);
 }
 
@@ -781,8 +787,11 @@ async fn test_lpd_bittorrent_peer_simulation() {
         .expect("Failed to register");
 
     // Simulate LPD discovering a peer that has the torrent
-    let discovered_peer =
-        LpdPeer::new(&info_hash, 6881, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)));
+    let discovered_peer = LpdPeer::new(
+        info_hash.as_str(),
+        6881,
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
+    );
 
     // Update peer registry
     manager
@@ -935,7 +944,7 @@ fn test_lpd_real_world_announcement_parsing() {
     );
 
     let peer = result.unwrap();
-    assert_eq!(peer.info_hash, info_hash);
+    assert_eq!(peer.info_hash.as_ref(), info_hash);
     assert_eq!(peer.port, port);
 }
 

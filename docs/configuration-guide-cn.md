@@ -194,6 +194,17 @@ aria2c --conf-path=aria2.conf --reset-config
 
 其中带宽/缓存/缓冲区是字节或带单位的 Size；`stop` 是停止条件；`file-allocation` 的值由当前构建帮助输出列出。不要把 `max-download-limit` 与 `max-overall-download-limit` 混用：前者针对单个任务，后者针对进程总量。
 
+#### `disk-cache` 容量建议
+
+`disk-cache` 默认值为 `16 MiB`，适合作为一般环境的固定起点，不区分操作系统。它主要用于合并小块、乱序写入；较大的连续写入会直接写入文件。容量越大不一定越快，也会增加单个任务可占用的内存；同时运行多个任务时，应将各任务缓存占用一起考虑。
+
+- `0`：关闭写回缓存，内存占用最低，适合低内存环境或希望直接写盘时使用。
+- `4 MiB`：小任务、并发任务较多或希望限制内存占用时使用。
+- `16 MiB`：默认值，适合大多数下载场景。
+- `64 MiB` 或更大：仅在大量小块写入且实测缓存能提高吞吐时使用；并发任务多时不建议盲目增大。
+
+示例：`aria2c --disk-cache=4M URL`。配置文件中可写为 `disk-cache=16M`。这些容量是缓存上限，不是必须预先分配的磁盘空间；具体收益取决于网络分片、文件系统和存储设备，应以实际下载速度及内存占用为准。
+
 ### RPC
 
 `enable-rpc`、`rpc-listen-all`、`rpc-listen-port`（1024..65535，默认 6800）、`rpc-listen-address`（默认 `127.0.0.1`）、`rpc-secret`、`rpc-user`、`rpc-passwd`、`rpc-allow-origin`、`rpc-cors-domain`、`rpc-secure`、`rpc-certificate`、`rpc-private-key`、`rpc-allow-origin-all`、`rpc-max-request-size`（默认 2 MiB）、`rpc-save-upload-metadata`。
