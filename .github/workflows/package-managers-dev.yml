@@ -1,0 +1,84 @@
+name: Dev package manager CI
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-managers-dev
+  cancel-in-progress: true
+
+jobs:
+  homebrew:
+    name: Homebrew (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+      - name: Clone the dev tap source
+        shell: bash
+        env:
+          TAP_SOURCE: ${{ runner.temp }}/aria2-rust-tap
+        run: |
+          set -euo pipefail
+          git clone --branch "$GITHUB_REF_NAME" --depth 1 \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$TAP_SOURCE"
+      - name: Install and upgrade formula from the dev tap
+        shell: bash
+        env:
+          TAP_SOURCE: ${{ runner.temp }}/aria2-rust-tap
+        run: |
+          set -euo pipefail
+          brew tap balovess/aria2_rust "file://$TAP_SOURCE"
+          brew install --build-from-source balovess/aria2_rust/aria2-rust
+          brew test aria2-rust
+          brew update
+          brew upgrade aria2-rust
+          VERSION_OUTPUT="$(aria2c --version)"
+          echo "$VERSION_OUTPUT"
+          EXPECTED_VERSION="$(sed -n 's#.*tags/v\([0-9.]*\)\.tar.gz.*#\1#p' "$TAP_SOURCE/Formula/aria2-rust.rb")"
+          echo "$VERSION_OUTPUT" | grep -F "$EXPECTED_VERSION"
+
+  scoop:
+    name: Scoop (Windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 1
+      - name: Clone the dev bucket source
+        shell: pwsh
+        env:
+          BUCKET_SOURCE: ${{ runner.temp }}\aria2-rust-bucket
+        run: |
+          git clone --branch $env:GITHUB_REF_NAME --depth 1 `
+            "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git" "$env:BUCKET_SOURCE"
+          $sourceUrl = "file:///$($env:BUCKET_SOURCE -replace '\\', '/')"
+          git config --global "url.$sourceUrl.insteadOf" "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY.git"
+      - name: Install and update app from the dev bucket
+        shell: pwsh
+        env:
+          BUCKET_REPOSITORY: https://github.com/${{ github.repository }}.git
+          BUCKET_SOURCE: ${{ runner.temp }}\aria2-rust-bucket
+        run: |
+          scoop bucket add aria2 $env:BUCKET_REPOSITORY
+          scoop install aria2/aria2-rust
+          scoop update
+          scoop update aria2-rust
+          $manifest = Get-Content -Raw "$env:BUCKET_SOURCE\bucket\aria2-rust.json" | ConvertFrom-Json
+          $versionOutput = (& aria2c --version | Out-String)
+          if ($versionOutput -notmatch [regex]::Escape($manifest.version)) {
+            throw "Scoop installation version does not match $($manifest.version): $versionOutput"
+          }
+          Write-Host $versionOutput
