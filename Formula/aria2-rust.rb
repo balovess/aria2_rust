@@ -1,10 +1,8 @@
 # Homebrew Formula for aria2-rust
 #
 # Installation:
-#   brew install aria2-rust
-#
-# Or from this repository:
-#   brew install ./homebrew/aria2-rust.rb
+#   brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git
+#   brew install balovess/aria2_rust/aria2-rust
 
 class Aria2Rust < Formula
   desc "The ultra fast download utility - rewritten in Rust"

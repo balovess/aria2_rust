@@ -2,7 +2,7 @@
 [CmdletBinding()]
 param([string]$Version, [string]$Repository = "balovess/aria2_rust", [switch]$Check)
 $ErrorActionPreference = "Stop"
-$path = Join-Path (Split-Path -Parent $PSScriptRoot) "homebrew/aria2-rust.rb"
+$path = Join-Path (Split-Path -Parent $PSScriptRoot) "Formula/aria2-rust.rb"
 $formula = [IO.File]::ReadAllText($path)
 if ($Check) {
     if ($formula -notmatch 'url "https://github\.com/[^/"]+/[^/"]+/archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz"') {

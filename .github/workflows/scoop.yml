@@ -29,29 +29,6 @@ jobs:
         run: |
           ./scripts/update-scoop.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
           ./scripts/update-scoop.ps1 -Check
-      - name: Verify packaged aria2c entry point
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          $manifest = Get-Content -Raw scoop/aria2-rust.json | ConvertFrom-Json
-          $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("aria2-scoop-smoke-" + [guid]::NewGuid().ToString("N"))
-          $archive = Join-Path $tempRoot 'aria2-rust.zip'
-          $extract = Join-Path $tempRoot 'extract'
-          try {
-            New-Item -ItemType Directory -Path $extract | Out-Null
-            Invoke-WebRequest -Uri $manifest.architecture.'64bit'.url -OutFile $archive -UseBasicParsing
-            Expand-Archive -LiteralPath $archive -DestinationPath $extract
-            $binary = Join-Path $extract 'aria2c.exe'
-            if (-not (Test-Path -LiteralPath $binary)) { throw "Scoop archive does not contain aria2c.exe" }
-            $versionOutput = (& $binary --version | Out-String)
-            if ($versionOutput -notmatch [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))) {
-              throw "Scoop binary version does not match $env:RELEASE_TAG: $versionOutput"
-            }
-            Write-Host $versionOutput
-          } finally {
-            if (Test-Path -LiteralPath $tempRoot) { Remove-Item -LiteralPath $tempRoot -Recurse -Force }
-          }
       - name: Commit manifest update
         shell: pwsh
         env:
@@ -60,10 +37,34 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add scoop/aria2-rust.json
+          git add bucket/aria2-rust.json
           if (git diff --cached --quiet) {
             Write-Host "Scoop manifest is already up to date."
             exit 0
           }
           git commit -m "chore: update Scoop manifest for $env:RELEASE_TAG"
           git push origin "HEAD:$env:DEFAULT_BRANCH"
+
+  upgrade-test:
+    name: Install and update Scoop bucket
+    needs: update
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Install from bucket and verify update path
+        shell: pwsh
+        env:
+          BUCKET_REPOSITORY: https://github.com/${{ github.repository }}.git
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          scoop bucket add aria2 $env:BUCKET_REPOSITORY
+          scoop install aria2/aria2-rust
+          scoop update
+          scoop update aria2-rust
+          $versionOutput = (& aria2c --version | Out-String)
+          if ($versionOutput -notmatch [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))) {
+            throw "Scoop installation version does not match $env:RELEASE_TAG: $versionOutput"
+          }
+          Write-Host $versionOutput

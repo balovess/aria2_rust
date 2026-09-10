@@ -19,7 +19,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$manifestPath = Join-Path $repoRoot "scoop/aria2-rust.json"
+$manifestPath = Join-Path $repoRoot "bucket/aria2-rust.json"
 
 function Get-VersionNumber {
     param([string]$Value)
@@ -98,7 +98,7 @@ function Test-RemoteArtifact {
     param([pscustomobject]$Manifest)
 
     $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("aria2-scoop-" + [guid]::NewGuid().ToString("N"))
-    $archivePath = Join-Path $tempRoot "aria2-x86_64-windows.zip"
+    $archivePath = Join-Path $tempRoot "aria2-x86_64-windows-full.zip"
     try {
         New-Item -ItemType Directory -Path $tempRoot | Out-Null
         Invoke-WebRequest -Uri $Manifest.architecture.'64bit'.url -OutFile $archivePath -UseBasicParsing

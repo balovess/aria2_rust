@@ -95,21 +95,37 @@ cargo run --release -- --version
 
 ### 包管理器状态
 
-macOS/Linux 可以直接使用 Homebrew formula：
+macOS/Linux 首次使用时添加当前仓库作为 Homebrew tap：
 
 ```bash
-brew install --formula https://raw.githubusercontent.com/balovess/aria2_rust/master/homebrew/aria2-rust.rb
+brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git
+brew install balovess/aria2_rust/aria2-rust
 ```
 
-Windows x64 可以直接使用 Scoop manifest：
+之后可以标准升级：
+
+```bash
+brew update
+brew upgrade aria2-rust
+```
+
+Windows x64 首次使用时添加当前仓库作为 Scoop bucket：
 
 ```powershell
-scoop install https://raw.githubusercontent.com/balovess/aria2_rust/master/scoop/aria2-rust.json
+scoop bucket add aria2 https://github.com/balovess/aria2_rust.git
+scoop install aria2/aria2-rust
+```
+
+之后可以标准升级：
+
+```powershell
+scoop update
+scoop update aria2-rust
 ```
 
 Homebrew 会从对应版本的源码构建完整 feature；Scoop 会安装经过 SHA-256
 校验的 Windows x64 full 发布包，并提供 `aria2c` 命令。两个清单都会在
-Release 发布后由 GitHub Actions 自动更新。
+Release 发布后由 GitHub Actions 自动更新，不需要手动修改版本配置。
 
 Chocolatey 包会由 GitHub Actions 根据 Windows full 发布包自动构建并校验。
 只有配置仓库 `CHOCO_API_KEY` secret 后，workflow 才会自动推送到 Chocolatey。
