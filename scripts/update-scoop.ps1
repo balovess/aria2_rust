@@ -76,14 +76,14 @@ function Assert-ScoopManifest {
     if ($Manifest.version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
         throw "Manifest version is invalid: $($Manifest.version)"
     }
-    if ($binary.url -notmatch "/v$([regex]::Escape($Manifest.version))/aria2-x86_64-windows\.zip$") {
+    if ($binary.url -notmatch "/v$([regex]::Escape($Manifest.version))/aria2-x86_64-windows-full\.zip$") {
         throw "Manifest URL does not match version $($Manifest.version)"
     }
     if ($binary.hash -notmatch '^[0-9a-f]{64}$') {
         throw "Manifest contains an invalid SHA-256 hash"
     }
-    if ($Manifest.checkver.github -ne "https://api.github.com/repos/balovess/aria2_rust/releases/latest") {
-        throw "Manifest checkver must use the latest GitHub release API"
+    if ($Manifest.checkver.github -ne "https://github.com/balovess/aria2_rust") {
+        throw "Manifest checkver must use the GitHub repository"
     }
     if ($Manifest.autoupdate.hash.url -ne '$url.sha256' -or
         $Manifest.autoupdate.hash.regex -ne '(?i)$sha256') {
@@ -141,7 +141,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 
 $versionNumber = Get-VersionNumber -Value $Version
 $tag = "v$versionNumber"
-$artifactName = "aria2-x86_64-windows.zip"
+$artifactName = "aria2-x86_64-windows-full.zip"
 $hash = Get-ReleaseHash -Repo $Repository -Tag $tag -ArtifactName $artifactName
 $manifest.version = $versionNumber
 $manifest.architecture.'64bit'.url = "https://github.com/$Repository/releases/download/$tag/$artifactName"

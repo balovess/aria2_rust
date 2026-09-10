@@ -98,15 +98,15 @@ docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balove
 
 | Platform | Command |
 |----------|---------|
-| Homebrew (macOS/Linux) | Formula updates are automated after releases; a public tap still requires setup |
-| Scoop (Windows) | Experimental manifest; stable Windows x64 releases are checked in CI |
+| Homebrew (macOS/Linux) | `brew install --formula https://raw.githubusercontent.com/balovess/aria2_rust/master/homebrew/aria2-rust.rb` |
+| Scoop (Windows x64) | `scoop install https://raw.githubusercontent.com/balovess/aria2_rust/master/scoop/aria2-rust.json` |
 | Chocolatey (Windows) | Package is built automatically from the Windows full release artifact; publishing requires repository `CHOCO_API_KEY` |
 | Cargo (from source) | Supported: `cargo install --path aria2` |
 
-Homebrew and Scoop packaging are distribution work in progress and are not a
-current priority. For reliable installation, use the platform installer
-scripts or the binaries attached to a GitHub Release. Do not treat the local
-Homebrew formula or Scoop manifest as a compatibility or release guarantee.
+The Homebrew formula builds the full feature set from the tagged source archive
+and works on supported macOS and Linux Intel/ARM hosts. The Scoop manifest
+installs the verified Windows x64 full release package and exposes it as
+`aria2c`.
 
 Chocolatey packaging is prepared by `.github/workflows/chocolatey.yml`. The
 workflow always validates and archives the package; it publishes to Chocolatey

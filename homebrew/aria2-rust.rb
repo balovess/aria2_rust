@@ -9,33 +9,16 @@
 class Aria2Rust < Formula
   desc "The ultra fast download utility - rewritten in Rust"
   homepage "https://github.com/balovess/aria2_rust"
-  version "0.3.5"
+  url "https://github.com/balovess/aria2_rust/archive/refs/tags/v0.3.6.tar.gz"
+  sha256 "2fbcbc81a782e1985bee5060a85893bdc78204c94d33789dddfdcdd4cfe223eb"
   license "GPL-2.0-or-later"
 
-  on_macos do
-    on_intel do
-      url "https://github.com/balovess/aria2_rust/releases/download/v#{version}/aria2-x86_64-macos-full.tar.gz"
-      sha256 "9da55d787a3a44b604d17e8448a2ced775dca961728391742eff2626db198f80"
-    end
-    on_arm do
-      url "https://github.com/balovess/aria2_rust/releases/download/v#{version}/aria2-aarch64-macos-full.tar.gz"
-      sha256 "3c4a68781f07660d65f624a68af6051ffcc52bca2353dfd41261048a4b34c137"
-    end
-  end
-
-  on_linux do
-    on_intel do
-      url "https://github.com/balovess/aria2_rust/releases/download/v#{version}/aria2-x86_64-linux-full.tar.gz"
-      sha256 "56583e8abc3a753cf7eeb903caac0c4dec658874de10103b40b09d513406356d"
-    end
-    on_arm do
-      url "https://github.com/balovess/aria2_rust/releases/download/v#{version}/aria2-aarch64-linux-full.tar.gz"
-      sha256 "PLACEHOLDER_SHA256"
-    end
-  end
+  depends_on "rust" => :build
 
   def install
-    bin.install "aria2c"
+    system "cargo", "build", "--release", "--locked", "--manifest-path", "aria2/Cargo.toml",
+      "--no-default-features", "--features", "full"
+    bin.install "target/release/aria2c"
   end
 
   def caveats

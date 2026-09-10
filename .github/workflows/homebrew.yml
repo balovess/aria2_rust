@@ -43,7 +43,11 @@ jobs:
   smoke-test:
     name: Install and verify Homebrew formula
     needs: update
-    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-13, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
         with:
