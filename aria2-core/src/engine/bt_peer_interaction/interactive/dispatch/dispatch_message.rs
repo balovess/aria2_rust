@@ -79,21 +79,21 @@ impl BtPeerInteractive {
             }
             BtMessage::Have { piece_index } => {
                 // Update the peer's bitfield and expose the exact transition.
-                if let Some(ref mut res) = conn.session_resource {
-                    if piece_index < res.num_pieces() {
-                        let old = res.has_piece(piece_index as usize);
-                        res.update_bitfield(piece_index as usize, 1);
-                        if !old {
-                            update.bitfield_update = Some(BitfieldUpdate {
-                                old: Vec::new(),
-                                new: Vec::new(),
-                                piece_change: Some(PieceBitfieldChange {
-                                    index: piece_index,
-                                    old,
-                                    new: true,
-                                }),
-                            });
-                        }
+                if let Some(ref mut res) = conn.session_resource
+                    && piece_index < res.num_pieces()
+                {
+                    let old = res.has_piece(piece_index as usize);
+                    res.update_bitfield(piece_index as usize, 1);
+                    if !old {
+                        update.bitfield_update = Some(BitfieldUpdate {
+                            old: Vec::new(),
+                            new: Vec::new(),
+                            piece_change: Some(PieceBitfieldChange {
+                                index: piece_index,
+                                old,
+                                new: true,
+                            }),
+                        });
                     }
                 }
                 if let Some(ref res) = conn.session_resource

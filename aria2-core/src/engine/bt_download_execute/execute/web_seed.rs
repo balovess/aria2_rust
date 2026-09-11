@@ -58,9 +58,6 @@ pub(super) async fn try_web_seed_fallback(
                 tracing::info!("[BT] Piece {} from web seed verified OK", next_piece_idx);
                 piece_manager.mark_piece_complete(next_piece_idx as u32);
                 piece_picker.mark_completed(next_piece_idx as u32);
-                cmd.group
-                    .recover()
-                    .update_bt_bitfield_piece(next_piece_idx as u32, num_pieces);
 
                 let web_seed_len = web_seed_data.len() as u64;
                 let web_seed_bytes = bytes::Bytes::from(web_seed_data);
@@ -80,6 +77,9 @@ pub(super) async fn try_web_seed_fallback(
                         .await?;
                 }
 
+                cmd.group
+                    .recover()
+                    .update_bt_bitfield_piece(next_piece_idx as u32, num_pieces);
                 cmd.completed_bytes += web_seed_len;
                 cmd.persist_checkpoint_after_piece(writer, completed_bitfield, web_seed_len)
                     .await?;
