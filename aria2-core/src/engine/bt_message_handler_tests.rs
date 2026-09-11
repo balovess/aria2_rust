@@ -39,7 +39,7 @@ pub(crate) mod tests {
         let mut handler = BtPeerMessageHandler::new(BLOCK_SIZE);
 
         let result = handler.send_request(5, 0, BLOCK_SIZE, vec![0u8; 17]);
-        assert!(result.is_some());
+        assert!(result);
         assert_eq!(handler.count_outstanding_requests(), 1);
         assert!(handler.is_outstanding_request(5, 0));
         assert!(handler.has_pending_messages());
@@ -50,12 +50,12 @@ pub(crate) mod tests {
         let mut handler = BtPeerMessageHandler::with_max_outstanding(BLOCK_SIZE, 2);
 
         // Fill up to max
-        assert!(handler.send_request(1, 0, BLOCK_SIZE, vec![1]).is_some());
-        assert!(handler.send_request(2, 0, BLOCK_SIZE, vec![2]).is_some());
+        assert!(handler.send_request(1, 0, BLOCK_SIZE, vec![1]));
+        assert!(handler.send_request(2, 0, BLOCK_SIZE, vec![2]));
         assert_eq!(handler.count_outstanding_requests(), 2);
 
         // Third request should be rejected
-        assert!(handler.send_request(3, 0, BLOCK_SIZE, vec![3]).is_none());
+        assert!(!handler.send_request(3, 0, BLOCK_SIZE, vec![3]));
         assert!(!handler.can_send_request());
     }
 

@@ -70,10 +70,33 @@ fn test_dispatch_have_updates_bitfield() {
 
     assert_eq!(update.have_index, Some(0));
     let transition = update.bitfield_update.expect("Have transition");
-    assert_eq!(transition.old, vec![0]);
-    assert_eq!(transition.new, vec![0x80]);
+    assert!(transition.old.is_empty());
+    assert!(transition.new.is_empty());
+    assert_eq!(transition.piece_change.unwrap().index, 0);
     // The peer should now have piece 0
     assert!(conn.has_piece(0));
+}
+
+#[test]
+fn test_dispatch_duplicate_and_out_of_range_have_do_not_emit_transition() {
+    let info_hash = [0u8; 20];
+    let mut interactive = BtPeerInteractive::new(info_hash, 100);
+    let mut conn = make_test_conn();
+    conn.allocate_session_resource(256 * 1024, 1024 * 1024);
+
+    let first =
+        interactive.dispatch_message(BtMessage::Have { piece_index: 0 }, &mut conn, |_| false);
+    assert!(first.bitfield_update.is_some());
+
+    let duplicate =
+        interactive.dispatch_message(BtMessage::Have { piece_index: 0 }, &mut conn, |_| false);
+    assert!(duplicate.bitfield_update.is_none());
+
+    let out_of_range =
+        interactive.dispatch_message(BtMessage::Have { piece_index: 4 }, &mut conn, |_| false);
+    assert!(out_of_range.bitfield_update.is_none());
+    assert!(conn.has_piece(0));
+    assert!(!conn.has_piece(4));
 }
 
 #[test]

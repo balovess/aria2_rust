@@ -269,6 +269,15 @@ pub enum CheckHaveResult {
 pub struct BitfieldUpdate {
     pub old: Vec<u8>,
     pub new: Vec<u8>,
+    /// A single-piece transition avoids materializing full peer bitfields.
+    pub piece_change: Option<PieceBitfieldChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PieceBitfieldChange {
+    pub index: u32,
+    pub old: bool,
+    pub new: bool,
 }
 
 #[derive(Debug, Clone, Default)]

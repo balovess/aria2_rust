@@ -135,6 +135,15 @@ fn checkpoint_save_due(
             >= Duration::from_secs(crate::constants::BT_CHECKPOINT_SAVE_INTERVAL_SECS)
 }
 
+pub(super) fn snapshot_completed_bitfield(
+    bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+) -> Vec<u8> {
+    bitfield
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 fn legacy_progress_piece_indices(
     progress: &BtProgress,
     piece_length: u32,
@@ -197,7 +206,7 @@ impl BtDownloadCommand {
     pub(super) async fn persist_checkpoint_after_piece(
         &mut self,
         writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
-        bitfield: &[u8],
+        bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
         piece_bytes: u64,
     ) -> Result<()> {
         let save_requested = self.group.recover().is_save_control_file_requested();
@@ -220,6 +229,7 @@ impl BtDownloadCommand {
         ) {
             return Ok(());
         }
+        let bitfield_snapshot = snapshot_completed_bitfield(bitfield);
 
         // The single-file BT writer uses a write-back cache. Persist payload
         // bytes before its bitfield so a restored checkpoint never advertises
@@ -231,7 +241,10 @@ impl BtDownloadCommand {
         })?;
 
         let save_started = std::time::Instant::now();
-        match checkpoint.save(bitfield, self.completed_bytes).await {
+        match checkpoint
+            .save(&bitfield_snapshot, self.completed_bytes)
+            .await
+        {
             Ok(()) => {
                 self.checkpoint_bytes_since_save = 0;
                 self.checkpoint_last_save = std::time::Instant::now();

@@ -95,7 +95,7 @@ pub struct RequestGroup {
     /// code can update progress without acquiring the outer `RwLock`.
     pub progress: Arc<AtomicProgress>,
     /// BT piece bitfield.
-    pub bt_bitfield: std::sync::RwLock<Option<Vec<u8>>>,
+    pub bt_bitfield: std::sync::RwLock<Option<Arc<std::sync::RwLock<Vec<u8>>>>>,
     /// Current active BT peer snapshots for read-only consumers.
     pub(crate) bt_peer_snapshots: Arc<std::sync::RwLock<Vec<BtPeerSnapshot>>>,
 

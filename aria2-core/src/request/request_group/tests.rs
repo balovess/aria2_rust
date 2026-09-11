@@ -1047,6 +1047,31 @@ fn test_set_and_get_download_context() {
 }
 
 #[test]
+fn test_shared_bt_bitfield_updates_only_valid_piece_bits() {
+    let group = RequestGroup::new(
+        GroupId::new(6),
+        vec!["magnet:?xt=urn:btih:shared".to_string()],
+        DownloadOptions::default(),
+    );
+    let shared = Arc::new(std::sync::RwLock::new(vec![0u8; 2]));
+    group.set_bt_bitfield_shared(Arc::clone(&shared));
+
+    group.update_bt_bitfield_piece(0, 9);
+    group.update_bt_bitfield_piece(8, 9);
+    group.update_bt_bitfield_piece(9, 9);
+    group.update_bt_bitfield_piece(u32::MAX, 9);
+
+    assert_eq!(group.get_bt_bitfield(), Some(vec![0x80, 0x80]));
+    assert_eq!(
+        shared
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_slice(),
+        &[0x80, 0x80]
+    );
+}
+
+#[test]
 fn test_uri_memory_stats_reports_transferred_uri_duplication() {
     let uri = "http://example.com/file.zip".to_string();
     let group = RequestGroup::new(

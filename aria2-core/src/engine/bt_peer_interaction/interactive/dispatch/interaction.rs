@@ -122,7 +122,11 @@ impl BtPeerInteractive {
             .await?;
         if let Some(storage) = piece_storage {
             for update in &bitfield_updates {
-                storage.update_piece_stats(&update.new, &update.old);
+                if let Some(change) = &update.piece_change {
+                    storage.update_piece_stat(change.index as usize, change.old, change.new);
+                } else {
+                    storage.update_piece_stats(&update.new, &update.old);
+                }
             }
             piece_storage = Some(storage);
         }

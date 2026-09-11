@@ -106,6 +106,8 @@ impl PieceProvider for MockPieceProvider {
 
     fn update_piece_stats(&mut self, _new_bitfield: &[u8], _old_bitfield: &[u8]) {}
 
+    fn update_piece_stat(&mut self, _index: usize, _old: bool, _new: bool) {}
+
     fn get_advertised_piece_indexes_ext(
         &self,
         _my_cuid: u64,
