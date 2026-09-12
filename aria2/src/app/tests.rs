@@ -2295,12 +2295,10 @@ async fn test_bt_bitfield_preserved_on_restore() {
     assert_eq!(groups.len(), 1, "Should have 1 group");
 
     let group = groups[0].read().unwrap();
-    let bitfield = group.bt_bitfield.read().unwrap();
-    assert!(bitfield.is_some(), "BT bitfield should be preserved");
     assert_eq!(
-        bitfield.as_ref().unwrap(),
-        &vec![0xFF, 0xAA, 0xBB],
-        "bitfield value should be correct"
+        group.get_bt_bitfield(),
+        Some(vec![0xFF, 0xAA, 0xBB]),
+        "BT bitfield should be preserved"
     );
 }
 

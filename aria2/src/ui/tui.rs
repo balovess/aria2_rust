@@ -30,6 +30,15 @@ enum InputMode {
     Filter,
 }
 
+#[derive(Clone, Copy)]
+struct ViewState<'a> {
+    locale: Locale,
+    input: Option<&'a str>,
+    input_mode: InputMode,
+    details: bool,
+    filter: &'a str,
+}
+
 /// Run the local interactive UI until the user quits or the terminal closes.
 pub async fn run(
     request_man: std::sync::Arc<RequestGroupMan>,
@@ -89,17 +98,20 @@ pub async fn run_remote(
         }
         let tasks = filtered_remote_tasks(&all_tasks, &filter);
         selected = selected.min(tasks.len().saturating_sub(1));
+        let view = ViewState {
+            locale,
+            input: input.as_deref(),
+            input_mode,
+            details,
+            filter: &filter,
+        };
         terminal
             .draw(|frame| {
                 draw_remote(
                     frame,
                     &tasks,
                     selected,
-                    locale,
-                    input.as_deref(),
-                    input_mode,
-                    details,
-                    &filter,
+                    view,
                     page,
                     has_next_page,
                     rpc_error.as_deref(),
@@ -140,8 +152,8 @@ pub async fn run_remote(
             }
             KeyCode::Enter if input_mode == InputMode::Add => {
                 let value = input.take().unwrap_or_default().trim().to_string();
-                if !value.is_empty() {
-                    if let Err(error) = rpc_call(
+                if !value.is_empty()
+                    && let Err(error) = rpc_call(
                         &client,
                         &url,
                         secret.as_deref(),
@@ -149,9 +161,8 @@ pub async fn run_remote(
                         serde_json::json!([[value]]),
                     )
                     .await
-                    {
-                        rpc_error = Some(error);
-                    }
+                {
+                    rpc_error = Some(error);
                 }
                 next_refresh = Instant::now();
                 input_mode = InputMode::None;
@@ -383,15 +394,18 @@ fn draw_remote(
     frame: &mut ratatui::Frame<'_>,
     tasks: &[&RemoteTask],
     selected: usize,
-    locale: Locale,
-    input: Option<&str>,
-    input_mode: InputMode,
-    details: bool,
-    filter: &str,
+    view: ViewState<'_>,
     page: usize,
     has_next_page: bool,
     rpc_error: Option<&str>,
 ) {
+    let ViewState {
+        locale,
+        input,
+        input_mode,
+        details,
+        filter,
+    } = view;
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if details {
@@ -572,11 +586,13 @@ async fn run_loop(
                     frame,
                     &visible_groups,
                     &mut table_state,
-                    locale,
-                    input.as_deref(),
-                    input_mode,
-                    details,
-                    &filter,
+                    ViewState {
+                        locale,
+                        input: input.as_deref(),
+                        input_mode,
+                        details,
+                        filter: &filter,
+                    },
                 )
             })
             .map_err(|error| format!("failed to draw TUI: {error}"))?;
@@ -694,12 +710,15 @@ fn draw(
         std::sync::Arc<std::sync::RwLock<aria2_core::request::request_group::RequestGroup>>,
     )],
     table_state: &mut TableState,
-    locale: Locale,
-    input: Option<&str>,
-    input_mode: InputMode,
-    details: bool,
-    filter: &str,
+    view: ViewState<'_>,
 ) {
+    let ViewState {
+        locale,
+        input,
+        input_mode,
+        details,
+        filter,
+    } = view;
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(if details {
