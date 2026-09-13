@@ -68,7 +68,7 @@ impl crate::config::OptionRegistry {
             name: "parameterized-uri".into(),
             opt_type: OptionType::Boolean,
             short_name: Some('P'),
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Enable parameterized URI support (e.g. {a,b})".into(),
             category: OptionCategory::General,
             ..Default::default()
@@ -271,7 +271,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "enable-mmap".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Enable mmap for file allocation".into(),
             category: OptionCategory::General,
             ..Default::default()
