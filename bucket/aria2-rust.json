@@ -2,7 +2,7 @@
   "version": "0.3.6",
   "description": "The ultra fast download utility - rewritten in Rust",
   "homepage": "https://github.com/balovess/aria2_rust",
-  "license": "GPL-2.0-or-later",
+  "license": "GPL-3.0-or-later",
   "notes": [
     "aria2-rust is now installed!",
     "",

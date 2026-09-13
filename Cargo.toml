@@ -10,7 +10,7 @@ members = [
 [workspace.package]
 edition = "2024"
 authors = ["aria2-rust contributors"]
-license = "GPL-2.0-or-later"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/balovess/aria2_rust/"
 readme = "README.md"
 keywords = ["download", "bittorrent", "http", "ftp", "rpc"]

@@ -9,7 +9,7 @@ class Aria2Rust < Formula
   homepage "https://github.com/balovess/aria2_rust"
   url "https://github.com/balovess/aria2_rust/archive/refs/tags/v0.3.6.tar.gz"
   sha256 "2fbcbc81a782e1985bee5060a85893bdc78204c94d33789dddfdcdd4cfe223eb"
-  license "GPL-2.0-or-later"
+  license "GPL-3.0-or-later"
 
   depends_on "rust" => :build
 
