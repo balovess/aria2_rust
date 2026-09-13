@@ -158,9 +158,10 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对象，包含分层的
 `announceList`，以及已存在时的 `comment`、`creationDate`、`mode` 和
 `info.name`。piece 进度通过原版定义的 `bitfield`、`pieceLength` 和
-`numPieces` 返回。`completedPieces` 和 `missingPieces` 是内部运行时统计，
-不属于原版 `tellStatus` wire 响应。长度、速度、计数等兼容字段按 aria2
-wire 格式序列化为字符串。
+`numPieces` 返回；BT 运行统计还包括 `seeder`、`numSeeders`、
+`verifiedLength` 和 `verifyIntegrityPending`。`completedPieces` 和
+`missingPieces` 是内部运行时统计，不属于原版 `tellStatus` wire 响应。
+长度、速度、计数等兼容字段按 aria2 wire 格式序列化为字符串。
 
 `aria2.getPeers` 返回当前仍处于活动状态的连接，不是历史 peer 记录。除标准
 字段 `peerId`、`ip`、`port`、`amChoking`、`peerChoking`、`downloadSpeed`、
@@ -173,7 +174,8 @@ wire 格式序列化为字符串。
 `allFailed`、`inFlight`、`interval`、`minInterval`、`seeders`、`leechers`、
 `trackerId` 和可选的 `secondsSinceLastSuccess`。状态来自正在执行的 BT
 命令；命令退出后不再保留该 GID 的运行快照。`current` 是下一次选择的
-tracker，`lastAttempt` 是最近一次尝试的 tracker。
+tracker，`lastAttempt` 是最近一次尝试的 tracker。该扩展接口中
+`interval` 按字符串返回，其他 tracker 数字和布尔状态按 JSON 原生类型返回。
 
 `aria2.getDhtStatus` 是进程级聚合接口，汇总当前活动 BT/magnet 命令注册的
 DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或

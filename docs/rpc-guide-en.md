@@ -155,14 +155,16 @@ Common `tellStatus` keys include `gid`, `status`, `totalLength`, `completedLengt
 BitTorrent status details: `bittorrent` is a nested torrent metadata object. It
 contains tiered `announceList` and, when present, `comment`, `creationDate`,
 `mode`, and `info.name`. Piece progress is exposed through `bitfield`,
-`pieceLength`, and `numPieces`. `completedPieces` and `missingPieces` are
-internal runtime statistics and are not part of the upstream `tellStatus` wire
-response. Lengths, speeds, and counters that belong to the aria2-compatible
-status contract are serialized as strings on the wire.
+`pieceLength`, and `numPieces`; BT runtime statistics also include `seeder`,
+`numSeeders`, `verifiedLength`, and `verifyIntegrityPending`.
+`completedPieces` and `missingPieces` are internal runtime statistics and are
+not part of the upstream `tellStatus` wire response. Lengths, speeds, and
+counters that belong to the aria2-compatible status contract are serialized as
+strings on the wire.
 
 `aria2.getPeers` reports currently active connections, not historical peers. In
 addition to the standard `peerId`, `ip`, `port`, `amChoking`, `peerChoking`,
-`downloadSpeed`, and `seeder` fields. `bitfield` is the peer's raw piece
+`downloadSpeed`, and `seeder` fields, `bitfield` is the peer's raw piece
 bitfield encoded as lowercase hexadecimal and is omitted when unknown. The
 first discovery source (`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
 `unknown`) is retained internally and is not emitted in the upstream response.
@@ -174,7 +176,9 @@ entry contains `uri`, 1-based `tier`, `current`, `lastAttempt`, `announceReady`,
 `trackerId`, and optional `secondsSinceLastSuccess`. The snapshot is published
 by the executing BitTorrent command and is removed when that command exits.
 `current` identifies the next tracker selected by the announce state machine;
-`lastAttempt` identifies the most recently attempted tracker.
+`lastAttempt` identifies the most recently attempted tracker. In this extension
+interface `interval` is serialized as a string; other tracker numbers and
+boolean state use native JSON types.
 
 `aria2.getDhtStatus` is process-wide. It aggregates the DHT engines registered
 by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
