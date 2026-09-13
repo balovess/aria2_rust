@@ -60,9 +60,7 @@ fn non_default_sample(definition: &OptionDef) -> String {
         }
         OptionType::Ipv4Address => vec!["192.0.2.1".to_string(), "127.0.0.1".to_string()],
         OptionType::Integer | OptionType::IntegerRange | OptionType::Size => {
-            [
-                "1", "2", "7", "1024", "2048", "65535", "1048576", "2097152",
-            ]
+            ["1", "2", "7", "1024", "2048", "65535", "1048576", "2097152"]
                 .into_iter()
                 .map(str::to_string)
                 .collect()

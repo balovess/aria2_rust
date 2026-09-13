@@ -220,7 +220,11 @@ mod tests {
 
         let value = serialize_status_response(
             BackendResponse::Status(status),
-            &["numPieces".into(), "completedPieces".into(), "missingPieces".into()],
+            &[
+                "numPieces".into(),
+                "completedPieces".into(),
+                "missingPieces".into(),
+            ],
         )
         .unwrap();
 
