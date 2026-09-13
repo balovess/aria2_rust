@@ -508,9 +508,11 @@ pub struct DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
-            split: None,
+            split: Some(crate::constants::DEFAULT_SPLIT),
             force_sequential: false,
-            max_connection_per_server: None,
+            max_connection_per_server: Some(
+                crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16,
+            ),
             max_download_limit: None,
             max_upload_limit: None,
             dir: None,
@@ -612,7 +614,7 @@ impl Default for DownloadOptions {
             enable_http_pipelining: true,
             http_accept_gzip: false,
             http_no_cache: false,
-            use_head: false,
+            use_head: true,
             no_want_digest_header: false,
             check_certificate: true,
             ca_certificate: None,

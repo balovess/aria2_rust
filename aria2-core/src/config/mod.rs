@@ -441,6 +441,16 @@ mod tests {
         assert!(dir.is_some());
         assert_eq!(mgr.get_global_bool("parameterized-uri").await, Some(true));
         assert_eq!(mgr.get_global_bool("enable-mmap").await, Some(true));
+        assert_eq!(mgr.get_global_bool("use-head").await, Some(true));
+        assert_eq!(mgr.get_global_i64("split").await, Some(16));
+        assert_eq!(
+            mgr.get_global_i64("max-connection-per-server").await,
+            Some(16)
+        );
+        assert_eq!(
+            mgr.get_global_i64("min-split-size").await,
+            Some(1024 * 1024)
+        );
         assert_eq!(
             mgr.get_global_bool("enable-http-pipelining").await,
             Some(true)

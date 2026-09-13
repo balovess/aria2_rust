@@ -332,7 +332,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "use-head".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Use HEAD method for file existence checks".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

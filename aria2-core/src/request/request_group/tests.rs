@@ -1047,6 +1047,7 @@ fn test_set_and_get_download_context() {
 }
 
 #[test]
+#[cfg(feature = "bittorrent")]
 fn test_shared_bt_bitfield_updates_only_valid_piece_bits() {
     let group = RequestGroup::new(
         GroupId::new(6),

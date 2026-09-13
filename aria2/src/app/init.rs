@@ -26,8 +26,8 @@ impl Default for InitPerformance {
     fn default() -> Self {
         Self {
             disk_cache: "256M".to_string(),
-            split: 8,
-            max_connection_per_server: 8,
+            split: 16,
+            max_connection_per_server: 16,
             max_concurrent_downloads: 5,
         }
     }
