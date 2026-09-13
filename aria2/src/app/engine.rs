@@ -35,14 +35,19 @@ pub(super) fn task_options_for_input(
 }
 
 fn task_option_snapshot_for_input(
-    mut snapshot: std::collections::HashMap<String, serde_json::Value>,
+    snapshot: std::collections::HashMap<String, serde_json::Value>,
     input_type: &InputType,
     explicit_timeout: bool,
 ) -> std::collections::HashMap<String, serde_json::Value> {
     #[cfg(feature = "bittorrent")]
-    if matches!(input_type, InputType::TorrentFile | InputType::MagnetLink) && !explicit_timeout {
-        snapshot.remove("timeout");
-    }
+    let snapshot = {
+        let mut snapshot = snapshot;
+        if matches!(input_type, InputType::TorrentFile | InputType::MagnetLink) && !explicit_timeout
+        {
+            snapshot.remove("timeout");
+        }
+        snapshot
+    };
     #[cfg(not(feature = "bittorrent"))]
     let _ = (input_type, explicit_timeout);
     snapshot
@@ -400,11 +405,18 @@ impl App {
             } else {
                 self.request_man.next_available_gid()
             };
-            let mut initial_uri = input.raw.clone();
-            #[cfg(feature = "bittorrent")]
-            if matches!(input.input_type, InputType::TorrentFile) {
-                initial_uri = format!("bt://{}", gid.value());
-            }
+            let initial_uri = {
+                #[cfg(feature = "bittorrent")]
+                if matches!(input.input_type, InputType::TorrentFile) {
+                    format!("bt://{}", gid.value())
+                } else {
+                    input.raw.clone()
+                }
+                #[cfg(not(feature = "bittorrent"))]
+                {
+                    input.raw.clone()
+                }
+            };
             let task_options =
                 options_for_input(&global_values, &options, input, self.explicit_timeout);
             let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(

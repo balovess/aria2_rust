@@ -218,6 +218,7 @@ impl super::RequestGroup {
     }
 
     /// Share the download loop's bitfield backing store without copying it.
+    #[cfg(feature = "bittorrent")]
     pub(crate) fn set_bt_bitfield_shared(&self, bitfield: Arc<std::sync::RwLock<Vec<u8>>>) {
         *self.bt_bitfield.recover_mut() = Some(bitfield);
     }
