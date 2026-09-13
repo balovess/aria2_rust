@@ -439,6 +439,20 @@ mod tests {
         assert!(!mgr.has_errors());
         let dir = mgr.get_global_str("dir").await;
         assert!(dir.is_some());
+        assert_eq!(mgr.get_global_bool("parameterized-uri").await, Some(true));
+        assert_eq!(mgr.get_global_bool("enable-mmap").await, Some(true));
+        assert_eq!(
+            mgr.get_global_bool("enable-http-pipelining").await,
+            Some(true)
+        );
+        #[cfg(feature = "bittorrent")]
+        {
+            assert_eq!(
+                mgr.get_global_bool("bt-load-saved-metadata").await,
+                Some(true)
+            );
+            assert_eq!(mgr.get_global_bool("bt-save-metadata").await, Some(true));
+        }
     }
 
     #[tokio::test]
