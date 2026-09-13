@@ -3,8 +3,11 @@
 //! These actions mirror aria2_original's `--show-files` path: metadata is
 //! parsed and printed before the download engine is initialized.
 
+#[cfg(any(feature = "bittorrent", feature = "metalink"))]
 use aria2_core::util::format::format_bytes;
-use aria2_core::validation::protocol_detector::{DetectedInput, InputType};
+use aria2_core::validation::protocol_detector::DetectedInput;
+#[cfg(any(feature = "bittorrent", feature = "metalink"))]
+use aria2_core::validation::protocol_detector::InputType;
 
 pub(super) fn show_files(inputs: &[DetectedInput]) -> Result<(), String> {
     for input in inputs {

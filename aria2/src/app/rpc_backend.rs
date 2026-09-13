@@ -50,7 +50,10 @@ impl CoreRpcBackend {
         save_session_path: Option<PathBuf>,
         product_version: impl Into<String>,
     ) -> Self {
+        #[cfg(any(feature = "bittorrent", feature = "metalink", feature = "sftp"))]
         let mut metadata = BackendMetadata::base(product_version);
+        #[cfg(not(any(feature = "bittorrent", feature = "metalink", feature = "sftp")))]
+        let metadata = BackendMetadata::base(product_version);
         #[cfg(feature = "bittorrent")]
         {
             metadata = metadata.with_bittorrent();
@@ -130,7 +133,7 @@ impl CoreRpcBackend {
         uris: Vec<String>,
         options: DownloadOptions,
         option_snapshot: HashMap<String, serde_json::Value>,
-        torrent_data: Option<Vec<u8>>,
+        _torrent_data: Option<Vec<u8>>,
     ) -> Result<String, BackendError> {
         self.group_man
             .add_group_with_gid(gid, uris, options)
@@ -145,7 +148,7 @@ impl CoreRpcBackend {
                 .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?;
             group.set_option_snapshot(option_snapshot);
             #[cfg(feature = "bittorrent")]
-            if let Some(data) = torrent_data {
+            if let Some(data) = _torrent_data {
                 group.set_bt_metadata_data(data);
             }
         }
@@ -181,9 +184,9 @@ impl CoreRpcBackend {
         #[cfg(not(feature = "bittorrent"))]
         {
             let _ = (data, additional_uris, options, position);
-            return Err(BackendError::Unsupported(
+            Err(BackendError::Unsupported(
                 "BitTorrent is not enabled".into(),
-            ));
+            ))
         }
 
         #[cfg(feature = "bittorrent")]
@@ -1218,6 +1221,7 @@ fn rpc_value_to_string(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+#[cfg(feature = "bittorrent")]
 fn parse_u64(value: &serde_json::Value, option: &str) -> Result<u64, BackendError> {
     value
         .as_u64()
