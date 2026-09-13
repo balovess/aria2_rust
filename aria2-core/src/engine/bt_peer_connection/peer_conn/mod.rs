@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use crate::engine::peer_stats::PeerStats;
+use crate::request::request_group::BtPeerSource;
 
 use super::session_resource::PeerSessionResource;
 use super::types::{ConnectionType, SendBuffer};
@@ -74,6 +75,8 @@ pub struct BtPeerConn {
     pub peer_id: Option<[u8; 20]>,
     /// Whether this was an incoming (accepted) connection.
     pub incoming: bool,
+    /// Discovery mechanism that supplied this peer address.
+    pub(crate) source: BtPeerSource,
     /// Whether this is a local network peer.
     pub local_peer: bool,
     /// Whether the peer disconnected gracefully.
@@ -140,6 +143,10 @@ pub struct BtPeerConn {
 }
 
 impl BtPeerConn {
+    pub(crate) fn set_source(&mut self, source: BtPeerSource) {
+        self.source = source;
+    }
+
     pub(crate) fn set_pex_enabled(&mut self, enabled: bool) {
         self.pex_enabled = enabled;
         if !enabled {

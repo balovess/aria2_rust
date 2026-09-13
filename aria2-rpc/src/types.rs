@@ -631,6 +631,9 @@ impl ServerInfo {
 pub struct PeerInfo {
     pub peer_id: String,
     pub ip: String,
+    /// Discovery mechanism that supplied this peer address.
+    #[serde(default = "default_peer_source")]
+    pub source: String,
     /// Peer port (serialized as string matching original util::uitos)
     #[serde(
         serialize_with = "wire::serialize_display_as_string",
@@ -667,6 +670,10 @@ pub struct PeerInfo {
     /// Seeder status as "true"/"false" string (matches original VLB_TRUE/VLB_FALSE)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seeder: Option<String>,
+}
+
+fn default_peer_source() -> String {
+    "unknown".to_string()
 }
 
 // =========================================================================
@@ -710,6 +717,52 @@ pub struct GlobalStat {
         deserialize_with = "wire::deserialize_string_or_number"
     )]
     pub num_stopped_total: usize,
+}
+
+/// Process-wide DHT runtime counters returned by `aria2.getDhtStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DhtStatus {
+    pub state: String,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub total_nodes: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub good_nodes: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub pending_transactions: usize,
+}
+
+/// Runtime state for one tracker URL returned by `aria2.getTrackers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerInfo {
+    pub uri: String,
+    pub tier: usize,
+    pub current: bool,
+    pub last_attempt: bool,
+    pub announce_ready: bool,
+    pub all_failed: bool,
+    pub in_flight: u32,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub interval: u64,
+    pub min_interval: u64,
+    pub seeders: i64,
+    pub leechers: i64,
+    pub tracker_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_since_last_success: Option<u64>,
 }
 
 impl GlobalStat {
@@ -1245,6 +1298,7 @@ mod tests {
             peer_id: "peer-abc123".to_string(),
             ip: "192.168.1.100".to_string(),
             port: 6881,
+            source: "tracker".to_string(),
             bitfield: Some("ff00ff00".to_string()),
             am_choking: false,
             peer_choking: true,
@@ -1255,6 +1309,7 @@ mod tests {
         let json = serde_json::to_value(&peer).unwrap();
         assert_eq!(json["peerId"], "peer-abc123");
         assert_eq!(json["ip"], "192.168.1.100");
+        assert_eq!(json["source"], "tracker");
         // port, downloadSpeed, uploadSpeed, amChoking, peerChoking are all
         // serialized as strings matching original aria2c wire format
         assert_eq!(json["port"], "6881");

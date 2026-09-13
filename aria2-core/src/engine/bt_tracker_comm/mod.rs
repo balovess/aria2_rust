@@ -26,5 +26,7 @@ pub use bt_announce::{
     perform_announce_with_event, urlencode_infohash,
 };
 pub use health_tracking::HealthTrackingAnnounceList;
-pub use tracker_announce::{AnnounceResult, TrackerAnnouncer};
+pub use tracker_announce::{
+    AnnounceResult, SharedTrackerRuntime, TrackerAnnouncer, TrackerRuntimeSnapshot,
+};
 pub use types::{AnnounceEvent, TrackerEntry, TrackerTier};

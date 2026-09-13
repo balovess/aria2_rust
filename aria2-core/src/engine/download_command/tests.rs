@@ -611,6 +611,7 @@ async fn authentication_retry_follows_redirect_and_preserves_protection_space() 
         http_auth_challenge: true,
         http_user: Some("user".to_string()),
         http_passwd: Some("password".to_string()),
+        use_head: false,
         ..DownloadOptions::default()
     };
     let uri = format!("http://{address}/protected/file.bin");
@@ -672,6 +673,7 @@ async fn conditional_get_304_completes_without_location() {
         allow_overwrite: true,
         conditional_get: true,
         dir: Some(directory.path().to_string_lossy().into_owned()),
+        use_head: false,
         ..DownloadOptions::default()
     };
     let uri = format!("http://{address}/cached.bin");
@@ -733,6 +735,7 @@ async fn unconditional_304_is_rejected_as_http_protocol_error() {
         allow_overwrite: true,
         dir: Some(directory.path().to_string_lossy().into_owned()),
         max_retries: 1,
+        use_head: false,
         ..DownloadOptions::default()
     };
     let uri = format!("http://{address}/cached.bin");

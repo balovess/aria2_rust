@@ -1236,7 +1236,12 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
     let mut expected = vec!["aria2.addUri"];
     #[cfg(feature = "bittorrent")]
-    expected.extend(["aria2.addTorrent", "aria2.getPeers"]);
+    expected.extend([
+        "aria2.addTorrent",
+        "aria2.getPeers",
+        "aria2.getTrackers",
+        "aria2.getDhtStatus",
+    ]);
     #[cfg(feature = "metalink")]
     expected.push("aria2.addMetalink");
     expected.extend([

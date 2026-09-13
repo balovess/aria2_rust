@@ -1559,6 +1559,60 @@ mod tests {
         }
     }
 
+    #[test]
+    fn registry_defaults_match_empty_conversion_and_runtime_values() {
+        let registry = crate::config::OptionRegistry::new();
+        let expected = [
+            ("enable-http-pipelining", "true"),
+            ("parameterized-uri", "true"),
+            ("enable-mmap", "true"),
+            ("use-head", "true"),
+            ("split", "16"),
+            ("max-connection-per-server", "16"),
+            ("min-split-size", "1048576"),
+        ];
+        let empty = DownloadOptions::from_option_strings(&HashMap::new());
+
+        for (name, expected_value) in expected {
+            let definition = registry.get(name).expect("default is registered");
+            assert_eq!(
+                definition.default_value().to_string(),
+                expected_value,
+                "{name}"
+            );
+            assert_eq!(
+                definition
+                    .parse_default_value()
+                    .expect("default parses")
+                    .to_string(),
+                expected_value,
+                "{name}"
+            );
+        }
+        assert!(empty.enable_http_pipelining);
+        assert!(empty.parameterized_uri);
+        assert!(empty.enable_mmap);
+        assert!(empty.use_head);
+        assert_eq!(empty.split, Some(16));
+        assert_eq!(empty.max_connection_per_server, Some(16));
+        assert_eq!(empty.min_split_size, Some(1024 * 1024));
+
+        #[cfg(feature = "bittorrent")]
+        {
+            for name in ["bt-load-saved-metadata", "bt-save-metadata"] {
+                let definition = registry.get(name).expect("BT default is registered");
+                assert_eq!(definition.default_value().to_string(), "true", "{name}");
+                assert_eq!(
+                    definition.parse_default_value().unwrap().to_string(),
+                    "true",
+                    "{name}"
+                );
+            }
+            assert!(empty.bt_load_saved_metadata);
+            assert!(empty.bt_save_metadata);
+        }
+    }
+
     #[cfg(feature = "bittorrent")]
     #[test]
     fn hash_check_controls_survive_option_conversion() {

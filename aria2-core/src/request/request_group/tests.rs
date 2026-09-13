@@ -2,6 +2,8 @@
 use std::sync::Arc;
 
 #[allow(unused_imports)]
+use super::bt_peer_snapshot::BtPeerSource;
+#[allow(unused_imports)]
 use super::group::RequestGroup;
 #[allow(unused_imports)]
 use super::group_id::GroupId;
@@ -19,6 +21,8 @@ fn test_bt_peer_snapshots_roundtrip() {
         peer_id: [1; 20],
         addr: "127.0.0.1:6881".parse().expect("valid test address"),
         is_incoming: false,
+        source: BtPeerSource::Tracker,
+        bitfield: Some(vec![0x80]),
         uploaded_bytes: 1,
         downloaded_bytes: 2,
         upload_speed: 3.0,
@@ -62,6 +66,8 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
                 .parse()
                 .expect("valid peer address"),
             is_incoming: false,
+            source: BtPeerSource::Dht,
+            bitfield: None,
             uploaded_bytes: 0,
             downloaded_bytes: 1,
             upload_speed: 0.0,

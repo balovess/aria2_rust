@@ -945,6 +945,8 @@ impl BtSeedManager {
                     peer_id: session.remote_peer_id().unwrap_or([0; 20]),
                     addr,
                     is_incoming: true,
+                    source: crate::request::request_group::BtPeerSource::Incoming,
+                    bitfield: None,
                     uploaded_bytes: session.uploaded_bytes(),
                     downloaded_bytes: 0,
                     upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),

@@ -60,7 +60,13 @@ fn sync_peer_snapshots(
             Some(BtPeerSnapshot {
                 peer_id: conn.peer_id.unwrap_or(conn.stats.peer_id),
                 addr: conn.remote_endpoint()?,
-                is_incoming: false,
+                is_incoming: conn.incoming,
+                source: conn.source,
+                bitfield: conn
+                    .session_resource
+                    .as_ref()
+                    .map(|resource| resource.bitfield().to_vec())
+                    .filter(|bitfield| !bitfield.is_empty()),
                 uploaded_bytes: conn.stats.uploaded_bytes,
                 downloaded_bytes: conn.stats.downloaded_bytes,
                 upload_speed: conn.stats.upload_speed,
@@ -886,6 +892,7 @@ impl BtDownloadCommand {
                 let new_connections = self
                     .connect_to_discovered_peers(
                         &all_new_pex_peers,
+                        crate::request::request_group::BtPeerSource::Pex,
                         &meta.network_info_hash(),
                         num_pieces,
                         active_connections,
@@ -938,6 +945,7 @@ impl BtDownloadCommand {
                     let new_connections = self
                         .connect_to_discovered_peers(
                             &new_peers,
+                            crate::request::request_group::BtPeerSource::Tracker,
                             &meta.network_info_hash(),
                             num_pieces,
                             active_connections,
@@ -993,6 +1001,7 @@ impl BtDownloadCommand {
                 let new_connections = self
                     .connect_to_discovered_peers(
                         &dht_peers,
+                        crate::request::request_group::BtPeerSource::Dht,
                         &meta.network_info_hash(),
                         num_pieces,
                         active_connections,
@@ -1544,7 +1553,11 @@ impl BtDownloadCommand {
 
 #[cfg(test)]
 mod tests {
-    use super::{BtStopTimeoutState, ProgressDownloadStats, progress_snapshot};
+    use super::{
+        BtStopTimeoutState, ProgressDownloadStats, progress_snapshot, sync_peer_snapshots,
+    };
+    use crate::engine::bt_peer_connection::BtPeerConn;
+    use crate::request::request_group::{BtPeerSource, DownloadOptions, GroupId, RequestGroup};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -1591,5 +1604,26 @@ mod tests {
         assert_eq!(snapshot.num_pieces, 2);
         assert_eq!(snapshot.upload_length, 3);
         assert_eq!(snapshot.stats.downloaded_bytes, 8);
+    }
+
+    #[test]
+    fn peer_snapshot_preserves_source_and_incoming_direction() {
+        let group = RequestGroup::new(GroupId::new(901), Vec::new(), DownloadOptions::default());
+        let mut connection = BtPeerConn::new_stub(&[0x11; 20]);
+        connection.set_source(BtPeerSource::Pex);
+        connection.incoming = true;
+        connection.allocate_session_resource(8, 8);
+        connection.set_peer_bitfield(&[0x80]);
+
+        sync_peer_snapshots(&group, &[connection]);
+
+        let snapshot = group
+            .bt_peer_snapshots()
+            .into_iter()
+            .next()
+            .expect("stub peer should be visible in the snapshot");
+        assert_eq!(snapshot.source, BtPeerSource::Pex);
+        assert!(snapshot.is_incoming);
+        assert_eq!(snapshot.bitfield, Some(vec![0x80]));
     }
 }

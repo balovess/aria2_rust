@@ -13,9 +13,16 @@ use aria2_core::checksum::checksum::Checksum;
 use aria2_core::config::{
     ConfigManager, OptionRegistry, is_global_option_changeable, project_initial_options,
 };
+use aria2_core::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_registry::BtRegistry;
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_tracker_comm::TrackerRuntimeSnapshot;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
-use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
+use aria2_core::request::request_group::{
+    BtPeerSnapshot, DownloadOptions, DownloadStatus, GroupId, RequestGroup,
+};
 use aria2_core::request::request_group_man::{ChangePositionMode, RequestGroupMan};
 use aria2_core::session::save_session_command::SaveSessionCommand;
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -33,6 +40,64 @@ fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
     if is_incoming { 0 } else { addr.port() }
 }
 
+fn peer_info_from_snapshot(peer: BtPeerSnapshot) -> PeerInfo {
+    PeerInfo {
+        peer_id: peer
+            .peer_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        ip: peer.addr.ip().to_string(),
+        port: rpc_peer_port(peer.addr, peer.is_incoming),
+        source: peer.source.as_str().to_string(),
+        bitfield: peer
+            .bitfield
+            .map(|bitfield| bitfield.iter().map(|byte| format!("{byte:02x}")).collect()),
+        am_choking: peer.am_choking,
+        peer_choking: peer.peer_choking,
+        download_speed: peer.download_speed.max(0.0) as u64,
+        upload_speed: peer.upload_speed.max(0.0) as u64,
+        seeder: peer.seeder.map(|value| value.to_string()),
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rpc::TrackerInfo> {
+    snapshot
+        .tracker_tiers
+        .iter()
+        .enumerate()
+        .flat_map(|(tier, uris)| {
+            uris.iter().map(move |uri| aria2_rpc::TrackerInfo {
+                uri: uri.clone(),
+                tier: tier + 1,
+                current: snapshot.current_url.as_deref() == Some(uri.as_str()),
+                last_attempt: snapshot.last_attempt_url.as_deref() == Some(uri.as_str()),
+                announce_ready: snapshot.announce_ready,
+                all_failed: snapshot.all_failed,
+                in_flight: snapshot.in_flight,
+                interval: snapshot.interval_secs,
+                min_interval: snapshot.min_interval_secs,
+                seeders: snapshot.seeders,
+                leechers: snapshot.leechers,
+                tracker_id: snapshot.tracker_id.clone(),
+                seconds_since_last_success: snapshot.seconds_since_last_success,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "bittorrent")]
+fn dht_state_priority(state: aria2_protocol::bittorrent::dht::engine::DhtEngineState) -> u8 {
+    use aria2_protocol::bittorrent::dht::engine::DhtEngineState;
+    match state {
+        DhtEngineState::Stopped => 1,
+        DhtEngineState::ShuttingDown => 2,
+        DhtEngineState::Bootstrapping => 3,
+        DhtEngineState::Running => 4,
+    }
+}
+
 /// The application adapter behind the RPC wire layer.
 pub struct CoreRpcBackend {
     group_man: Arc<RequestGroupMan>,
@@ -40,6 +105,8 @@ pub struct CoreRpcBackend {
     config: Arc<RwLock<ConfigManager>>,
     save_session_path: Option<PathBuf>,
     metadata: BackendMetadata,
+    #[cfg(feature = "bittorrent")]
+    bt_registry: Option<Arc<std::sync::RwLock<BtRegistry>>>,
 }
 
 impl CoreRpcBackend {
@@ -73,7 +140,14 @@ impl CoreRpcBackend {
             config,
             save_session_path,
             metadata,
+            #[cfg(feature = "bittorrent")]
+            bt_registry: None,
         }
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_bt_registry(&mut self, registry: Arc<std::sync::RwLock<BtRegistry>>) {
+        self.bt_registry = Some(registry);
     }
 
     fn invalid(message: impl Into<String>) -> BackendError {
@@ -402,6 +476,9 @@ impl CoreRpcBackend {
                 .with_piece_length(bt.piece_length as u64)
                 .with_completed_pieces(bt.completed_pieces)
                 .with_missing_pieces(bt.missing_pieces);
+            if let Some(torrent) = torrent_info_from_group(group) {
+                info = info.with_bittorrent(torrent);
+            }
             if let Some(bitfield) = &bt.bitfield {
                 info = info.with_bitfield(
                     bitfield
@@ -718,23 +795,104 @@ impl CoreRpcBackend {
             .map(|bt| bt.peers)
             .unwrap_or_default()
             .into_iter()
-            .map(|peer| PeerInfo {
-                peer_id: peer
-                    .peer_id
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
-                ip: peer.addr.ip().to_string(),
-                port: rpc_peer_port(peer.addr, peer.is_incoming),
-                bitfield: None,
-                am_choking: peer.am_choking,
-                peer_choking: peer.peer_choking,
-                download_speed: peer.download_speed.max(0.0) as u64,
-                upload_speed: peer.upload_speed.max(0.0) as u64,
-                seeder: peer.seeder.map(|value| value.to_string()),
-            })
+            .map(peer_info_from_snapshot)
             .collect();
         Ok(BackendResult::response(BackendResponse::Peers(peers)))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    fn get_trackers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let registry = self
+            .bt_registry
+            .as_ref()
+            .ok_or_else(|| Self::execution("BitTorrent registry is unavailable"))?;
+        let gid = u64::from_str_radix(&gid, 16)
+            .map_err(|_| Self::execution(format!("Invalid GID {gid}")))?;
+        let guard = registry
+            .read()
+            .map_err(|_| BackendError::Internal("Failed to lock BitTorrent registry".into()))?;
+        let object = guard
+            .get(gid)
+            .ok_or_else(|| Self::execution(format!("GID {gid:x} is not a BitTorrent task")))?;
+        if let Some(runtime) = object.tracker_runtime.as_ref() {
+            let snapshot = runtime.read().map_err(|_| {
+                BackendError::Internal("Failed to lock tracker runtime snapshot".into())
+            })?;
+            let trackers = tracker_infos_from_runtime(&snapshot);
+            return Ok(BackendResult::response(BackendResponse::Trackers(trackers)));
+        }
+        let announce = object
+            .bt_announce
+            .as_ref()
+            .ok_or_else(|| Self::execution("Tracker announcer is unavailable"))?;
+        let current_announce = announce.as_ref();
+        let current = current_announce
+            .announce_list()
+            .get_announce()
+            .map(str::to_owned);
+        let mut trackers = Vec::new();
+        for tier in 0..current_announce.announce_list().tier_count() {
+            let mut entry = 0;
+            while let Some(uri) = current_announce
+                .announce_list()
+                .get_tracker_url(tier, entry)
+            {
+                trackers.push(aria2_rpc::TrackerInfo {
+                    uri: uri.clone(),
+                    tier: tier + 1,
+                    current: current.as_deref() == Some(uri.as_str()),
+                    last_attempt: false,
+                    announce_ready: announce.is_announce_ready(),
+                    all_failed: announce.is_all_announce_failed(),
+                    in_flight: current_announce.in_flight_announces(),
+                    interval: announce.interval().as_secs(),
+                    min_interval: current_announce.min_interval().as_secs(),
+                    seeders: current_announce.complete(),
+                    leechers: current_announce.incomplete(),
+                    tracker_id: current_announce.tracker_id().to_string(),
+                    seconds_since_last_success: current_announce.seconds_since_last_success(),
+                });
+                entry += 1;
+            }
+        }
+        Ok(BackendResult::response(BackendResponse::Trackers(trackers)))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    async fn get_dht_status(&self) -> Result<BackendResult, BackendError> {
+        let engines = self
+            .bt_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .read()
+                    .ok()
+                    .map(|registry| registry.get_dht_engines())
+            })
+            .unwrap_or_default();
+        let mut stats = aria2_protocol::bittorrent::dht::engine::DhtEngineStats {
+            total_nodes: 0,
+            good_nodes: 0,
+            pending_transactions: 0,
+            state: aria2_protocol::bittorrent::dht::engine::DhtEngineState::Stopped,
+        };
+        for engine in engines {
+            let current = engine.stats().await;
+            stats.total_nodes += current.total_nodes;
+            stats.good_nodes += current.good_nodes;
+            stats.pending_transactions += current.pending_transactions;
+            if dht_state_priority(current.state) > dht_state_priority(stats.state) {
+                stats.state = current.state;
+            }
+        }
+        Ok(BackendResult::response(BackendResponse::DhtStatus(
+            aria2_rpc::DhtStatus {
+                state: format!("{:?}", stats.state).to_lowercase(),
+                total_nodes: stats.total_nodes,
+                good_nodes: stats.good_nodes,
+                pending_transactions: stats.pending_transactions,
+            },
+        )))
     }
 
     fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {
@@ -815,6 +973,25 @@ impl CoreRpcBackend {
             .map_err(Self::execution)?;
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
     }
+}
+
+fn torrent_info_from_group(group: &RequestGroup) -> Option<aria2_rpc::BittorrentInfo> {
+    let context = group.get_download_context()?;
+    let attribute = context
+        .get_attribute(ContextAttributeType::BitTorrent)?
+        .downcast_ref::<TorrentAttribute>()?;
+    Some(aria2_rpc::BittorrentInfo {
+        announce_list: attribute.announce_list.clone(),
+        comment: (!attribute.comment.is_empty()).then(|| attribute.comment.clone()),
+        creation_date: (attribute.creation_date != 0).then_some(attribute.creation_date),
+        mode: Some(match attribute.mode {
+            BtFileMode::Single => "single".to_string(),
+            BtFileMode::Multi => "multi".to_string(),
+        }),
+        info: Some(aria2_rpc::BittorrentMetaInfo {
+            name: attribute.name.clone(),
+        }),
+    })
 }
 
 #[async_trait]
@@ -914,6 +1091,18 @@ impl RpcBackend for CoreRpcBackend {
             BackendRequest::GetOption { gid } => self.get_option(gid).await,
             BackendRequest::ChangeOption { gid, options } => self.change_option(gid, options),
             BackendRequest::GetPeers { gid } => self.get_peers(gid),
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::GetTrackers { gid } => self.get_trackers(gid),
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::GetTrackers { .. } => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::GetDhtStatus => self.get_dht_status().await,
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::GetDhtStatus => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
             BackendRequest::PauseAll => {
                 let gids = self.lifecycle_gids();
                 self.group_man.pause_all();
@@ -1290,5 +1479,113 @@ mod tests {
         let incoming_addr = "127.0.0.1:7673".parse().expect("valid socket address");
         assert_eq!(rpc_peer_port(incoming_addr, true), 0);
         assert_eq!(rpc_peer_port(incoming_addr, false), 7673);
+    }
+
+    #[test]
+    fn get_peers_adapter_exposes_source_and_bitfield() {
+        let info = peer_info_from_snapshot(BtPeerSnapshot {
+            peer_id: [0xAB; 20],
+            addr: "192.0.2.10:6881".parse().expect("valid socket address"),
+            is_incoming: false,
+            source: aria2_core::request::request_group::BtPeerSource::Dht,
+            bitfield: Some(vec![0xA0, 0x01]),
+            uploaded_bytes: 0,
+            downloaded_bytes: 0,
+            upload_speed: 0.0,
+            download_speed: 0.0,
+            avg_upload_speed: 0,
+            avg_download_speed: 0,
+            am_choking: false,
+            peer_choking: true,
+            seeder: Some(false),
+            connection_duration_secs: 0,
+            last_data_age_secs: 0,
+            is_snubbed: false,
+            is_banned: false,
+        });
+
+        assert_eq!(info.source, "dht");
+        assert_eq!(info.bitfield.as_deref(), Some("a001"));
+        assert_eq!(info.port, 6881);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn tracker_runtime_adapter_exposes_current_and_last_attempt() {
+        let snapshot = TrackerRuntimeSnapshot {
+            tracker_tiers: vec![
+                vec![
+                    "http://tracker.example.com/one".to_string(),
+                    "udp://tracker.example.com/two".to_string(),
+                ],
+                vec!["https://tracker.example.com/three".to_string()],
+            ],
+            current_url: Some("udp://tracker.example.com/two".to_string()),
+            last_attempt_url: Some("http://tracker.example.com/one".to_string()),
+            announce_ready: true,
+            all_failed: false,
+            in_flight: 1,
+            interval_secs: 120,
+            min_interval_secs: 60,
+            seeders: 7,
+            leechers: 11,
+            tracker_id: "tracker-id".to_string(),
+            seconds_since_last_success: Some(4),
+        };
+
+        let trackers = tracker_infos_from_runtime(&snapshot);
+        assert_eq!(trackers.len(), 3);
+        assert!(!trackers[0].current);
+        assert!(trackers[0].last_attempt);
+        assert!(trackers[1].current);
+        assert_eq!(trackers[1].in_flight, 1);
+        assert_eq!(trackers[2].tier, 2);
+        assert_eq!(trackers[2].seeders, 7);
+    }
+
+    #[test]
+    fn tell_status_exposes_torrent_metadata_from_the_real_context() {
+        let group = RequestGroup::new(
+            GroupId::new(0x102),
+            vec!["file.torrent".to_string()],
+            DownloadOptions::default(),
+        );
+        let mut context = aria2_core::download::download_context::DownloadContext::new(
+            16_384,
+            16_384,
+            "/tmp/file.bin".into(),
+        );
+        context.set_attribute(
+            ContextAttributeType::BitTorrent,
+            Box::new(TorrentAttribute {
+                name: "test.iso".to_string(),
+                mode: BtFileMode::Single,
+                announce_list: vec![vec!["udp://tracker.test:6969/announce".to_string()]],
+                nodes: vec![("router.test".to_string(), 6881)],
+                info_hash: "0123456789abcdef0123456789abcdef01234567".to_string(),
+                metadata: Vec::new(),
+                metadata_size: 0,
+                private_torrent: false,
+                creation_date: 1_700_000_000,
+                comment: "fixture".to_string(),
+                created_by: "aria2-rust".to_string(),
+                url_list: vec!["https://seed.test/file.iso".to_string()],
+            }),
+        );
+        group.set_download_context(Arc::new(context));
+        group.set_bt_metadata(
+            1,
+            16_384,
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        );
+        let status = CoreRpcBackend::status_from_group(&group, "0000000000000102");
+        let json = serde_json::to_value(status).expect("status serializes");
+        assert_eq!(
+            json["bittorrent"]["announceList"][0][0],
+            "udp://tracker.test:6969/announce"
+        );
+        assert_eq!(json["bittorrent"]["info"]["name"], "test.iso");
+        assert_eq!(json["bittorrent"]["comment"], "fixture");
+        assert_eq!(json["bittorrent"]["creationDate"], 1_700_000_000);
     }
 }

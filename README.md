@@ -69,7 +69,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (38 all-features methods, 6 notifications; compatibility coverage tracked separately)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (40 all-features methods, 6 notifications; BT status includes torrent, tracker, peer, and DHT runtime information)
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -594,7 +594,7 @@ cross-platform evidence is incomplete.
 | CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
-| JSON-RPC API | Implemented path | 38 all-features methods returned by `system.listMethods`; interoperability remains open |
+| JSON-RPC API | Implemented path | 40 all-features methods returned by `system.listMethods`; BT metadata, tracker runtime state, and DHT runtime counters are available |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |
@@ -623,6 +623,7 @@ cross-platform evidence is incomplete.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
+- BitTorrent RPC exposes torrent metadata, live tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. `aria2.getPeers` also reports each connected peer's first discovery source (`tracker`, `dht`, `pex`, `lpd`, or `incoming`; `unknown` is used when unavailable). Tracker and DHT values are published from the active BT command and are removed when that command exits.
 - Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License

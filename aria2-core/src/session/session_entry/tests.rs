@@ -439,11 +439,11 @@ fn test_download_options_to_map_all_fields() {
         ]),
         bt_exclude_tracker: Some(vec!["https://excluded.example/announce".to_string()]),
         bt_external_ip: Some("203.0.113.7".to_string()),
-        bt_load_saved_metadata: true,
+        bt_load_saved_metadata: false,
         bt_metadata_only: true,
         bt_min_crypto_level: "arc4".to_string(),
         bt_request_peer_speed_limit: 128 * 1024,
-        bt_save_metadata: true,
+        bt_save_metadata: false,
         bt_tracker_interval: 17,
         bt_tracker_connect_timeout: 11,
         bt_tracker_timeout: 23,
@@ -495,10 +495,10 @@ fn test_download_options_to_map_all_fields() {
         user_agent: Some("test-client/1.0".to_string()),
         referer: Some("http://example.com".to_string()),
         enable_http_keep_alive: false,
-        enable_http_pipelining: true,
+        enable_http_pipelining: false,
         http_accept_gzip: true,
         http_no_cache: true,
-        use_head: true,
+        use_head: false,
         no_want_digest_header: true,
         check_certificate: false,
         ca_certificate: Some("/tmp/ca.pem".to_string()),
@@ -598,11 +598,11 @@ fn test_download_options_to_map_all_fields() {
         "https://excluded.example/announce"
     );
     assert_eq!(map.get("bt-external-ip").unwrap(), "203.0.113.7");
-    assert_eq!(map.get("bt-load-saved-metadata").unwrap(), "true");
+    assert_eq!(map.get("bt-load-saved-metadata").unwrap(), "false");
     assert_eq!(map.get("bt-metadata-only").unwrap(), "true");
     assert_eq!(map.get("bt-min-crypto-level").unwrap(), "arc4");
     assert_eq!(map.get("bt-request-peer-speed-limit").unwrap(), "131072");
-    assert_eq!(map.get("bt-save-metadata").unwrap(), "true");
+    assert_eq!(map.get("bt-save-metadata").unwrap(), "false");
     assert_eq!(map.get("bt-tracker-interval").unwrap(), "17");
     assert_eq!(map.get("bt-tracker-connect-timeout").unwrap(), "11");
     assert_eq!(map.get("bt-tracker-timeout").unwrap(), "23");
@@ -670,10 +670,10 @@ fn test_download_options_to_map_all_fields() {
     assert_eq!(map.get("user-agent").unwrap(), "test-client/1.0");
     assert_eq!(map.get("referer").unwrap(), "http://example.com");
     assert_eq!(map.get("enable-http-keep-alive").unwrap(), "false");
-    assert_eq!(map.get("enable-http-pipelining").unwrap(), "true");
+    assert_eq!(map.get("enable-http-pipelining").unwrap(), "false");
     assert_eq!(map.get("http-accept-gzip").unwrap(), "true");
     assert_eq!(map.get("http-no-cache").unwrap(), "true");
-    assert_eq!(map.get("use-head").unwrap(), "true");
+    assert_eq!(map.get("use-head").unwrap(), "false");
     assert_eq!(map.get("no-want-digest-header").unwrap(), "true");
     assert_eq!(map.get("check-certificate").unwrap(), "false");
     assert_eq!(map.get("ca-certificate").unwrap(), "/tmp/ca.pem");
@@ -703,11 +703,11 @@ fn test_download_options_to_map_all_fields() {
         Some(vec!["https://excluded.example/announce".to_string()])
     );
     assert_eq!(restored.bt_external_ip.as_deref(), Some("203.0.113.7"));
-    assert!(restored.bt_load_saved_metadata);
+    assert!(!restored.bt_load_saved_metadata);
     assert!(restored.bt_metadata_only);
     assert_eq!(restored.bt_min_crypto_level, "arc4");
     assert_eq!(restored.bt_request_peer_speed_limit, 128 * 1024);
-    assert!(restored.bt_save_metadata);
+    assert!(!restored.bt_save_metadata);
     assert_eq!(restored.bt_tracker_interval, 17);
     assert_eq!(restored.bt_tracker_connect_timeout, 11);
     assert_eq!(restored.bt_tracker_timeout, 23);
@@ -747,4 +747,37 @@ fn test_download_options_to_map_defaults_excluded() {
     // The omitted wire value must still restore aria2's typed default.
     let restored = DownloadOptions::from_option_strings(&map);
     assert_eq!(restored.seed_ratio, Some(1.0));
+}
+
+#[test]
+fn test_download_options_to_map_preserves_disabled_default_true_options() {
+    let opts = DownloadOptions {
+        enable_mmap: false,
+        parameterized_uri: false,
+        bt_load_saved_metadata: false,
+        bt_save_metadata: false,
+        enable_http_pipelining: false,
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let map = download_options_to_map(&opts);
+
+    for name in [
+        "enable-mmap",
+        "parameterized-uri",
+        "bt-load-saved-metadata",
+        "bt-save-metadata",
+        "enable-http-pipelining",
+        "use-head",
+    ] {
+        assert_eq!(map.get(name), Some(&"false".to_string()), "{name}");
+    }
+
+    let restored = DownloadOptions::from_option_strings(&map);
+    assert!(!restored.enable_mmap);
+    assert!(!restored.parameterized_uri);
+    assert!(!restored.bt_load_saved_metadata);
+    assert!(!restored.bt_save_metadata);
+    assert!(!restored.enable_http_pipelining);
+    assert!(!restored.use_head);
 }

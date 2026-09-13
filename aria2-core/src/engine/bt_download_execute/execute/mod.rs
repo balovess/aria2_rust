@@ -397,8 +397,15 @@ impl Command for BtDownloadCommand {
                 &announce_list,
                 &announce_url,
             ));
+            let tracker_runtime = Arc::new(std::sync::RwLock::new(
+                crate::engine::bt_tracker_comm::TrackerRuntimeSnapshot::from_bt_announce(
+                    &bt_announce,
+                ),
+            ));
+            self.tracker_runtime = Some(Arc::clone(&tracker_runtime));
             let bt_object = crate::engine::bt_registry::BtObject::builder()
                 .bt_announce(bt_announce)
+                .tracker_runtime(tracker_runtime)
                 .download_context(download_context.unwrap_or_else(|| {
                     Arc::new(crate::download::DownloadContext::new(0, 0, String::new()))
                 }))

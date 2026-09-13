@@ -540,6 +540,7 @@ impl BtDownloadCommand {
                 options.bt_max_peers,
                 10,
             ),
+            peer_sources: HashMap::new(),
             dht_engine: None,
             public_trackers: None,
             choking_algo,
@@ -599,6 +600,7 @@ impl BtDownloadCommand {
 
             // BtRegistry integration (set via set_bt_registry after construction)
             bt_registry: None,
+            tracker_runtime: None,
 
             // Process-wide rate limiter (set via set_global_limiter after construction)
             global_limiter: None,

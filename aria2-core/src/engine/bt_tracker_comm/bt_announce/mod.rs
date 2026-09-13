@@ -185,6 +185,11 @@ impl BtAnnounce {
             || self.is_default_announce_ready()
     }
 
+    /// Number of announce requests currently in flight.
+    pub fn in_flight_announces(&self) -> u32 {
+        self.trackers
+    }
+
     /// Adjust the announce list for the next announce (matching C++ adjustAnnounceList).
     ///
     /// This is the core state machine logic:
@@ -576,6 +581,11 @@ impl BtAnnounce {
     /// Get the current announce interval.
     pub fn interval(&self) -> Duration {
         self.interval
+    }
+
+    /// Seconds since the last successful announce, if one exists.
+    pub fn seconds_since_last_success(&self) -> Option<u64> {
+        self.prev_announce_time.map(|time| time.elapsed().as_secs())
     }
 
     /// Get the current minimum interval.

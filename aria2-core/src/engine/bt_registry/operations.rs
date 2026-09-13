@@ -130,6 +130,8 @@ impl BtRegistry {
     ///
     /// Equivalent to C++ `BtRegistry::remove(a2_gid_t)`.
     pub fn remove(&mut self, gid: u64) -> bool {
+        self.dht_engines.remove(&gid);
+        self.refresh_dht_engine_alias();
         if let Some(old) = self.pool.remove(&gid) {
             self.cleanup_info_hash_index(gid, &old);
             trace!(gid, "BtRegistry::remove: entry removed");
@@ -150,6 +152,8 @@ impl BtRegistry {
         );
         self.pool.clear();
         self.info_hash_index.clear();
+        self.dht_engines.clear();
+        self.dht_engine = None;
     }
 
     // -----------------------------------------------------------------------
@@ -233,6 +237,17 @@ impl BtRegistry {
         self.dht_engine = Some(engine);
     }
 
+    /// Register the DHT engine owned by one active download.
+    pub fn set_dht_engine_for_gid(
+        &mut self,
+        gid: u64,
+        engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
+        trace!(gid, "BtRegistry::set_dht_engine_for_gid");
+        self.dht_engines.insert(gid, Arc::clone(&engine));
+        self.dht_engine = Some(engine);
+    }
+
     /// Get a reference to the shared DHT engine.
     ///
     /// Returns `None` if no DHT engine has been set.
@@ -248,6 +263,53 @@ impl BtRegistry {
     pub fn clear_dht_engine(&mut self) {
         trace!("BtRegistry::clear_dht_engine");
         self.dht_engine = None;
+    }
+
+    /// Clear the shared DHT engine only when it still belongs to the caller.
+    ///
+    /// Multiple BitTorrent commands can finish out of order. Pointer identity
+    /// prevents an older command from clearing a newer command's live engine.
+    pub fn clear_dht_engine_if(
+        &mut self,
+        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
+        if self
+            .dht_engine
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, engine))
+        {
+            self.dht_engine = None;
+        }
+    }
+
+    /// Remove one download's DHT engine only when the handle still matches.
+    pub fn clear_dht_engine_for_gid_if(
+        &mut self,
+        gid: u64,
+        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
+        if self
+            .dht_engines
+            .get(&gid)
+            .is_some_and(|current| Arc::ptr_eq(current, engine))
+        {
+            self.dht_engines.remove(&gid);
+            self.refresh_dht_engine_alias();
+        } else {
+            self.clear_dht_engine_if(engine);
+        }
+    }
+
+    /// Clone all currently registered DHT engines for a status snapshot.
+    pub fn get_dht_engines(&self) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        if self.dht_engines.is_empty() {
+            return self.dht_engine.iter().cloned().collect();
+        }
+        self.dht_engines.values().cloned().collect()
+    }
+
+    fn refresh_dht_engine_alias(&mut self) {
+        self.dht_engine = self.dht_engines.values().next().cloned();
     }
 
     // -----------------------------------------------------------------------
