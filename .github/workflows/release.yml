@@ -175,7 +175,7 @@ jobs:
             $expected = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -replace '\s+.*$', ''
             $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($expected -ne $actual) {
-              throw "Checksum mismatch for $artifact: expected $expected, got $actual"
+              throw "Checksum mismatch for ${artifact}: expected $expected, got $actual"
             }
           }
       - name: Generate Linux/macOS artifact checksums
