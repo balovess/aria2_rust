@@ -214,12 +214,44 @@ impl super::RequestGroup {
 
     /// Set BT bitfield (sync, uses std::sync::RwLock).
     pub fn set_bt_bitfield(&self, bf: Option<Vec<u8>>) {
-        *self.bt_bitfield.recover_mut() = bf;
+        *self.bt_bitfield.recover_mut() = bf.map(|bytes| Arc::new(std::sync::RwLock::new(bytes)));
+    }
+
+    /// Share the download loop's bitfield backing store without copying it.
+    pub(crate) fn set_bt_bitfield_shared(&self, bitfield: Arc<std::sync::RwLock<Vec<u8>>>) {
+        *self.bt_bitfield.recover_mut() = Some(bitfield);
     }
 
     /// Get BT bitfield (sync, uses std::sync::RwLock).
     pub fn get_bt_bitfield(&self) -> Option<Vec<u8>> {
-        self.bt_bitfield.recover().clone()
+        self.bt_bitfield
+            .recover()
+            .as_ref()
+            .map(|bitfield| bitfield.recover().clone())
+    }
+
+    /// Update one completed piece in the shared internal bitfield.
+    ///
+    /// The public/session boundary still exposes an owned `Vec<u8>`, while
+    /// piece completion only changes one byte in the shared backing storage.
+    /// Invalid indexes are ignored so a malformed completion event cannot
+    /// index beyond either the torrent or the allocated byte buffer.
+    pub fn update_bt_bitfield_piece(&self, piece_index: u32, num_pieces: u32) {
+        let index = piece_index as usize;
+        let piece_count = num_pieces as usize;
+        if index >= piece_count {
+            return;
+        }
+
+        let Some(bitfield) = self.bt_bitfield.recover().as_ref().cloned() else {
+            return;
+        };
+        let byte_index = index / 8;
+        let mut bitfield = bitfield.recover_mut();
+        let Some(byte) = bitfield.get_mut(byte_index) else {
+            return;
+        };
+        *byte |= 1 << (7 - (index % 8));
     }
 
     // ── BT Peer Snapshots ──────────────────────────────────────────────

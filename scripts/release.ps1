@@ -8,8 +8,8 @@
 # 1. Run tests
 # 2. Bump version with cargo-release
 # 3. Update CHANGELOG
-# 4. Commit and tag
-# 5. Push to trigger GitHub Actions
+# 4. Commit
+# 5. Push the current branch and open a PR into master
 
 param(
     [Parameter(Mandatory=$true)]
@@ -52,15 +52,17 @@ if ($cargoContent -match 'version\s*=\s*"([^"]+)"') {
 }
 git add -A
 git commit -m "chore: release v$Version"
-git tag "v$Version"
-Write-Host "  ✓ Committed and tagged"
+Write-Host "  ✓ Committed"
 Write-Host ""
 
 # Step 5: Push to trigger GitHub Actions
-Write-Host "Step 5: Pushing to remote..."
-git push origin main
-git push origin "v$Version"
-Write-Host "  ✓ Pushed"
+Write-Host "Step 5: Pushing the current branch..."
+$Branch = (git branch --show-current).Trim()
+if ([string]::IsNullOrWhiteSpace($Branch) -or $Branch -eq "master") {
+    throw "Release script must run on a non-master development branch; open a PR into master."
+}
+git push origin $Branch
+Write-Host "  ✓ Pushed $Branch"
 Write-Host ""
 
 Pop-Location
@@ -69,7 +71,7 @@ Write-Host "=== Release Complete ==="
 Write-Host "Version: $Version"
 Write-Host "Tag: v$Version"
 Write-Host ""
-Write-Host "GitHub Actions will now:"
+Write-Host "Open a pull request from $Branch into master. After it is merged, GitHub Actions will:"
 Write-Host "  - Build binaries for all platforms"
 Write-Host "  - Create GitHub Release"
 Write-Host "  - Publish to crates.io"

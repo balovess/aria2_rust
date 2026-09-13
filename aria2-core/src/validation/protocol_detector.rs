@@ -27,6 +27,8 @@ pub struct DetectedInput {
     pub input_type: InputType,
     pub raw: String,
     pub file_data: Option<Vec<u8>>,
+    /// Options attached to this URI in an aria2 URI list file.
+    pub options: std::collections::HashMap<String, String>,
 }
 
 fn looks_like_torrent(data: &[u8]) -> bool {
@@ -55,6 +57,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
             input_type: InputType::MagnetLink,
             raw: trimmed.to_string(),
             file_data: None,
+            options: std::collections::HashMap::new(),
         });
     }
 
@@ -65,6 +68,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
                     input_type: InputType::HttpUrl,
                     raw: trimmed.to_string(),
                     file_data: None,
+                    options: std::collections::HashMap::new(),
                 });
             }
             "ftp" => {
@@ -72,6 +76,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
                     input_type: InputType::FtpUrl,
                     raw: trimmed.to_string(),
                     file_data: None,
+                    options: std::collections::HashMap::new(),
                 });
             }
             "sftp" => {
@@ -79,6 +84,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
                     input_type: InputType::SftpUrl,
                     raw: trimmed.to_string(),
                     file_data: None,
+                    options: std::collections::HashMap::new(),
                 });
             }
             "file" => {}
@@ -109,6 +115,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
             input_type: InputType::TorrentFile,
             raw: trimmed.to_string(),
             file_data: Some(data),
+            options: std::collections::HashMap::new(),
         });
     }
 
@@ -131,6 +138,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
             input_type: InputType::MetalinkFile,
             raw: trimmed.to_string(),
             file_data: Some(data),
+            options: std::collections::HashMap::new(),
         });
     }
 
@@ -143,6 +151,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
                 input_type: InputType::TorrentFile,
                 raw: trimmed.to_string(),
                 file_data: Some(data),
+                options: std::collections::HashMap::new(),
             });
         }
         if looks_like_metalink(&data) {
@@ -150,6 +159,7 @@ pub fn detect(input: &str) -> Result<DetectedInput> {
                 input_type: InputType::MetalinkFile,
                 raw: trimmed.to_string(),
                 file_data: Some(data),
+                options: std::collections::HashMap::new(),
             });
         }
         // A local file that exists but is neither a torrent nor a metalink must

@@ -2,6 +2,8 @@
 
 中文：[`release-artifacts-cn.md`](release-artifacts-cn.md)
 
+Release checklist: [`release-checklist-en.md`](release-checklist-en.md)
+
 ## Variants
 
 Each platform provides four binary packages:

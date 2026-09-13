@@ -2,6 +2,7 @@ name: Release
 
 on:
   pull_request:
+    branches: [master]
     types: [closed]
 
 permissions:
@@ -158,6 +159,21 @@ jobs:
           foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-tui.zip", "${{ matrix.artifact }}-full.zip")) {
             $hash = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
             "$hash  $artifact" | Set-Content -LiteralPath "$artifact.sha256" -Encoding ascii
+          }
+      - name: Verify Windows artifacts and checksums
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($artifact in @("${{ matrix.artifact }}-minimal.zip", "${{ matrix.artifact }}-standard.zip", "${{ matrix.artifact }}-tui.zip", "${{ matrix.artifact }}-full.zip")) {
+            $checksumPath = "$artifact.sha256"
+            if (-not (Test-Path -LiteralPath $artifact) -or -not (Test-Path -LiteralPath $checksumPath)) {
+              throw "Missing Windows release artifact or checksum: $artifact"
+            }
+            $expected = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -replace '\s+.*$', ''
+            $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($expected -ne $actual) {
+              throw "Checksum mismatch for $artifact: expected $expected, got $actual"
+            }
           }
       - name: Generate Linux/macOS artifact checksums
         if: runner.os != 'Windows'
@@ -352,27 +368,29 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.prepare.outputs.sha }}
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=${{ needs.prepare.outputs.tag }}
             type=raw,value=latest,enable=${{ !contains(needs.prepare.outputs.version, '-') }}
-      - uses: docker/build-push-action@v5
+      - uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Cache export is best-effort; a cache quota/reservation failure must
+          # not fail an image that was already pushed to GHCR.
+          cache-to: type=gha,mode=max,ignore-error=true
           platforms: linux/amd64
 
   github-release:

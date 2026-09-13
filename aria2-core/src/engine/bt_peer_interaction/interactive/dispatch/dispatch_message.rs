@@ -79,11 +79,22 @@ impl BtPeerInteractive {
             }
             BtMessage::Have { piece_index } => {
                 // Update the peer's bitfield and expose the exact transition.
-                if let Some(ref mut res) = conn.session_resource {
-                    let old = res.bitfield().to_vec();
+                if let Some(ref mut res) = conn.session_resource
+                    && piece_index < res.num_pieces()
+                {
+                    let old = res.has_piece(piece_index as usize);
                     res.update_bitfield(piece_index as usize, 1);
-                    let new = res.bitfield().to_vec();
-                    update.bitfield_update = Some(BitfieldUpdate { old, new });
+                    if !old {
+                        update.bitfield_update = Some(BitfieldUpdate {
+                            old: Vec::new(),
+                            new: Vec::new(),
+                            piece_change: Some(PieceBitfieldChange {
+                                index: piece_index,
+                                old,
+                                new: true,
+                            }),
+                        });
+                    }
                 }
                 if let Some(ref res) = conn.session_resource
                     && res.is_seeder()
@@ -98,7 +109,11 @@ impl BtPeerInteractive {
                 if let Some(ref mut res) = conn.session_resource {
                     let old = res.set_bitfield(&data);
                     let new = res.bitfield().to_vec();
-                    update.bitfield_update = Some(BitfieldUpdate { old, new });
+                    update.bitfield_update = Some(BitfieldUpdate {
+                        old,
+                        new,
+                        piece_change: None,
+                    });
                     if res.is_seeder() {
                         conn.seeder = true;
                     }
@@ -188,7 +203,11 @@ impl BtPeerInteractive {
                     let old = res.bitfield().to_vec();
                     res.mark_seeder();
                     let new = res.bitfield().to_vec();
-                    update.bitfield_update = Some(BitfieldUpdate { old, new });
+                    update.bitfield_update = Some(BitfieldUpdate {
+                        old,
+                        new,
+                        piece_change: None,
+                    });
                 }
                 conn.seeder = true;
                 trace!("Dispatched HaveAll message");
@@ -201,7 +220,11 @@ impl BtPeerInteractive {
                     let old = res.bitfield().to_vec();
                     res.clear_bitfield();
                     let new = res.bitfield().to_vec();
-                    update.bitfield_update = Some(BitfieldUpdate { old, new });
+                    update.bitfield_update = Some(BitfieldUpdate {
+                        old,
+                        new,
+                        piece_change: None,
+                    });
                 }
                 conn.seeder = false;
                 trace!("Dispatched HaveNone message");

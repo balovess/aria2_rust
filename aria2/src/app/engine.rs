@@ -13,7 +13,7 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
-use aria2_core::request::request_group::{GroupId, RequestGroup};
+use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_core::validation::protocol_detector::InputType;
 #[cfg(feature = "metalink")]
@@ -46,6 +46,47 @@ fn task_option_snapshot_for_input(
     #[cfg(not(feature = "bittorrent"))]
     let _ = (input_type, explicit_timeout);
     snapshot
+}
+
+pub(super) fn options_for_input(
+    global_values: &std::collections::HashMap<String, aria2_core::config::OptionValue>,
+    base_options: &DownloadOptions,
+    input: &aria2_core::validation::protocol_detector::DetectedInput,
+    explicit_timeout: bool,
+) -> DownloadOptions {
+    let mut task_values = global_values.clone();
+    for (key, value) in &input.options {
+        task_values.insert(
+            key.clone(),
+            aria2_core::config::OptionValue::Str(value.clone()),
+        );
+    }
+    let task_options = if input.options.is_empty() {
+        base_options.clone()
+    } else {
+        DownloadOptions::from_option_values(&task_values)
+    };
+    #[cfg(feature = "bittorrent")]
+    {
+        task_options_for_input(&task_options, &input.input_type, explicit_timeout)
+    }
+    #[cfg(not(feature = "bittorrent"))]
+    {
+        let _ = explicit_timeout;
+        task_options
+    }
+}
+
+fn option_snapshot_for_input(
+    global_snapshot: &std::collections::HashMap<String, serde_json::Value>,
+    input: &aria2_core::validation::protocol_detector::DetectedInput,
+    explicit_timeout: bool,
+) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut snapshot = global_snapshot.clone();
+    for (key, value) in &input.options {
+        snapshot.insert(key.clone(), serde_json::Value::String(value.clone()));
+    }
+    task_option_snapshot_for_input(snapshot, &input.input_type, explicit_timeout)
 }
 
 impl App {
@@ -184,7 +225,15 @@ impl App {
             return Err("No download inputs provided".to_string());
         }
 
-        let (options, option_snapshot) = self.download_options_with_snapshot().await;
+        let global_values = self.global_option_values().await;
+        let options =
+            aria2_core::request::request_group::DownloadOptions::from_option_values(&global_values);
+        let option_snapshot = aria2_core::config::project_initial_options(
+            global_values
+                .iter()
+                .filter(|(_, value)| !value.is_none())
+                .map(|(name, value)| (name.clone(), serde_json::Value::from(value))),
+        );
         let explicit_gid = self
             .get_opt_str("gid")
             .await
@@ -249,33 +298,37 @@ impl App {
                     .file_data
                     .as_deref()
                     .ok_or_else(|| "Metalink file data not available".to_string())?;
+                let input_options =
+                    options_for_input(&global_values, &options, input, self.explicit_timeout);
+                let input_snapshot =
+                    option_snapshot_for_input(&option_snapshot, input, self.explicit_timeout);
                 let converter = MetalinkToRequestGroup::new();
                 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
                 {
                     let graphs = converter
-                        .create_torrent_graphs_from_bytes(data, &options, &mut gid_iter)
+                        .create_torrent_graphs_from_bytes(data, &input_options, &mut gid_iter)
                         .map_err(|e| format!("Metalink graph construction failed: {}", e))?;
                     for graph in &graphs {
                         graph
                             .metadata
                             .recover_mut()
-                            .set_option_snapshot(option_snapshot.clone());
+                            .set_option_snapshot(input_snapshot.clone());
                         graph
                             .payload
                             .recover_mut()
-                            .set_option_snapshot(option_snapshot.clone());
+                            .set_option_snapshot(input_snapshot.clone());
                     }
                     metalink_graphs.extend(graphs);
                 }
                 #[cfg(feature = "metalink")]
                 {
                     let groups = converter
-                        .create_resource_groups_from_bytes(data, &options, &mut gid_iter)
+                        .create_resource_groups_from_bytes(data, &input_options, &mut gid_iter)
                         .map_err(|e| format!("Metalink resource construction failed: {}", e))?;
                     for group in &groups {
                         group
                             .recover_mut()
-                            .set_option_snapshot(option_snapshot.clone());
+                            .set_option_snapshot(input_snapshot.clone());
                     }
                     metalink_resource_groups.extend(groups);
                 }
@@ -352,11 +405,8 @@ impl App {
             if matches!(input.input_type, InputType::TorrentFile) {
                 initial_uri = format!("bt://{}", gid.value());
             }
-            #[cfg(feature = "bittorrent")]
             let task_options =
-                task_options_for_input(&options, &input.input_type, self.explicit_timeout);
-            #[cfg(not(feature = "bittorrent"))]
-            let task_options = options.clone();
+                options_for_input(&global_values, &options, input, self.explicit_timeout);
             let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
                 gid,
                 vec![initial_uri],
@@ -364,9 +414,9 @@ impl App {
             )));
             group
                 .recover_mut()
-                .set_option_snapshot(task_option_snapshot_for_input(
-                    option_snapshot.clone(),
-                    &input.input_type,
+                .set_option_snapshot(option_snapshot_for_input(
+                    &option_snapshot,
+                    input,
                     self.explicit_timeout,
                 ));
             if options.uses_memory_download() {

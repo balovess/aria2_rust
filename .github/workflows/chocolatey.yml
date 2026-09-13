@@ -1,0 +1,70 @@
+name: Package Chocolatey release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: package-manifests
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: ${{ !github.event.release.prerelease && !github.event.release.draft }}
+    runs-on: windows-latest
+    env:
+      CHOCO_API_KEY: ${{ secrets.CHOCO_API_KEY }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Update and validate package
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ./scripts/update-chocolatey.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
+          ./scripts/update-chocolatey.ps1 -Check
+          choco pack chocolatey/aria2-rust.nuspec --out chocolatey/dist
+      - name: Install package and verify aria2c
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $package = Get-ChildItem chocolatey/dist/aria2-rust.*.nupkg | Select-Object -First 1
+          choco install aria2-rust --source $package.DirectoryName --yes --no-progress --force
+          $shim = Join-Path $env:ChocolateyInstall 'bin\aria2c.exe'
+          if (-not (Test-Path -LiteralPath $shim)) {
+            throw "Chocolatey did not create the aria2c shim: $shim"
+          }
+          $versionOutput = (& $shim --version | Out-String)
+          if ($versionOutput -notmatch [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))) {
+            throw "Installed aria2c version does not match $env:RELEASE_TAG: $versionOutput"
+          }
+          Write-Host $versionOutput
+      - uses: actions/upload-artifact@v5
+        with:
+          name: chocolatey-package
+          path: chocolatey/dist/aria2-rust.*.nupkg
+          if-no-files-found: error
+      - name: Commit package metadata
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add chocolatey/aria2-rust.nuspec chocolatey/tools/chocolateyInstall.ps1
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "chore: update Chocolatey package for $env:RELEASE_TAG"
+            git push origin "HEAD:$env:DEFAULT_BRANCH"
+          }
+      - name: Push package to Chocolatey
+        if: ${{ env.CHOCO_API_KEY != '' }}
+        shell: pwsh
+        run: choco push (Get-ChildItem chocolatey/dist/aria2-rust.*.nupkg | Select-Object -First 1) --source https://push.chocolatey.org/ --api-key $env:CHOCO_API_KEY

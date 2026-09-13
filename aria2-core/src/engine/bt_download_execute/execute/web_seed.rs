@@ -17,6 +17,8 @@ pub(super) async fn try_web_seed_fallback(
     next_piece_idx: usize,
     piece_manager: &mut crate::engine::bt_piece::PieceManager,
     piece_picker: &mut crate::engine::bt_piece::PiecePicker,
+    completed_bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+    num_pieces: u32,
     writer: &mut Box<dyn crate::filesystem::disk_writer::SeekableDiskWriter>,
     piece_length: u32,
 ) -> Result<bool> {
@@ -75,16 +77,11 @@ pub(super) async fn try_web_seed_fallback(
                         .await?;
                 }
 
-                let bitfield = piece_picker.export_bitfield();
-                // Keep the in-memory status and on-disk checkpoint on the same
-                // verified-piece snapshot regardless of the source adapter.
-                {
-                    let g = cmd.group.recover();
-                    g.set_bt_bitfield(Some(bitfield.clone()));
-                }
-
+                cmd.group
+                    .recover()
+                    .update_bt_bitfield_piece(next_piece_idx as u32, num_pieces);
                 cmd.completed_bytes += web_seed_len;
-                cmd.persist_checkpoint_after_piece(writer, &bitfield, web_seed_len)
+                cmd.persist_checkpoint_after_piece(writer, completed_bitfield, web_seed_len)
                     .await?;
                 Ok(true)
             } else {

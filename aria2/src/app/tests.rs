@@ -841,6 +841,57 @@ async fn test_input_file_uri_list_remains_a_download_input() {
 }
 
 #[tokio::test]
+async fn test_input_file_uri_options_are_retained_for_each_download() {
+    let temp_dir = TempDir::new().expect("temporary URI list directory");
+    let input_path = temp_dir.path().join("scoop.txt");
+    tokio::fs::write(
+        &input_path,
+        "https://example.test/file.zip\n  dir=D:\\Scoop\\cache\n  out=app#1.0.0#hash.zip\n\nhttps://example.test/other.zip\n  out=second.zip\n",
+    )
+    .await
+    .expect("URI list should be written");
+
+    let cli = CliArgs::try_parse_from([
+        "aria2c",
+        "--dir",
+        r"D:\Scoop\global-cache",
+        "--out",
+        "global.zip",
+        "--input-file",
+        input_path.to_str().expect("input path is UTF-8"),
+    ])
+    .expect("URI list arguments should parse");
+    let mut app = App::new();
+    app.load_cli_args(cli)
+        .await
+        .expect("URI list input should load");
+
+    assert_eq!(app.detected_inputs.len(), 2);
+    assert_eq!(app.detected_inputs[0].options["dir"], r"D:\Scoop\cache");
+    assert_eq!(app.detected_inputs[0].options["out"], "app#1.0.0#hash.zip");
+    assert_eq!(app.detected_inputs[1].options["out"], "second.zip");
+
+    let global_values = app.global_option_values().await;
+    let base_options = DownloadOptions::from_option_values(&global_values);
+    let first = super::engine::options_for_input(
+        &global_values,
+        &base_options,
+        &app.detected_inputs[0],
+        false,
+    );
+    let second = super::engine::options_for_input(
+        &global_values,
+        &base_options,
+        &app.detected_inputs[1],
+        false,
+    );
+    assert_eq!(first.dir.as_deref(), Some(r"D:\Scoop\cache"));
+    assert_eq!(first.out.as_deref(), Some("app#1.0.0#hash.zip"));
+    assert_eq!(second.dir.as_deref(), Some(r"D:\Scoop\global-cache"));
+    assert_eq!(second.out.as_deref(), Some("second.zip"));
+}
+
+#[tokio::test]
 async fn test_no_conf_skips_explicit_config_file() {
     let temp_dir = TempDir::new().expect("temporary config directory");
     let config_path = temp_dir.path().join("aria2.conf");
@@ -1204,6 +1255,9 @@ async fn test_process_restart_executes_restored_metalink_graph() {
             })
             .unwrap(),
             false,
+            false,
+            None,
+            None,
         )
         .await
         .expect("restored Metalink graph should execute to completion");
@@ -1363,6 +1417,9 @@ async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() 
             })
             .unwrap(),
             false,
+            false,
+            None,
+            None,
         )
         .await
         .expect("restored nonzero Metalink graph should execute to completion");
@@ -1530,6 +1587,9 @@ async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
             })
             .unwrap(),
             false,
+            false,
+            None,
+            None,
         )
         .await
         .expect("unpaused restored Metalink graph should execute to completion");
@@ -2235,12 +2295,10 @@ async fn test_bt_bitfield_preserved_on_restore() {
     assert_eq!(groups.len(), 1, "Should have 1 group");
 
     let group = groups[0].read().unwrap();
-    let bitfield = group.bt_bitfield.read().unwrap();
-    assert!(bitfield.is_some(), "BT bitfield should be preserved");
     assert_eq!(
-        bitfield.as_ref().unwrap(),
-        &vec![0xFF, 0xAA, 0xBB],
-        "bitfield value should be correct"
+        group.get_bt_bitfield(),
+        Some(vec![0xFF, 0xAA, 0xBB]),
+        "BT bitfield should be preserved"
     );
 }
 

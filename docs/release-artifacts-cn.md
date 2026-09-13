@@ -2,6 +2,8 @@
 
 English: [`release-artifacts-en.md`](release-artifacts-en.md)
 
+发布检查清单：[`release-checklist-cn.md`](release-checklist-cn.md)
+
 ## 版本类型
 
 每个平台发布四种二进制包：

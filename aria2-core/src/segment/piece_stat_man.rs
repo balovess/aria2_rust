@@ -140,6 +140,21 @@ impl PieceStatMan {
         trace!(nbits, "update_piece_stats completed");
     }
 
+    /// Update one piece count without constructing full old/new bitfields.
+    pub fn update_piece_stat(&self, index: usize, old: bool, new: bool) {
+        if old == new {
+            return;
+        }
+        let mut counts = self.counts.write().unwrap();
+        if let Some(count) = counts.get_mut(index) {
+            if new {
+                *count = count.saturating_add(1);
+            } else {
+                *count = count.saturating_sub(1);
+            }
+        }
+    }
+
     /// Returns the piece order array (random-shuffled indices for tie-breaking).
     #[inline]
     pub fn order(&self) -> &[u32] {

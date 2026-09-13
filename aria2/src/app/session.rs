@@ -136,7 +136,7 @@ impl App {
                             let mut group = group_lock.recover_mut();
                             group.set_option_snapshot(option_snapshot.clone());
                             if entry.bitfield.is_some() {
-                                *group.bt_bitfield.recover_mut() = entry.bitfield.clone();
+                                group.set_bt_bitfield(entry.bitfield.clone());
                                 debug!(
                                     "Set BT bitfield for GID={}, bits={}",
                                     gid.value(),

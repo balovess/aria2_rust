@@ -8,8 +8,8 @@
 # 1. Run tests
 # 2. Bump version with cargo-release
 # 3. Update CHANGELOG
-# 4. Commit and tag
-# 5. Push to trigger GitHub Actions
+# 4. Commit
+# 5. Push the current branch and open a PR into master
 
 set -e
 
@@ -52,22 +52,25 @@ echo "Step 4: Committing changes..."
 VERSION=$(grep -oP 'version\s*=\s*"\K[^"]+' "$PROJECT_ROOT/aria2/Cargo.toml" | head -1)
 git add -A
 git commit -m "chore: release v$VERSION"
-git tag "v$VERSION"
-echo "  ✓ Committed and tagged"
+echo "  ✓ Committed"
 echo ""
 
 # Step 5: Push to trigger GitHub Actions
-echo "Step 5: Pushing to remote..."
-git push origin main
-git push origin "v$VERSION"
-echo "  ✓ Pushed"
+echo "Step 5: Pushing the current branch..."
+BRANCH="$(git branch --show-current)"
+if [[ -z "$BRANCH" || "$BRANCH" == "master" ]]; then
+    echo "Release script must run on a non-master development branch; open a PR into master." >&2
+    exit 1
+fi
+git push origin "$BRANCH"
+echo "  ✓ Pushed $BRANCH"
 echo ""
 
 echo "=== Release Complete ==="
 echo "Version: $VERSION"
 echo "Tag: v$VERSION"
 echo ""
-echo "GitHub Actions will now:"
+echo "Open a pull request from $BRANCH into master. After it is merged, GitHub Actions will:"
 echo "  - Build binaries for all platforms"
 echo "  - Create GitHub Release"
 echo "  - Publish to crates.io"

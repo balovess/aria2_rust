@@ -737,6 +737,11 @@ impl BtDownloadCommand {
                 piece_manager.mark_piece_complete(index as u32);
             }
         }
+        let completed_bitfield =
+            std::sync::Arc::new(std::sync::RwLock::new(piece_picker.export_bitfield()));
+        self.group
+            .recover()
+            .set_bt_bitfield_shared(std::sync::Arc::clone(&completed_bitfield));
         piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
 
         tracing::info!(
@@ -800,8 +805,9 @@ impl BtDownloadCommand {
                     Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                 })?;
                 if let Some(checkpoint) = self.checkpoint.as_mut() {
+                    let bitfield = super::snapshot_completed_bitfield(&completed_bitfield);
                     checkpoint
-                        .save(&piece_picker.export_bitfield(), self.completed_bytes)
+                        .save(&bitfield, self.completed_bytes)
                         .await
                         .map_err(|error| {
                             Aria2Error::FileIo(format!(
@@ -1200,8 +1206,9 @@ impl BtDownloadCommand {
                         Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                     })?;
                     if let Some(checkpoint) = self.checkpoint.as_mut() {
+                        let bitfield = super::snapshot_completed_bitfield(&completed_bitfield);
                         checkpoint
-                            .save(&piece_picker.export_bitfield(), self.completed_bytes)
+                            .save(&bitfield, self.completed_bytes)
                             .await
                             .map_err(|error| {
                                 Aria2Error::FileIo(format!(
@@ -1322,15 +1329,12 @@ impl BtDownloadCommand {
                         };
                         self.completed_bytes += accounted_piece_len;
 
-                        // Sync bitfield to RequestGroup for session persistence
-                        let bitfield = piece_picker.export_bitfield();
-                        {
-                            let g = self.group.recover();
-                            g.set_bt_bitfield(Some(bitfield.clone()));
-                        }
+                        self.group
+                            .recover()
+                            .update_bt_bitfield_piece(next_piece_idx as u32, num_pieces);
                         self.persist_checkpoint_after_piece(
                             &mut writer,
-                            &bitfield,
+                            &completed_bitfield,
                             accounted_piece_len,
                         )
                         .await?;
@@ -1345,7 +1349,7 @@ impl BtDownloadCommand {
                         // P1 integration: periodically save download progress
                         self.maybe_save_progress(
                             meta,
-                            &bitfield,
+                            &completed_bitfield,
                             piece_length,
                             total_size,
                             num_pieces,
@@ -1414,6 +1418,8 @@ impl BtDownloadCommand {
                     next_piece_idx,
                     &mut piece_manager,
                     &mut piece_picker,
+                    &completed_bitfield,
+                    num_pieces,
                     &mut writer,
                     piece_length,
                 )
@@ -1494,7 +1500,7 @@ impl BtDownloadCommand {
     fn maybe_save_progress(
         &self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
-        bitfield: &[u8],
+        bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
@@ -1505,9 +1511,10 @@ impl BtDownloadCommand {
         if let Some(ref mgr) = self.progress_manager
             && last_progress_save.elapsed() >= self.progress_save_interval
         {
+            let bitfield = super::snapshot_completed_bitfield(bitfield);
             let progress = progress_snapshot(
                 meta.network_info_hash(),
-                bitfield,
+                &bitfield,
                 piece_length,
                 total_size,
                 num_pieces,

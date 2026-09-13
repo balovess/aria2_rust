@@ -1,8 +1,8 @@
 {
-  "version": "0.3.2",
+  "version": "0.3.6",
   "description": "The ultra fast download utility - rewritten in Rust",
   "homepage": "https://github.com/balovess/aria2_rust",
-  "license": "GPL-2.0-or-later",
+  "license": "GPL-3.0-or-later",
   "notes": [
     "aria2-rust is now installed!",
     "",
@@ -14,8 +14,8 @@
   ],
   "architecture": {
     "64bit": {
-      "url": "https://github.com/balovess/aria2_rust/releases/download/v0.3.2/aria2-x86_64-windows.zip",
-      "hash": "214c7948617bfa0d7d9f08cc7e8dccc72fb8ea51655ab13fa540e6a08d1c2f2e"
+      "url": "https://github.com/balovess/aria2_rust/releases/download/v0.3.6/aria2-x86_64-windows-full.zip",
+      "hash": "61b75d3ba235c82edf24b91aa0c539e6e1ef7fa02bb207952e9ed5b14d61633e"
     }
   },
   "bin": [
@@ -25,14 +25,12 @@
     ]
   ],
   "checkver": {
-    "github": "https://api.github.com/repos/balovess/aria2_rust/releases/latest",
-    "jsonpath": "$.tag_name",
-    "regex": "^v(?<version>[0-9]+\\.[0-9]+\\.[0-9]+)$"
+    "github": "https://github.com/balovess/aria2_rust"
   },
   "autoupdate": {
     "architecture": {
       "64bit": {
-        "url": "https://github.com/balovess/aria2_rust/releases/download/v$version/aria2-x86_64-windows.zip"
+        "url": "https://github.com/balovess/aria2_rust/releases/download/v$version/aria2-x86_64-windows-full.zip"
       }
     },
     "hash": {

@@ -33,11 +33,24 @@ English: [`README.md`](README.md)
 ***
 
 **aria2_rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
-实现，当前仍在以 `aria2_original` 为基准进行兼容迁移。默认构建支持
+实现，核心实现迁移已基本完成，目前进入最终兼容性验收阶段。默认构建支持
 HTTP/HTTPS、FTP、BitTorrent 协议，并提供
 JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 SFTP 和 Metalink 需要分别启用对应 Cargo feature。
+
+### 当前迁移状态（2026-09-13）
+
+最新可复现验证已覆盖 CLI、RPC、协议、BitTorrent、Metalink、FTP/SFTP、
+Node.js 和 Python 路径：`aria2-core` 通过 3,307 个库测试，
+`aria2-protocol` 通过 872 个测试，`aria2-rpc` 通过 404 个测试，
+`aria2` 通过 292 个测试，Node.js 绑定通过 123 个测试，Python 绑定通过
+137 个测试。详细命令和证据见[兼容性状态矩阵](docs/compatibility-status.md)。
+
+剩余工作主要是兼容性证据和发布收尾：完整原版客户端/浏览器插件互操作、
+公共 C ABI 对等性、跨平台真实协议与绑定验证、少量 Metalink 及暂停/移除
+生命周期边界，以及与 aria2 C++ 的可比性能基线。这些不是核心协议实现缺失，
+而是兼容性矩阵中明确保留的最终验收边界。
 
 二进制 Release 提供 `minimal`、`standard`、`tui` 和 `full` 四种功能档位，
 详见 [Release 产物说明](docs/release-artifacts-cn.md)。
@@ -57,7 +70,7 @@ SFTP 和 Metalink 需要分别启用对应 Cargo feature。
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（按编译 feature 返回原版方法/通知目录：核心 33 个方法和 5 个通知，BitTorrent/Metalink 启用后分别增加对应能力；全 feature 为 36/6）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（按编译 feature 返回方法/通知目录：核心 35 个方法和 5 个通知，BitTorrent/Metalink 启用后分别增加对应能力；全 feature 为 38/6）
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -95,10 +108,40 @@ cargo run --release -- --version
 
 ### 包管理器状态
 
-Homebrew 和 Scoop 目前只有维护中的分发草案，尚未建立稳定的 Homebrew
-tap；两者也不是当前优先级。需要可靠安装时，请使用平台安装脚本或 GitHub
-Release 中的二进制文件。不要将仓库内的 Homebrew formula 或 Scoop manifest
-视为正式兼容性保证。
+macOS/Linux 首次使用时添加当前仓库作为 Homebrew tap：
+
+```bash
+brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git
+brew install balovess/aria2_rust/aria2-rust
+```
+
+之后可以标准升级：
+
+```bash
+brew update
+brew upgrade aria2-rust
+```
+
+Windows x64 首次使用时添加当前仓库作为 Scoop bucket：
+
+```powershell
+scoop bucket add aria2 https://github.com/balovess/aria2_rust.git
+scoop install aria2/aria2-rust
+```
+
+之后可以标准升级：
+
+```powershell
+scoop update
+scoop update aria2-rust
+```
+
+Homebrew 会从对应版本的源码构建完整 feature；Scoop 会安装经过 SHA-256
+校验的 Windows x64 full 发布包，并提供 `aria2c` 命令。两个清单都会在
+Release 发布后由 GitHub Actions 自动更新，不需要手动修改版本配置。
+
+Chocolatey 包会由 GitHub Actions 根据 Windows full 发布包自动构建并校验。
+只有配置仓库 `CHOCO_API_KEY` secret 后，workflow 才会自动推送到 Chocolatey。
 
 ## 初始化持久化目录
 
@@ -455,7 +498,7 @@ cargo bench --bench config_bench
 
 ## 与原版 aria2 的兼容性
 
-下表表示代码路径已实现，不等同于完整兼容。模块级 `PARTIAL`、
+下表表示代码路径已实现及其剩余验收边界。模块级 `PARTIAL`、
 `UNVERIFIED`、`MISSING` 状态和验收证据以
 [兼容性矩阵](docs/compatibility-status.md) 为准。
 
@@ -469,7 +512,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
-| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回原版顺序和清单（33/35/36）；RPC E2E 通过，原版客户端矩阵仍在验证 |
+| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/37/38）；RPC E2E 通过，原版客户端矩阵仍在验证 |
 | XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
 | WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
@@ -503,7 +546,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 
 ## 许可证
 
-本项目采用 **GPL-2.0-or-later** 许可证，与原版 [aria2](https://github.com/aria2/aria2) 项目保持一致。
+本项目采用 **GPL-3.0-or-later** 许可证。
 
 Copyright (C) 2024 aria2-rust contributors.
 

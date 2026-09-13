@@ -395,7 +395,7 @@ impl BtPeerInteractive {
                 );
 
                 // Queue through the handler (tracks request slots + outgoing queue)
-                if let Some(_msg_bytes) = self
+                if self
                     .handler
                     .send_request(req.index, req.begin, req.length, serialized)
                 {

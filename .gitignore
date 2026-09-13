@@ -31,3 +31,5 @@ docs/MIGRATION.md
 
 # Ignore local/tooling directories whose names start with a dot.
 .*/
+!.github/
+!.github/workflows/

@@ -69,7 +69,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (36 all-features methods, 6 notifications; compatibility coverage tracked separately)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (38 all-features methods, 6 notifications; compatibility coverage tracked separately)
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -98,14 +98,28 @@ docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balove
 
 | Platform | Command |
 |----------|---------|
-| Homebrew (macOS/Linux) | Formula draft only; tap and stable automated updates are not yet available |
-| Scoop (Windows) | Experimental manifest; stable Windows x64 releases are checked in CI |
+| Homebrew (macOS/Linux) | `brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git && brew install balovess/aria2_rust/aria2-rust` |
+| Scoop (Windows x64) | `scoop bucket add aria2 https://github.com/balovess/aria2_rust.git && scoop install aria2/aria2-rust` |
+| Chocolatey (Windows) | Package is built automatically from the Windows full release artifact; publishing requires repository `CHOCO_API_KEY` |
 | Cargo (from source) | Supported: `cargo install --path aria2` |
 
-Homebrew and Scoop packaging are distribution work in progress and are not a
-current priority. For reliable installation, use the platform installer
-scripts or the binaries attached to a GitHub Release. Do not treat the local
-Homebrew formula or Scoop manifest as a compatibility or release guarantee.
+The Homebrew formula builds the full feature set from the tagged source archive
+and works on supported macOS and Linux Intel/ARM hosts. The Scoop manifest
+installs the verified Windows x64 full release package and exposes it as
+`aria2c`. After the one-time tap/bucket setup, standard update commands work:
+
+```bash
+brew update && brew upgrade aria2-rust
+```
+
+```powershell
+scoop update
+scoop update aria2-rust
+```
+
+Chocolatey packaging is prepared by `.github/workflows/chocolatey.yml`. The
+workflow always validates and archives the package; it publishes to Chocolatey
+only when the repository `CHOCO_API_KEY` secret is configured.
 
 ### First Download
 
@@ -263,26 +277,21 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Verification snapshot (2026-08-18): the current focused evidence includes
-the CLI, RPC, protocol, BitTorrent, Metalink, FTP/SFTP, Node.js, and Python
-regression/E2E suites recorded in
-[docs/compatibility-status.md](docs/compatibility-status.md). The workspace
-command `cargo test --workspace --all-targets --no-run` also compiles all Rust
-test and benchmark targets. Node.js reports 123 passed and Python reports 137
-passed on this host. Under the current `0.3.2`, the version entry point,
-application tests, Clippy, and the targeted parser/RPC regressions pass;
-`aria2c --version` reports `aria2-rust 0.3.2`, and all Rust members and SDK
-metadata resolve to that product version. Existing `check-certificate`,
-`ca-certificate`, `certificate`, and `private-key` configuration values are
-handled by the Rust HTTP transport across primary HTTP/HTTPS downloads,
-Metalink HTTP, production BitTorrent HTTP trackers, and web seeds; local
-Rustls HTTPS fixtures verify custom CA trust, disabled verification, separate
-PEM mutual TLS, legacy empty-password PKCS#12, and modern PBES2/AES-256
-single-file identities;
-aggregate runtime coverage,
-platform-specific binding runs, complete original-client/browser-extension
-interoperability, public C ABI compatibility, and the aria2 C performance
-comparison remain open; these results do not mean the migration is complete.
+Migration status (2026-09-13): the Rust implementation migration is
+substantially complete and is now in the final compatibility and acceptance
+phase. The latest reproducible verification covers the CLI, RPC, protocol,
+BitTorrent, Metalink, FTP/SFTP, Node.js, and Python paths; see the
+[compatibility status](docs/compatibility-status.md) for commands and evidence.
+The current snapshot includes 3,307 passing `aria2-core` library tests,
+872 passing `aria2-protocol` tests, 404 passing `aria2-rpc` tests, 292 passing
+`aria2` tests, plus 123 Node.js and 137 Python binding tests.
+
+Remaining work is primarily compatibility evidence and release hardening:
+complete original-client and browser-extension interoperability, public C ABI
+parity, live cross-platform protocol/binding coverage, a few Metalink and
+pause/remove lifecycle edges, and a comparable aria2 C++ performance baseline.
+These do not represent a missing core protocol implementation; they remain
+explicit acceptance boundaries in the compatibility matrix.
 
 The project is organized as a Cargo workspace with 4 crates:
 
@@ -347,7 +356,7 @@ aria2-rust/
 │   ├── src/xml_rpc.rs      #   XML-RPC codec
 │   ├── src/websocket.rs    #   WebSocket event publisher
 │   ├── src/server.rs       #   HTTP server (auth/CORS/status)
-│   └── src/engine.rs       #   RpcEngine bridge (25 RPC methods)
+│   └── src/engine.rs       #   RpcEngine bridge (feature-gated RPC methods)
 └── bindings/               # Language bindings (~1,200 lines)
     ├── python/            #   Python SDK (~600 lines)
     └── nodejs/            #   Node.js SDK (~627 lines TS)
@@ -574,17 +583,18 @@ For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-gui
 
 ## Compatibility with Original aria2
 
-The table below records implemented code paths, not full compatibility. The
-authoritative status is the module matrix in
+The table below records implemented code paths and their remaining acceptance
+boundaries. The authoritative status is the module matrix in
 [docs/compatibility-status.md](docs/compatibility-status.md); an implemented
-path can still be `PARTIAL` or `UNVERIFIED` there.
+path can still be `PARTIAL` or `UNVERIFIED` when external interoperability or
+cross-platform evidence is incomplete.
 
 | Feature | Path state | Notes |
 |---------|--------|-------|
 | CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
-| JSON-RPC API | Implemented path | 36 all-features methods returned by `system.listMethods`; interoperability remains open |
+| JSON-RPC API | Implemented path | 38 all-features methods returned by `system.listMethods`; interoperability remains open |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |
@@ -607,9 +617,9 @@ path can still be `PARTIAL` or `UNVERIFIED` there.
 
 **Known gaps and verification status:**
 - This table is a capability inventory, not a release compatibility claim.
-- The migration is not currently all pass; optional features, ignored network
-  tests, platform-specific binding runs, original-client interoperability, and
-  the public C ABI remain tracked work.
+- The implementation migration is substantially complete; optional-feature
+  evidence, ignored network tests, platform-specific binding runs,
+  original-client interoperability, and public C ABI parity remain tracked.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
@@ -617,7 +627,7 @@ path can still be `PARTIAL` or `UNVERIFIED` there.
 
 ## License
 
-This project is licensed under **GPL-2.0-or-later**, consistent with the original [aria2](https://github.com/aria2/aria2) project.
+This project is licensed under **GPL-3.0-or-later**.
 
 Copyright (C) 2024 aria2-rust contributors.
 

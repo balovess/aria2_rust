@@ -14,8 +14,7 @@ impl BtPeerMessageHandler {
     /// The serialized message bytes are added to the dispatcher's outgoing queue
     /// and a [`RequestSlot`] is created to track the outstanding request.
     ///
-    /// Returns the serialized Request message bytes if the request was accepted,
-    /// or `None` if the max outstanding limit has been reached.
+    /// Returns whether the request was accepted.
     ///
     /// Mirrors C++ `BtRequestFactory::createRequestMessage()` followed by
     /// `dispatcher_->addMessageToQueue()` and `addOutstandingRequest()`.
@@ -25,14 +24,14 @@ impl BtPeerMessageHandler {
         begin: u32,
         length: u32,
         serialized_msg: Vec<u8>,
-    ) -> Option<Vec<u8>> {
+    ) -> bool {
         if !self.can_send_request() {
             debug!(
                 "PeerHandler: max outstanding requests ({}) reached, deferring request \
                  (piece={}, begin={})",
                 self.max_outstanding_requests, index, begin
             );
-            return None;
+            return false;
         }
 
         // Add request slot first so the slot is tracked even if queue add fails
@@ -49,16 +48,7 @@ impl BtPeerMessageHandler {
             self.count_outstanding_requests()
         );
 
-        // Return a freshly serialized copy for the caller to send immediately.
-        // The original bytes were moved into the queue; re-serializing avoids
-        // cloning the entire buffer.
-        Some(aria2_protocol::bittorrent::message::serializer::serialize(
-            &aria2_protocol::bittorrent::message::types::BtMessage::Request {
-                request: aria2_protocol::bittorrent::message::types::PieceBlockRequest::new(
-                    index, begin, length,
-                ),
-            },
-        ))
+        true
     }
 
     /// Handle receiving a Piece message from the peer.

@@ -63,6 +63,9 @@ pub trait PieceProvider: Send + Sync {
     /// Apply a peer bitfield transition to global piece availability stats.
     fn update_piece_stats(&mut self, new_bitfield: &[u8], old_bitfield: &[u8]);
 
+    /// Apply one peer piece transition without copying the peer bitfield.
+    fn update_piece_stat(&mut self, index: usize, old: bool, new: bool);
+
     // ── checkHave optimization support ──────────────────────────────────
 
     /// Get piece indexes advertised since `last_have_index` by CUIDs other

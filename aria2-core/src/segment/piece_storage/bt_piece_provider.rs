@@ -119,6 +119,10 @@ impl PieceProvider for DefaultPieceStorage {
         <Self as PieceStorage>::update_piece_stats(self, new_bitfield, old_bitfield)
     }
 
+    fn update_piece_stat(&mut self, index: usize, old: bool, new: bool) {
+        self.piece_stat_man.update_piece_stat(index, old, new);
+    }
+
     // ── checkHave optimization support ────────────────────────────────────
 
     fn get_advertised_piece_indexes_ext(
