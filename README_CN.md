@@ -39,13 +39,13 @@ JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 SFTP 和 Metalink 需要分别启用对应 Cargo feature。
 
-### 当前迁移状态（2026-09-13）
+### 当前迁移状态（2026-09-14）
 
-最新可复现验证已覆盖 CLI、RPC、协议、BitTorrent、Metalink、FTP/SFTP、
-Node.js 和 Python 路径：`aria2-core` 通过 3,307 个库测试，
-`aria2-protocol` 通过 872 个测试，`aria2-rpc` 通过 404 个测试，
-`aria2` 通过 292 个测试，Node.js 绑定通过 123 个测试，Python 绑定通过
-137 个测试。详细命令和证据见[兼容性状态矩阵](docs/compatibility-status.md)。
+最新聚焦验证已覆盖 CLI、RPC、协议、BitTorrent、Metalink、FTP/SFTP、
+Node.js 和 Python 路径：`aria2-core` 通过 3,733 个库测试（忽略 1 个），
+`aria2-protocol` 通过 866 个测试（忽略 1 个），`aria2-rpc` 通过 319 个测试，
+`aria2` 通过 379 个测试（忽略 3 个），Node.js 绑定通过 123 个测试，
+Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩阵](docs/compatibility-status.md)。
 
 剩余工作主要是兼容性证据和发布收尾：完整原版客户端/浏览器插件互操作、
 公共 C ABI 对等性、跨平台真实协议与绑定验证、少量 Metalink 及暂停/移除
@@ -538,7 +538,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 - `aria2.forceShutdown`、`system.listMethods` 和 `system.listNotifications` 已实现，并有 handler/集成测试覆盖。
 - HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
 - IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
-- BT RPC 已覆盖 torrent 元数据、tracker 分层及实时运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；`aria2.getPeers` 还会返回每个连接 peer 的首次发现来源（`tracker`、`dht`、`pex`、`lpd` 或 `incoming`，无法确定时为 `unknown`）。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
+- BT RPC 已覆盖 torrent 元数据、tracker 分层及实时运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；peer 首次发现来源只保留在内部，不加入原版 `getPeers` wire 响应。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
 - 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
 - `aria2-core/src/c_api.rs` 已提供 opaque-handle `extern "C"`/cdylib 迁移接口；它不是原版 C++ STL 类 ABI 的二进制兼容实现。
 - Metalink torrent `metaurl` 依赖生命周期、完整性回调路径和部分协议互操作仍未闭环。

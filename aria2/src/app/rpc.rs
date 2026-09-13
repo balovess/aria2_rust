@@ -284,9 +284,7 @@ impl App {
             .lock()
             .await
             .as_ref()
-            .expect("engine should be initialized")
-            .bt_registry()
-            .clone();
+            .map(|engine| engine.bt_registry().clone());
         #[allow(unused_mut)]
         let mut backend = super::rpc_backend::CoreRpcBackend::new(
             group_man,
@@ -296,7 +294,9 @@ impl App {
             crate::identity::PRODUCT_VERSION,
         );
         #[cfg(feature = "bittorrent")]
-        backend.set_bt_registry(bt_registry);
+        if let Some(bt_registry) = bt_registry {
+            backend.set_bt_registry(bt_registry);
+        }
         let backend = Arc::new(backend);
         let rpc_engine =
             RpcEngine::with_backend(backend).with_auth_middleware(RpcAuthMiddleware::new(&secret));

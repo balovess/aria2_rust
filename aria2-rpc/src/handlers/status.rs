@@ -129,8 +129,6 @@ fn serialize_status(
     add_optional!("bitfield", &status.bitfield);
     add_number!("pieceLength", &status.piece_length);
     add_number!("numPieces", &status.num_pieces);
-    add_number!("completedPieces", &status.completed_pieces);
-    add_number!("missingPieces", &status.missing_pieces);
     add_optional!("followedBy", &status.followed_by);
     add_optional!("belongsTo", &status.belongs_to);
     add_optional!("infoHash", &status.info_hash);
@@ -211,5 +209,23 @@ mod tests {
         assert_eq!(value["totalLength"], "2048");
         assert_eq!(value["completedLength"], "1024");
         assert_eq!(value["status"], "paused");
+    }
+
+    #[test]
+    fn upstream_status_projection_rejects_internal_piece_extensions() {
+        let status = StatusInfo::new("gid-bt")
+            .with_num_pieces(10)
+            .with_completed_pieces(9)
+            .with_missing_pieces(1);
+
+        let value = serialize_status_response(
+            BackendResponse::Status(status),
+            &["numPieces".into(), "completedPieces".into(), "missingPieces".into()],
+        )
+        .unwrap();
+
+        assert_eq!(value["numPieces"], "10");
+        assert!(value.get("completedPieces").is_none());
+        assert!(value.get("missingPieces").is_none());
     }
 }

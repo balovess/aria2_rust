@@ -220,19 +220,21 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub num_pieces: Option<u32>,
-    /// Number of locally verified pieces (BitTorrent only).
+    /// Number of locally verified pieces (internal runtime extension).
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
         deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing,
         skip_serializing_if = "Option::is_none"
     )]
     pub completed_pieces: Option<u32>,
-    /// Number of pieces still missing locally (BitTorrent only).
+    /// Number of pieces still missing locally (internal runtime extension).
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
         deserialize_with = "wire::deserialize_option_string_or_number",
+        skip_serializing,
         skip_serializing_if = "Option::is_none"
     )]
     pub missing_pieces: Option<u32>,
@@ -631,8 +633,8 @@ impl ServerInfo {
 pub struct PeerInfo {
     pub peer_id: String,
     pub ip: String,
-    /// Discovery mechanism that supplied this peer address.
-    #[serde(default = "default_peer_source")]
+    /// Discovery mechanism that supplied this peer address; internal only.
+    #[serde(default = "default_peer_source", skip_serializing)]
     pub source: String,
     /// Peer port (serialized as string matching original util::uitos)
     #[serde(
@@ -1309,7 +1311,7 @@ mod tests {
         let json = serde_json::to_value(&peer).unwrap();
         assert_eq!(json["peerId"], "peer-abc123");
         assert_eq!(json["ip"], "192.168.1.100");
-        assert_eq!(json["source"], "tracker");
+        assert!(json.get("source").is_none());
         // port, downloadSpeed, uploadSpeed, amChoking, peerChoking are all
         // serialized as strings matching original aria2c wire format
         assert_eq!(json["port"], "6881");
@@ -1783,12 +1785,10 @@ mod tests {
 
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["numPieces"].as_str(), Some("10"));
-        assert_eq!(json["completedPieces"].as_str(), Some("9"));
-        assert_eq!(json["missingPieces"].as_str(), Some("1"));
-
-        let roundtrip: StatusInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(roundtrip.completed_pieces, Some(9));
-        assert_eq!(roundtrip.missing_pieces, Some(1));
+        assert!(json.get("completedPieces").is_none());
+        assert!(json.get("missingPieces").is_none());
+        assert_eq!(info.completed_pieces, Some(9));
+        assert_eq!(info.missing_pieces, Some(1));
     }
 
     #[test]

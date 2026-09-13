@@ -106,6 +106,25 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 
 所有参数均为 JSON 数组中的位置参数；方法名大小写敏感。可选的 `options` 是字符串键值对象，值可以是字符串、数字、布尔值；数组型累积选项也支持数组表示。
 
+### 6.1 原版兼容矩阵
+
+兼容基线是官方 C++ aria2 1.37.0 的 JSON-RPC/XML-RPC 合同。下表中的“原版”表示方法名、参数顺序、返回结构、wire 类型和错误语义必须保持兼容；扩展方法可以额外存在，但不得改变原版方法的响应。
+
+| 范围 | 原版基线 | aria2-rust | 结论 |
+| --- | --- | --- | --- |
+| 核心任务/队列 | `addUri`、`remove`、`pause`、`unpause`、`changePosition`、`changeUri` 等 | 已提供 | 兼容基线 |
+| 状态查询 | `tellStatus`、`tellActive`、`tellWaiting`、`tellStopped` | 已提供，支持 `keys` 投影 | 兼容基线 |
+| 文件/URI/服务器 | `getFiles`、`getUris`、`getServers` | 已提供 | 兼容基线 |
+| BT 任务状态 | `infoHash`、`numSeeders`、`seeder`、`bitfield`、`pieceLength`、`numPieces`、`connections` 等 | 已提供 | 兼容基线 |
+| BT Peer | `getPeers` 的标准字段及字符串 wire 类型 | 已提供；发现来源仅保留在内部 | 兼容基线 |
+| 全局统计 | `getGlobalStat` 的速度和任务计数 | 已提供 | 兼容基线 |
+| 版本/选项/会话/系统 | 原版对应方法 | 已提供 | 兼容基线 |
+| DHT 内部统计 | 原版没有专用 RPC | `getDhtStatus` | 扩展 |
+| Tracker 运行快照 | 原版没有 `getTrackers` | `getTrackers` | 扩展 |
+| 浏览器会话上下文 | 原版没有 | `updateBrowserContext`、`clearBrowserContext` | 扩展 |
+
+原版方法的响应不得携带扩展字段。当前运行时仍可维护 `source`、`completedPieces` 和 `missingPieces` 等内部数据，但它们不从原版 `getPeers`/`tellStatus` 响应输出；扩展数据应通过独立扩展方法提供。数字和布尔值继续按原版 wire 格式输出为字符串。
+
 ### 任务创建与队列
 
 | 方法 | 参数 | 返回 |
@@ -130,9 +149,37 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.getFiles` | `gid` | 文件对象数组 |
 | `aria2.getServers` | `gid` | 服务器对象数组；通常仅 active 任务可用 |
 | `aria2.getPeers` | `gid` | peer 对象数组；需 BitTorrent |
+| `aria2.getTrackers` | `gid` | tracker 运行状态数组；需 BitTorrent |
+| `aria2.getDhtStatus` | 无 | 当前活动 BT/magnet 任务聚合的 DHT 状态；需 BitTorrent |
 | `aria2.getGlobalStat` | 无 | 全局速度和任务计数 |
 
 常用 `tellStatus` key：`gid`、`status`、`totalLength`、`completedLength`、`uploadLength`、`downloadSpeed`、`uploadSpeed`、`pieceLength`、`numPieces`、`connections`、`errorCode`、`errorMessage`、`followedBy`、`following`、`belongsTo`、`dir`、`files`、`bittorrent`、`infoHash`。
+
+BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对象，包含分层的
+`announceList`，以及已存在时的 `comment`、`creationDate`、`mode` 和
+`info.name`。piece 进度通过原版定义的 `bitfield`、`pieceLength` 和
+`numPieces` 返回。`completedPieces` 和 `missingPieces` 是内部运行时统计，
+不属于原版 `tellStatus` wire 响应。长度、速度、计数等兼容字段按 aria2
+wire 格式序列化为字符串。
+
+`aria2.getPeers` 返回当前仍处于活动状态的连接，不是历史 peer 记录。除标准
+字段 `peerId`、`ip`、`port`、`amChoking`、`peerChoking`、`downloadSpeed`、
+`uploadSpeed` 和 `seeder` 外，`bitfield` 是 peer 原始 piece 位图的十六进制字符串（未知时省略）。
+发现来源（`tracker`、`dht`、`pex`、`lpd`、`incoming` 或 `unknown`）仅作为内部运行时数据保存，不进入原版响应。端口、
+速度、布尔值和 seeder 状态遵循 aria2 的字符串 wire 格式。
+
+`aria2.getTrackers` 返回指定 GID 的实时 tracker 快照，每个元素包含
+`uri`、1-based `tier`、`current`、`lastAttempt`、`announceReady`、
+`allFailed`、`inFlight`、`interval`、`minInterval`、`seeders`、`leechers`、
+`trackerId` 和可选的 `secondsSinceLastSuccess`。状态来自正在执行的 BT
+命令；命令退出后不再保留该 GID 的运行快照。`current` 是下一次选择的
+tracker，`lastAttempt` 是最近一次尝试的 tracker。
+
+`aria2.getDhtStatus` 是进程级聚合接口，汇总当前活动 BT/magnet 命令注册的
+DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
+`shuttingDown`）以及 `totalNodes`、`goodNodes`、`pendingTransactions`。
+三个计数按 aria2 wire 格式返回字符串；没有活动 DHT 引擎时返回 stopped 和
+零计数。
 
 ### 选项、会话与进程
 
@@ -168,7 +215,7 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 
 `system.listMethods` 返回当前构建实际支持的方法；`system.listNotifications` 返回事件名；`system.multicall` 接收 `[{"methodName":"...","params":[...]}]` 数组。
 
-当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.addMetalink`。
+当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.getTrackers`、`aria2.getDhtStatus`、`aria2.addMetalink`；全 feature 构建共 40 个方法。
 
 ## 7. 错误与限制
 

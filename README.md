@@ -277,14 +277,15 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Migration status (2026-09-13): the Rust implementation migration is
+Migration status (2026-09-14): the Rust implementation migration is
 substantially complete and is now in the final compatibility and acceptance
 phase. The latest reproducible verification covers the CLI, RPC, protocol,
 BitTorrent, Metalink, FTP/SFTP, Node.js, and Python paths; see the
 [compatibility status](docs/compatibility-status.md) for commands and evidence.
-The current snapshot includes 3,307 passing `aria2-core` library tests,
-872 passing `aria2-protocol` tests, 404 passing `aria2-rpc` tests, 292 passing
-`aria2` tests, plus 123 Node.js and 137 Python binding tests.
+The latest focused snapshot includes 3,733 passing `aria2-core` library tests
+(1 ignored), 866 passing `aria2-protocol` tests (1 ignored), 319 passing
+`aria2-rpc` tests, and 379 passing `aria2` tests (3 ignored), plus 123 Node.js
+and 137 Python binding tests.
 
 Remaining work is primarily compatibility evidence and release hardening:
 complete original-client and browser-extension interoperability, public C ABI
@@ -623,7 +624,7 @@ cross-platform evidence is incomplete.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
-- BitTorrent RPC exposes torrent metadata, live tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. `aria2.getPeers` also reports each connected peer's first discovery source (`tracker`, `dht`, `pex`, `lpd`, or `incoming`; `unknown` is used when unavailable). Tracker and DHT values are published from the active BT command and are removed when that command exits.
+- BitTorrent RPC exposes torrent metadata, live tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. Tracker and DHT values are published from the active BT command and are removed when that command exits; peer discovery attribution is retained internally and is not added to the upstream `getPeers` wire response.
 - Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License

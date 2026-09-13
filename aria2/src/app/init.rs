@@ -308,8 +308,8 @@ mod tests {
         assert!(config.contains(&format!("dir={}", downloads.display())));
         assert!(config.contains("continue=true"));
         assert!(config.contains("disk-cache=256M"));
-        assert!(config.contains("split=8"));
-        assert!(config.contains("max-connection-per-server=8"));
+        assert!(config.contains("split=16"));
+        assert!(config.contains("max-connection-per-server=16"));
         assert!(config.contains("max-concurrent-downloads=5"));
         assert!(!config.contains("save-session="));
         assert!(!config.contains("log="));
