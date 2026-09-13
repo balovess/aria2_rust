@@ -813,12 +813,14 @@ impl DownloadOptions {
         };
 
         Self {
-            split: positive_u16("split"),
+            split: positive_u16("split").or(Some(crate::constants::DEFAULT_SPLIT)),
             force_sequential: options
                 .get("force-sequential")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            max_connection_per_server: positive_u16("max-connection-per-server"),
+            max_connection_per_server: positive_u16("max-connection-per-server").or(Some(
+                crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16,
+            )),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
@@ -864,7 +866,7 @@ impl DownloadOptions {
             enable_mmap: options
                 .get("enable-mmap")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             max_mmap_limit: options
                 .get("max-mmap-limit")
                 .map(|v| OptionValue::parse_size_str(v)),
@@ -942,7 +944,7 @@ impl DownloadOptions {
             bt_load_saved_metadata: options
                 .get("bt-load-saved-metadata")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             bt_metadata_only: options
                 .get("bt-metadata-only")
                 .map(|v| v == "true")
@@ -958,7 +960,7 @@ impl DownloadOptions {
             bt_save_metadata: options
                 .get("bt-save-metadata")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             bt_enable_web_seed: options
                 .get("bt-enable-web-seed")
                 .map(|v| v != "false")
@@ -1104,7 +1106,7 @@ impl DownloadOptions {
             enable_http_pipelining: options
                 .get("enable-http-pipelining")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             http_accept_gzip: options
                 .get("http-accept-gzip")
                 .map(|v| v == "true")
@@ -1113,10 +1115,7 @@ impl DownloadOptions {
                 .get("http-no-cache")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            use_head: options
-                .get("use-head")
-                .map(|v| v == "true")
-                .unwrap_or(false),
+            use_head: options.get("use-head").map(|v| v == "true").unwrap_or(true),
             no_want_digest_header: options
                 .get("no-want-digest-header")
                 .map(|v| v == "true")
@@ -1153,7 +1152,7 @@ impl DownloadOptions {
             parameterized_uri: options
                 .get("parameterized-uri")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             reuse_uri: options
                 .get("reuse-uri")
                 .map(|v| v != "false")
@@ -1534,6 +1533,30 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("continue".to_string(), "true".to_string());
         assert!(DownloadOptions::from_option_strings(&values).continue_download);
+    }
+
+    #[test]
+    fn performance_defaults_survive_empty_option_conversion() {
+        let options = DownloadOptions::from_option_strings(&HashMap::new());
+
+        assert!(options.enable_mmap);
+        assert!(options.enable_http_pipelining);
+        assert!(options.use_head);
+        assert!(options.parameterized_uri);
+        assert_eq!(options.split, Some(crate::constants::DEFAULT_SPLIT));
+        assert_eq!(
+            options.max_connection_per_server,
+            Some(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        );
+        assert_eq!(
+            options.min_split_size,
+            Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+        );
+        #[cfg(feature = "bittorrent")]
+        {
+            assert!(options.bt_load_saved_metadata);
+            assert!(options.bt_save_metadata);
+        }
     }
 
     #[cfg(feature = "bittorrent")]
