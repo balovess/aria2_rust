@@ -6,6 +6,28 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+#[cfg(feature = "bittorrent")]
+#[path = "../../../aria2-core/tests/fixtures/mock_tracker.rs"]
+mod mock_tracker;
+
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_registry::{BtObject, BtRegistry};
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_tracker_comm::{
+    BtAnnounce, TrackerAnnouncer, TrackerRuntimeSnapshot,
+};
+#[cfg(feature = "bittorrent")]
+use aria2_core::request::request_group::{BtPeerSnapshot, BtPeerSource};
+#[cfg(feature = "bittorrent")]
+use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+#[cfg(feature = "bittorrent")]
+use aria2_protocol::bittorrent::message::handshake::Handshake;
+#[cfg(feature = "bittorrent")]
+use std::sync::Arc;
+#[cfg(feature = "bittorrent")]
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(feature = "bittorrent")]
+use tokio::net::{TcpListener, TcpStream};
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
 use aria2_rpc::server::RpcAuthMiddleware;
@@ -394,6 +416,65 @@ async fn regression_status_keys_filter_fields() {
         waiting[0].as_object().unwrap().keys().collect::<Vec<_>>(),
         vec!["gid"]
     );
+}
+
+/// Test: live BT upload counters are exposed through the RPC status snapshots.
+#[tokio::test]
+#[cfg(feature = "bittorrent")]
+async fn regression_rpc_status_exposes_live_bt_upload_stats() {
+    let fixture = RpcFixture::new(None);
+    let engine = &fixture.engine;
+
+    let add_req = make_request(
+        "aria2.addUri",
+        serde_json::json!([["bt://local-seeder/test-piece"]]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let group = fixture
+        .group_man
+        .group_by_hex(&gid)
+        .expect("RPC-created group must be discoverable");
+    {
+        let group = group.write().unwrap();
+        group.set_bt_metadata(
+            1,
+            16_384,
+            "5151515151515151515151515151515151515151".to_string(),
+        );
+        group.set_bt_bitfield(Some(vec![0x80]));
+        group.set_uploaded_length(16_384);
+        group.set_upload_speed_cached(8_192);
+    }
+    assert_eq!(fixture.group_man.fill_from_reserver().len(), 1);
+
+    let status_req = make_request(
+        "aria2.tellStatus",
+        serde_json::json!([gid, ["status", "uploadLength", "uploadSpeed"]]),
+    );
+    let status_resp = engine.handle_request(&status_req).await;
+    assert_success(&status_resp);
+    let status = status_resp.result.unwrap();
+    assert_eq!(status["status"], "active");
+    assert_eq!(status["uploadLength"], "16384");
+    assert_eq!(status["uploadSpeed"], "8192");
+
+    let active_req = make_request(
+        "aria2.tellActive",
+        serde_json::json!([["uploadLength", "uploadSpeed"]]),
+    );
+    let active_resp = engine.handle_request(&active_req).await;
+    assert_success(&active_resp);
+    let active = active_resp.result.unwrap();
+    assert_eq!(active[0]["uploadLength"], "16384");
+    assert_eq!(active[0]["uploadSpeed"], "8192");
+
+    let global_req = make_request("aria2.getGlobalStat", serde_json::json!([]));
+    let global_resp = engine.handle_request(&global_req).await;
+    assert_success(&global_resp);
+    assert_eq!(global_resp.result.unwrap()["uploadSpeed"], "8192");
 }
 
 /// Test: aria2.tellActive returns array of StatusInfo.

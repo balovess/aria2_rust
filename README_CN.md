@@ -70,13 +70,39 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（全 feature 为 40 个方法、6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 40 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
 - **公共 Tracker 列表**: 自动从 trackerslist.com 更新 BT Peer 发现
 
 ## 快速开始
+
+### 安装 Release
+
+预编译产物发布在 [GitHub Releases](https://github.com/balovess/aria2_rust/releases)。
+每个平台提供 `minimal`、`standard`、`tui` 和 `full` 四种版本，并附带对应的
+SHA-256 校验文件。选择版本前请先阅读 [Release 产物说明](docs/release-artifacts-cn.md)。
+
+### 一键安装
+
+**Linux / macOS：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash
+```
+
+**Windows（PowerShell，当前 Release 提供 x86_64）：**
+
+```powershell
+irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
+```
+
+**Docker（Linux amd64 镜像）：**
+
+```bash
+docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
+```
 
 ### 前置条件
 
@@ -140,8 +166,8 @@ Homebrew 会从对应版本的源码构建完整 feature；Scoop 会安装经过
 校验的 Windows x64 full 发布包，并提供 `aria2c` 命令。两个清单都会在
 Release 发布后由 GitHub Actions 自动更新，不需要手动修改版本配置。
 
-Chocolatey 包会由 GitHub Actions 根据 Windows full 发布包自动构建并校验。
-只有配置仓库 `CHOCO_API_KEY` secret 后，workflow 才会自动推送到 Chocolatey。
+Chocolatey 不是本项目支持的安装渠道。Windows 请使用 GitHub Release ZIP、
+PowerShell 安装脚本或 Scoop。
 
 ## 初始化持久化目录
 
@@ -348,8 +374,8 @@ Windows release 构建中的 Rust-only Criterion 基准（`50,000` pieces，同�
 运行专项基准：
 
 ```bash
-cargo bench -p aria2-core --bench segment_scan_bench -- --noplot
-cargo bench -p aria2-protocol --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
+cargo bench -p aria2-core --features bittorrent --bench segment_scan_bench -- --noplot
+cargo bench -p aria2-core --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
 ```
 
 ## 库使用
@@ -436,7 +462,7 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 
 # 运行特定示例
-cargo run --example simple_download -- http://example.com/test.bin
+cargo run -p aria2 --example simple_download -- http://example.com/test.bin
 ```
 
 ## 测试
@@ -491,7 +517,7 @@ cargo tarpaulin --workspace --out Lcov --output-dir coverage/
 cargo bench --workspace
 
 # 运行特定性能测试
-cargo bench --bench config_bench
+cargo bench -p aria2-core --bench config_bench
 ```
 
 详细测试指南请参阅 [docs/testing-guide.md](docs/testing-guide.md)。

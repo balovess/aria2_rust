@@ -468,3 +468,110 @@ jobs:
           body_path: release-notes.md
           files: artifacts/*/*
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+
+  update-package-managers:
+    name: Update package-manager manifests
+    needs: [prepare, github-release]
+    if: needs.prepare.outputs.should_release == 'true' && !contains(needs.prepare.outputs.version, '-')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Update and validate Homebrew formula
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ./scripts/update-homebrew.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
+          ./scripts/update-homebrew.ps1 -Check
+      - name: Update and validate Scoop manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ./scripts/update-scoop.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
+          ./scripts/update-scoop.ps1 -Check
+      - name: Commit package-manager manifests
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/aria2-rust.rb bucket/aria2-rust.json
+          if (git diff --cached --quiet) {
+            Write-Host "Package-manager manifests are already up to date."
+            exit 0
+          }
+          git commit -m "chore: update package-manager manifests for $env:RELEASE_TAG"
+          git push origin HEAD:master
+
+  package-manager-smoke:
+    name: Verify package managers (${{ matrix.name }})
+    needs: [prepare, update-package-managers]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Homebrew Linux
+            os: ubuntu-latest
+          - name: Homebrew macOS Intel
+            os: macos-15-intel
+          - name: Homebrew macOS ARM
+            os: macos-15
+          - name: Scoop Windows x64
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - name: Install Homebrew on Linux
+        if: startsWith(matrix.name, 'Homebrew') && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+      - name: Verify Homebrew formula
+        if: startsWith(matrix.name, 'Homebrew')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          brew tap balovess/aria2_rust "https://github.com/${GITHUB_REPOSITORY}.git"
+          brew install balovess/aria2_rust/aria2-rust
+          brew test aria2-rust
+          brew update
+          brew upgrade aria2-rust
+          aria2c --version | grep -F "${RELEASE_TAG#v}"
+      - name: Install Scoop
+        if: matrix.name == 'Scoop Windows x64'
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\scoop\shims"
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop --version
+      - name: Verify Scoop manifest
+        if: matrix.name == 'Scoop Windows x64'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          scoop bucket add aria2 "https://github.com/$env:GITHUB_REPOSITORY.git"
+          scoop install aria2/aria2-rust
+          scoop update
+          scoop update aria2-rust
+          $versionOutput = (& aria2c --version | Out-String)
+          if ($versionOutput -notmatch [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))) {
+            throw "Scoop installation version does not match $env:RELEASE_TAG: $versionOutput"
+          }
+          Write-Host $versionOutput
