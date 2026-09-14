@@ -560,8 +560,8 @@ jobs:
           # GitHub-hosted macOS/Linux runners may already have aria2 installed.
           # Unlink it so the tap smoke test can link aria2-rust's aria2c.
           brew unlink aria2 >/dev/null 2>&1 || true
-          brew tap balovess/aria2_rust "https://github.com/${GITHUB_REPOSITORY}.git"
-          brew install balovess/aria2_rust/aria2-rust
+          brew tap balovess/aria2-rust "https://github.com/${GITHUB_REPOSITORY}.git"
+          brew install balovess/aria2-rust/aria2-rust
           brew test aria2-rust
           brew update
           brew upgrade aria2-rust
