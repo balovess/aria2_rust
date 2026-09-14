@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      retry_package_managers:
+        description: Recheck Homebrew and Scoop for an existing release
+        required: false
+        default: false
+        type: boolean
   pull_request:
     branches: [master]
     types: [closed]
@@ -22,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
+      retry_package_managers: ${{ steps.release.outputs.retry_package_managers }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       sha: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
@@ -44,6 +51,7 @@ jobs:
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "retry_package_managers=${{ github.event_name == 'workflow_dispatch' && inputs.retry_package_managers || false }}" >> "$GITHUB_OUTPUT"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -470,7 +478,12 @@ jobs:
   update-package-managers:
     name: Update package-manager manifests
     needs: [prepare, github-release]
-    if: needs.prepare.outputs.should_release == 'true' && !contains(needs.prepare.outputs.version, '-')
+    if: >-
+      always() && !contains(needs.prepare.outputs.version, '-') &&
+      (
+        (needs.prepare.outputs.should_release == 'true' && needs.github-release.result == 'success') ||
+        needs.prepare.outputs.retry_package_managers == 'true'
+      )
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
