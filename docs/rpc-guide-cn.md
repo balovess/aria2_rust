@@ -242,3 +242,23 @@ rpc-save-upload-metadata=true
 3. 用 `aria2.addUri` 创建任务并保存 GID。
 4. 用 `tellStatus` 轮询，或监听 WebSocket 事件。
 5. 先检查 JSON-RPC `error.code`，再读取 `result`；不要只依据 HTTP 200 判断业务成功。
+
+## 10. 官方差分测试
+
+仓库提供官方 `aria2c` 对照 harness：`scripts/rpc-differential.ps1`。它会分别启动官方 aria2c 和当前构建，对 JSON-RPC、XML-RPC、WebSocket、任务状态、字段缺失、错误码以及暂停的最小 BitTorrent torrent 做结构和 wire 类型比较。
+
+运行前准备一个官方 C++ aria2c 二进制，然后执行：
+
+```powershell
+$env:ARIA2_ORIGINAL_BIN = 'C:\tools\aria2c-original.exe'
+cargo build -p aria2 --features standard --bin aria2c
+pwsh -File .\scripts\rpc-differential.ps1 -BuildCurrent
+```
+
+也可以直接传入路径：
+
+```powershell
+pwsh -File .\scripts\rpc-differential.ps1 `
+  -Original C:\tools\aria2c-original.exe `
+  -Current .\target\debug\aria2c.exe
+```

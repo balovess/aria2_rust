@@ -245,3 +245,23 @@ The certificate and private key must be PEM files. Set CORS to explicit origins,
 3. Create a task with `aria2.addUri` and retain its GID.
 4. Poll with `tellStatus`, or subscribe to WebSocket events.
 5. Check JSON-RPC `error.code` before reading `result`; HTTP 200 alone does not prove business success.
+
+## 10. Official differential testing
+
+The repository provides an official-aria2c differential harness at `scripts/rpc-differential.ps1`. It starts the official aria2c and the current build separately, then compares JSON-RPC, XML-RPC, WebSocket, task status, field omission, error codes, and a paused minimal BitTorrent torrent for result shape and wire types.
+
+Provide an official C++ aria2c binary and run:
+
+```powershell
+$env:ARIA2_ORIGINAL_BIN = 'C:\tools\aria2c-original.exe'
+cargo build -p aria2 --features standard --bin aria2c
+pwsh -File .\scripts\rpc-differential.ps1 -BuildCurrent
+```
+
+Paths may also be passed explicitly:
+
+```powershell
+pwsh -File .\scripts\rpc-differential.ps1 `
+  -Original C:\tools\aria2c-original.exe `
+  -Current .\target\debug\aria2c.exe
+```
