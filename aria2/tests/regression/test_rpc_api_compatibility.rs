@@ -6,28 +6,6 @@
 #[path = "../support/mod.rs"]
 mod support;
 
-#[cfg(feature = "bittorrent")]
-#[path = "../../../aria2-core/tests/fixtures/mock_tracker.rs"]
-mod mock_tracker;
-
-#[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_registry::{BtObject, BtRegistry};
-#[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_tracker_comm::{
-    BtAnnounce, TrackerAnnouncer, TrackerRuntimeSnapshot,
-};
-#[cfg(feature = "bittorrent")]
-use aria2_core::request::request_group::{BtPeerSnapshot, BtPeerSource};
-#[cfg(feature = "bittorrent")]
-use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
-#[cfg(feature = "bittorrent")]
-use aria2_protocol::bittorrent::message::handshake::Handshake;
-#[cfg(feature = "bittorrent")]
-use std::sync::Arc;
-#[cfg(feature = "bittorrent")]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(feature = "bittorrent")]
-use tokio::net::{TcpListener, TcpStream};
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
 use aria2_rpc::server::RpcAuthMiddleware;
