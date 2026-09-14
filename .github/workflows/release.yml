@@ -8,6 +8,17 @@ on:
         required: false
         default: false
         type: boolean
+      package_manager_target:
+        description: Package-manager job to retry
+        required: false
+        default: All
+        type: choice
+        options:
+          - All
+          - Homebrew Linux
+          - Homebrew macOS Intel
+          - Homebrew macOS ARM
+          - Scoop Windows x64
   pull_request:
     branches: [master]
     types: [closed]
@@ -524,7 +535,13 @@ jobs:
   package-manager-smoke:
     name: Verify package managers (${{ matrix.name }})
     needs: [prepare, update-package-managers]
-    if: always() && needs.update-package-managers.result == 'success'
+    if: >-
+      always() && needs.update-package-managers.result == 'success' &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.package_manager_target == 'All' ||
+        inputs.package_manager_target == matrix.name
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -560,8 +577,8 @@ jobs:
           # GitHub-hosted macOS/Linux runners may already have aria2 installed.
           # Unlink it so the tap smoke test can link aria2-rust's aria2c.
           brew unlink aria2 >/dev/null 2>&1 || true
-          brew tap balovess/aria2-rust "https://github.com/${GITHUB_REPOSITORY}.git"
           brew trust --formula balovess/aria2-rust/aria2-rust
+          brew tap balovess/aria2-rust "https://github.com/${GITHUB_REPOSITORY}.git"
           brew install balovess/aria2-rust/aria2-rust
           brew test aria2-rust
           brew update
