@@ -40,6 +40,7 @@ jobs:
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
       retry_package_managers: ${{ steps.release.outputs.retry_package_managers }}
+      package_manager_matrix: ${{ steps.release.outputs.package_manager_matrix }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
       sha: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
@@ -61,8 +62,17 @@ jobs:
 
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "retry_package_managers=${{ github.event_name == 'workflow_dispatch' && inputs.retry_package_managers || false }}" >> "$GITHUB_OUTPUT"
+           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+           echo "retry_package_managers=${{ github.event_name == 'workflow_dispatch' && inputs.retry_package_managers || false }}" >> "$GITHUB_OUTPUT"
+           TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.package_manager_target || 'All' }}"
+           case "$TARGET" in
+             "Homebrew Linux") MATRIX='{"include":[{"name":"Homebrew Linux","os":"ubuntu-latest"}]}' ;;
+             "Homebrew macOS Intel") MATRIX='{"include":[{"name":"Homebrew macOS Intel","os":"macos-15-intel"}]}' ;;
+             "Homebrew macOS ARM") MATRIX='{"include":[{"name":"Homebrew macOS ARM","os":"macos-15"}]}' ;;
+             "Scoop Windows x64") MATRIX='{"include":[{"name":"Scoop Windows x64","os":"windows-latest"}]}' ;;
+             *) MATRIX='{"include":[{"name":"Homebrew Linux","os":"ubuntu-latest"},{"name":"Homebrew macOS Intel","os":"macos-15-intel"},{"name":"Homebrew macOS ARM","os":"macos-15"},{"name":"Scoop Windows x64","os":"windows-latest"}]}' ;;
+           esac
+           echo "package_manager_matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -535,25 +545,10 @@ jobs:
   package-manager-smoke:
     name: Verify package managers (${{ matrix.name }})
     needs: [prepare, update-package-managers]
-    if: >-
-      always() && needs.update-package-managers.result == 'success' &&
-      (
-        github.event_name != 'workflow_dispatch' ||
-        inputs.package_manager_target == 'All' ||
-        inputs.package_manager_target == matrix.name
-      )
+    if: always() && needs.update-package-managers.result == 'success'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: Homebrew Linux
-            os: ubuntu-latest
-          - name: Homebrew macOS Intel
-            os: macos-15-intel
-          - name: Homebrew macOS ARM
-            os: macos-15
-          - name: Scoop Windows x64
-            os: windows-latest
+      matrix: ${{ fromJSON(needs.prepare.outputs.package_manager_matrix) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
