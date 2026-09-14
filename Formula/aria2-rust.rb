@@ -7,8 +7,8 @@
 class Aria2Rust < Formula
   desc "The ultra fast download utility - rewritten in Rust"
   homepage "https://github.com/balovess/aria2_rust"
-  url "https://github.com/balovess/aria2_rust/archive/refs/tags/v0.3.7.tar.gz"
-  sha256 "597b725c8ff09d11c0de7801f97e48396d00ba9fe1ee7ec59dc01bd88e8892d0"
+  url "https://github.com/balovess/aria2_rust/archive/refs/tags/v0.3.8.tar.gz"
+  sha256 "287d53bfb3125cefb5ca438d1bea3f35f028a94d302e1a920c626461426e0037"
   license "GPL-3.0-or-later"
 
   depends_on "rust" => :build
