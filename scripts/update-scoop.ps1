@@ -53,15 +53,9 @@ function Get-ReleaseHash {
         [string]$ArtifactName
     )
 
-    $releaseUri = "https://api.github.com/repos/$Repo/releases/tags/$Tag"
-    $release = Invoke-RestMethod -Uri $releaseUri -Headers @{ "User-Agent" = "aria2-rust-scoop" }
     $hashAssetName = "$ArtifactName.sha256"
-    $hashAsset = @($release.assets | Where-Object { $_.name -eq $hashAssetName })
-    if ($hashAsset.Count -ne 1) {
-        throw "Release $Tag does not contain exactly one $hashAssetName asset"
-    }
-
-    $hashText = Get-TextResponse -Uri $hashAsset[0].browser_download_url
+    $hashUrl = "https://github.com/$Repo/releases/download/$Tag/$hashAssetName"
+    $hashText = Get-TextResponse -Uri $hashUrl
     $match = [regex]::Match($hashText, '(?i)\b[0-9a-f]{64}\b')
     if (-not $match.Success) {
         throw "Unable to find a SHA-256 hash in $hashAssetName"

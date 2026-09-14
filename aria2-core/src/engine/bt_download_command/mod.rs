@@ -14,7 +14,8 @@ use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::rate_limiter::RateLimiter;
-use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::request::request_group::{AtomicProgress, BtPeerSource, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 pub use crate::engine::bt_message_handler::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_BLOCK_READ_MESSAGES, MAX_RETRIES,
@@ -86,6 +87,24 @@ impl Drop for BtDownloadCommand {
     fn drop(&mut self) {
         self.bt_peer_route.take();
 
+        if let Some(registry) = self.bt_registry.as_ref()
+            && let Ok(mut registry) = registry.write()
+        {
+            if let Some(engine) = self.dht_engine.as_ref() {
+                registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
+            }
+            let gid = self.group.recover().gid().value();
+            let owns_registration = self.tracker_runtime.as_ref().is_some_and(|runtime| {
+                registry
+                    .get(gid)
+                    .and_then(|object| object.tracker_runtime.as_ref())
+                    .is_some_and(|registered| Arc::ptr_eq(registered, runtime))
+            });
+            if owns_registration {
+                registry.remove(gid);
+            }
+        }
+
         let mut storage = self
             .peer_storage
             .lock()
@@ -121,6 +140,8 @@ pub struct BtDownloadCommand {
     pub(crate) listen_port: u16,
     pub(crate) bt_runtime: std::sync::Arc<BtRuntimeState>,
     pub(crate) peer_coordinator: crate::engine::bt_peer_coordinator::BtPeerCoordinator,
+    /// First discovery mechanism recorded for each outbound peer endpoint.
+    pub(crate) peer_sources: HashMap<(String, u16), BtPeerSource>,
     pub(crate) dht_engine:
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
@@ -225,6 +246,8 @@ pub struct BtDownloadCommand {
     // blocklist, and cross-download coordination work end-to-end.
     // Set via set_bt_registry() after construction by the engine or caller.
     pub(crate) bt_registry: Option<Arc<std::sync::RwLock<super::bt_registry::BtRegistry>>>,
+    /// Shared live tracker state published to the engine registry for RPC.
+    pub(crate) tracker_runtime: Option<crate::engine::bt_tracker_comm::SharedTrackerRuntime>,
 
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` so that this torrent's
@@ -260,6 +283,19 @@ pub struct BtDownloadCommand {
 }
 
 impl BtDownloadCommand {
+    pub(crate) fn record_peer_source(&mut self, ip: &str, port: u16, source: BtPeerSource) {
+        self.peer_sources
+            .entry((ip.to_string(), port))
+            .or_insert(source);
+    }
+
+    pub(crate) fn peer_source_for(&self, ip: &str, port: u16) -> BtPeerSource {
+        self.peer_sources
+            .get(&(ip.to_string(), port))
+            .copied()
+            .unwrap_or_default()
+    }
+
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         use crate::util::rwlock_ext::RwLockRecover;
         self.group.recover()
@@ -279,6 +315,12 @@ impl BtDownloadCommand {
         // The DHT engine owns background receive/maintenance tasks and its
         // final routing-table snapshot. Shut it down before the command is
         // dropped; DhtEngine::Drop only aborts tasks and cannot persist state.
+        if let Some(engine) = self.dht_engine.as_ref()
+            && let Some(registry) = self.bt_registry.as_ref()
+            && let Ok(mut registry) = registry.write()
+        {
+            registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
+        }
         if let Some(engine) = self.dht_engine.take() {
             engine.shutdown_async().await;
         }

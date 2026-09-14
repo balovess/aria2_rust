@@ -630,6 +630,20 @@ impl RpcBackend for FakeBackend {
                 }
                 Ok(BackendResult::response(BackendResponse::Peers(Vec::new())))
             }
+            BackendRequest::GetTrackers { gid } => {
+                let state = self.lock_state()?;
+                if !state.tasks.contains_key(&gid)
+                    && !state.stopped.iter().any(|task| task.gid == gid)
+                {
+                    return Err(Self::execution(format!("GID {gid} not found")));
+                }
+                Ok(BackendResult::response(BackendResponse::Trackers(
+                    Vec::new(),
+                )))
+            }
+            BackendRequest::GetDhtStatus => Ok(BackendResult::response(
+                BackendResponse::DhtStatus(aria2_rpc::DhtStatus::default()),
+            )),
             BackendRequest::PauseAll | BackendRequest::ForcePauseAll => {
                 let mut state = self.lock_state()?;
                 let mut events = Vec::new();

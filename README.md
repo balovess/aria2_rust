@@ -42,6 +42,18 @@ Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
 
+## GUI Companion
+
+[Phosona Manager](https://github.com/balovess/Phosona_Manager) is a
+cross-platform GUI download tool highly based on `aria2_rust`. Its desktop
+application, installers, and GUI releases will be published in the
+[Phosona_Manager repository](https://github.com/balovess/Phosona_Manager),
+while this repository remains the home for the Rust engine, protocol crates,
+and RPC services.
+
+Phosona Manager will also ship a new P2P network model focused on sharing and
+incentive mechanisms, inspired by BitTorrent, eMule, and similar systems.
+
 Binary releases are available in four feature tiers; see the
 [release artifact guide](docs/release-artifacts-en.md) to choose between
 `minimal`, `standard`, `tui`, and `full`.
@@ -54,8 +66,8 @@ feature has passed the complete cross-platform E2E matrix. See the
 
 - **Multi-Protocol Download**: HTTP/HTTPS, FTP, and BitTorrent by default; SFTP and Metalink are feature-gated
 - **Multi-Source Mirrors**: Automatic segmented parallel downloads from multiple URIs for maximum bandwidth utilization
-- **Resume Support**: Breakpoint resume on all protocols with seamless recovery after network interruptions
-- **Full BitTorrent Support**: 
+- **Resume Support**: Checkpoint-based resume for the main download paths; protocol-specific compatibility is tracked in the matrix
+- **BitTorrent**:
   - ✅ DHT network (KRPC + routing table + bootstrap)
   - ✅ Tracker communication (UDP/HTTP)
   - ✅ Peer Exchange (PEX, per-peer BEP 10 extension-ID negotiation)
@@ -69,7 +81,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, WebSocket (38 all-features methods, 6 notifications; compatibility coverage tracked separately)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 40 methods and 6 notifications)
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -77,7 +89,11 @@ feature has passed the complete cross-platform E2E matrix. See the
 
 ## Quick Start
 
-### One-Line Installation (Recommended)
+### Install a Release
+
+Prebuilt artifacts are published on the [GitHub Releases](https://github.com/balovess/aria2_rust/releases) page. Each platform has `minimal`, `standard`, `tui`, and `full` variants with matching SHA-256 files. See the [release artifact guide](docs/release-artifacts-en.md) before choosing a variant.
+
+### One-Line Installation
 
 **Linux / macOS:**
 ```bash
@@ -89,7 +105,7 @@ curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh
 irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
 ```
 
-**Docker:**
+**Docker (Linux amd64 image):**
 ```bash
 docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
 ```
@@ -100,8 +116,7 @@ docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balove
 |----------|---------|
 | Homebrew (macOS/Linux) | `brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git && brew install balovess/aria2_rust/aria2-rust` |
 | Scoop (Windows x64) | `scoop bucket add aria2 https://github.com/balovess/aria2_rust.git && scoop install aria2/aria2-rust` |
-| Chocolatey (Windows) | Package is built automatically from the Windows full release artifact; publishing requires repository `CHOCO_API_KEY` |
-| Cargo (from source) | Supported: `cargo install --path aria2` |
+| Cargo (from source) | `cargo install --path aria2` |
 
 The Homebrew formula builds the full feature set from the tagged source archive
 and works on supported macOS and Linux Intel/ARM hosts. The Scoop manifest
@@ -117,9 +132,8 @@ scoop update
 scoop update aria2-rust
 ```
 
-Chocolatey packaging is prepared by `.github/workflows/chocolatey.yml`. The
-workflow always validates and archives the package; it publishes to Chocolatey
-only when the repository `CHOCO_API_KEY` secret is configured.
+Chocolatey is not a supported installation channel. Use the GitHub Release ZIP,
+the PowerShell installer, or Scoop on Windows.
 
 ### First Download
 
@@ -277,14 +291,15 @@ Test status is reported from reproducible commands in
 [docs/compatibility-status.md](docs/compatibility-status.md), rather than as
 a fixed historical test count.
 
-Migration status (2026-09-13): the Rust implementation migration is
+Migration status (2026-09-14): the Rust implementation migration is
 substantially complete and is now in the final compatibility and acceptance
 phase. The latest reproducible verification covers the CLI, RPC, protocol,
 BitTorrent, Metalink, FTP/SFTP, Node.js, and Python paths; see the
 [compatibility status](docs/compatibility-status.md) for commands and evidence.
-The current snapshot includes 3,307 passing `aria2-core` library tests,
-872 passing `aria2-protocol` tests, 404 passing `aria2-rpc` tests, 292 passing
-`aria2` tests, plus 123 Node.js and 137 Python binding tests.
+The latest focused snapshot includes 3,733 passing `aria2-core` library tests
+(1 ignored), 866 passing `aria2-protocol` tests (1 ignored), 319 passing
+`aria2-rpc` tests, and 379 passing `aria2` tests (3 ignored), plus 123 Node.js
+and 137 Python binding tests.
 
 Remaining work is primarily compatibility evidence and release hardening:
 complete original-client and browser-extension interoperability, public C ABI
@@ -433,8 +448,8 @@ in [docs/MIGRATION.md](docs/MIGRATION.md) and
 To reproduce the focused benchmarks:
 
 ```bash
-cargo bench -p aria2-core --bench segment_scan_bench -- --noplot
-cargo bench -p aria2-protocol --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
+cargo bench -p aria2-core --features bittorrent --bench segment_scan_bench -- --noplot
+cargo bench -p aria2-core --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
 ```
 
 ## Library Usage
@@ -521,7 +536,7 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 
 # Run a specific example
-cargo run --example simple_download -- http://example.com/test.bin
+cargo run -p aria2 --example simple_download -- http://example.com/test.bin
 ```
 
 ## Testing
@@ -576,7 +591,7 @@ cargo tarpaulin --workspace --out Lcov --output-dir coverage/
 cargo bench --workspace
 
 # Run specific benchmark
-cargo bench --bench config_bench
+cargo bench -p aria2-core --bench config_bench
 ```
 
 For comprehensive testing guidance, see [docs/testing-guide.md](docs/testing-guide.md).
@@ -594,7 +609,7 @@ cross-platform evidence is incomplete.
 | CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
-| JSON-RPC API | Implemented path | 38 all-features methods returned by `system.listMethods`; interoperability remains open |
+| JSON-RPC API | Implemented path | Feature-dependent method set (up to 40 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, and DHT runtime counters are available |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |
@@ -623,6 +638,7 @@ cross-platform evidence is incomplete.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
+- BitTorrent RPC exposes torrent metadata, live tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. Tracker and DHT values are published from the active BT command and are removed when that command exits; peer discovery attribution is retained internally and is not added to the upstream `getPeers` wire response.
 - Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License

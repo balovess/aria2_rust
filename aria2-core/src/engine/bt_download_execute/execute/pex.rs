@@ -29,6 +29,7 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
 use crate::engine::extension_registry::ExtensionUpdate;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::request::request_group::BtPeerSource;
 use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::pex::PexHandler;
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
@@ -210,9 +211,11 @@ impl BtDownloadCommand {
     ///
     /// # Returns
     /// The successfully connected peers, ready for piece scheduling.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_to_discovered_peers(
         &mut self,
         new_peers: &[PeerAddr],
+        source: BtPeerSource,
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
         active_connections: &[BtPeerConn],
@@ -275,6 +278,7 @@ impl BtDownloadCommand {
             match result {
                 Ok(mut conn) => {
                     debug!("[PEX] Connected to {}:{}", peer.ip, peer.port);
+                    conn.set_source(source);
                     self.apply_peer_exchange_policy(&mut conn);
                     connected.push(conn);
                 }

@@ -508,9 +508,11 @@ pub struct DownloadOptions {
 impl Default for DownloadOptions {
     fn default() -> Self {
         Self {
-            split: None,
+            split: Some(crate::constants::DEFAULT_SPLIT),
             force_sequential: false,
-            max_connection_per_server: None,
+            max_connection_per_server: Some(
+                crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16,
+            ),
             max_download_limit: None,
             max_upload_limit: None,
             dir: None,
@@ -612,7 +614,7 @@ impl Default for DownloadOptions {
             enable_http_pipelining: true,
             http_accept_gzip: false,
             http_no_cache: false,
-            use_head: false,
+            use_head: true,
             no_want_digest_header: false,
             check_certificate: true,
             ca_certificate: None,
@@ -811,12 +813,14 @@ impl DownloadOptions {
         };
 
         Self {
-            split: positive_u16("split"),
+            split: positive_u16("split").or(Some(crate::constants::DEFAULT_SPLIT)),
             force_sequential: options
                 .get("force-sequential")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            max_connection_per_server: positive_u16("max-connection-per-server"),
+            max_connection_per_server: positive_u16("max-connection-per-server").or(Some(
+                crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16,
+            )),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),
@@ -862,7 +866,7 @@ impl DownloadOptions {
             enable_mmap: options
                 .get("enable-mmap")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             max_mmap_limit: options
                 .get("max-mmap-limit")
                 .map(|v| OptionValue::parse_size_str(v)),
@@ -940,7 +944,7 @@ impl DownloadOptions {
             bt_load_saved_metadata: options
                 .get("bt-load-saved-metadata")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             bt_metadata_only: options
                 .get("bt-metadata-only")
                 .map(|v| v == "true")
@@ -956,7 +960,7 @@ impl DownloadOptions {
             bt_save_metadata: options
                 .get("bt-save-metadata")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             bt_enable_web_seed: options
                 .get("bt-enable-web-seed")
                 .map(|v| v != "false")
@@ -1102,7 +1106,7 @@ impl DownloadOptions {
             enable_http_pipelining: options
                 .get("enable-http-pipelining")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             http_accept_gzip: options
                 .get("http-accept-gzip")
                 .map(|v| v == "true")
@@ -1111,10 +1115,7 @@ impl DownloadOptions {
                 .get("http-no-cache")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            use_head: options
-                .get("use-head")
-                .map(|v| v == "true")
-                .unwrap_or(false),
+            use_head: options.get("use-head").map(|v| v == "true").unwrap_or(true),
             no_want_digest_header: options
                 .get("no-want-digest-header")
                 .map(|v| v == "true")
@@ -1151,7 +1152,7 @@ impl DownloadOptions {
             parameterized_uri: options
                 .get("parameterized-uri")
                 .map(|v| v == "true")
-                .unwrap_or(false),
+                .unwrap_or(true),
             reuse_uri: options
                 .get("reuse-uri")
                 .map(|v| v != "false")
@@ -1532,6 +1533,84 @@ mod tests {
         let mut values = HashMap::new();
         values.insert("continue".to_string(), "true".to_string());
         assert!(DownloadOptions::from_option_strings(&values).continue_download);
+    }
+
+    #[test]
+    fn performance_defaults_survive_empty_option_conversion() {
+        let options = DownloadOptions::from_option_strings(&HashMap::new());
+
+        assert!(options.enable_mmap);
+        assert!(options.enable_http_pipelining);
+        assert!(options.use_head);
+        assert!(options.parameterized_uri);
+        assert_eq!(options.split, Some(crate::constants::DEFAULT_SPLIT));
+        assert_eq!(
+            options.max_connection_per_server,
+            Some(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        );
+        assert_eq!(
+            options.min_split_size,
+            Some(crate::constants::DEFAULT_MIN_SPLIT_SIZE)
+        );
+        #[cfg(feature = "bittorrent")]
+        {
+            assert!(options.bt_load_saved_metadata);
+            assert!(options.bt_save_metadata);
+        }
+    }
+
+    #[test]
+    fn registry_defaults_match_empty_conversion_and_runtime_values() {
+        let registry = crate::config::OptionRegistry::new();
+        let expected = [
+            ("enable-http-pipelining", "true"),
+            ("parameterized-uri", "true"),
+            ("enable-mmap", "true"),
+            ("use-head", "true"),
+            ("split", "16"),
+            ("max-connection-per-server", "16"),
+            ("min-split-size", "1048576"),
+        ];
+        let empty = DownloadOptions::from_option_strings(&HashMap::new());
+
+        for (name, expected_value) in expected {
+            let definition = registry.get(name).expect("default is registered");
+            assert_eq!(
+                definition.default_value().to_string(),
+                expected_value,
+                "{name}"
+            );
+            assert_eq!(
+                definition
+                    .parse_default_value()
+                    .expect("default parses")
+                    .to_string(),
+                expected_value,
+                "{name}"
+            );
+        }
+        assert!(empty.enable_http_pipelining);
+        assert!(empty.parameterized_uri);
+        assert!(empty.enable_mmap);
+        assert!(empty.use_head);
+        assert_eq!(empty.split, Some(16));
+        assert_eq!(empty.max_connection_per_server, Some(16));
+        assert_eq!(empty.min_split_size, Some(1024 * 1024));
+
+        #[cfg(feature = "bittorrent")]
+        {
+            for name in ["bt-load-saved-metadata", "bt-save-metadata"] {
+                let definition = registry.get(name).expect("BT default is registered");
+                assert_eq!(definition.default_value().to_string(), "true", "{name}");
+                assert_eq!(
+                    definition.parse_default_value().unwrap().to_string(),
+                    "true",
+                    "{name}"
+                );
+            }
+            assert!(empty.bt_load_saved_metadata);
+            assert!(empty.bt_save_metadata);
+        }
     }
 
     #[cfg(feature = "bittorrent")]

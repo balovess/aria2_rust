@@ -26,8 +26,8 @@ impl Default for InitPerformance {
     fn default() -> Self {
         Self {
             disk_cache: "256M".to_string(),
-            split: 8,
-            max_connection_per_server: 8,
+            split: 16,
+            max_connection_per_server: 16,
             max_concurrent_downloads: 5,
         }
     }
@@ -308,8 +308,8 @@ mod tests {
         assert!(config.contains(&format!("dir={}", downloads.display())));
         assert!(config.contains("continue=true"));
         assert!(config.contains("disk-cache=256M"));
-        assert!(config.contains("split=8"));
-        assert!(config.contains("max-connection-per-server=8"));
+        assert!(config.contains("split=16"));
+        assert!(config.contains("max-connection-per-server=16"));
         assert!(config.contains("max-concurrent-downloads=5"));
         assert!(!config.contains("save-session="));
         assert!(!config.contains("log="));

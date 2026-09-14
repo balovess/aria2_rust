@@ -1,6 +1,6 @@
 [package]
 name = "aria2"
-version = "0.3.7"
+version = "0.3.8"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -14,6 +14,10 @@ path = "src/main.rs"
 [[test]]
 name = "test_rpc_api_compatibility"
 path = "tests/regression/test_rpc_api_compatibility.rs"
+
+[[test]]
+name = "test_rpc_bt_live_snapshots"
+path = "tests/regression/test_rpc_bt_live_snapshots.rs"
 
 [[test]]
 name = "test_cli_options"

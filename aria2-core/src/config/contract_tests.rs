@@ -60,7 +60,7 @@ fn non_default_sample(definition: &OptionDef) -> String {
         }
         OptionType::Ipv4Address => vec!["192.0.2.1".to_string(), "127.0.0.1".to_string()],
         OptionType::Integer | OptionType::IntegerRange | OptionType::Size => {
-            ["1", "2", "7", "1024", "2048", "65535", "1048576"]
+            ["1", "2", "7", "1024", "2048", "65535", "1048576", "2097152"]
                 .into_iter()
                 .map(str::to_string)
                 .collect()
@@ -752,8 +752,8 @@ bt-tracker-timeout=23\n\
 bt-tracker-connect-timeout=11\n\
 bt-request-peer-speed-limit=128K\n\
 enable-peer-exchange=false\n\
-bt-load-saved-metadata=true\n\
-bt-save-metadata=true\n\
+bt-load-saved-metadata=false\n\
+bt-save-metadata=false\n\
 bt-metadata-only=true\n";
     let temp_dir = tempfile::tempdir().expect("BitTorrent config contract directory");
     let config_path = temp_dir.path().join("bittorrent-options.conf");
@@ -779,8 +779,8 @@ bt-metadata-only=true\n";
         "--bt-tracker-connect-timeout=11",
         "--bt-request-peer-speed-limit=128K",
         "--enable-peer-exchange=false",
-        "--bt-load-saved-metadata=true",
-        "--bt-save-metadata=true",
+        "--bt-load-saved-metadata=false",
+        "--bt-save-metadata=false",
         "--bt-metadata-only=true",
     ]);
     assert!(
@@ -816,9 +816,9 @@ bt-metadata-only=true\n";
         ("enable-peer-exchange".to_string(), serde_json::json!(false)),
         (
             "bt-load-saved-metadata".to_string(),
-            serde_json::json!(true),
+            serde_json::json!(false),
         ),
-        ("bt-save-metadata".to_string(), serde_json::json!(true)),
+        ("bt-save-metadata".to_string(), serde_json::json!(false)),
         ("bt-metadata-only".to_string(), serde_json::json!(true)),
     ]);
     let rpc_options = DownloadOptions::try_from_rpc_options(&rpc_values)
@@ -859,8 +859,8 @@ bt-metadata-only=true\n";
         assert_eq!(options.bt_tracker_connect_timeout, 11);
         assert_eq!(options.bt_request_peer_speed_limit, 128 * 1024);
         assert!(!options.enable_peer_exchange);
-        assert!(options.bt_load_saved_metadata);
-        assert!(options.bt_save_metadata);
+        assert!(!options.bt_load_saved_metadata);
+        assert!(!options.bt_save_metadata);
         assert!(options.bt_metadata_only);
     }
 
@@ -880,8 +880,8 @@ bt-metadata-only=true\n";
         ("bt-tracker-connect-timeout", "11"),
         ("bt-request-peer-speed-limit", "131072"),
         ("enable-peer-exchange", "false"),
-        ("bt-load-saved-metadata", "true"),
-        ("bt-save-metadata", "true"),
+        ("bt-load-saved-metadata", "false"),
+        ("bt-save-metadata", "false"),
         ("bt-metadata-only", "true"),
     ] {
         assert_eq!(

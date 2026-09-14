@@ -278,13 +278,26 @@ impl App {
 
         // The binary owns the only adapter that knows both aria2-core and the
         // protocol-independent RPC seam. The RPC crate remains transport-only.
-        let backend = Arc::new(super::rpc_backend::CoreRpcBackend::new(
+        #[cfg(feature = "bittorrent")]
+        let bt_registry = self
+            .engine
+            .lock()
+            .await
+            .as_ref()
+            .map(|engine| engine.bt_registry().clone());
+        #[allow(unused_mut)]
+        let mut backend = super::rpc_backend::CoreRpcBackend::new(
             group_man,
             engine_cmd_tx.into(),
             Arc::clone(&self.config),
             save_session_path,
             crate::identity::PRODUCT_VERSION,
-        ));
+        );
+        #[cfg(feature = "bittorrent")]
+        if let Some(bt_registry) = bt_registry {
+            backend.set_bt_registry(bt_registry);
+        }
+        let backend = Arc::new(backend);
         let rpc_engine =
             RpcEngine::with_backend(backend).with_auth_middleware(RpcAuthMiddleware::new(&secret));
 

@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::types::{FileInfo, GlobalStat, PeerInfo, ServerInfoIndex, StatusInfo, UriEntry};
+use crate::types::{
+    DhtStatus, FileInfo, GlobalStat, PeerInfo, ServerInfoIndex, StatusInfo, TrackerInfo, UriEntry,
+};
 
 /// Metadata advertised by a backend through `system.listMethods` and
 /// `aria2.getVersion`.
@@ -46,7 +48,13 @@ impl BackendMetadata {
         self.enabled_features.insert(1, "BitTorrent".to_string());
         self.methods.splice(
             1..1,
-            ["aria2.addTorrent", "aria2.getPeers"].map(str::to_string),
+            [
+                "aria2.addTorrent",
+                "aria2.getPeers",
+                "aria2.getTrackers",
+                "aria2.getDhtStatus",
+            ]
+            .map(str::to_string),
         );
         self.notifications
             .push("aria2.onBtDownloadComplete".to_string());
@@ -215,6 +223,10 @@ pub enum BackendRequest {
     GetPeers {
         gid: String,
     },
+    GetTrackers {
+        gid: String,
+    },
+    GetDhtStatus,
     PauseAll,
     ForcePauseAll,
     UnpauseAll,
@@ -294,6 +306,8 @@ pub enum BackendResponse {
     Files(Vec<FileInfo>),
     Servers(Vec<ServerInfoIndex>),
     Peers(Vec<PeerInfo>),
+    Trackers(Vec<TrackerInfo>),
+    DhtStatus(DhtStatus),
     Options(HashMap<String, serde_json::Value>),
     Position(usize),
     Counts([usize; 2]),
@@ -313,6 +327,8 @@ impl BackendResponse {
             Self::Files(files) => serde_json::to_value(files),
             Self::Servers(servers) => serde_json::to_value(servers),
             Self::Peers(peers) => serde_json::to_value(peers),
+            Self::Trackers(trackers) => serde_json::to_value(trackers),
+            Self::DhtStatus(status) => serde_json::to_value(status),
             Self::Options(options) => serde_json::to_value(options),
             Self::Position(position) => serde_json::to_value(position),
             Self::Counts(counts) => serde_json::to_value(counts.map(|count| count.to_string())),

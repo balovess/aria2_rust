@@ -13,6 +13,7 @@ use crate::engine::peer_stats::PeerStats;
 use crate::engine::udp_tracker_client::UdpTrackerClient;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::http::client_identity::ClientTlsConfig;
+use crate::request::request_group::BtPeerSource;
 use crate::util::rwlock_ext::RwLockRecover;
 
 fn filter_tracker_tiers(tiers: Vec<Vec<String>>, excluded: &[String]) -> Vec<Vec<String>> {
@@ -257,6 +258,9 @@ impl BtDownloadCommand {
         // The listener is created before discovery, matching BtSetup's order in
         // the original engine. Advertise its actual port in every announce.
         announcer.set_tcp_port(self.listen_port);
+        if let Some(runtime) = self.tracker_runtime.as_ref() {
+            announcer.set_runtime_snapshot(std::sync::Arc::clone(runtime));
+        }
 
         let mut peer_addrs: Vec<(String, u16)> = Vec::new();
 
@@ -278,6 +282,9 @@ impl BtDownloadCommand {
                     result.seeders,
                     result.leechers
                 );
+                for (ip, port) in &result.peers {
+                    self.record_peer_source(ip, *port, BtPeerSource::Tracker);
+                }
                 peer_addrs.extend(result.peers);
 
                 // If we got peers, no need to try more trackers immediately
@@ -337,6 +344,11 @@ impl BtDownloadCommand {
             if !lpd_peers.is_empty() {
                 let before = peer_addrs.len();
                 for lpd_peer in &lpd_peers {
+                    self.record_peer_source(
+                        &lpd_peer.addr.to_string(),
+                        lpd_peer.port,
+                        BtPeerSource::Lpd,
+                    );
                     let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
                         &lpd_peer.addr.to_string(),
                         lpd_peer.port,
@@ -379,6 +391,14 @@ impl BtDownloadCommand {
                     tracing::info!("[BT] DHT engine started");
                     if let Some(dht) = self.dht_engine.as_ref() {
                         dht.start_maintenance_loop();
+                        if let Some(registry) = self.bt_registry.as_ref()
+                            && let Ok(mut registry) = registry.write()
+                        {
+                            registry.set_dht_engine_for_gid(
+                                self.group.recover().gid().value(),
+                                std::sync::Arc::clone(dht),
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -394,6 +414,7 @@ impl BtDownloadCommand {
                         let before = peer_addrs.len();
                         for addr in &result.peers {
                             let ip_str = addr.ip().to_string();
+                            self.record_peer_source(&ip_str, addr.port(), BtPeerSource::Dht);
                             let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
                                 &ip_str,
                                 addr.port(),
@@ -585,6 +606,7 @@ impl BtDownloadCommand {
 
         let mut active_connections = conn_result.connections;
         for conn in &mut active_connections {
+            conn.set_source(self.peer_source_for(&conn.ip_addr, conn.port));
             self.apply_peer_exchange_policy(conn);
         }
 

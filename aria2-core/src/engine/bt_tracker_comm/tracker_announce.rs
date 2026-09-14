@@ -42,6 +42,66 @@ pub struct AnnounceResult {
     pub tracker_url: String,
 }
 
+/// Shared tracker state exposed to the application/RPC layer.
+///
+/// The registry keeps this snapshot separate from the immutable compatibility
+/// `BtAnnounce` handle. The download command owns the live `TrackerAnnouncer`,
+/// so it publishes here whenever that state changes.
+#[derive(Debug, Clone, Default)]
+pub struct TrackerRuntimeSnapshot {
+    /// Tracker URLs grouped by announce tier in their current failover order.
+    pub tracker_tiers: Vec<Vec<String>>,
+    /// Tracker selected for the next announce attempt.
+    pub current_url: Option<String>,
+    /// Tracker URL used by the most recent announce attempt.
+    pub last_attempt_url: Option<String>,
+    pub announce_ready: bool,
+    pub all_failed: bool,
+    pub in_flight: u32,
+    pub interval_secs: u64,
+    pub min_interval_secs: u64,
+    pub seeders: i64,
+    pub leechers: i64,
+    pub tracker_id: String,
+    pub seconds_since_last_success: Option<u64>,
+}
+
+/// Registry-safe handle for the live tracker snapshot.
+pub type SharedTrackerRuntime = Arc<std::sync::RwLock<TrackerRuntimeSnapshot>>;
+
+impl TrackerRuntimeSnapshot {
+    /// Build an initial snapshot from the compatibility announce state.
+    pub fn from_bt_announce(announce: &BtAnnounce) -> Self {
+        let announce_list = announce.announce_list();
+        let tracker_tiers = (0..announce_list.tier_count())
+            .map(|tier| {
+                let mut urls = Vec::new();
+                let mut entry = 0;
+                while let Some(url) = announce_list.get_tracker_url(tier, entry) {
+                    urls.push(url.clone());
+                    entry += 1;
+                }
+                urls
+            })
+            .collect();
+
+        Self {
+            tracker_tiers,
+            current_url: announce.announce_list().get_announce().map(str::to_owned),
+            last_attempt_url: None,
+            announce_ready: announce.is_announce_ready(),
+            all_failed: announce.is_all_announce_failed(),
+            in_flight: announce.in_flight_announces(),
+            interval_secs: announce.interval().as_secs(),
+            min_interval_secs: announce.min_interval().as_secs(),
+            seeders: announce.complete(),
+            leechers: announce.incomplete(),
+            tracker_id: announce.tracker_id().to_string(),
+            seconds_since_last_success: announce.seconds_since_last_success(),
+        }
+    }
+}
+
 /// Unified tracker announcer that dispatches HTTP and UDP tracker announces
 /// through the `BtAnnounce` state machine.
 ///
@@ -77,6 +137,8 @@ pub struct TrackerAnnouncer {
     tracker_connect_timeout_secs: u64,
     /// Total shutdown budget for all stopped announce attempts.
     stopped_timeout: Duration,
+    /// Optional registry-visible mirror of the live announcer state.
+    runtime_state: Option<SharedTrackerRuntime>,
 }
 
 impl TrackerAnnouncer {
@@ -95,6 +157,7 @@ impl TrackerAnnouncer {
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
+            runtime_state: None,
         }
     }
 
@@ -113,6 +176,31 @@ impl TrackerAnnouncer {
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
+            runtime_state: None,
+        }
+    }
+
+    /// Attach the registry-visible mirror of this announcer's live state.
+    pub fn set_runtime_snapshot(&mut self, state: SharedTrackerRuntime) {
+        self.runtime_state = Some(state);
+        self.publish_runtime_snapshot();
+    }
+
+    /// Return the complete live tracker state for RPC or diagnostics.
+    pub fn runtime_snapshot(&self) -> TrackerRuntimeSnapshot {
+        let mut snapshot = TrackerRuntimeSnapshot::from_bt_announce(&self.announce);
+        snapshot.last_attempt_url = self.last_attempt_tracker_url.clone();
+        snapshot
+    }
+
+    /// Publish the current live state without holding a lock across callers.
+    pub fn publish_runtime_snapshot(&self) {
+        let Some(state) = self.runtime_state.as_ref() else {
+            return;
+        };
+        let snapshot = self.runtime_snapshot();
+        if let Ok(mut current) = state.write() {
+            *current = snapshot;
         }
     }
 
@@ -213,6 +301,7 @@ impl TrackerAnnouncer {
         let tracker_url = self.announce.announce_list().get_announce()?.to_string();
         self.last_attempt_tracker_url = Some(tracker_url.clone());
         self.last_failure_kind = None;
+        self.publish_runtime_snapshot();
         let is_udp = is_udp_tracker(&tracker_url);
         let event = self.announce.announce_list().get_event();
 
@@ -233,6 +322,8 @@ impl TrackerAnnouncer {
             )
             .await
         };
+
+        self.publish_runtime_snapshot();
 
         if self.public_tracker_urls.contains(&tracker_url)
             && let Some(catalog) = self.public_tracker_catalog.as_ref()
@@ -289,16 +380,19 @@ impl TrackerAnnouncer {
             }
         }
 
-        let mgr = self.udp_manager.as_mut()?;
-        mgr.set_request_timeout(Duration::from_secs(self.tracker_timeout_secs));
+        {
+            let mgr = self.udp_manager.as_mut()?;
+            mgr.set_request_timeout(Duration::from_secs(self.tracker_timeout_secs));
 
-        // The state machine selects one URL per attempt. Keep the UDP manager
-        // scoped to that URL so responses cannot be attributed to a different
-        // public tracker accumulated by an earlier attempt.
-        mgr.use_tracker_url(tracker_url).await;
+            // The state machine selects one URL per attempt. Keep the UDP manager
+            // scoped to that URL so responses cannot be attributed to a different
+            // public tracker accumulated by an earlier attempt.
+            mgr.use_tracker_url(tracker_url).await;
+        }
 
         // Signal announce start
         self.announce.announce_start();
+        self.publish_runtime_snapshot();
 
         // The event and numwant were captured before network I/O so the
         // request and result describe the same state-machine transition.
@@ -308,7 +402,9 @@ impl TrackerAnnouncer {
             tracker_url, event, udp_event
         );
 
-        let responses = mgr
+        let responses = self
+            .udp_manager
+            .as_mut()?
             .announce(
                 info_hash,
                 peer_id,
@@ -322,7 +418,8 @@ impl TrackerAnnouncer {
 
         if responses.is_empty() {
             warn!("[BT] UDP tracker {} returned no response", tracker_url);
-            self.last_failure_kind = Some(match mgr.last_announce_error().await {
+            let last_error = self.udp_manager.as_mut()?.last_announce_error().await;
+            self.last_failure_kind = Some(match last_error {
                 Some(UdpError::TrackerError) => TrackerFailureKind::TrackerRejected,
                 Some(UdpError::MalformedResponse) => TrackerFailureKind::MalformedResponse,
                 Some(UdpError::Network) => TrackerFailureKind::Network,
@@ -381,6 +478,7 @@ impl TrackerAnnouncer {
 
         // Signal announce start
         self.announce.announce_start();
+        self.publish_runtime_snapshot();
 
         debug!(
             "[BT] Announcing to HTTP tracker {} (event={:?})",
@@ -521,6 +619,7 @@ impl TrackerAnnouncer {
             return;
         }
         self.announce.set_runtime_halted(true);
+        self.publish_runtime_snapshot();
 
         // Try to send stopped event to all applicable tiers
         let mut attempts = 0;
@@ -576,6 +675,7 @@ impl TrackerAnnouncer {
         uploaded: u64,
     ) {
         self.announce.set_download_complete(true);
+        self.publish_runtime_snapshot();
 
         if let Some(result) = self
             .announce(info_hash, peer_id, downloaded, 0, uploaded)
@@ -616,11 +716,13 @@ impl TrackerAnnouncer {
     /// Reset the announce state (e.g., after a long pause).
     pub fn reset_announce(&mut self) {
         self.announce.reset_announce();
+        self.publish_runtime_snapshot();
     }
 
     /// Set whether the download has fewer than minimum peers.
     pub fn set_less_than_min_peers(&mut self, less: bool) {
         self.announce.set_less_than_min_peers(less);
+        self.publish_runtime_snapshot();
     }
 
     /// Set the TCP port for announce URL construction.
@@ -636,17 +738,41 @@ impl TrackerAnnouncer {
     /// Set whether the download is complete.
     pub fn set_download_complete(&mut self, complete: bool) {
         self.announce.set_download_complete(complete);
+        self.publish_runtime_snapshot();
     }
 
     /// Set whether the runtime is halted (stopping).
     pub fn set_runtime_halted(&mut self, halted: bool) {
         self.announce.set_runtime_halted(halted);
+        self.publish_runtime_snapshot();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_snapshot_publishes_live_tracker_state() {
+        let first = "http://tracker.example.com/one".to_string();
+        let second = "udp://tracker.example.com/two".to_string();
+        let shared = Arc::new(std::sync::RwLock::new(TrackerRuntimeSnapshot::default()));
+        let mut announcer = TrackerAnnouncer::new(&[vec![first.clone(), second.clone()]], &None);
+
+        announcer.set_runtime_snapshot(Arc::clone(&shared));
+        announcer.last_attempt_tracker_url = Some(second.clone());
+        announcer.publish_runtime_snapshot();
+
+        let snapshot = shared.read().expect("tracker runtime snapshot lock");
+        assert_eq!(snapshot.tracker_tiers, vec![vec![first, second.clone()]]);
+        assert_eq!(
+            snapshot.current_url.as_deref(),
+            Some("http://tracker.example.com/one")
+        );
+        assert_eq!(snapshot.last_attempt_url.as_deref(), Some(second.as_str()));
+        assert!(snapshot.announce_ready);
+        assert!(!snapshot.all_failed);
+    }
 
     #[test]
     fn tracker_timeout_options_are_stored_for_both_transports() {

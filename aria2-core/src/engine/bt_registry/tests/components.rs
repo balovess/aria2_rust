@@ -302,6 +302,20 @@ fn test_dht_engine_clear() {
     assert!(registry.get_dht_engine().is_none());
 }
 
+#[test]
+fn test_dht_engine_is_tracked_by_download_gid() {
+    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let engine = rt.block_on(async { DhtEngine::start(DhtEngineConfig::local()).await.unwrap() });
+    let mut registry = BtRegistry::new();
+    registry.set_dht_engine_for_gid(7, Arc::clone(&engine));
+
+    assert_eq!(registry.get_dht_engines().len(), 1);
+    registry.clear_dht_engine_for_gid_if(7, &engine);
+    assert!(registry.get_dht_engines().is_empty());
+}
+
 // -----------------------------------------------------------------------
 // Peer blocklist integration
 // -----------------------------------------------------------------------

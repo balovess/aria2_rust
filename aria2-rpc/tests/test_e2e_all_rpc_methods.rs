@@ -703,6 +703,33 @@ async fn e2e_get_peers_nonexistent_gid_errors() {
 }
 
 #[tokio::test]
+#[cfg(feature = "bittorrent")]
+async fn e2e_get_trackers_returns_runtime_array() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let gid = add_uri(&client, &base, "http://127.0.0.1:1/get-trackers").await;
+    let resp = rpc_call(&client, &base, "aria2.getTrackers", json![[&gid]]).await;
+
+    assert_jsonrpc_format(&resp, "aria2-getTrackers");
+    assert_success(&resp);
+    assert!(resp["result"].is_array());
+}
+
+#[tokio::test]
+#[cfg(feature = "bittorrent")]
+async fn e2e_get_dht_status_returns_runtime_counters() {
+    let (base, _guard) = start_test_server(None).await;
+    let client = Client::new();
+    let resp = rpc_call(&client, &base, "aria2.getDhtStatus", json!([])).await;
+
+    assert_jsonrpc_format(&resp, "aria2-getDhtStatus");
+    assert_success(&resp);
+    assert!(resp["result"].is_object());
+    assert!(resp["result"].get("state").is_some());
+    assert!(resp["result"].get("totalNodes").is_some());
+}
+
+#[tokio::test]
 async fn e2e_get_uris_returns_array() {
     let (base, _guard) = start_test_server(None).await;
     let client = Client::new();
@@ -829,7 +856,7 @@ async fn e2e_system_list_methods_returns_array() {
 
     let methods = resp["result"].as_array().unwrap();
     let expected_method_count = 35
-        + usize::from(cfg!(feature = "bittorrent")) * 2
+        + usize::from(cfg!(feature = "bittorrent")) * 4
         + usize::from(cfg!(feature = "metalink"));
     assert_eq!(
         methods.len(),

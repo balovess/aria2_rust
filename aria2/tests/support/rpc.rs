@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use aria2::app::rpc_backend::CoreRpcBackend;
 use aria2_core::config::ConfigManager;
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_registry::BtRegistry;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
@@ -39,6 +41,34 @@ impl RpcFixture {
             save_session_path,
             aria2::identity::PRODUCT_VERSION,
         );
+
+        Self {
+            engine: RpcEngine::with_backend(Arc::new(backend)),
+            group_man,
+            _command_receiver: command_receiver,
+        }
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn new_with_bt_registry(
+        save_session_path: Option<PathBuf>,
+        registry: Arc<std::sync::RwLock<BtRegistry>>,
+    ) -> Self {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, command_receiver) =
+            tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
+            aria2::identity::DEFAULT_USER_AGENT,
+            aria2::identity::DEFAULT_PEER_AGENT,
+        )));
+        let mut backend = CoreRpcBackend::new(
+            Arc::clone(&group_man),
+            command_sender.into(),
+            config,
+            save_session_path,
+            aria2::identity::PRODUCT_VERSION,
+        );
+        backend.set_bt_registry(registry);
 
         Self {
             engine: RpcEngine::with_backend(Arc::new(backend)),
