@@ -436,8 +436,6 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "# aria2_rust ${RELEASE_VERSION}"
-            echo
             echo "## Changes"
             echo "${RELEASE_CHANGELOG}"
             echo
