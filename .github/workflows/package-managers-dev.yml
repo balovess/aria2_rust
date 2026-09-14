@@ -50,6 +50,7 @@ jobs:
         run: |
           set -euo pipefail
           brew tap balovess/aria2-rust "file://$TAP_SOURCE"
+          brew trust --formula balovess/aria2-rust/aria2-rust
           if brew list --formula aria2 >/dev/null 2>&1; then
             brew unlink aria2
           fi

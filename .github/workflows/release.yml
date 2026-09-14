@@ -561,6 +561,7 @@ jobs:
           # Unlink it so the tap smoke test can link aria2-rust's aria2c.
           brew unlink aria2 >/dev/null 2>&1 || true
           brew tap balovess/aria2-rust "https://github.com/${GITHUB_REPOSITORY}.git"
+          brew trust --formula balovess/aria2-rust/aria2-rust
           brew install balovess/aria2-rust/aria2-rust
           brew test aria2-rust
           brew update
