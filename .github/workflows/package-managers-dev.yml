@@ -49,11 +49,11 @@ jobs:
           TAP_SOURCE: ${{ runner.temp }}/aria2-rust-tap
         run: |
           set -euo pipefail
-          brew tap balovess/aria2_rust "file://$TAP_SOURCE"
+          brew tap balovess/aria2-rust "file://$TAP_SOURCE"
           if brew list --formula aria2 >/dev/null 2>&1; then
             brew unlink aria2
           fi
-          brew install --build-from-source balovess/aria2_rust/aria2-rust
+          brew install --build-from-source balovess/aria2-rust/aria2-rust
           brew test aria2-rust
           brew update
           brew upgrade aria2-rust
