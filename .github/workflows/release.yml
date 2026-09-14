@@ -524,6 +524,7 @@ jobs:
   package-manager-smoke:
     name: Verify package managers (${{ matrix.name }})
     needs: [prepare, update-package-managers]
+    if: always() && needs.update-package-managers.result == 'success'
     strategy:
       fail-fast: false
       matrix:
