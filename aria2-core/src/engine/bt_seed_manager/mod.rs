@@ -850,8 +850,12 @@ impl BtSeedManager {
 
     /// Return upload statistics: (total_uploaded, upload_speed).
     pub fn get_upload_stats(&self) -> (u64, u64) {
-        let elapsed_secs = self.seeding_start_time.elapsed().as_secs();
-        let upload_speed = self.total_uploaded.checked_div(elapsed_secs).unwrap_or(0);
+        let elapsed_secs = self.seeding_start_time.elapsed().as_secs_f64();
+        let upload_speed = if elapsed_secs > 0.0 {
+            (self.total_uploaded as f64 / elapsed_secs) as u64
+        } else {
+            0
+        };
         (self.total_uploaded, upload_speed)
     }
 
