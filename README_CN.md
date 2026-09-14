@@ -39,6 +39,16 @@ JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 SFTP 和 Metalink 需要分别启用对应 Cargo feature。
 
+## GUI 下载工具
+
+[Phosona Manager](https://github.com/balovess/Phosona_Manager) 是一款高度基于
+`aria2_rust` 构建的跨平台 GUI 下载工具。它的桌面应用、安装包和 GUI 版本将
+发布在 [Phosona_Manager 仓库](https://github.com/balovess/Phosona_Manager)；
+本仓库继续负责 Rust 下载引擎、协议库和 RPC 服务。
+
+一种注重分享与奖励机制的新型 P2P 网络形态（类似 BT、eMule 等）也将随
+Phosona Manager 一同发布。
+
 ### 当前迁移状态（2026-09-14）
 
 最新聚焦验证已覆盖 CLI、RPC、协议、BitTorrent、Metalink、FTP/SFTP、

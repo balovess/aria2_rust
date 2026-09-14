@@ -42,6 +42,18 @@ Metalink and SFTP require their Cargo features;
 compatibility status and verification evidence are tracked in
 [docs/compatibility-status.md](docs/compatibility-status.md).
 
+## GUI Companion
+
+[Phosona Manager](https://github.com/balovess/Phosona_Manager) is a
+cross-platform GUI download tool highly based on `aria2_rust`. Its desktop
+application, installers, and GUI releases will be published in the
+[Phosona_Manager repository](https://github.com/balovess/Phosona_Manager),
+while this repository remains the home for the Rust engine, protocol crates,
+and RPC services.
+
+Phosona Manager will also ship a new P2P network model focused on sharing and
+incentive mechanisms, inspired by BitTorrent, eMule, and similar systems.
+
 Binary releases are available in four feature tiers; see the
 [release artifact guide](docs/release-artifacts-en.md) to choose between
 `minimal`, `standard`, `tui`, and `full`.
