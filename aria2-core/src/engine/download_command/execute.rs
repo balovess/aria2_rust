@@ -51,7 +51,11 @@ impl DownloadCommand {
         };
         let options = self.group.recover().options_arc();
         let known_total_length = self.group.recover().total_length();
-        let should_head = options.dry_run || (options.use_head && known_total_length == 0);
+        let needs_metadata_probe =
+            options.uses_memory_download() && !options.uses_memory_download_for_uri(uri);
+        let should_head = options.dry_run
+            || (options.use_head && known_total_length == 0)
+            || needs_metadata_probe;
         let head_resp = if should_head {
             let head_req = self.request_policy.apply(
                 self.client.head(uri),
@@ -62,6 +66,20 @@ impl DownloadCommand {
         } else {
             None
         };
+        let head_content_type = head_resp.as_ref().and_then(|response| {
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+        });
+        if let Some(content_type) = head_content_type {
+            self.group.recover().set_content_type(content_type);
+            if !options.dry_run && options.uses_memory_download_for_content_type(content_type) {
+                self.group.recover().mark_in_memory_download();
+                return self.execute_in_memory(uri).await;
+            }
+        }
+
         let (total_length, head_supports_range) = if let Some(ref resp) = head_resp {
             let tl = resp
                 .headers()

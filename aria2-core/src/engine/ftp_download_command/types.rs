@@ -77,7 +77,7 @@ impl FtpDownloadCommand {
             vec![uri.to_string()],
             options.clone(),
         )));
-        if options.uses_memory_download() {
+        if options.uses_memory_download_for_uri(uri) {
             group.recover().mark_in_memory_download();
         }
         Self::new_with_group(group, output_dir, output_name)
@@ -106,7 +106,7 @@ impl FtpDownloadCommand {
             (uri, opts)
         };
 
-        if options.uses_memory_download() {
+        if options.uses_memory_download_for_uri(&uri) {
             group.recover().mark_in_memory_download();
         }
 

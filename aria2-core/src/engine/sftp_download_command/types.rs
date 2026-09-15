@@ -129,7 +129,7 @@ impl SftpDownloadCommand {
 
         // Step 5: Create the request group
         let group = RequestGroup::new(gid, vec![uri.to_string()], options.clone());
-        if options.uses_memory_download() {
+        if options.uses_memory_download_for_uri(uri) {
             group.mark_in_memory_download();
         }
 
@@ -174,7 +174,7 @@ impl SftpDownloadCommand {
     ) -> Result<Self> {
         let parsed = Self::parse_uri(uri)?;
         let (username, password) = Self::resolve_credentials(&parsed, options)?;
-        if options.uses_memory_download() {
+        if options.uses_memory_download_for_uri(uri) {
             group.recover().mark_in_memory_download();
         }
         let dir = output_dir

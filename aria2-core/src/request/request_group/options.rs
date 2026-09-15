@@ -707,14 +707,54 @@ pub fn option_value_to_string(value: &serde_json::Value) -> Option<String> {
 }
 
 impl DownloadOptions {
-    /// Whether this source should use the C++ memory pre-download semantics.
+    /// Whether a memory follow mode is configured.
     ///
-    /// Either metadata option can request memory-backed handling. This keeps
-    /// the decision at the source-download boundary while the post-download
-    /// handler still decides whether the bytes are BitTorrent or Metalink.
+    /// This is an option-level predicate only. Callers that are deciding how
+    /// to download a source must also check its URI or response content type
+    /// with [`Self::uses_memory_download_for_uri`] or
+    /// [`Self::uses_memory_download_for_content_type`].
     pub fn uses_memory_download(&self) -> bool {
         self.follow_torrent.is_some_and(FollowMode::is_memory)
             || self.follow_metalink.is_some_and(FollowMode::is_memory)
+    }
+
+    /// Whether a source URI should use memory-backed metadata handling.
+    ///
+    /// The `follow-*=mem` options apply to recognized metadata sources, not
+    /// to every HTTP/FTP/SFTP payload in the request group. URI matching
+    /// mirrors aria2's suffix criteria and ignores URL query/fragment parts.
+    pub fn uses_memory_download_for_uri(&self, uri: &str) -> bool {
+        let path = Url::parse(uri)
+            .map(|url| url.path().to_owned())
+            .unwrap_or_else(|_| uri.to_owned());
+        let path = path.to_ascii_lowercase();
+
+        (self.follow_torrent.is_some_and(FollowMode::is_memory) && path.ends_with(".torrent"))
+            || (self.follow_metalink.is_some_and(FollowMode::is_memory)
+                && [".meta4", ".metalink", ".metalink3"]
+                    .iter()
+                    .any(|extension| path.ends_with(extension)))
+    }
+
+    /// Whether a response content type identifies a memory-backed metadata
+    /// source for the configured follow mode.
+    pub fn uses_memory_download_for_content_type(&self, content_type: &str) -> bool {
+        let content_type = content_type
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+
+        (self.follow_torrent.is_some_and(FollowMode::is_memory)
+            && content_type == "application/x-bittorrent")
+            || (self.follow_metalink.is_some_and(FollowMode::is_memory)
+                && matches!(
+                    content_type.as_str(),
+                    "application/metalink4+xml"
+                        | "application/metalink+xml"
+                        | "application/x-metalink"
+                ))
     }
 
     /// Build per-download options from typed configuration values.
@@ -1412,6 +1452,38 @@ mod tests {
         assert_eq!(options.follow_torrent, Some(FollowMode::Memory));
         assert_eq!(options.follow_metalink, Some(FollowMode::Disabled));
         assert!(options.uses_memory_download());
+    }
+
+    #[test]
+    fn memory_follow_mode_is_limited_to_metadata_sources() {
+        let options = DownloadOptions {
+            follow_torrent: Some(FollowMode::Memory),
+            follow_metalink: Some(FollowMode::Memory),
+            ..DownloadOptions::default()
+        };
+
+        assert!(!options.uses_memory_download_for_uri("https://example.test/file.bin"));
+        assert!(options.uses_memory_download_for_uri(
+            "https://example.test/source.torrent?download=1#metadata"
+        ));
+        assert!(options.uses_memory_download_for_uri("https://example.test/index.meta4"));
+        assert!(options.uses_memory_download_for_uri("/tmp/index.metalink3"));
+    }
+
+    #[test]
+    fn memory_follow_mode_matches_metadata_content_types() {
+        let options = DownloadOptions {
+            follow_torrent: Some(FollowMode::Memory),
+            follow_metalink: Some(FollowMode::Memory),
+            ..DownloadOptions::default()
+        };
+
+        assert!(
+            options
+                .uses_memory_download_for_content_type("application/x-bittorrent; charset=binary")
+        );
+        assert!(options.uses_memory_download_for_content_type("application/metalink4+xml"));
+        assert!(!options.uses_memory_download_for_content_type("application/octet-stream"));
     }
 
     #[test]

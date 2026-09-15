@@ -131,7 +131,9 @@ impl RequestGroupMan {
     pub fn add_group(&self, uris: Vec<String>, options: DownloadOptions) -> Result<GroupId> {
         let _lifecycle = self.lifecycle_guard();
         let gid = self.generate_gid();
-        let memory_download = options.uses_memory_download();
+        let memory_download = uris
+            .first()
+            .is_some_and(|uri| options.uses_memory_download_for_uri(uri));
         let mut group = RequestGroup::new(gid, uris, options);
         if memory_download {
             group.mark_in_memory_download();
@@ -171,7 +173,14 @@ impl RequestGroupMan {
             warn!(gid = gid.value(), "Ignoring stale terminal request group");
             return;
         }
-        if group.recover().options().uses_memory_download() {
+        let memory_download = {
+            let group = group.recover();
+            group
+                .uris()
+                .first()
+                .is_some_and(|uri| group.options().uses_memory_download_for_uri(uri))
+        };
+        if memory_download {
             group.recover().mark_in_memory_download();
         }
         if !self.register_group(Arc::clone(&group)) {
@@ -291,7 +300,9 @@ impl RequestGroupMan {
         options: DownloadOptions,
     ) -> Result<()> {
         let _lifecycle = self.lifecycle_guard();
-        let memory_download = options.uses_memory_download();
+        let memory_download = uris
+            .first()
+            .is_some_and(|uri| options.uses_memory_download_for_uri(uri));
         let mut group = RequestGroup::new(gid, uris, options);
         if memory_download {
             group.mark_in_memory_download();
