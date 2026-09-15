@@ -31,21 +31,9 @@ impl DownloadCommand {
             self.output_path.display()
         );
 
-        // Re-check cancellation after the HEAD probe / pre-allocation work so
-        // a remove issued while we were doing filesystem setup is honoured
-        // before any network transfer begins.
+        // Re-check cancellation before the metadata probe and filesystem work
+        // so a remove issued before execution is honoured immediately.
         self.check_cancelled()?;
-
-        if let Some(parent) = self.output_path.parent()
-            && !parent.exists()
-        {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Failed to create directory: {}",
-                    e
-                )))
-            })?;
-        }
 
         let release_path = |path: &std::path::Path| {
             let path = path.to_path_buf();
@@ -90,6 +78,34 @@ impl DownloadCommand {
         } else {
             (known_total_length, false)
         };
+
+        // `dry_run` is a metadata-only HTTP operation. The HEAD above checks
+        // availability and discovers the size, but no range probe, output
+        // directory, collision resolution, resume inspection, allocation, or
+        // GET request may follow it.
+        if options.dry_run {
+            self.completed_bytes = total_length;
+            {
+                let group = self.group.recover();
+                group.set_total_length(total_length);
+                group.update_progress(total_length);
+                group.set_checksum_verified(true);
+            }
+            self.group.recover_mut().complete()?;
+            self.completed = true;
+            return Ok(());
+        }
+
+        if let Some(parent) = self.output_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                    "Failed to create directory: {}",
+                    e
+                )))
+            })?;
+        }
 
         let supports_range = if head_supports_range {
             true

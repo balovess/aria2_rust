@@ -132,9 +132,12 @@ impl RequestGroupMan {
         let _lifecycle = self.lifecycle_guard();
         let gid = self.generate_gid();
         let memory_download = options.uses_memory_download();
-        let group = RequestGroup::new(gid, uris, options);
+        let mut group = RequestGroup::new(gid, uris, options);
         if memory_download {
             group.mark_in_memory_download();
+        }
+        if group.options().pause {
+            group.pause()?;
         }
         let group = Arc::new(std::sync::RwLock::new(group));
         if !self.register_group(Arc::clone(&group)) {
@@ -174,6 +177,11 @@ impl RequestGroupMan {
         if !self.register_group(Arc::clone(&group)) {
             debug!(gid = gid.value(), "Request group is already registered");
             return;
+        }
+        if group.recover().options().pause
+            && let Err(error) = group.recover_mut().pause()
+        {
+            warn!(gid = gid.value(), %error, "Failed to apply initial pause option");
         }
         self.next_gid
             .fetch_max(gid.value().saturating_add(1), Ordering::SeqCst);
@@ -284,9 +292,12 @@ impl RequestGroupMan {
     ) -> Result<()> {
         let _lifecycle = self.lifecycle_guard();
         let memory_download = options.uses_memory_download();
-        let group = RequestGroup::new(gid, uris, options);
+        let mut group = RequestGroup::new(gid, uris, options);
         if memory_download {
             group.mark_in_memory_download();
+        }
+        if group.options().pause {
+            group.pause()?;
         }
         let group = Arc::new(std::sync::RwLock::new(group));
         if !self.register_group(Arc::clone(&group)) {
@@ -1203,6 +1214,44 @@ mod tests {
         assert!(
             group.recover().is_in_memory_download(),
             "pre-constructed groups must honor memory-backed metadata options"
+        );
+    }
+
+    #[test]
+    fn newly_queued_groups_honor_initial_pause_option() {
+        let man = RequestGroupMan::new();
+        let paused_options = DownloadOptions {
+            pause: true,
+            ..DownloadOptions::default()
+        };
+
+        let generated_gid = man
+            .add_group(
+                vec!["http://example.com/generated.bin".to_string()],
+                paused_options.clone(),
+            )
+            .unwrap();
+        assert!(
+            man.find_group(generated_gid)
+                .unwrap()
+                .recover()
+                .status()
+                .is_paused()
+        );
+
+        let explicit_gid = GroupId::new(74);
+        man.add_group_with_gid(
+            explicit_gid,
+            vec!["http://example.com/explicit.bin".to_string()],
+            paused_options,
+        )
+        .unwrap();
+        assert!(
+            man.find_group(explicit_gid)
+                .unwrap()
+                .recover()
+                .status()
+                .is_paused()
         );
     }
 
