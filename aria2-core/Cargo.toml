@@ -59,8 +59,7 @@ reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip"
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
 # Kept at 0.24: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
-# feature is enabled (we don't use it). Upgrading to 0.26 would conflict with russh's
-# pinned `rand_core = 0.10.0-rc-3` via aria2-protocol's SFTP support.
+# feature is enabled (we don't use it).
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"], default-features = false }
 rand.workspace = true
 regex = "1"
@@ -125,7 +124,8 @@ base64.workspace = true
 aria2-protocol.workspace = true
 # Local SFTP E2E fixture. Reuses the production lockfile version and stays
 # test-only so it does not expand the engine's runtime dependency surface.
-russh = { version = "0.59", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.61", default-features = false, features = ["ring", "rsa"] }
+getrandom = "0.4"
 # sysinfo is used by the memory-footprint regression test (Phase F6) to sample
 # the process RSS while writing a file via PositionedDiskWriter. Pinned to 0.30
 # where `Process::memory()` returns bytes (in newer versions the API was split
