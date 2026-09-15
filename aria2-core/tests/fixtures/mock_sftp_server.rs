@@ -12,7 +12,7 @@ use aria2_protocol::sftp::packet::{
 };
 use russh::ChannelId;
 use russh::keys::PrivateKey;
-use russh::keys::ssh_key::{self, rand_core::OsRng};
+use russh::keys::ssh_key::{self, rand_core::UnwrapErr};
 use russh::server::{self, Auth, Msg, Session};
 use sha1::{Digest, Sha1};
 use tokio::net::TcpListener;
@@ -76,7 +76,7 @@ impl MockSftpServer {
         let stat_requests = Arc::new(AtomicUsize::new(0));
         let read_requests = Arc::new(AtomicUsize::new(0));
 
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(getrandom::SysRng);
         let host_key = PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
             .expect("mock SFTP host key should generate");
         let public_key_bytes = host_key
