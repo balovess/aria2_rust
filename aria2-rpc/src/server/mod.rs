@@ -9,7 +9,8 @@
 //! - [`cors`] — `CorsConfig`.
 //! - [`tls`] — `TlsConfig` and `TlsError`.
 //! - [`config`] — `ServerConfig` aggregation.
-//! - [`http_routes`] — `RpcServer` and the axum HTTP route handlers.
+//! - [`http_routes`] — `RpcServer`, listener ownership, and HTTP/TLS serving.
+//! - [`http_handlers`] — CORS, authentication, and JSON/XML/GET handlers.
 //! - [`ws_session`] — WebSocket upgrade, inbound JSON-RPC dispatch, and
 //!   outbound event forwarding.
 //! - [`test_cert`] — `generate_test_cert()` test utility.
@@ -17,6 +18,7 @@
 mod auth;
 mod config;
 mod cors;
+mod http_handlers;
 mod http_routes;
 mod test_cert;
 mod tls;
