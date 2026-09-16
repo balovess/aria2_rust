@@ -24,19 +24,46 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
+    fn from_parts(
+        config: ServerConfig,
+        tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+        engine: Arc<RpcEngine>,
+    ) -> Self {
+        Self {
+            config,
+            tls_acceptor,
+            engine,
+        }
+    }
+
+    fn load_tls_acceptor(
+        config: &ServerConfig,
+    ) -> Result<Option<tokio_rustls::TlsAcceptor>, TlsError> {
+        config
+            .tls
+            .as_ref()
+            .map(|tls_config| {
+                tls_config
+                    .load_server_config()
+                    .map(tokio_rustls::TlsAcceptor::from)
+            })
+            .transpose()
+    }
+
+    fn from_config_and_engine(
+        config: ServerConfig,
+        engine: Arc<RpcEngine>,
+    ) -> Result<Self, TlsError> {
+        let tls_acceptor = Self::load_tls_acceptor(&config)?;
+        Ok(Self::from_parts(config, tls_acceptor, engine))
+    }
+
     /// Create a new RPC server with the given configuration.
     ///
     /// # Errors
     ///
     /// Returns an error if TLS configuration is provided but fails to load.
     pub fn new(config: ServerConfig) -> Result<Self, TlsError> {
-        let tls_acceptor = if let Some(ref tls_config) = config.tls {
-            let server_config = tls_config.load_server_config()?;
-            Some(tokio_rustls::TlsAcceptor::from(server_config))
-        } else {
-            None
-        };
-
         let engine = if let Some(token) = config.auth.token.as_deref() {
             Arc::new(
                 RpcEngine::new().with_auth_middleware(super::auth::RpcAuthMiddleware::new(token)),
@@ -45,38 +72,23 @@ impl RpcServer {
             Arc::new(RpcEngine::new())
         };
 
-        Ok(Self {
-            config,
-            tls_acceptor,
-            engine,
-        })
+        Self::from_config_and_engine(config, engine)
     }
 
     /// Create a new RPC server with a pre-configured shared engine.
     /// Use this when the caller has already set up `group_man` and `cmd_tx`
     /// on the engine (e.g., when wiring to a running DownloadEngine).
     pub fn new_with_engine(config: ServerConfig, engine: Arc<RpcEngine>) -> Result<Self, TlsError> {
-        let tls_acceptor = if let Some(ref tls_config) = config.tls {
-            let server_config = tls_config.load_server_config()?;
-            Some(tokio_rustls::TlsAcceptor::from(server_config))
-        } else {
-            None
-        };
-
-        Ok(Self {
-            config,
-            tls_acceptor,
-            engine,
-        })
+        Self::from_config_and_engine(config, engine)
     }
 
     /// Create a new HTTP RPC server (no TLS).
     pub fn new_http(host: impl Into<String>, port: u16) -> Self {
-        Self {
-            config: ServerConfig::default().with_host(host).with_port(port),
-            tls_acceptor: None,
-            engine: Arc::new(RpcEngine::new()),
-        }
+        Self::from_parts(
+            ServerConfig::default().with_host(host).with_port(port),
+            None,
+            Arc::new(RpcEngine::new()),
+        )
     }
 
     /// Create a new HTTPS RPC server with TLS.
@@ -91,17 +103,11 @@ impl RpcServer {
         key_path: impl Into<String>,
     ) -> Result<Self, TlsError> {
         let tls_config = TlsConfig::new(cert_path, key_path);
-        let server_config = tls_config.load_server_config()?;
-        let tls_acceptor = tokio_rustls::TlsAcceptor::from(server_config);
-
-        Ok(Self {
-            config: ServerConfig::default()
-                .with_host(host)
-                .with_port(port)
-                .with_tls(tls_config),
-            tls_acceptor: Some(tls_acceptor),
-            engine: Arc::new(RpcEngine::new()),
-        })
+        let config = ServerConfig::default()
+            .with_host(host)
+            .with_port(port)
+            .with_tls(tls_config);
+        Self::from_config_and_engine(config, Arc::new(RpcEngine::new()))
     }
 
     /// Get the server address string.

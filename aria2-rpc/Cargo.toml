@@ -1,6 +1,6 @@
 [package]
 name = "aria2-rpc"
-version = "0.3.5"
+version = "0.3.6"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -15,19 +15,16 @@ include = ["src/**/*", "../README.md", "../LICENSE"]
 
 [dependencies]
 tokio.workspace = true
-tokio-util.workspace = true
 futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true
 tracing.workspace = true
 bytes.workspace = true
 async-trait.workspace = true
 
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }
-tungstenite = "0.20"
 base64.workspace = true
 quick-xml = "0.31"
 url = "2.5"

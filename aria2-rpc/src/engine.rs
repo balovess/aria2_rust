@@ -16,7 +16,7 @@ use crate::backend::{
 };
 use crate::handlers::{self, backend_error};
 use crate::json_rpc::{JsonRpcRequest, JsonRpcResponse, JsonRpcWireEntry};
-use crate::server::{AuthConfig, CorsConfig, RpcAuthMiddleware};
+use crate::server::{AuthConfig, RpcAuthMiddleware};
 use crate::types::SessionInfo;
 use crate::websocket::EventPublisher;
 
@@ -246,10 +246,6 @@ impl RpcEngine {
 
     pub fn with_auth_middleware(mut self, middleware: RpcAuthMiddleware) -> Self {
         self.auth_middleware = middleware;
-        self
-    }
-
-    pub fn with_cors(self, _cors: CorsConfig) -> Self {
         self
     }
 

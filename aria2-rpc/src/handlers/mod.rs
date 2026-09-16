@@ -7,7 +7,6 @@
 pub mod bittorrent;
 pub mod options;
 pub mod status;
-pub mod system;
 pub mod task;
 
 use crate::backend::{BackendError, BackendEvent};

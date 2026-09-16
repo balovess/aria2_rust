@@ -31,25 +31,6 @@ fn decode_rpc_payload(input: String) -> Result<Vec<u8>, JsonRpcError> {
         .map_err(|error| JsonRpcError::InvalidParams(format!("base64 decode failed: {error}")))
 }
 
-fn validate_torrent(data: &[u8]) -> Result<(), JsonRpcError> {
-    if data.len() < 3 || data[0] != b'd' || data[1] != b'8' || data[2] != b':' {
-        return Err(JsonRpcError::InvalidParams(
-            "Invalid BEncode data (not a .torrent file)".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_metalink(data: &[u8]) -> Result<(), JsonRpcError> {
-    let preview = String::from_utf8_lossy(&data[..data.len().min(200)]).to_ascii_lowercase();
-    if !preview.contains("<metalink") && !preview.contains("urn:ietf:params:xml:ns:metalink") {
-        return Err(JsonRpcError::InvalidParams(
-            "Invalid Metalink XML data".into(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn parse_add_uri(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     let uris = req.take_param::<Vec<String>>(0)?;
     let options = req
@@ -73,7 +54,7 @@ pub(crate) fn parse_add_torrent(req: &mut JsonRpcRequest) -> Result<BackendReque
         .unwrap_or_default();
     let position = optional_position(req, 3)?;
     let data = decode_rpc_payload(encoded)?;
-    validate_torrent(&data)?;
+    // Torrent syntax is domain data; the backend owns parsing and validation.
     Ok(BackendRequest::AddTorrent {
         data,
         additional_uris,
@@ -89,7 +70,7 @@ pub(crate) fn parse_add_metalink(req: &mut JsonRpcRequest) -> Result<BackendRequ
         .unwrap_or_default();
     let position = optional_position(req, 2)?;
     let data = decode_rpc_payload(encoded)?;
-    validate_metalink(&data)?;
+    // Metalink syntax is domain data; the backend owns parsing and validation.
     Ok(BackendRequest::AddMetalink {
         data,
         options,
@@ -180,4 +161,37 @@ pub(crate) fn parse_save_session(_req: &mut JsonRpcRequest) -> BackendRequest {
 
 pub(crate) fn parse_shutdown(_req: &mut JsonRpcRequest, force: bool) -> BackendRequest {
     BackendRequest::Shutdown { force }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use serde_json::json;
+
+    #[test]
+    fn add_torrent_parser_leaves_content_validation_to_backend() {
+        let data = b"not a torrent document".to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let mut request = JsonRpcRequest::new("aria2.addTorrent", json!([encoded]));
+
+        let parsed = parse_add_torrent(&mut request).expect("payload should be decoded");
+        assert!(matches!(
+            parsed,
+            BackendRequest::AddTorrent { data: parsed, .. } if parsed == data
+        ));
+    }
+
+    #[test]
+    fn add_metalink_parser_leaves_content_validation_to_backend() {
+        let data = b"not an XML document".to_vec();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let mut request = JsonRpcRequest::new("aria2.addMetalink", json!([encoded]));
+
+        let parsed = parse_add_metalink(&mut request).expect("payload should be decoded");
+        assert!(matches!(
+            parsed,
+            BackendRequest::AddMetalink { data: parsed, .. } if parsed == data
+        ));
+    }
 }
