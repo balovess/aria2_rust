@@ -81,6 +81,14 @@ impl CoreRpcBackend {
         BackendError::Execution(message.into())
     }
 
+    #[cfg(feature = "bittorrent")]
+    fn validate_torrent_data(data: &[u8]) -> Result<(), BackendError> {
+        if data.len() < 3 || data[0] != b'd' || data[1] != b'8' || data[2] != b':' {
+            return Err(Self::invalid("Invalid BEncode data (not a .torrent file)"));
+        }
+        Ok(())
+    }
+
     fn parse_gid(gid: &str) -> Result<GroupId, BackendError> {
         GroupId::from_hex_string(gid).ok_or_else(|| Self::invalid("Invalid GID"))
     }
@@ -188,6 +196,7 @@ impl CoreRpcBackend {
 
         #[cfg(feature = "bittorrent")]
         {
+            Self::validate_torrent_data(&data)?;
             let (download_options, snapshot) = self.merged_task_options(options).await?;
             let gid = self.group_man.next_available_gid();
             let mut uris = Vec::with_capacity(1 + additional_uris.len());
