@@ -1,6 +1,11 @@
 use super::*;
 
-/// Process all pending task completion notifications.
+enum ProcessedTaskResult {
+    Success,
+    Failed(Aria2Error),
+    Cancelled,
+}
+
 pub(super) fn map_error_code(error: &Aria2Error) -> DownloadResultCode {
     match error {
         Aria2Error::Recoverable(RecoverableError::Timeout) => DownloadResultCode::TimeOut,
@@ -100,6 +105,145 @@ impl<R: CompletionQueue> CompletionQueue for PrefetchedCompletion<'_, R> {
     }
 }
 
+/// Apply the lifecycle transition that belongs to one completed command.
+///
+/// Keeping this decision separate from channel accounting makes the event loop
+/// responsible for orchestration while the completion state machine stays local.
+fn apply_completion_state(
+    group: &std::sync::Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>,
+    result: ProcessedTaskResult,
+    last_command: bool,
+) {
+    let group = group.recover();
+
+    match result {
+        ProcessedTaskResult::Success if last_command => {
+            let had_failure = group
+                .command_failure
+                .load(std::sync::atomic::Ordering::Acquire);
+            if had_failure {
+                let message = group.get_last_error_message();
+                let code = group.get_last_error_code();
+                group.mark_error_with_code(code, message);
+            } else {
+                let was_pause_requested = group.is_pause_requested() || group.is_paused_flag();
+                let halt_reason = group.get_halt_reason();
+
+                if matches!(halt_reason, HaltReason::None) && was_pause_requested {
+                    // A pause can race with a command finishing cleanly.
+                    // Preserve the resumable state instead of turning
+                    // the pause into a terminal completion.
+                    group.mark_paused();
+                } else {
+                    match halt_reason {
+                        HaltReason::UserRequest => group.mark_removed(),
+                        HaltReason::Timeout => group.mark_timeout(),
+                        HaltReason::ShutdownSignal => {}
+                        HaltReason::None => group.mark_complete(),
+                    }
+                }
+            }
+        }
+        ProcessedTaskResult::Success => {
+            // C++ removes a RequestGroup only after its final
+            // AbstractCommand is destroyed. Keep the group active
+            // while other command instances are still running.
+        }
+        ProcessedTaskResult::Failed(error) if !last_command => {
+            // A non-final command failure is recorded for the group,
+            // but terminal state is deferred until all commands have
+            // exited, matching C++ numCommand_ semantics.
+            let message = error.to_string();
+            let code = map_error_code(&error);
+            group.set_last_error(code, message);
+            group
+                .command_failure
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        ProcessedTaskResult::Failed(error) => {
+            // Handle failures from the final command, including pause-induced
+            // termination, before treating them as errors.
+            // The pause command marks the group Paused and the download loop
+            // aborts via check_cancelled; it must remain resumable rather
+            // than being recorded as an error that can never be unpaused.
+            // Mirrors C++ where pause-requested groups return to the
+            // reserved queue.
+            let was_pause_requested = group.is_pause_requested() || group.is_paused_flag();
+            let is_pause_error = matches!(
+                &error,
+                Aria2Error::DownloadFailed(message) if message == "Download paused"
+            );
+            let halt_reason = group.get_halt_reason();
+
+            match halt_reason {
+                // A user removal is terminal even when a pause command
+                // reached the group first. The halt reason is the
+                // stronger lifecycle signal and must win over the
+                // resumable Paused status.
+                HaltReason::UserRequest => group.mark_removed(),
+                HaltReason::Timeout => group.mark_timeout(),
+                HaltReason::ShutdownSignal => {
+                    // A shutdown halt remains non-terminal so its
+                    // result maps to IN_PROGRESS after cleanup.
+                }
+                HaltReason::None if was_pause_requested => {
+                    group.mark_paused();
+                }
+                HaltReason::None if is_pause_error => {
+                    // A pause was requested and then undone before the task
+                    // fully exited. Leave the group Waiting so the demotion
+                    // layer re-queues it and promotion re-spawns the download.
+                    let status = group.status();
+                    if !matches!(
+                        status,
+                        DownloadStatus::Complete
+                            | DownloadStatus::Error(_)
+                            | DownloadStatus::Removed
+                    ) {
+                        group.mark_waiting();
+                    }
+                }
+                HaltReason::None => {
+                    group.mark_error_with_code(map_error_code(&error), error.to_string());
+                }
+            }
+            group
+                .command_failure
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        ProcessedTaskResult::Cancelled => {
+            // Synthetic cancellation is emitted before Tokio abort, so
+            // finalize the group here rather than relying on the
+            // cancelled task to mutate its status.
+            let was_pause_requested = group.is_pause_requested() || group.is_paused_flag();
+            let halt_reason = group.get_halt_reason();
+
+            if matches!(halt_reason, HaltReason::UserRequest | HaltReason::Timeout) {
+                // Removal/timeout is terminal even if the task was
+                // paused when the force-halt arrived.
+                if last_command {
+                    match halt_reason {
+                        HaltReason::UserRequest => group.mark_removed(),
+                        HaltReason::Timeout => group.mark_timeout(),
+                        _ => unreachable!(),
+                    }
+                } else {
+                    group
+                        .command_failure
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+            } else if was_pause_requested {
+                group.mark_paused();
+            } else if !last_command {
+                group
+                    .command_failure
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+}
+
+/// Process all pending task completion notifications.
 pub(super) async fn process_task_completions<R: CompletionQueue>(
     ctx: &EngineLoopContext,
     completion_rx: &mut R,
@@ -157,153 +301,7 @@ pub(super) async fn process_task_completions<R: CompletionQueue>(
                 TaskResult::Cancelled => ProcessedTaskResult::Cancelled,
             };
 
-            match result {
-                ProcessedTaskResult::Success if last_command => {
-                    let had_failure = group
-                        .recover()
-                        .command_failure
-                        .load(std::sync::atomic::Ordering::Acquire);
-                    if had_failure {
-                        let message = group.recover().get_last_error_message();
-                        let code = group.recover().get_last_error_code();
-                        group.recover().mark_error_with_code(code, message);
-                    } else {
-                        let group_state = group.recover();
-                        let was_pause_requested =
-                            group_state.is_pause_requested() || group_state.is_paused_flag();
-                        let halt_reason = group_state.get_halt_reason();
-                        drop(group_state);
-
-                        if matches!(halt_reason, HaltReason::None) && was_pause_requested {
-                            // A pause can race with a command finishing cleanly.
-                            // Preserve the resumable state instead of turning
-                            // the pause into a terminal completion.
-                            group.recover().mark_paused();
-                        } else {
-                            match halt_reason {
-                                crate::request::request_group::HaltReason::UserRequest => {
-                                    group.recover().mark_removed();
-                                }
-                                crate::request::request_group::HaltReason::Timeout => {
-                                    group.recover().mark_timeout();
-                                }
-                                crate::request::request_group::HaltReason::ShutdownSignal => {}
-                                crate::request::request_group::HaltReason::None => {
-                                    group.recover_mut().mark_complete();
-                                }
-                            }
-                        }
-                    }
-                }
-                ProcessedTaskResult::Success => {
-                    // C++ removes a RequestGroup only after its final
-                    // AbstractCommand is destroyed. Keep the group active
-                    // while other command instances are still running.
-                }
-                ProcessedTaskResult::Failed(e) if !last_command => {
-                    // A non-final command failure is recorded for the group,
-                    // but terminal state is deferred until all commands have
-                    // exited, matching C++ numCommand_ semantics.
-                    let message = e.to_string();
-                    let code = map_error_code(&e);
-                    group.recover().set_last_error(code, message);
-                    group
-                        .recover()
-                        .command_failure
-                        .store(true, std::sync::atomic::Ordering::Release);
-                }
-                ProcessedTaskResult::Failed(e) => {
-                    // Handle failures from the final command, including pause-induced
-                    // termination, before treating them as errors.
-                    // (`aria2.pause` / `aria2.forcePause`
-                    // marks the group Paused and the download loop aborts via
-                    // check_cancelled) must leave the group Paused — resumable —
-                    // rather than recording an Error that can never be unpaused.
-                    // Mirrors C++ where pause-requested groups return to the
-                    // reserved queue.
-                    let group_state = group.recover();
-                    let was_pause_requested =
-                        group_state.is_pause_requested() || group_state.is_paused_flag();
-                    let is_pause_error = matches!(
-                        &e,
-                        Aria2Error::DownloadFailed(msg) if msg == "Download paused"
-                    );
-                    let halt_reason = group_state.get_halt_reason();
-                    drop(group_state);
-
-                    match halt_reason {
-                        // A user removal is terminal even when a pause command
-                        // reached the group first. The halt reason is the
-                        // stronger lifecycle signal and must win over the
-                        // resumable Paused status.
-                        HaltReason::UserRequest => group.recover().mark_removed(),
-                        HaltReason::Timeout => group.recover().mark_timeout(),
-                        HaltReason::ShutdownSignal => {
-                            // A shutdown halt remains non-terminal so its
-                            // result maps to IN_PROGRESS after cleanup.
-                        }
-                        HaltReason::None if was_pause_requested => {
-                            group.recover_mut().mark_paused();
-                        }
-                        HaltReason::None if is_pause_error => {
-                            // A pause was requested and then undone (`unpause`)
-                            // before the task fully exited. Leave the group
-                            // Waiting so the demotion layer re-queues it and
-                            // promotion re-spawns the download.
-                            let status = group.recover().status();
-                            if !matches!(
-                                status,
-                                DownloadStatus::Complete
-                                    | DownloadStatus::Error(_)
-                                    | DownloadStatus::Removed
-                            ) {
-                                group.recover().mark_waiting();
-                            }
-                        }
-                        HaltReason::None => group
-                            .recover()
-                            .mark_error_with_code(map_error_code(&e), e.to_string()),
-                    }
-                    group
-                        .recover()
-                        .command_failure
-                        .store(false, std::sync::atomic::Ordering::Release);
-                }
-                ProcessedTaskResult::Cancelled => {
-                    // Synthetic cancellation is emitted before Tokio abort, so
-                    // finalize the group here rather than relying on the
-                    // cancelled task to mutate its status.
-                    let group_state = group.recover();
-                    let was_pause_requested =
-                        group_state.is_pause_requested() || group_state.is_paused_flag();
-                    let halt_reason = group_state.get_halt_reason();
-                    drop(group_state);
-
-                    if matches!(halt_reason, HaltReason::UserRequest | HaltReason::Timeout) {
-                        // Removal/timeout is terminal even if the task was
-                        // paused when the force-halt arrived.
-                        if last_command {
-                            match halt_reason {
-                                HaltReason::UserRequest => group.recover().mark_removed(),
-                                HaltReason::Timeout => group.recover().mark_timeout(),
-                                _ => unreachable!(),
-                            }
-                        } else {
-                            group
-                                .recover()
-                                .command_failure
-                                .store(true, std::sync::atomic::Ordering::Release);
-                        }
-                    } else if was_pause_requested {
-                        group.recover_mut().mark_paused();
-                    } else if !last_command {
-                        group
-                            .recover()
-                            .command_failure
-                            .store(true, std::sync::atomic::Ordering::Release);
-                    }
-                }
-            }
+            apply_completion_state(&group, result, last_command);
         }
     }
     processed

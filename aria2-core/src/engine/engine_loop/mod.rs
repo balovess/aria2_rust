@@ -71,12 +71,6 @@ async fn mark_failed_connection(
     }
 }
 
-enum ProcessedTaskResult {
-    Success,
-    Failed(Aria2Error),
-    Cancelled,
-}
-
 /// Context passed into the engine loop, holding shared state that the
 /// loop needs to coordinate between EngineCommand processing, promotion,
 /// demotion, and deadline-driven maintenance.
