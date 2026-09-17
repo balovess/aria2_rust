@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{DownloadResultCode, HaltReason};
@@ -8,7 +9,7 @@ use crate::util::rwlock_ext::RwLockRecover;
 use tracing::{debug, info, warn};
 
 use super::super::peer_events::NewPeerConnectionsContext;
-use super::PieceDownloadSession;
+use super::{PieceDownloadSession, PieceLoopAction};
 
 impl PieceDownloadSession<'_> {
     pub(super) async fn run(mut self) -> Result<()> {
@@ -146,23 +147,7 @@ impl PieceDownloadSession<'_> {
                         self.total_size,
                     )
                     .await;
-                let mut context = NewPeerConnectionsContext {
-                    peer_last_data_time: &mut self.peer_last_data_time,
-                    pex_enabled_peers: self.pex_enabled_peers,
-                    allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
-                    suggest_sent_counts: &mut self.command.suggest_sent_counts,
-                    peer_tracker: &mut self.peer_tracker,
-                    choking_algo: &mut self.command.choking_algo,
-                };
-                let connected = BtDownloadCommand::append_new_connections(
-                    self.active_connections,
-                    new_connections,
-                    self.command.group.recover().options().bt_max_peers,
-                    self.command.is_private,
-                    &mut context,
-                    &self.command.peer_storage,
-                    self.command.group.recover().gid().value(),
-                );
+                let connected = self.append_new_connections(new_connections);
                 if connected > 0 {
                     info!("[PEX] Successfully connected to {} new peers", connected);
                     let group = self.command.group.recover();
@@ -204,23 +189,7 @@ impl PieceDownloadSession<'_> {
                             self.total_size,
                         )
                         .await;
-                    let mut context = NewPeerConnectionsContext {
-                        peer_last_data_time: &mut self.peer_last_data_time,
-                        pex_enabled_peers: self.pex_enabled_peers,
-                        allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
-                        suggest_sent_counts: &mut self.command.suggest_sent_counts,
-                        peer_tracker: &mut self.peer_tracker,
-                        choking_algo: &mut self.command.choking_algo,
-                    };
-                    let connected = BtDownloadCommand::append_new_connections(
-                        self.active_connections,
-                        new_connections,
-                        self.command.group.recover().options().bt_max_peers,
-                        self.command.is_private,
-                        &mut context,
-                        &self.command.peer_storage,
-                        self.command.group.recover().gid().value(),
-                    );
+                    let connected = self.append_new_connections(new_connections);
                     if connected > 0 {
                         info!("[BT] Connected to {} new peers", connected);
                         let group = self.command.group.recover();
@@ -262,23 +231,7 @@ impl PieceDownloadSession<'_> {
                         self.total_size,
                     )
                     .await;
-                let mut context = NewPeerConnectionsContext {
-                    peer_last_data_time: &mut self.peer_last_data_time,
-                    pex_enabled_peers: self.pex_enabled_peers,
-                    allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
-                    suggest_sent_counts: &mut self.command.suggest_sent_counts,
-                    peer_tracker: &mut self.peer_tracker,
-                    choking_algo: &mut self.command.choking_algo,
-                };
-                let connected = BtDownloadCommand::append_new_connections(
-                    self.active_connections,
-                    new_connections,
-                    self.command.group.recover().options().bt_max_peers,
-                    self.command.is_private,
-                    &mut context,
-                    &self.command.peer_storage,
-                    self.command.group.recover().gid().value(),
-                );
+                let connected = self.append_new_connections(new_connections);
                 if connected > 0 {
                     info!("[BT] Connected to {} DHT-discovered peers", connected);
                     let group = self.command.group.recover();
@@ -375,20 +328,24 @@ impl PieceDownloadSession<'_> {
                 }
             };
 
-            self.download_piece(next_piece_idx).await?;
-            {
-                self.command
-                    .progress
-                    .set_completed_length(self.command.completed_bytes);
+            if matches!(
+                self.download_piece(next_piece_idx).await?,
+                PieceLoopAction::RefreshProgress
+            ) {
+                {
+                    self.command
+                        .progress
+                        .set_completed_length(self.command.completed_bytes);
 
-                let elapsed = self.last_speed_update.elapsed();
-                if elapsed.as_millis() >= 500 {
-                    let delta = self.command.completed_bytes - self.last_completed;
-                    let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-                    self.command.progress.set_download_speed(speed);
-                    self.command.progress.set_upload_speed(0);
-                    self.last_speed_update = Instant::now();
-                    self.last_completed = self.command.completed_bytes;
+                    let elapsed = self.last_speed_update.elapsed();
+                    if elapsed.as_millis() >= 500 {
+                        let delta = self.command.completed_bytes - self.last_completed;
+                        let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
+                        self.command.progress.set_download_speed(speed);
+                        self.command.progress.set_upload_speed(0);
+                        self.last_speed_update = Instant::now();
+                        self.last_completed = self.command.completed_bytes;
+                    }
                 }
             }
         }
@@ -412,5 +369,30 @@ impl PieceDownloadSession<'_> {
         );
 
         Ok(())
+    }
+}
+
+impl PieceDownloadSession<'_> {
+    fn append_new_connections(&mut self, new_connections: Vec<BtPeerConn>) -> usize {
+        let max_peers = self.command.group.recover().options().bt_max_peers;
+        let caretaker_id = self.command.group.recover().gid().value();
+        let is_private = self.command.is_private;
+        let mut context = NewPeerConnectionsContext {
+            peer_last_data_time: &mut self.peer_last_data_time,
+            pex_enabled_peers: self.pex_enabled_peers,
+            allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
+            suggest_sent_counts: &mut self.command.suggest_sent_counts,
+            peer_tracker: &mut self.peer_tracker,
+            choking_algo: &mut self.command.choking_algo,
+        };
+        BtDownloadCommand::append_new_connections(
+            self.active_connections,
+            new_connections,
+            max_peers,
+            is_private,
+            &mut context,
+            &self.command.peer_storage,
+            caretaker_id,
+        )
     }
 }

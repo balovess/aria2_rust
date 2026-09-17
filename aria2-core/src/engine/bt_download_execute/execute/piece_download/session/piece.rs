@@ -9,11 +9,14 @@ use crate::request::request_group::DownloadResultCode;
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::info;
 
-use super::PieceDownloadSession;
+use super::{PieceDownloadSession, PieceLoopAction};
 use crate::engine::bt_download_execute::types::PeerKey;
 
 impl PieceDownloadSession<'_> {
-    pub(super) async fn download_piece(&mut self, next_piece_idx: usize) -> Result<()> {
+    pub(super) async fn download_piece(
+        &mut self,
+        next_piece_idx: usize,
+    ) -> Result<PieceLoopAction> {
         tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
 
         let actual_piece_len =
@@ -121,7 +124,7 @@ impl PieceDownloadSession<'_> {
                     // updates share this notifier. Retry the interrupted
                     // piece so its normal completion boundary can consume
                     // the requested checkpoint.
-                    return Ok(());
+                    return Ok(PieceLoopAction::Retry);
                 }
 
                 self.writer.flush().await.map_err(|error| {
@@ -387,12 +390,12 @@ impl PieceDownloadSession<'_> {
                     // missing piece may become available after the next tracker,
                     // DHT, PEX, or incoming-peer event, so keep the download
                     // resumable and let bt-stop-timeout provide the final bound.
-                    return Ok(());
+                    return Ok(PieceLoopAction::Retry);
                 }
                 return Err(Aria2Error::Fatal(FatalError::Config(failure_message)));
             }
         }
-        Ok(())
+        Ok(PieceLoopAction::RefreshProgress)
     }
 }
 

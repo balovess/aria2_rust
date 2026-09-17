@@ -16,6 +16,7 @@ use super::PieceDownloadSession;
 use crate::engine::bt_download_execute::types::{EndgameState, PeerKey};
 
 impl<'a> PieceDownloadSession<'a> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         command: &'a mut BtDownloadCommand,
         active_connections: &'a mut Vec<BtPeerConn>,

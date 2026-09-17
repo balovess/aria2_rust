@@ -21,7 +21,7 @@ mod run;
 pub(super) struct PieceDownloadSession<'a> {
     pub(super) command: &'a mut BtDownloadCommand,
     pub(super) active_connections: &'a mut Vec<BtPeerConn>,
-    pub(super) meta: &'a mut aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+    pub(super) meta: &'a aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
     pub(super) piece_length: u32,
     pub(super) total_size: u64,
     pub(super) num_pieces: u32,
@@ -47,7 +47,15 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) stop_timeout: BtStopTimeoutState,
 }
 
+/// Tells the outer loop whether this piece iteration reached its normal
+/// progress-update boundary or should be retried immediately.
+pub(super) enum PieceLoopAction {
+    RefreshProgress,
+    Retry,
+}
+
 impl BtDownloadCommand {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::engine::bt_download_execute::execute) async fn download_pieces_loop(
         &mut self,
         active_connections: &mut Vec<BtPeerConn>,
