@@ -69,7 +69,7 @@ impl FtpNegotiator {
         info!("Connected to FTP server {}:{}", host, port);
 
         // Authenticate using shared helper
-        super::parsing::authenticate(&mut ctrl, username, password).await?;
+        super::fresh_commands::authenticate(&mut ctrl, username, password).await?;
 
         // Query server capabilities via FEAT command
         let capabilities = capabilities::query_feat(&mut ctrl).await?;

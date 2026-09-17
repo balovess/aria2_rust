@@ -107,6 +107,7 @@ fn test_percent_decode_basic() {
 fn test_percent_decode_utf8() {
     // Chinese character for "file" encoded in UTF-8 percent-encoding
     assert_eq!(percent_decode("%E6%96%87%E4%BB%B6"), "文件");
+    assert_eq!(percent_decode("文件.txt"), "文件.txt");
 }
 
 #[test]

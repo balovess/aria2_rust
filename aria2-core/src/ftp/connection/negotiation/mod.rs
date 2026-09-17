@@ -34,8 +34,10 @@
 
 mod capabilities;
 mod control;
+mod fresh_commands;
 mod fresh_flow;
 mod parsing;
+mod pooled_commands;
 mod pooled_flow;
 
 #[cfg(test)]
@@ -48,10 +50,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::ftp::connection::negotiation::control::PooledControl;
-use crate::ftp::connection::negotiation::parsing::{
-    cwd_traversal_pooled, extract_directory_part, extract_file_part, query_mdtm_pooled,
-    query_size_pooled, send_rest_pooled, send_retr_pooled,
-};
+use crate::ftp::connection::negotiation::parsing::{extract_directory_part, extract_file_part};
 use crate::ftp::connection::types::FtpMode;
 
 // Re-export public types from submodules
@@ -245,27 +244,27 @@ impl FtpNegotiator {
 
         // Step 6: TYPE (binary or ASCII, per config)
         let is_binary = transfer_type == FtpTransferType::Binary;
-        parsing::set_transfer_mode(&mut ctrl, is_binary).await?;
+        fresh_commands::set_transfer_mode(&mut ctrl, is_binary).await?;
 
         // Step 7: PWD -> baseWorkingDir
-        let base_working_dir = parsing::query_pwd(&mut ctrl).await?;
+        let base_working_dir = fresh_commands::query_pwd(&mut ctrl).await?;
         info!("Base working directory: {}", base_working_dir);
 
         // Step 8: CWD traversal
         let dir_part = extract_directory_part(&remote_path);
-        parsing::cwd_traversal(&mut ctrl, &base_working_dir, &dir_part).await?;
+        fresh_commands::cwd_traversal(&mut ctrl, &base_working_dir, &dir_part).await?;
 
         // Step 9: MDTM (if remote_time enabled and server supports it)
         let modification_time = if remote_time {
             let file_part = extract_file_part(&remote_path);
-            parsing::query_mdtm(&mut ctrl, &file_part).await?
+            fresh_commands::query_mdtm(&mut ctrl, &file_part).await?
         } else {
             None
         };
 
         // Step 10: SIZE
         let file_part = extract_file_part(&remote_path);
-        let file_size = parsing::query_size(&mut ctrl, &file_part).await?;
+        let file_size = fresh_commands::query_size(&mut ctrl, &file_part).await?;
 
         // Step 11: Data connection
         let data_stream = match mode {
@@ -310,10 +309,10 @@ impl FtpNegotiator {
         // Step 12: REST (after data connection established, per C++ ordering)
         // C++ always sends REST, even REST 0 (FtpConnection.cc:234-245).
         // The send_rest function handles REST 0 rejection gracefully.
-        parsing::send_rest(&mut ctrl, resume_offset).await?;
+        fresh_commands::send_rest(&mut ctrl, resume_offset).await?;
 
         // Step 13: RETR
-        parsing::send_retr(&mut ctrl, &file_part).await?;
+        fresh_commands::send_retr(&mut ctrl, &file_part).await?;
 
         // Build result - detach the control stream
         let ctrl_reader = ctrl.reader;
@@ -367,19 +366,19 @@ impl FtpNegotiator {
 
         // Step 8: CWD traversal (skip connect + auth + FEAT + SYST + TYPE + PWD for pooled)
         let dir_part = extract_directory_part(&remote_path);
-        cwd_traversal_pooled(&mut ctrl, &base_working_dir, &dir_part).await?;
+        pooled_commands::cwd_traversal_pooled(&mut ctrl, &base_working_dir, &dir_part).await?;
 
         // Step 9: MDTM
         let modification_time = if remote_time {
             let file_part = extract_file_part(&remote_path);
-            query_mdtm_pooled(&mut ctrl, &file_part).await?
+            pooled_commands::query_mdtm_pooled(&mut ctrl, &file_part).await?
         } else {
             None
         };
 
         // Step 10: SIZE
         let file_part = extract_file_part(&remote_path);
-        let file_size = query_size_pooled(&mut ctrl, &file_part).await?;
+        let file_size = pooled_commands::query_size_pooled(&mut ctrl, &file_part).await?;
 
         // Step 11: Data connection
         let data_stream = match mode {
@@ -414,10 +413,10 @@ impl FtpNegotiator {
 
         // Step 12: REST
         // C++ always sends REST, even REST 0 (FtpConnection.cc:234-245).
-        send_rest_pooled(&mut ctrl, resume_offset).await?;
+        pooled_commands::send_rest_pooled(&mut ctrl, resume_offset).await?;
 
         // Step 13: RETR
-        send_retr_pooled(&mut ctrl, &file_part).await?;
+        pooled_commands::send_retr_pooled(&mut ctrl, &file_part).await?;
 
         let result = FtpNegotiationResult {
             data_stream,
