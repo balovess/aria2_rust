@@ -21,13 +21,6 @@ pub use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
 
 use std::collections::HashSet;
 
-pub(super) use checkpoint::{
-    completed_piece_bytes, initial_bt_progress, legacy_progress_piece_indices,
-    snapshot_completed_bitfield,
-};
-pub(super) use environment::parse_listen_ports;
-pub(super) use hash_verification::verify_piece_hash_async;
-
 pub(crate) fn deduplicate_tracker_tiers(tiers: Vec<Vec<String>>) -> Vec<Vec<String>> {
     let mut seen = HashSet::new();
     tiers

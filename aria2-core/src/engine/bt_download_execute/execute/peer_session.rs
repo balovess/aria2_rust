@@ -10,7 +10,7 @@ use crate::error::{Aria2Error, FatalError};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::parse_listen_ports;
+use super::environment::parse_listen_ports;
 
 pub(super) struct PeerSession {
     pub(super) active_connections: Vec<BtPeerConn>,

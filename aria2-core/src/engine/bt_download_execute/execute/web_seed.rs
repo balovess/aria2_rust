@@ -53,7 +53,8 @@ pub(super) async fn try_web_seed_fallback(
             // seed response cannot monopolize the download task.
             let expected_hash = piece_manager.expected_piece_verification(next_piece_idx as u32);
             let (verified, web_seed_data) =
-                super::verify_piece_hash_async(expected_hash, web_seed_data).await?;
+                super::hash_verification::verify_piece_hash_async(expected_hash, web_seed_data)
+                    .await?;
             if verified {
                 tracing::info!("[BT] Piece {} from web seed verified OK", next_piece_idx);
                 piece_manager.mark_piece_complete(next_piece_idx as u32);

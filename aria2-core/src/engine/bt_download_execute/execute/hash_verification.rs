@@ -21,7 +21,7 @@ fn piece_hash_semaphore() -> &'static Arc<Semaphore> {
 ///
 /// The owned payload is returned so callers can write it after verification
 /// without allocating a second piece-sized buffer.
-pub(crate) async fn verify_piece_hash_async(
+pub(super) async fn verify_piece_hash_async(
     expected: Option<crate::engine::bt_piece::PieceVerification>,
     data: Vec<u8>,
 ) -> Result<(bool, Vec<u8>)> {

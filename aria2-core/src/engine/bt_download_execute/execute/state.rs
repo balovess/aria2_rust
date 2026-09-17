@@ -9,7 +9,7 @@ use crate::engine::bt_piece_selector::build_bitfield_from_completed;
 use crate::error::Result;
 use crate::util::rwlock_ext::RwLockRecover;
 
-use super::initial_bt_progress;
+use super::checkpoint::initial_bt_progress;
 
 pub(super) struct IntegrityPreparation {
     pub(super) payload_exists: bool,

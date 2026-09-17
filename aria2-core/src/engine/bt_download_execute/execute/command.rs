@@ -12,8 +12,8 @@ use crate::request::request_group::BtConnectionGuard;
 use crate::request::request_group::{ActiveConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::checkpoint::{completed_piece_bytes, legacy_progress_piece_indices};
 use super::state::IntegrityPreparation;
-use super::{completed_piece_bytes, legacy_progress_piece_indices};
 
 #[async_trait]
 impl Command for BtDownloadCommand {

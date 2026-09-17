@@ -7,7 +7,7 @@ use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
-pub(crate) fn parse_listen_ports(value: &str) -> std::result::Result<Vec<u16>, String> {
+pub(super) fn parse_listen_ports(value: &str) -> std::result::Result<Vec<u16>, String> {
     let ports = parse_integer_segments(value, 1024, u16::MAX as i64)?
         .into_iter()
         .flat_map(|range| range.map(|port| port as u16))

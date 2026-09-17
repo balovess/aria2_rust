@@ -54,8 +54,9 @@ impl PieceDownloadSession<'_> {
                     Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
                 })?;
                 if let Some(checkpoint) = self.command.checkpoint.as_mut() {
-                    let bitfield =
-                        super::super::super::snapshot_completed_bitfield(&self.completed_bitfield);
+                    let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
+                        &self.completed_bitfield,
+                    );
                     checkpoint
                         .save(&bitfield, self.command.completed_bytes)
                         .await

@@ -7,7 +7,7 @@ use crate::engine::bt_progress_info_file::BtProgress;
 use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
-pub(crate) fn checkpoint_save_due(
+pub(super) fn checkpoint_save_due(
     save_requested: bool,
     bytes_since_save: u64,
     last_save: Instant,
@@ -19,7 +19,7 @@ pub(crate) fn checkpoint_save_due(
             >= Duration::from_secs(crate::constants::BT_CHECKPOINT_SAVE_INTERVAL_SECS)
 }
 
-pub(crate) fn snapshot_completed_bitfield(
+pub(super) fn snapshot_completed_bitfield(
     bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
 ) -> Vec<u8> {
     bitfield
@@ -28,7 +28,7 @@ pub(crate) fn snapshot_completed_bitfield(
         .clone()
 }
 
-pub(crate) fn legacy_progress_piece_indices(
+pub(super) fn legacy_progress_piece_indices(
     progress: &BtProgress,
     piece_length: u32,
     total_size: u64,
@@ -66,7 +66,7 @@ pub(crate) fn legacy_progress_piece_indices(
     )
 }
 
-pub(crate) fn completed_piece_bytes(indices: &[usize], piece_length: u32, total_size: u64) -> u64 {
+pub(super) fn completed_piece_bytes(indices: &[usize], piece_length: u32, total_size: u64) -> u64 {
     indices
         .iter()
         .map(|&index| {
@@ -77,7 +77,7 @@ pub(crate) fn completed_piece_bytes(indices: &[usize], piece_length: u32, total_
         .sum()
 }
 
-pub(crate) fn initial_bt_progress(
+pub(super) fn initial_bt_progress(
     check_integrity: bool,
     checkpoint_completed_length: u64,
 ) -> (u64, u64) {

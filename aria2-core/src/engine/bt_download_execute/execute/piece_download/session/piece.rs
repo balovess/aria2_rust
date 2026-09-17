@@ -135,7 +135,9 @@ impl PieceDownloadSession<'_> {
                 })?;
                 if let Some(checkpoint) = self.command.checkpoint.as_mut() {
                     let bitfield =
-                        super::super::super::snapshot_completed_bitfield(&self.completed_bitfield);
+                        super::super::super::checkpoint::snapshot_completed_bitfield(
+                            &self.completed_bitfield,
+                        );
                     checkpoint
                         .save(&bitfield, self.command.completed_bytes)
                         .await
@@ -220,7 +222,11 @@ impl PieceDownloadSession<'_> {
                     .piece_manager
                     .expected_piece_verification(next_piece_idx as u32);
                 let (piece_verified, piece_data) =
-                    super::super::super::verify_piece_hash_async(expected_hash, piece_data).await?;
+                    super::super::super::hash_verification::verify_piece_hash_async(
+                        expected_hash,
+                        piece_data,
+                    )
+                    .await?;
                 if piece_verified {
                     tracing::info!("[BT] Piece {} verified OK", next_piece_idx);
                     self.piece_manager
@@ -417,7 +423,7 @@ impl BtDownloadCommand {
         if let Some(ref mgr) = self.progress_manager
             && last_progress_save.elapsed() >= self.progress_save_interval
         {
-            let bitfield = super::super::super::snapshot_completed_bitfield(bitfield);
+            let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(bitfield);
             let progress = super::super::progress_snapshot(
                 meta.network_info_hash(),
                 &bitfield,
