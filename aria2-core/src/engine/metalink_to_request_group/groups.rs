@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -8,7 +7,11 @@ use crate::error::{Aria2Error, Result};
 use crate::request::request_group::BtFileMapping;
 use crate::request::request_group::DownloadOptions;
 use crate::util::rwlock_ext::RwLockRecover;
-use aria2_protocol::metalink::parser::{MetalinkDocument, MetalinkFile};
+use aria2_protocol::metalink::parser::MetalinkDocument;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use aria2_protocol::metalink::parser::MetalinkFile;
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+use std::path::Path;
 
 use super::MetalinkToRequestGroup;
 
