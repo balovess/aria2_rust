@@ -294,7 +294,6 @@ impl MagnetDownloadCommand {
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
-                    self.dht_engine.as_ref().unwrap().start_maintenance_loop();
                     info!("Magnet: DHT engine started for peer discovery");
                 }
                 Err(error) => {

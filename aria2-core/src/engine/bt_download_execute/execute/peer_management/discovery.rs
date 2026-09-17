@@ -274,9 +274,6 @@ impl BtDownloadCommand {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
                     tracing::info!("[BT] DHT engine started");
-                    if let Some(dht) = self.dht_engine.as_ref() {
-                        dht.start_maintenance_loop();
-                    }
                 }
                 Err(e) => {
                     warn!("[BT] DHT engine start failed: {}", e);
