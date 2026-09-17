@@ -9,12 +9,13 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
+use super::types::PasvResult;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::ftp::connection::negotiation::FtpNegotiator;
 use crate::ftp::connection::negotiation::capabilities;
 use crate::ftp::connection::negotiation::capabilities::ServerCapabilities;
 use crate::ftp::connection::negotiation::control::FreshControl;
 use crate::ftp::connection::negotiation::parsing::{parse_epsv_response, parse_pasv_response};
-use crate::ftp::connection::negotiation::{FtpNegotiator, PasvResult};
 
 impl FtpNegotiator {
     /// Connect to FTP server, read greeting, authenticate, and detect capabilities.
