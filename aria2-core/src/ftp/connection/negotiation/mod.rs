@@ -59,8 +59,8 @@ pub use capabilities::ServerCapabilities;
 pub use control::RawFtpControl;
 pub(crate) use control::read_response_impl;
 pub(crate) use parsing::{
-    cwd_targets, parse_mdtm_timestamp, parse_pwd_response, percent_decode,
-    split_decoded_remote_path,
+    cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
+    parse_pwd_response, percent_decode, split_decoded_remote_path,
 };
 
 /// FTP transfer type, matching C++ `PREF_FTP_TYPE`.

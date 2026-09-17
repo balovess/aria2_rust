@@ -4,6 +4,7 @@
 //! management, data transfer, and retry logic.
 
 mod attempt;
+mod connection;
 mod control;
 mod execution;
 mod proxy;

@@ -122,7 +122,7 @@ pub(crate) fn parse_pwd_response(response: &str) -> Option<String> {
 // =============================================================================
 
 /// Parse PASV response to extract IP and port.
-pub(super) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
+pub(crate) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
     let start = response.find('(')?;
     let end = response.rfind(')')?;
     let inner = &response[start + 1..end];
@@ -149,7 +149,7 @@ pub(super) fn parse_pasv_response(response: &str) -> Option<(String, u16)> {
 /// (or the raw `|||port|` pattern), splitting on `|`, and extracting the
 /// port from the 4th field. The port must be in range 1..=65535 (0 is
 /// rejected per C++).
-pub(super) fn parse_epsv_response(response: &str) -> Option<u16> {
+pub(crate) fn parse_epsv_response(response: &str) -> Option<u16> {
     // Try to find the parenthesized portion first: (|...|port|)
     let epsv_part = if let Some(open) = response.find('(') {
         let close = response.rfind(')').filter(|&c| c > open)?;
