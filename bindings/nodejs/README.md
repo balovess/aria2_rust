@@ -160,6 +160,9 @@ listed here can still be called through a custom transport.
 - `updateBrowserContext(context: unknown): Promise<string>`
 - `clearBrowserContext(): Promise<string>`
 
+**System methods:**
+- `systemMulticall(calls)` / `systemListMethods()` / `systemListNotifications()`
+
 `getFiles(gid)` is the direct binding for aria2's `aria2.getFiles` method:
 
 ```typescript

@@ -247,6 +247,20 @@ export class Aria2Client {
     return (await this.transport.sendRequest('aria2.clearBrowserContext', [])) as string;
   }
 
+  async systemMulticall(
+    calls: Array<{ methodName: string; params?: unknown[] }>,
+  ): Promise<unknown[]> {
+    return (await this.transport.sendRequest('system.multicall', [calls])) as unknown[];
+  }
+
+  async systemListMethods(): Promise<string[]> {
+    return (await this.transport.sendRequest('system.listMethods', [])) as string[];
+  }
+
+  async systemListNotifications(): Promise<string[]> {
+    return (await this.transport.sendRequest('system.listNotifications', [])) as string[];
+  }
+
   on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
     this.ensureEventEmitter()
       .then((emitter) => {

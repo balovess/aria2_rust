@@ -24,6 +24,14 @@ enum {
   ARIA2_RUST_DOWNLOAD_REMOVED = 5
 };
 
+enum {
+  ARIA2_RUST_POSITION_SET = 0,
+  ARIA2_RUST_POSITION_CUR = 1,
+  ARIA2_RUST_POSITION_END = 2
+};
+
+#define ARIA2_RUST_BUFFER_TOO_SMALL (-3)
+
 typedef struct Aria2RustDownloadInfo {
   uint32_t status;
   uint64_t total_length;
@@ -70,11 +78,21 @@ int32_t aria2_rust_add_torrent(
     size_t torrent_length, const char *const *web_seed_uris,
     size_t web_seed_uri_count, const Aria2RustKeyValue *options,
     size_t option_count, uint64_t *gid_out);
+int32_t aria2_rust_add_metalink(
+    Aria2RustSession *session, const uint8_t *metalink_data,
+    size_t data_length, const Aria2RustKeyValue *options,
+    size_t option_count, uint64_t *gids_out, size_t gid_capacity,
+    size_t *gid_count_out);
 int32_t aria2_rust_remove(Aria2RustSession *session, uint64_t gid,
                           uint8_t force);
 int32_t aria2_rust_pause(Aria2RustSession *session, uint64_t gid,
                          uint8_t force);
 int32_t aria2_rust_unpause(Aria2RustSession *session, uint64_t gid);
+int32_t aria2_rust_pause_all(Aria2RustSession *session, uint8_t force);
+int32_t aria2_rust_unpause_all(Aria2RustSession *session);
+int32_t aria2_rust_change_position(Aria2RustSession *session, uint64_t gid,
+                                   int32_t position, uint32_t mode,
+                                   size_t *position_out);
 int32_t aria2_rust_change_option(Aria2RustSession *session, uint64_t gid,
                                  const Aria2RustKeyValue *options,
                                  size_t option_count);

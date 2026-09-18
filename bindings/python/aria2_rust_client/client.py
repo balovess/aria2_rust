@@ -301,6 +301,26 @@ class Aria2Client:
         result = await self._call("aria2.clearBrowserContext")
         return str(result) if result is not None else "OK"
 
+    async def system_multicall(self, calls: List[Dict[str, Any]]) -> List[Any]:
+        result = await self._call("system.multicall", [calls])
+        if isinstance(result, list):
+            return result
+        raise Aria2Error(f"Unexpected result type for system.multicall: {type(result)}")
+
+    async def system_list_methods(self) -> List[str]:
+        result = await self._call("system.listMethods")
+        if isinstance(result, list):
+            return [str(method) for method in result]
+        raise Aria2Error(f"Unexpected result type for system.listMethods: {type(result)}")
+
+    async def system_list_notifications(self) -> List[str]:
+        result = await self._call("system.listNotifications")
+        if isinstance(result, list):
+            return [str(notification) for notification in result]
+        raise Aria2Error(
+            f"Unexpected result type for system.listNotifications: {type(result)}"
+        )
+
     async def subscribe_events(
         self, filter: Optional[List[EventType]] = None
     ) -> EventSubscriber:

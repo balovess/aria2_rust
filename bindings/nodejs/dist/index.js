@@ -584,6 +584,15 @@ var Aria2Client = class {
   async clearBrowserContext() {
     return await this.transport.sendRequest("aria2.clearBrowserContext", []);
   }
+  async systemMulticall(calls) {
+    return await this.transport.sendRequest("system.multicall", [calls]);
+  }
+  async systemListMethods() {
+    return await this.transport.sendRequest("system.listMethods", []);
+  }
+  async systemListNotifications() {
+    return await this.transport.sendRequest("system.listNotifications", []);
+  }
   on(event, handler) {
     this.ensureEventEmitter().then((emitter) => {
       emitter.on(event, handler);

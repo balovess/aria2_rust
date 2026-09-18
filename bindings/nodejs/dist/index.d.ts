@@ -148,6 +148,12 @@ declare class Aria2Client {
     saveSession(): Promise<string>;
     updateBrowserContext(context: unknown): Promise<string>;
     clearBrowserContext(): Promise<string>;
+    systemMulticall(calls: Array<{
+        methodName: string;
+        params?: unknown[];
+    }>): Promise<unknown[]>;
+    systemListMethods(): Promise<string[]>;
+    systemListNotifications(): Promise<string[]>;
     on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
     close(): Promise<void>;
     destroy(): void;

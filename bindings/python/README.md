@@ -129,6 +129,9 @@ not listed here can still be called through the transport layer.
 **Session and browser context:**
 - `update_browser_context(context)` / `clear_browser_context()`
 
+**System methods:**
+- `system_multicall(calls)` / `system_list_methods()` / `system_list_notifications()`
+
 `get_files(gid)` is the direct binding for aria2's `aria2.getFiles` method:
 
 ```python
