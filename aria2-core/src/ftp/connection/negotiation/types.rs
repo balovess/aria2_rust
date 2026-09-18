@@ -4,7 +4,16 @@ use std::time::{Duration, SystemTime};
 
 use super::capabilities::ServerCapabilities;
 use crate::ftp::connection::negotiation::control::RawFtpControl;
-use crate::ftp::connection::types::FtpMode;
+
+/// FTP data connection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FtpMode {
+    /// Passive mode (the client connects to the server's data port).
+    #[default]
+    Passive,
+    /// Active mode (the server connects to the client's listener).
+    Active,
+}
 
 /// FTP transfer type, matching C++ `PREF_FTP_TYPE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

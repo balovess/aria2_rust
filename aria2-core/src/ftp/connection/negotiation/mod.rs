@@ -59,5 +59,6 @@ pub(crate) use parsing::{
     parse_pwd_response, percent_decode, split_decoded_remote_path,
 };
 pub use types::{
-    FtpDataProxyConfig, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, FtpTransferType,
+    FtpDataProxyConfig, FtpMode, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator,
+    FtpTransferType,
 };

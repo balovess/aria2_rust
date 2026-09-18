@@ -3,18 +3,17 @@
 use tokio::time::Duration;
 use tracing::{debug, info, warn};
 
-use crate::error::{Aria2Error, RecoverableError, Result};
-use crate::ftp::connection::negotiation::control::{PooledControl, RawFtpControl};
-use crate::ftp::connection::types::FtpMode;
-
 use super::capabilities;
 use super::capabilities::ServerCapabilities;
 use super::fresh_commands;
 use super::parsing::{extract_directory_part, extract_file_part};
 use super::pooled_commands;
 use super::types::{
-    FtpDataProxyConfig, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator, FtpTransferType,
+    FtpDataProxyConfig, FtpMode, FtpNegotiationConfig, FtpNegotiationResult, FtpNegotiator,
+    FtpTransferType,
 };
+use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::ftp::connection::negotiation::control::{PooledControl, RawFtpControl};
 
 impl FtpNegotiator {
     /// Execute the complete FTP negotiation flow.

@@ -9,9 +9,9 @@ use crate::checksum::checksum::Checksum;
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError};
 use crate::filesystem::disk_writer::{DiskWriter, new_sequential_download_writer};
-use crate::ftp::connection::FtpDataStream;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::util::rwlock_ext::RwLockRecover;
+use aria2_protocol::ftp::tls::FtpDataStream;
 
 use super::control::RawFtpControl;
 use super::execution::FtpAttemptError;

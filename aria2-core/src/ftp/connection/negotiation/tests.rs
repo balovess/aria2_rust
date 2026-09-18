@@ -8,8 +8,7 @@ use super::parsing::{
     days_from_civil, extract_directory_part, extract_file_part, parse_epsv_response,
     parse_mdtm_timestamp, parse_pasv_response, percent_decode,
 };
-use super::{FtpNegotiationConfig, FtpTransferType, active_data_bind_addr};
-use crate::ftp::connection::types::FtpMode;
+use super::{FtpMode, FtpNegotiationConfig, FtpTransferType, active_data_bind_addr};
 use crate::{error::Aria2Error, error::RecoverableError};
 
 #[tokio::test]

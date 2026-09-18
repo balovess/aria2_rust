@@ -7,9 +7,10 @@ use tracing::{debug, info};
 
 use crate::constants;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use aria2_protocol::ftp::tls::{self as tls, FtpControlStream, FtpDataStream, FtpsConfig};
+
 use crate::ftp::connection::{
-    self, FtpControlStream, FtpDataStream, FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig,
-    FtpsConfig, read_response_impl,
+    FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig, read_response_impl,
 };
 use crate::network::ConnectionContext;
 
@@ -121,7 +122,7 @@ impl RawFtpControl {
         stream: tokio::net::TcpStream,
     ) -> Result<FtpDataStream> {
         if let Some(config) = &self.ftps_config {
-            let tls_stream = connection::upgrade_data_stream(stream, &self.host, config)
+            let tls_stream = tls::upgrade_data_stream(stream, &self.host, config)
                 .await
                 .map_err(|error| {
                     Aria2Error::Network(format!("FTPS data TLS handshake failed: {}", error))
@@ -185,7 +186,7 @@ impl RawFtpControl {
 
         if let Some(config) = ftps_config {
             if ftps_implicit {
-                let tls_stream = connection::perform_tls_handshake(stream, host, config)
+                let tls_stream = tls::perform_tls_handshake(stream, host, config)
                     .await
                     .map_err(|error| {
                         Aria2Error::Network(format!("FTPS proxy TLS handshake failed: {}", error))
@@ -197,6 +198,11 @@ impl RawFtpControl {
                     Some(config.clone()),
                 );
                 ctrl.read_welcome().await?;
+                tls::negotiate_protected_data_channel(&mut ctrl.reader)
+                    .await
+                    .map_err(|error| {
+                        Aria2Error::Network(format!("FTPS data protection failed: {}", error))
+                    })?;
                 return Ok(ctrl);
             }
 
@@ -217,7 +223,7 @@ impl RawFtpControl {
                 FtpControlStream::Plain(stream) => stream,
                 FtpControlStream::Tls(_) => unreachable!("fresh FTPS proxy stream is plain"),
             };
-            let tls_stream = connection::upgrade_control_stream(stream, &host, config)
+            let tls_stream = tls::upgrade_control_stream(stream, &host, config)
                 .await
                 .map_err(|error| {
                     Aria2Error::Network(format!("FTPS proxy control upgrade failed: {}", error))
@@ -262,7 +268,7 @@ impl RawFtpControl {
             FtpControlStream::Plain(stream) => stream,
             FtpControlStream::Tls(_) => unreachable!("fresh FTPS control stream is plain"),
         };
-        let tls_stream = connection::upgrade_control_stream(stream, &host, config)
+        let tls_stream = tls::upgrade_control_stream(stream, &host, config)
             .await
             .map_err(|error| {
                 Aria2Error::Network(format!("FTPS control upgrade failed: {}", error))
@@ -285,7 +291,7 @@ impl RawFtpControl {
         config: &FtpsConfig,
     ) -> Result<Self> {
         let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
-        let tls_stream = connection::perform_tls_handshake(stream, host, config)
+        let tls_stream = tls::perform_tls_handshake(stream, host, config)
             .await
             .map_err(|error| {
                 Aria2Error::Network(format!("FTPS TLS handshake failed: {}", error))
@@ -297,6 +303,12 @@ impl RawFtpControl {
             Some(config.clone()),
         );
         ctrl.read_welcome().await?;
+
+        tls::negotiate_protected_data_channel(&mut ctrl.reader)
+            .await
+            .map_err(|error| {
+                Aria2Error::Network(format!("FTPS data protection failed: {}", error))
+            })?;
 
         info!(
             "Implicit FTPS control connection established with {}:{}",

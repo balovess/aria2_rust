@@ -13,7 +13,7 @@ use std::task::{Context, Poll};
 use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, info, warn};
@@ -253,6 +253,73 @@ impl ServerCertVerifier for NoCertificateVerification {
 // RFC 4217 control-channel negotiation
 // =============================================================================
 
+/// Negotiate protected FTP data channels on an established control stream.
+///
+/// This sends `PBSZ 0` followed by `PROT P`. It is shared by explicit FTPS
+/// after `AUTH TLS` and implicit FTPS after the initial TLS handshake.
+/// Returning an error for either rejected response keeps callers from
+/// accidentally treating a TLS control channel as a protected FTPS session
+/// when its data channel would still be plaintext.
+pub async fn negotiate_protected_data_channel<R>(reader: &mut R) -> Result<(), String>
+where
+    R: AsyncBufRead + AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    debug!("Sending PBSZ 0");
+    reader
+        .write_all(b"PBSZ 0\r\n")
+        .await
+        .map_err(|e| format!("Failed to send PBSZ 0: {}", e))?;
+    reader
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush PBSZ 0: {}", e))?;
+
+    let mut line_buf = String::new();
+    reader
+        .read_line(&mut line_buf)
+        .await
+        .map_err(|e| format!("Failed to read PBSZ response: {}", e))?;
+    let pbsz_resp = line_buf.trim();
+    debug!("PBSZ response: {}", pbsz_resp);
+    let pbsz_code = parse_response_code(pbsz_resp, "PBSZ")?;
+    if pbsz_code != 200 {
+        return Err(format!(
+            "PBSZ 0 rejected by server: {} (expected 200)",
+            pbsz_resp
+        ));
+    }
+
+    debug!("Sending PROT P");
+    reader
+        .write_all(b"PROT P\r\n")
+        .await
+        .map_err(|e| format!("Failed to send PROT P: {}", e))?;
+    reader
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush PROT P: {}", e))?;
+
+    line_buf.clear();
+    reader
+        .read_line(&mut line_buf)
+        .await
+        .map_err(|e| format!("Failed to read PROT response: {}", e))?;
+    let prot_resp = line_buf.trim();
+    debug!("PROT response: {}", prot_resp);
+    let prot_code = parse_response_code(prot_resp, "PROT")?;
+    if prot_code != 200 {
+        return Err(format!(
+            "PROT P rejected by server: {} (data channel would be unencrypted)",
+            prot_resp
+        ));
+    }
+
+    info!("PBSZ 0 and PROT P accepted — data channel will be TLS-protected");
+    Ok(())
+}
+
 /// Perform `AUTH TLS`, the TLS handshake, `PBSZ 0`, and `PROT P`.
 pub async fn upgrade_control_stream(
     mut stream: TcpStream,
@@ -292,61 +359,7 @@ pub async fn upgrade_control_stream(
     let stream = reader.into_inner();
     let mut tls_stream = perform_tls_handshake(stream, host, config).await?;
     let mut reader = tokio::io::BufReader::new(&mut tls_stream);
-    let mut line_buf = String::new();
-
-    debug!("Sending PBSZ 0");
-    reader
-        .get_mut()
-        .write_all(b"PBSZ 0\r\n")
-        .await
-        .map_err(|e| format!("Failed to send PBSZ 0: {}", e))?;
-    reader
-        .get_mut()
-        .flush()
-        .await
-        .map_err(|e| format!("Failed to flush PBSZ 0: {}", e))?;
-    line_buf.clear();
-    reader
-        .read_line(&mut line_buf)
-        .await
-        .map_err(|e| format!("Failed to read PBSZ response: {}", e))?;
-    let pbsz_resp = line_buf.trim();
-    debug!("PBSZ response: {}", pbsz_resp);
-    let pbsz_code = parse_response_code(pbsz_resp, "PBSZ")?;
-    if pbsz_code != 200 {
-        return Err(format!(
-            "PBSZ 0 rejected by server: {} (expected 200)",
-            pbsz_resp
-        ));
-    }
-
-    debug!("Sending PROT P");
-    reader
-        .get_mut()
-        .write_all(b"PROT P\r\n")
-        .await
-        .map_err(|e| format!("Failed to send PROT P: {}", e))?;
-    reader
-        .get_mut()
-        .flush()
-        .await
-        .map_err(|e| format!("Failed to flush PROT P: {}", e))?;
-    line_buf.clear();
-    reader
-        .read_line(&mut line_buf)
-        .await
-        .map_err(|e| format!("Failed to read PROT response: {}", e))?;
-    let prot_resp = line_buf.trim();
-    debug!("PROT response: {}", prot_resp);
-    let prot_code = parse_response_code(prot_resp, "PROT")?;
-    if prot_code != 200 {
-        return Err(format!(
-            "PROT P rejected by server: {} (data channel would be unencrypted)",
-            prot_resp
-        ));
-    }
-
-    info!("PBSZ 0 and PROT P accepted — data channel will be TLS-protected");
+    negotiate_protected_data_channel(&mut reader).await?;
     Ok(tls_stream)
 }
 
@@ -529,5 +542,64 @@ mod tests {
             min_tls_version: TlsVersion::Tls13,
         };
         assert!(build_tls_connector(&config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn protected_data_channel_negotiation_requires_both_responses() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let (client, server) = tokio::io::duplex(256);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "PBSZ 0\r\n");
+            reader
+                .get_mut()
+                .write_all(b"200 PBSZ ok\r\n")
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "PROT P\r\n");
+            reader
+                .get_mut()
+                .write_all(b"200 PROT ok\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::io::BufReader::new(client);
+        negotiate_protected_data_channel(&mut client).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_data_channel_negotiation_fails_closed_on_prot_rejection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let (client, server) = tokio::io::duplex(256);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"200 PBSZ ok\r\n")
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"534 PROT rejected\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::io::BufReader::new(client);
+        let result = negotiate_protected_data_channel(&mut client).await;
+        assert!(result.is_err());
+        server.await.unwrap();
     }
 }

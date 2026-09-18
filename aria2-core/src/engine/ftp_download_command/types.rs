@@ -15,7 +15,9 @@ use url::Url;
 use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::ftp::connection::{FtpProxyConfig, FtpsConfig, ProxyMethod, TlsVersion};
+use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
+
+use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
 
