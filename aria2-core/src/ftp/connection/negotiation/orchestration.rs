@@ -264,38 +264,6 @@ impl FtpNegotiator {
         Ok(result)
     }
 
-    /// Finish a download: read the 226 response and optionally pool the connection.
-    ///
-    /// Per C++ `FtpFinishDownloadCommand`, non-226 responses are not fatal
-    /// (data was already received). If the connection is reusable and the
-    /// pool key (host + username + baseWorkingDir) matches, the connection
-    /// can be returned for reuse.
-    ///
-    /// # Arguments
-    ///
-    /// - `control`: The raw FTP control connection from `FtpNegotiationResult`
-    /// - `reuse_connection`: Whether connection pooling is enabled
-    ///
-    /// # Returns
-    ///
-    /// `Some(())` if the connection can be pooled, `None` otherwise.
-    pub async fn finish_download(
-        control: &mut RawFtpControl,
-        reuse_connection: bool,
-    ) -> Option<()> {
-        // Read 226 transfer-complete response
-        let transfer_ok = control.read_transfer_complete().await.ok()?;
-
-        if transfer_ok && reuse_connection {
-            // Connection is good for reuse
-            return Some(());
-        }
-
-        // Non-226 or pooling disabled; still return Some(()) to indicate
-        // the finish completed (data was already received)
-        Some(())
-    }
-
     // =========================================================================
     // Data connection verification (C++ sendRestPasv check)
     // =========================================================================
