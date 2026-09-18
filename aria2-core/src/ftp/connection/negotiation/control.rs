@@ -3,7 +3,7 @@
 //! Contains `RawFtpControl` (public, used after negotiation), and internal
 //! `FreshControl` / `PooledControl` wrappers used during negotiation.
 
-use tokio::io::{AsyncBufRead, BufReader};
+use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
@@ -101,38 +101,12 @@ impl RawFtpControl {
     // ---- Internal I/O helpers ----
 
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
         debug!("FTP CMD: {}", cmd.trim());
-        self.reader
-            .get_mut()
-            .write_all(format!("{}\r\n", cmd).as_bytes())
-            .await
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP write command failed: {}", e),
-                })
-            })?;
-        self.reader.get_mut().flush().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("FTP flush failed: {}", e),
-            })
-        })?;
-        Ok(())
+        send_command_impl(self.reader.get_mut(), cmd, "FTP write command").await
     }
 
     pub(super) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
         read_response_impl(&mut self.reader, timeout_dur).await
-    }
-
-    /// Send command and read response in one operation.
-    #[allow(dead_code)]
-    pub(super) async fn command(
-        &mut self,
-        cmd: &str,
-        timeout_dur: Duration,
-    ) -> Result<(u16, String)> {
-        self.send_command(cmd).await?;
-        self.read_response(timeout_dur).await
     }
 }
 
@@ -160,23 +134,8 @@ impl FreshControl {
     }
 
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
         debug!("FTP CMD: {}", cmd.trim());
-        self.reader
-            .get_mut()
-            .write_all(format!("{}\r\n", cmd).as_bytes())
-            .await
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP write failed: {}", e),
-                })
-            })?;
-        self.reader.get_mut().flush().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("FTP flush failed: {}", e),
-            })
-        })?;
-        Ok(())
+        send_command_impl(self.reader.get_mut(), cmd, "FTP write").await
     }
 
     pub(super) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
@@ -214,23 +173,8 @@ impl PooledControl {
     }
 
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
         debug!("FTP CMD (pooled): {}", cmd.trim());
-        self.reader
-            .get_mut()
-            .write_all(format!("{}\r\n", cmd).as_bytes())
-            .await
-            .map_err(|e| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("FTP write failed: {}", e),
-                })
-            })?;
-        self.reader.get_mut().flush().await.map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!("FTP flush failed: {}", e),
-            })
-        })?;
-        Ok(())
+        send_command_impl(self.reader.get_mut(), cmd, "FTP write").await
     }
 
     pub(super) async fn read_response(&mut self, timeout_dur: Duration) -> Result<(u16, String)> {
@@ -243,6 +187,32 @@ impl PooledControl {
         self.send_command(cmd).await?;
         self.read_response(self.read_timeout).await
     }
+}
+
+/// Write one complete FTP command and make it visible to the server.
+///
+/// The three control wrappers intentionally remain separate types, but their
+/// wire-level write path is identical. Keeping this small helper private
+/// removes that implementation duplication without adding a public trait or
+/// weakening the fresh/pooled state distinction.
+async fn send_command_impl<W>(writer: &mut W, cmd: &str, write_error_label: &str) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer
+        .write_all(format!("{}\r\n", cmd).as_bytes())
+        .await
+        .map_err(|error| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: format!("{write_error_label} failed: {error}"),
+            })
+        })?;
+    writer.flush().await.map_err(|error| {
+        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: format!("FTP flush failed: {error}"),
+        })
+    })?;
+    Ok(())
 }
 
 // =============================================================================
