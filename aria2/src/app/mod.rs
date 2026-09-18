@@ -78,6 +78,36 @@ fn console_progress_enabled(show_console_readout: bool, quiet: bool) -> bool {
 }
 
 impl App {
+    async fn initialize_logging(&self) {
+        let log_level = self
+            .get_opt_str("log-level")
+            .await
+            .unwrap_or_else(|| "info".to_string());
+        let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
+            "error".to_string()
+        } else {
+            self.get_opt_str("console-log-level")
+                .await
+                .unwrap_or_else(|| "notice".to_string())
+        };
+        let log_path = self.get_opt_str("log").await;
+        let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
+        let log_max_size = self
+            .get_opt_i64("log-max-size")
+            .await
+            .filter(|&v| v > 0)
+            .map(|v| v as u64);
+        let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
+        init_logging(
+            &log_level,
+            &console_log_level,
+            log_path.as_deref(),
+            log_backup_count,
+            log_max_size,
+            log_max_files,
+        );
+    }
+
     /// Create a new `App` instance with default configuration.
     pub fn new() -> Self {
         let config = Arc::new(RwLock::new(
@@ -252,33 +282,7 @@ impl App {
 
             // After daemonization, we are in the child process
             // Re-initialize logging for the daemon process
-            let log_level = self
-                .get_opt_str("log-level")
-                .await
-                .unwrap_or_else(|| "info".to_string());
-            let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
-                "error".to_string()
-            } else {
-                self.get_opt_str("console-log-level")
-                    .await
-                    .unwrap_or_else(|| "notice".to_string())
-            };
-            let log_path = self.get_opt_str("log").await;
-            let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
-            let log_max_size = self
-                .get_opt_i64("log-max-size")
-                .await
-                .filter(|&v| v > 0)
-                .map(|v| v as u64);
-            let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
-            init_logging(
-                &log_level,
-                &console_log_level,
-                log_path.as_deref(),
-                log_backup_count,
-                log_max_size,
-                log_max_files,
-            );
+            self.initialize_logging().await;
 
             info!("Daemon started successfully");
         }
@@ -294,33 +298,7 @@ impl App {
 
         // In daemon mode, logging was already re-initialized after daemonization above.
         if !daemon_mode {
-            let log_level = self
-                .get_opt_str("log-level")
-                .await
-                .unwrap_or_else(|| "info".to_string());
-            let console_log_level = if self.get_opt_bool("quiet").await.unwrap_or(false) {
-                "error".to_string()
-            } else {
-                self.get_opt_str("console-log-level")
-                    .await
-                    .unwrap_or_else(|| "notice".to_string())
-            };
-            let log_path = self.get_opt_str("log").await;
-            let log_backup_count = self.get_opt_i64("log-backup-count").await.unwrap_or(5) as usize;
-            let log_max_size = self
-                .get_opt_i64("log-max-size")
-                .await
-                .filter(|&v| v > 0)
-                .map(|v| v as u64);
-            let log_max_files = self.get_opt_i64("log-max-files").await.map(|v| v as usize);
-            init_logging(
-                &log_level,
-                &console_log_level,
-                log_path.as_deref(),
-                log_backup_count,
-                log_max_size,
-                log_max_files,
-            );
+            self.initialize_logging().await;
         }
 
         let quiet = self.get_opt_bool("quiet").await.unwrap_or(false);

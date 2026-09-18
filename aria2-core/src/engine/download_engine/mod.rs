@@ -12,9 +12,7 @@ use super::bt_registry::BtRegistry;
 use super::engine_command::{
     EngineCommandQueueSnapshot, EngineCommandReceiver, EngineCommandSender, channel,
 };
-use crate::constants;
 use crate::dns::dns_cache::DnsCache;
-use crate::ftp::FtpConnectionPool;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::{RetryPolicy, RetryStats};
@@ -45,9 +43,6 @@ pub struct DownloadEngine {
     pub(crate) request_group_man: Option<Arc<RequestGroupMan>>,
     pub(crate) auto_save: Option<Arc<Mutex<AutoSaveCoordinator>>>,
     pub(crate) auto_save_dirty_signal: Option<Arc<std::sync::atomic::AtomicBool>>,
-    /// FTP connection pool for connection reuse across FTP downloads.
-    /// Created during engine initialization and passed down via dependency injection.
-    pub(crate) ftp_pool: Arc<FtpConnectionPool>,
     /// DNS resolution cache for avoiding repeated lookups.
     /// Created during engine initialization and passed down via dependency injection.
     pub(crate) dns_cache: Arc<Mutex<DnsCache>>,
@@ -137,9 +132,6 @@ impl DownloadEngine {
             request_group_man: None,
             auto_save: None,
             auto_save_dirty_signal: None,
-            ftp_pool: Arc::new(FtpConnectionPool::new(
-                constants::FTP_POOL_DEFAULT_MAX_CONNECTIONS,
-            )),
             dns_cache: Arc::new(Mutex::new(DnsCache::new())),
             keep_alive: false,
             #[cfg(feature = "bittorrent")]
@@ -276,11 +268,6 @@ impl DownloadEngine {
         &self.retry_policy
     }
 
-    /// Get a reference to the FTP connection pool for dependency injection.
-    pub fn ftp_pool(&self) -> &Arc<FtpConnectionPool> {
-        &self.ftp_pool
-    }
-
     /// Get a reference to the DNS cache for dependency injection.
     pub fn dns_cache(&self) -> &Arc<Mutex<DnsCache>> {
         &self.dns_cache
@@ -369,9 +356,10 @@ impl DownloadEngine {
     ///
     /// Layers above `aria2-core` use this to install a
     /// [`DownloadEventListener`](super::download_event_hooks::DownloadEventListener)
-    /// **before** `run()` consumes the engine — for example the
-    /// adapter in the `aria2` binary that republishes lifecycle events as
-    /// JSON-RPC WebSocket notifications.
+    /// **before** `run()` consumes the engine. The listener receives lifecycle
+    /// events and, when metadata creates child download groups, the structured
+    /// `MetadataResolvedEvent` callback. The latter is a Rust-library event
+    /// and is not forwarded as a standard aria2 RPC notification.
     pub fn event_hooks(&self) -> &Arc<super::download_event_hooks::DownloadEventHooks> {
         &self.event_hooks
     }

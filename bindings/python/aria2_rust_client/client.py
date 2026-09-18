@@ -10,9 +10,13 @@ from .events import EventSubscriber
 from .transport import HttpTransport, Transport, WebSocketTransport
 from .types import (
     EventType,
+    FileInfo,
     GlobalStat,
+    PeerInfo,
+    ServerInfoIndex,
     SessionInfo,
     StatusInfo,
+    UriEntry,
     VersionInfo,
 )
 
@@ -52,33 +56,55 @@ class Aria2Client:
         return await self._transport.send_request(method, params or [])
 
     async def add_uri(
-        self, uris: List[str], options: Optional[Dict] = None
+        self,
+        uris: List[str],
+        options: Optional[Dict] = None,
+        position: Optional[int] = None,
     ) -> str:
         params: list = [uris]
-        if options is not None:
-            params.append(options)
+        if options is not None or position is not None:
+            params.append(options or {})
+        if position is not None:
+            params.append(position)
         result = await self._call("aria2.addUri", params)
         return str(result)
 
     async def add_torrent(
-        self, torrent: bytes, options: Optional[Dict] = None
+        self,
+        torrent: bytes,
+        options: Optional[Dict] = None,
+        web_seed_uris: Optional[List[str]] = None,
+        position: Optional[int] = None,
     ) -> str:
         encoded = base64.b64encode(torrent).decode("ascii")
         params: list = [encoded]
-        if options is not None:
-            params.append(options)
+        if web_seed_uris is not None or options is not None or position is not None:
+            params.append(web_seed_uris or [])
+        if options is not None or position is not None:
+            params.append(options or {})
+        if position is not None:
+            params.append(position)
         result = await self._call("aria2.addTorrent", params)
         return str(result)
 
     async def add_metalink(
-        self, metalink: bytes, options: Optional[Dict] = None
-    ) -> str:
+        self,
+        metalink: bytes,
+        options: Optional[Dict] = None,
+        position: Optional[int] = None,
+    ) -> List[str]:
         encoded = base64.b64encode(metalink).decode("ascii")
         params: list = [encoded]
         if options is not None:
             params.append(options)
+        elif position is not None:
+            params.append({})
+        if position is not None:
+            params.append(position)
         result = await self._call("aria2.addMetalink", params)
-        return str(result)
+        if isinstance(result, list):
+            return [str(gid) for gid in result]
+        raise Aria2Error(f"Unexpected result type for addMetalink: {type(result)}")
 
     async def remove(self, gid: str) -> str:
         result = await self._call("aria2.remove", [gid])
@@ -100,9 +126,39 @@ class Aria2Client:
         result = await self._call("aria2.forceRemove", [gid])
         return str(result)
 
-    async def force_unpause(self, gid: str) -> str:
-        result = await self._call("aria2.forceUnpause", [gid])
+    async def pause_all(self) -> str:
+        result = await self._call("aria2.pauseAll")
         return str(result)
+
+    async def force_pause_all(self) -> str:
+        result = await self._call("aria2.forcePauseAll")
+        return str(result)
+
+    async def unpause_all(self) -> str:
+        result = await self._call("aria2.unpauseAll")
+        return str(result)
+
+    async def change_position(self, gid: str, position: int, mode: str) -> int:
+        result = await self._call("aria2.changePosition", [gid, position, mode])
+        if isinstance(result, int):
+            return result
+        raise Aria2Error(f"Unexpected result type for changePosition: {type(result)}")
+
+    async def change_uri(
+        self,
+        gid: str,
+        file_index: int,
+        delete_uris: List[str],
+        add_uris: List[str],
+        position: Optional[int] = None,
+    ) -> List[str]:
+        params: list = [gid, file_index, delete_uris, add_uris]
+        if position is not None:
+            params.append(position)
+        result = await self._call("aria2.changeUri", params)
+        if isinstance(result, list):
+            return [str(count) for count in result]
+        raise Aria2Error(f"Unexpected result type for changeUri: {type(result)}")
 
     async def tell_status(
         self, gid: str, keys: Optional[List[str]] = None
@@ -114,6 +170,41 @@ class Aria2Client:
         if isinstance(result, dict):
             return StatusInfo.from_dict(result)
         raise Aria2Error(f"Unexpected result type for tellStatus: {type(result)}")
+
+    async def get_files(self, gid: str) -> List[FileInfo]:
+        """Return the file metadata associated with a download GID.
+
+        This is the Python binding for aria2's ``aria2.getFiles`` method.
+        For HTTP/FTP downloads the length may remain unknown until the
+        metadata probe has completed.  Magnet downloads likewise require
+        metadata exchange before their file list is complete.
+        """
+        result = await self._call("aria2.getFiles", [gid])
+        if isinstance(result, list):
+            return [FileInfo.from_dict(item) for item in result if isinstance(item, dict)]
+        raise Aria2Error(f"Unexpected result type for getFiles: {type(result)}")
+
+    async def get_uris(self, gid: str) -> List[UriEntry]:
+        result = await self._call("aria2.getUris", [gid])
+        if isinstance(result, list):
+            return [UriEntry.from_dict(item) for item in result if isinstance(item, dict)]
+        raise Aria2Error(f"Unexpected result type for getUris: {type(result)}")
+
+    async def get_servers(self, gid: str) -> List[ServerInfoIndex]:
+        result = await self._call("aria2.getServers", [gid])
+        if isinstance(result, list):
+            return [
+                ServerInfoIndex.from_dict(item)
+                for item in result
+                if isinstance(item, dict)
+            ]
+        raise Aria2Error(f"Unexpected result type for getServers: {type(result)}")
+
+    async def get_peers(self, gid: str) -> List[PeerInfo]:
+        result = await self._call("aria2.getPeers", [gid])
+        if isinstance(result, list):
+            return [PeerInfo.from_dict(item) for item in result if isinstance(item, dict)]
+        raise Aria2Error(f"Unexpected result type for getPeers: {type(result)}")
 
     async def tell_active(
         self, keys: Optional[List[str]] = None
@@ -201,6 +292,34 @@ class Aria2Client:
     async def save_session(self) -> str:
         result = await self._call("aria2.saveSession")
         return str(result) if result is not None else "OK"
+
+    async def update_browser_context(self, context: Any) -> str:
+        result = await self._call("aria2.updateBrowserContext", [context])
+        return str(result) if result is not None else "OK"
+
+    async def clear_browser_context(self) -> str:
+        result = await self._call("aria2.clearBrowserContext")
+        return str(result) if result is not None else "OK"
+
+    async def system_multicall(self, calls: List[Dict[str, Any]]) -> List[Any]:
+        result = await self._call("system.multicall", [calls])
+        if isinstance(result, list):
+            return result
+        raise Aria2Error(f"Unexpected result type for system.multicall: {type(result)}")
+
+    async def system_list_methods(self) -> List[str]:
+        result = await self._call("system.listMethods")
+        if isinstance(result, list):
+            return [str(method) for method in result]
+        raise Aria2Error(f"Unexpected result type for system.listMethods: {type(result)}")
+
+    async def system_list_notifications(self) -> List[str]:
+        result = await self._call("system.listNotifications")
+        if isinstance(result, list):
+            return [str(notification) for notification in result]
+        raise Aria2Error(
+            f"Unexpected result type for system.listNotifications: {type(result)}"
+        )
 
     async def subscribe_events(
         self, filter: Optional[List[EventType]] = None

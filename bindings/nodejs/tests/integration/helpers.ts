@@ -11,13 +11,12 @@ const GID = '2089b05ecca3d829';
 const METHOD_HANDLERS: Record<string, (params: unknown[]) => unknown> = {
   'aria2.addUri': () => GID,
   'aria2.addTorrent': () => GID,
-  'aria2.addMetalink': () => GID,
+  'aria2.addMetalink': () => [`${GID}-metadata`, `${GID}-payload`],
   'aria2.remove': (params) => String(params[0]),
   'aria2.pause': (params) => String(params[0]),
   'aria2.unpause': (params) => String(params[0]),
   'aria2.forcePause': (params) => String(params[0]),
   'aria2.forceRemove': (params) => String(params[0]),
-  'aria2.forceUnpause': (params) => String(params[0]),
   'aria2.tellStatus': (params) => ({
     gid: String(params[0]),
     status: 'active',

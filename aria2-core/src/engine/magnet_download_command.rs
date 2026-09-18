@@ -5,6 +5,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::download_event_hooks::{DownloadEventHooks, MetadataResolvedEvent};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::rate_limiter::RateLimiter;
@@ -324,7 +325,6 @@ impl MagnetDownloadCommand {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
                     let engine = self.dht_engine.as_ref().unwrap();
-                    engine.start_maintenance_loop();
                     self.register_dht_engine(engine);
                     info!("Magnet: DHT engine started for peer discovery");
                 }
@@ -503,17 +503,24 @@ impl Command for MagnetDownloadCommand {
             self.shutdown_dht_engine().await;
             self.group.recover_mut().complete()?;
             self.metadata_complete = true;
+            DownloadEventHooks::shared().notify_metadata_resolved(MetadataResolvedEvent::new(
+                self.group.recover().gid(),
+                Vec::new(),
+            ));
             info!("Magnet metadata download complete; payload download skipped");
             return Ok(());
         }
 
         use crate::engine::bt_download_command::BtDownloadCommand;
-        let mut bt_cmd = BtDownloadCommand::new(
-            self.group.recover().gid(),
+        let gid = self.group.recover().gid();
+        let mut bt_cmd = BtDownloadCommand::new_with_group(
+            Arc::clone(&self.group),
             &torrent_bytes,
             self.group.recover().options(),
             self.output_path.parent().and_then(|p| p.to_str()),
         )?;
+        DownloadEventHooks::shared()
+            .notify_metadata_resolved(MetadataResolvedEvent::new(gid, vec![gid]));
         if let Some(gl) = self.global_limiter.clone() {
             bt_cmd.set_global_limiter(gl);
         }
@@ -576,6 +583,38 @@ mod tests {
     use crate::engine::bt_download_command_tests::{
         build_private_test_torrent, build_test_torrent,
     };
+
+    #[derive(Default)]
+    struct MetadataEventListener {
+        events: std::sync::Mutex<Vec<MetadataResolvedEvent>>,
+        alive: std::sync::atomic::AtomicBool,
+    }
+
+    impl MetadataEventListener {
+        fn new() -> Self {
+            Self {
+                events: std::sync::Mutex::new(Vec::new()),
+                alive: std::sync::atomic::AtomicBool::new(true),
+            }
+        }
+    }
+
+    impl crate::engine::download_event_hooks::DownloadEventListener for MetadataEventListener {
+        fn on_download_event(
+            &self,
+            _event: crate::engine::download_event_hooks::DownloadEvent,
+            _gid: &str,
+        ) {
+        }
+
+        fn on_metadata_resolved(&self, event: &MetadataResolvedEvent) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+
+        fn is_alive(&self) -> bool {
+            self.alive.load(std::sync::atomic::Ordering::Acquire)
+        }
+    }
 
     /// Valid 40-char hex info-hash magnet link used by all test cases.
     const TEST_MAGNET_URI: &str =
@@ -649,6 +688,9 @@ mod tests {
         let saved_path = command.saved_metadata_path(&info_hash);
         std::fs::write(&saved_path, &torrent).expect("write saved torrent metadata");
 
+        let listener = Arc::new(MetadataEventListener::new());
+        DownloadEventHooks::shared().add_listener(listener.clone());
+
         command
             .execute()
             .await
@@ -663,6 +705,13 @@ mod tests {
             std::fs::read(saved_path).expect("read saved torrent"),
             torrent
         );
+        assert_eq!(
+            listener.events.lock().unwrap().as_slice(),
+            [MetadataResolvedEvent::new(GroupId::new(3), Vec::new())]
+        );
+        listener
+            .alive
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 
     #[test]

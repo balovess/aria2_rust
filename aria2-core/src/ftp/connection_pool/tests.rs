@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::{TcpListener, TcpStream};
 
 use super::*;
 
@@ -142,4 +143,27 @@ async fn test_try_get_relaxed_returns_none_when_empty() {
 async fn test_cleanup_stale_count_on_empty_pool() {
     let pool = FtpConnectionPool::new(2);
     assert_eq!(pool.cleanup_stale_count().await, 0);
+}
+
+#[tokio::test]
+async fn test_raw_return_can_be_reused_with_credentials() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stream = TcpStream::connect(address).await.unwrap();
+    let (server_stream, _) = listener.accept().await.unwrap();
+
+    let pool = FtpConnectionPool::new(1);
+    pool.return_raw_connection(stream, "ftp.example.com", 21, "user", FtpMode::Passive, "/")
+        .await
+        .unwrap();
+
+    assert!(
+        pool.try_get("ftp.example.com", 21, "user", "pass", "/")
+            .await
+            .is_some()
+    );
+    assert_eq!(pool.size().await, 0);
+    assert_eq!(pool.stats().await.current_size, 0);
+
+    drop(server_stream);
 }

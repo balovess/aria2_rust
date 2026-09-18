@@ -14,7 +14,7 @@ use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::rate_limiter::RateLimiter;
-use crate::request::request_group::{AtomicProgress, BtPeerSource, RequestGroup};
+use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 pub use crate::engine::bt_message_handler::{
@@ -26,6 +26,7 @@ pub use crate::engine::bt_peer_interaction::{
 pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 
 // Re-export sub-module public items
+pub use constructor::prepare_group_metadata;
 pub(crate) use constructor::{
     apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
 };
@@ -140,8 +141,6 @@ pub struct BtDownloadCommand {
     pub(crate) listen_port: u16,
     pub(crate) bt_runtime: std::sync::Arc<BtRuntimeState>,
     pub(crate) peer_coordinator: crate::engine::bt_peer_coordinator::BtPeerCoordinator,
-    /// First discovery mechanism recorded for each outbound peer endpoint.
-    pub(crate) peer_sources: HashMap<(String, u16), BtPeerSource>,
     pub(crate) dht_engine:
         Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     pub(crate) public_trackers:
@@ -283,19 +282,6 @@ pub struct BtDownloadCommand {
 }
 
 impl BtDownloadCommand {
-    pub(crate) fn record_peer_source(&mut self, ip: &str, port: u16, source: BtPeerSource) {
-        self.peer_sources
-            .entry((ip.to_string(), port))
-            .or_insert(source);
-    }
-
-    pub(crate) fn peer_source_for(&self, ip: &str, port: u16) -> BtPeerSource {
-        self.peer_sources
-            .get(&(ip.to_string(), port))
-            .copied()
-            .unwrap_or_default()
-    }
-
     pub fn group(&self) -> std::sync::RwLockReadGuard<'_, RequestGroup> {
         use crate::util::rwlock_ext::RwLockRecover;
         self.group.recover()

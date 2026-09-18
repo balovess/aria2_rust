@@ -82,6 +82,68 @@ class FileInfo:
 
 
 @dataclass
+class ServerInfo:
+    uri: Optional[str] = None
+    current_uri: Optional[str] = None
+    download_speed: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ServerInfo:
+        converted = _convert_keys(data)
+        return cls(
+            uri=converted.get("uri"),
+            current_uri=converted.get("current_uri"),
+            download_speed=converted.get("download_speed"),
+        )
+
+
+@dataclass
+class ServerInfoIndex:
+    index: Optional[str] = None
+    servers: List[ServerInfo] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ServerInfoIndex:
+        converted = _convert_keys(data)
+        servers_data = converted.get("servers") or []
+        return cls(
+            index=converted.get("index"),
+            servers=[
+                ServerInfo.from_dict(server) if isinstance(server, dict) else server
+                for server in servers_data
+            ],
+        )
+
+
+@dataclass
+class PeerInfo:
+    peer_id: Optional[str] = None
+    ip: Optional[str] = None
+    port: Optional[str] = None
+    bitfield: Optional[str] = None
+    am_choking: Optional[str] = None
+    peer_choking: Optional[str] = None
+    download_speed: Optional[str] = None
+    upload_speed: Optional[str] = None
+    seeder: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PeerInfo:
+        converted = _convert_keys(data)
+        return cls(
+            peer_id=converted.get("peer_id"),
+            ip=converted.get("ip"),
+            port=converted.get("port"),
+            bitfield=converted.get("bitfield"),
+            am_choking=converted.get("am_choking"),
+            peer_choking=converted.get("peer_choking"),
+            download_speed=converted.get("download_speed"),
+            upload_speed=converted.get("upload_speed"),
+            seeder=converted.get("seeder"),
+        )
+
+
+@dataclass
 class StatusInfo:
     gid: Optional[str] = None
     total_length: Optional[str] = None
@@ -89,10 +151,26 @@ class StatusInfo:
     upload_length: Optional[str] = None
     download_speed: Optional[str] = None
     upload_speed: Optional[str] = None
+    connections: Optional[str] = None
     error_code: Optional[str] = None
+    error_message: Optional[str] = None
     status: Optional[str] = None
     dir: Optional[str] = None
     files: List[FileInfo] = field(default_factory=list)
+    bittorrent: Optional[Dict[str, Any]] = None
+    following: Optional[str] = None
+    seeder: Optional[str] = None
+    bitfield: Optional[str] = None
+    piece_length: Optional[str] = None
+    num_pieces: Optional[str] = None
+    completed_pieces: Optional[str] = None
+    missing_pieces: Optional[str] = None
+    followed_by: List[str] = field(default_factory=list)
+    belongs_to: Optional[str] = None
+    info_hash: Optional[str] = None
+    num_seeders: Optional[str] = None
+    verified_length: Optional[str] = None
+    verify_integrity_pending: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StatusInfo:
@@ -106,10 +184,26 @@ class StatusInfo:
             upload_length=converted.get("upload_length"),
             download_speed=converted.get("download_speed"),
             upload_speed=converted.get("upload_speed"),
+            connections=converted.get("connections"),
             error_code=converted.get("error_code"),
+            error_message=converted.get("error_message"),
             status=converted.get("status"),
             dir=converted.get("dir"),
             files=files,
+            bittorrent=converted.get("bittorrent"),
+            following=converted.get("following"),
+            seeder=converted.get("seeder"),
+            bitfield=converted.get("bitfield"),
+            piece_length=converted.get("piece_length"),
+            num_pieces=converted.get("num_pieces"),
+            completed_pieces=converted.get("completed_pieces"),
+            missing_pieces=converted.get("missing_pieces"),
+            followed_by=list(converted.get("followed_by") or []),
+            belongs_to=converted.get("belongs_to"),
+            info_hash=converted.get("info_hash"),
+            num_seeders=converted.get("num_seeders"),
+            verified_length=converted.get("verified_length"),
+            verify_integrity_pending=converted.get("verify_integrity_pending"),
         )
 
 

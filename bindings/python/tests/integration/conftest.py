@@ -79,9 +79,17 @@ class MockAria2Server:
             return gid, None
 
         elif method == "aria2.addMetalink":
-            gid = self._next_gid()
-            self._tasks[gid] = {"status": "active", "data": self._make_status(gid, "active")}
-            return gid, None
+            metadata_gid = self._next_gid()
+            payload_gid = self._next_gid()
+            self._tasks[metadata_gid] = {
+                "status": "active",
+                "data": self._make_status(metadata_gid, "active"),
+            }
+            self._tasks[payload_gid] = {
+                "status": "active",
+                "data": self._make_status(payload_gid, "active"),
+            }
+            return [metadata_gid, payload_gid], None
 
         elif method == "aria2.remove":
             gid = params[0] if params else ""
@@ -118,13 +126,6 @@ class MockAria2Server:
             gid = params[0] if params else ""
             if gid in self._tasks:
                 del self._tasks[gid]
-                return gid, None
-            return None, {"code": 1, "message": f"GID {gid} not found"}
-
-        elif method == "aria2.forceUnpause":
-            gid = params[0] if params else ""
-            if gid in self._tasks:
-                self._tasks[gid]["status"] = "active"
                 return gid, None
             return None, {"code": 1, "message": f"GID {gid} not found"}
 

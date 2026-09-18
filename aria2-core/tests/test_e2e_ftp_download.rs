@@ -541,7 +541,7 @@ async fn test_e2e_ftp_memory_download_keeps_source_out_of_filesystem() {
     let server = start_server().await;
     let dir = tmp_dir();
     let addr = server.addr();
-    let url = format!("ftp://127.0.0.1:{}/files/small.bin", addr.port());
+    let url = format!("ftp://127.0.0.1:{}/files/small.bin.torrent", addr.port());
     let options = DownloadOptions {
         follow_torrent: Some(FollowMode::Memory),
         ..DownloadOptions::default()

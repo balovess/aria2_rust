@@ -50,7 +50,6 @@ impl DownloadEngine {
 
         let ctx = super::super::engine_loop::EngineLoopContext {
             group_man,
-            ftp_pool: Arc::clone(&self.ftp_pool),
             dns_cache: Arc::clone(&self.dns_cache),
             auto_save: self.auto_save.take(),
             auto_save_dirty_signal: self.auto_save_dirty_signal.take(),

@@ -343,7 +343,9 @@ impl SessionPersistence {
             )
         })?;
 
-        let memory_download = options.uses_memory_download()
+        let memory_download = uris
+            .first()
+            .is_some_and(|uri| options.uses_memory_download_for_uri(uri))
             || resume_data
                 .options
                 .get("aria2-rust-memory-download")

@@ -195,7 +195,7 @@ async fn in_memory_http_records_each_payload_chunk_for_timeout() {
         }
     });
 
-    let url = format!("http://{address}/metadata");
+    let url = format!("http://{address}/metadata.torrent");
     let options = DownloadOptions {
         follow_torrent: Some(FollowMode::Memory),
         use_head: false,

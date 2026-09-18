@@ -34,6 +34,13 @@ fn assert_error_code(resp: &JsonRpcResponse, expected_code: i32) {
     assert_eq!(resp.error.as_ref().unwrap().code, expected_code);
 }
 
+fn valid_torrent() -> String {
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"d8:announce27:http://example.com/announce4:infod6:lengthi4e4:name8:file.bin12:piece lengthi4e6:pieces20:12345678901234567890eee",
+    )
+}
+
 // =========================================================================
 // Task Management Methods (11 methods)
 // =========================================================================
@@ -123,11 +130,7 @@ async fn regression_add_uri_rejects_negative_position() {
 #[tokio::test]
 async fn regression_add_torrent_validates_bencode() {
     let engine = core_engine();
-    // Valid bencode prefix: d8:
-    let valid_torrent = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        b"d8:announce42:http://example.com/announce",
-    );
+    let valid_torrent = valid_torrent();
     let req = make_request("aria2.addTorrent", serde_json::json!([valid_torrent]));
     let resp = engine.handle_request(&req).await;
 
@@ -154,10 +157,7 @@ async fn regression_add_torrent_rejects_invalid() {
 #[cfg(feature = "bittorrent")]
 async fn regression_add_torrent_rejects_invalid_uri_parameter() {
     let engine = core_engine();
-    let torrent = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        b"d8:announce42:http://example.com/announce",
-    );
+    let torrent = valid_torrent();
     let req = make_request(
         "aria2.addTorrent",
         serde_json::json!([torrent, "not-a-uri-list"]),
@@ -763,10 +763,7 @@ async fn regression_get_peers_returns_array() {
     let engine = core_engine();
 
     // Add a torrent task
-    let valid_torrent = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        b"d8:announce42:http://example.com/announce",
-    );
+    let valid_torrent = valid_torrent();
     let add_req = make_request("aria2.addTorrent", serde_json::json!([valid_torrent]));
     let add_resp = engine.handle_request(&add_req).await;
     let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
@@ -839,6 +836,34 @@ async fn regression_get_files_format() {
         assert!(file.get("selected").is_some());
         assert!(file.get("uris").is_some());
     }
+}
+
+/// A paused local torrent still exposes parsed file metadata immediately.
+/// This is the observable equivalent of the original libaria2
+/// addTorrent -> DownloadHandle::getFiles flow.
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn regression_add_torrent_get_files_is_available_before_start() {
+    let engine = core_engine();
+    let torrent = valid_torrent();
+
+    let add_req = make_request(
+        "aria2.addTorrent",
+        serde_json::json!([torrent, [], {"pause": true}]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let files_resp = engine
+        .handle_request(&make_request("aria2.getFiles", serde_json::json!([gid])))
+        .await;
+    assert_success(&files_resp);
+    let files: Vec<serde_json::Value> = serde_json::from_value(files_resp.result.unwrap()).unwrap();
+
+    assert_eq!(files.len(), 1);
+    assert!(files[0]["path"].as_str().unwrap().ends_with("file.bin"));
+    assert_eq!(files[0]["length"], "4");
 }
 
 /// Test: aria2.getServers returns array with server info.

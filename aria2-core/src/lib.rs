@@ -60,21 +60,26 @@
 //! metadata.
 //!
 //! ```rust,no_run
-//! use aria2_core::{
-//!     BtMessageValidator, PeerBitfieldTracker, PieceManager, PiecePicker,
-//!     PieceSelectionStrategy,
-//! };
+//! fn bittorrent_library_example() {
+//!     #[cfg(feature = "bittorrent")]
+//!     {
+//!     use aria2_core::{
+//!         BtMessageValidator, PeerBitfieldTracker, PieceManager, PiecePicker,
+//!         PieceSelectionStrategy,
+//!     };
 //!
-//! let mut picker = PiecePicker::new(128);
-//! picker.set_strategy(PieceSelectionStrategy::RarestFirst);
-//! let mut peers = PeerBitfieldTracker::new(128);
-//! peers.update_peer_bitfield("peer-1", &[0xff; 16]);
+//!     let mut picker = PiecePicker::new(128);
+//!     picker.set_strategy(PieceSelectionStrategy::RarestFirst);
+//!     let mut peers = PeerBitfieldTracker::new(128);
+//!     peers.update_peer_bitfield("peer-1", &[0xff; 16]);
 //!
-//! let hashes = vec![[0u8; 20]; 128];
-//! let manager = PieceManager::new(128, 262_144, 128 * 262_144, &hashes);
-//! let validator = BtMessageValidator::new(manager.num_pieces(), manager.piece_length());
-//! assert!(validator.validate_index(0).is_ok());
-//! # let _ = (picker, peers);
+//!     let hashes = vec![[0u8; 20]; 128];
+//!     let manager = PieceManager::new(128, 262_144, 128 * 262_144, &hashes);
+//!     let validator = BtMessageValidator::new(manager.num_pieces(), manager.piece_length());
+//!     assert!(validator.validate_index(0).is_ok());
+//!     let _ = (picker, peers);
+//!     }
+//! }
 //! ```
 //!
 //! The companion `aria2-protocol` crate owns wire formats and protocol
@@ -86,27 +91,28 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use aria2_core::config::ConfigManager;
-//! use aria2_core::request::request_group_man::RequestGroupMan;
+//! use std::sync::Arc;
+//!
 //! use aria2_core::request::request_group::DownloadOptions;
-//! use aria2_core::config::OptionValue;
+//! use aria2_core::request::request_group_man::RequestGroupMan;
+//! use aria2_core::DownloadEngine;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let mut config = ConfigManager::new();
-//!     config.set_global_option("dir", OptionValue::Str("./downloads".into())).await.unwrap();
-//!     config.set_global_option("split", OptionValue::Int(4)).await.unwrap();
+//!     let groups = Arc::new(RequestGroupMan::new());
+//!     let mut engine = DownloadEngine::new();
+//!     engine.set_request_group_man(Arc::clone(&groups));
+//!     let engine = engine.start().unwrap();
 //!
-//!     let man = RequestGroupMan::new();
-//!     let opts = DownloadOptions {
-//!         split: Some(4),
-//!         ..Default::default()
-//!     };
+//!     let download = engine.downloads().add_uri(
+//!         vec!["http://example.com/file.zip".into()],
+//!         DownloadOptions::default(),
+//!     ).unwrap();
+//!     let result = download.wait().await.unwrap();
+//!     println!("{}: {}", download.gid_hex(), result.status);
 //!
-//!     match man.add_group(vec!["http://example.com/file.zip".into()], opts) {
-//!         Ok(gid) => println!("Started: #{}", gid.value()),
-//!         Err(e) => eprintln!("Error: {}", e),
-//!     }
+//!     engine.shutdown().unwrap();
+//!     engine.wait().await.unwrap();
 //! }
 //! ```
 
@@ -149,12 +155,22 @@ pub use engine::bt_piece::{
     PieceManager, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
     PieceSelectionStrategy,
 };
+pub use engine::download_engine::DownloadEngine;
+pub use engine::download_event_hooks::{
+    DownloadEvent, DownloadEventHooks, DownloadEventListener, DownloadEventStream,
+    DownloadNotification, MetadataResolvedEvent,
+};
+pub use engine::download_manager::{
+    DownloadEngineHandle, DownloadHandle, DownloadManager, DownloadManagerError,
+};
 #[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{
-    ChangeableKind, DownloadStatus, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS,
-    RUNTIME_CHANGEABLE_OPTIONS, is_option_changeable,
+    ChangeableKind, DownloadOptions, DownloadResult, DownloadStatus, DownloadStatusSnapshot,
+    GroupId, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
+    is_option_changeable,
 };
+pub use request::request_group_man::RequestGroupMan;
 
 #[cfg(test)]
 mod integration_tests_j2_j5;

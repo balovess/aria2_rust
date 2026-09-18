@@ -1,4 +1,4 @@
-# @aria2-rust/client
+# @aria2-rust/aria2-rust
 
 Node.js/TypeScript SDK for the aria2-rust JSON-RPC and WebSocket interface.
 The client surface is tested against the current server; full original-client
@@ -20,7 +20,7 @@ compatibility remains tracked in the repository compatibility matrix.
 ## Installation
 
 ```bash
-npm install @aria2-rust/client
+npm install @aria2-rust/aria2-rust
 ```
 
 Or from source:
@@ -36,7 +36,7 @@ npm run build
 ### Basic Usage
 
 ```typescript
-import { Aria2Client } from '@aria2-rust/client';
+import { Aria2Client } from '@aria2-rust/aria2-rust';
 
 async function main() {
   const client = new Aria2Client('http://localhost:6800/jsonrpc');
@@ -60,7 +60,7 @@ main();
 ### With Authentication
 
 ```typescript
-import { Aria2Client } from '@aria2-rust/client';
+import { Aria2Client } from '@aria2-rust/aria2-rust';
 
 // Token authentication
 const client = new Aria2Client('http://localhost:6800/jsonrpc', {
@@ -74,7 +74,7 @@ const gid = await client.addUri(['http://example.com/file.zip']);
 ### Event Subscription
 
 ```typescript
-import { Aria2Client } from '@aria2-rust/client';
+import { Aria2Client } from '@aria2-rust/aria2-rust';
 
 async function main() {
   const client = new Aria2Client('ws://localhost:6800/jsonrpc');
@@ -129,25 +129,53 @@ interface ClientOptions {
 
 #### Methods
 
-All RPC methods return Promises and follow aria2 specification:
+The client exposes the standard aria2 RPC methods listed below. Methods not
+listed here can still be called through a custom transport.
 
 **Task Management:**
-- `addUri(uris: string[], options?: Record<string, unknown>): Promise<string>`
-- `addTorrent(torrent: Buffer, options?: Record<string, unknown>): Promise<string>`
-- `addMetalink(metalink: Buffer, options?: Record<string, unknown>): Promise<string>`
+- `addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>`
+- `addTorrent(torrent: Buffer, options?: Record<string, unknown>, webSeedUris?: string[], position?: number): Promise<string>`
+- `addMetalink(metalink: Buffer, options?: Record<string, unknown>, position?: number): Promise<string[]>`
 - `remove(gid: string): Promise<string>`
 - `pause(gid: string): Promise<string>`
 - `unpause(gid: string): Promise<string>`
 - `forcePause(gid: string): Promise<string>`
 - `forceRemove(gid: string): Promise<string>`
-- `forceUnpause(gid: string): Promise<string>`
+- `pauseAll(): Promise<string>` / `forcePauseAll(): Promise<string>` / `unpauseAll(): Promise<string>`
+- `changePosition(gid: string, position: number, mode: string): Promise<number>`
+- `changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>`
 
 **Status Queries:**
 - `tellStatus(gid: string, keys?: string[]): Promise<StatusInfo>`
+- `getFiles(gid: string): Promise<FileInfo[]>`
+- `getUris(gid: string): Promise<UriEntry[]>`
+- `getServers(gid: string): Promise<ServerInfoIndex[]>`
+- `getPeers(gid: string): Promise<PeerInfo[]>`
 - `tellActive(keys?: string[]): Promise<StatusInfo[]>`
 - `tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `getGlobalStat(): Promise<GlobalStat>`
+
+**Session and browser context:**
+- `updateBrowserContext(context: unknown): Promise<string>`
+- `clearBrowserContext(): Promise<string>`
+
+**System methods:**
+- `systemMulticall(calls)` / `systemListMethods()` / `systemListNotifications()`
+
+`getFiles(gid)` is the direct binding for aria2's `aria2.getFiles` method:
+
+```typescript
+const files = await client.getFiles(gid);
+for (const file of files) {
+  console.log(file.path, file.length);
+}
+```
+
+For HTTP/FTP URLs, the length may be unknown until the metadata probe has
+completed. For magnet links, the file list is unavailable until metadata
+exchange completes. A local torrent is parsed when it is added, so its file
+metadata can be queried even when the task is created with `pause: true`.
 
 **Options:**
 - `getGlobalOption(): Promise<Record<string, unknown>>`
@@ -296,7 +324,7 @@ class TimeoutError extends Aria2Error {  // code = -4 }
 ### Download Progress Monitoring
 
 ```typescript
-import { Aria2Client, StatusInfo } from '@aria2-rust/client';
+import { Aria2Client, StatusInfo } from '@aria2-rust/aria2-rust';
 
 async function downloadWithProgress(url: string): Promise<StatusInfo> {
   const client = new Aria2Client();
@@ -328,7 +356,7 @@ downloadWithProgress('http://example.com/largefile.zip');
 ### Batch Download
 
 ```typescript
-import { Aria2Client } from '@aria2-rust/client';
+import { Aria2Client } from '@aria2-rust/aria2-rust';
 
 async function batchDownload(urls: string[], maxConcurrent = 5) {
   const client = new Aria2Client();
@@ -374,7 +402,7 @@ batchDownload(urls);
 ### Torrent Download
 
 ```typescript
-import { Aria2Client } from '@aria2-rust/client';
+import { Aria2Client } from '@aria2-rust/aria2-rust';
 import { promises as fs } from 'fs';
 
 async function downloadTorrent(torrentPath: string) {
@@ -408,7 +436,7 @@ downloadTorrent('example.torrent');
 ### Event-Driven Download
 
 ```typescript
-import { Aria2Client } from '@aria2-rust/client';
+import { Aria2Client } from '@aria2-rust/aria2-rust';
 
 async function eventDrivenDownload() {
   const client = new Aria2Client('ws://localhost:6800/jsonrpc');

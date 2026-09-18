@@ -153,6 +153,18 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.getDhtStatus` | 无 | 当前活动 BT/magnet 任务聚合的 DHT 状态；需 BitTorrent |
 | `aria2.getGlobalStat` | 无 | 全局速度和任务计数 |
 
+`aria2.getFiles(gid)` 是查询文件名、路径、总大小和已完成大小的标准接口，
+返回值中的数值字段仍按 aria2 RPC 约定序列化为字符串。它查询的是已经创建的
+任务，不是一个独立的 URL 检查接口：
+
+- HTTP/FTP 任务需要完成远端 metadata probe 后才能确定长度；
+- 本地 torrent 在 `addTorrent` 时解析，因此即使使用 `pause=true` 也可以查询文件列表；
+- magnet 必须先完成 metadata exchange，文件名和大小才会出现；
+- `dry-run` 只执行 HTTP/FTP 可用性和长度探测，不应当被当作通用文件列表接口。
+
+Python 和 Node.js binding 分别对应 `client.get_files(gid)` 与
+`client.getFiles(gid)`。
+
 常用 `tellStatus` key：`gid`、`status`、`totalLength`、`completedLength`、`uploadLength`、`downloadSpeed`、`uploadSpeed`、`pieceLength`、`numPieces`、`connections`、`errorCode`、`errorMessage`、`followedBy`、`following`、`belongsTo`、`dir`、`files`、`bittorrent`、`infoHash`。
 
 BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对象，包含分层的

@@ -24,6 +24,14 @@ enum {
   ARIA2_RUST_DOWNLOAD_REMOVED = 5
 };
 
+enum {
+  ARIA2_RUST_POSITION_SET = 0,
+  ARIA2_RUST_POSITION_CUR = 1,
+  ARIA2_RUST_POSITION_END = 2
+};
+
+#define ARIA2_RUST_BUFFER_TOO_SMALL (-3)
+
 typedef struct Aria2RustDownloadInfo {
   uint32_t status;
   uint64_t total_length;
@@ -33,6 +41,12 @@ typedef struct Aria2RustDownloadInfo {
   uint64_t upload_speed;
   uint32_t error_code;
 } Aria2RustDownloadInfo;
+
+typedef struct Aria2RustFileInfo {
+  uint64_t length;
+  uint64_t completed_length;
+  uint8_t selected;
+} Aria2RustFileInfo;
 
 typedef struct Aria2RustGlobalStat {
   uint64_t download_speed;
@@ -59,11 +73,26 @@ int32_t aria2_rust_add_uri(Aria2RustSession *session, const char *const *uris,
                             size_t uri_count,
                             const Aria2RustKeyValue *options,
                             size_t option_count, uint64_t *gid_out);
+int32_t aria2_rust_add_torrent(
+    Aria2RustSession *session, const uint8_t *torrent_data,
+    size_t torrent_length, const char *const *web_seed_uris,
+    size_t web_seed_uri_count, const Aria2RustKeyValue *options,
+    size_t option_count, uint64_t *gid_out);
+int32_t aria2_rust_add_metalink(
+    Aria2RustSession *session, const uint8_t *metalink_data,
+    size_t data_length, const Aria2RustKeyValue *options,
+    size_t option_count, uint64_t *gids_out, size_t gid_capacity,
+    size_t *gid_count_out);
 int32_t aria2_rust_remove(Aria2RustSession *session, uint64_t gid,
                           uint8_t force);
 int32_t aria2_rust_pause(Aria2RustSession *session, uint64_t gid,
                          uint8_t force);
 int32_t aria2_rust_unpause(Aria2RustSession *session, uint64_t gid);
+int32_t aria2_rust_pause_all(Aria2RustSession *session, uint8_t force);
+int32_t aria2_rust_unpause_all(Aria2RustSession *session);
+int32_t aria2_rust_change_position(Aria2RustSession *session, uint64_t gid,
+                                   int32_t position, uint32_t mode,
+                                   size_t *position_out);
 int32_t aria2_rust_change_option(Aria2RustSession *session, uint64_t gid,
                                  const Aria2RustKeyValue *options,
                                  size_t option_count);
@@ -73,6 +102,15 @@ int32_t aria2_rust_change_global_option(Aria2RustSession *session,
 
 int32_t aria2_rust_get_download_info(Aria2RustSession *session, uint64_t gid,
                                      Aria2RustDownloadInfo *output);
+/* File indexes are 1-based, matching aria2.getFiles and libaria2. */
+size_t aria2_rust_get_file_count(Aria2RustSession *session, uint64_t gid);
+int32_t aria2_rust_get_file_info(Aria2RustSession *session, uint64_t gid,
+                                 size_t file_index,
+                                 Aria2RustFileInfo *output);
+/* Returns required bytes including NUL; returns 0 when the file is absent. */
+size_t aria2_rust_get_file_path(Aria2RustSession *session, uint64_t gid,
+                                size_t file_index, char *output,
+                                size_t capacity);
 int32_t aria2_rust_get_global_stat(Aria2RustSession *session,
                                    Aria2RustGlobalStat *output);
 /* Returns the required number of entries. Pass NULL/0 to query the size. */

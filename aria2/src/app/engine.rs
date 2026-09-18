@@ -431,9 +431,6 @@ impl App {
                     input,
                     self.explicit_timeout,
                 ));
-            if options.uses_memory_download() {
-                group.recover().mark_in_memory_download();
-            }
             #[cfg(feature = "bittorrent")]
             if matches!(input.input_type, InputType::TorrentFile) {
                 let data = input

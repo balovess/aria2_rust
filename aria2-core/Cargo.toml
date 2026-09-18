@@ -1,6 +1,6 @@
 [package]
 name = "aria2-core"
-version = "0.3.8"
+version = "0.3.9"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -59,8 +59,7 @@ reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip"
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
 # Kept at 0.24: reqwest 0.13.4 only requires hickory-resolver 0.26 when its `hickory-dns`
-# feature is enabled (we don't use it). Upgrading to 0.26 would conflict with russh's
-# pinned `rand_core = 0.10.0-rc-3` via aria2-protocol's SFTP support.
+# feature is enabled (we don't use it).
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"], default-features = false }
 rand.workspace = true
 regex = "1"
@@ -86,9 +85,6 @@ p12_q3 = { workspace = true }
 # focused on the PBES2 algorithms required by the existing client contract.
 pkcs5 = { version = "0.7.1", default-features = false, features = ["alloc", "pbes2", "sha1-insecure"] }
 yasna = { version = "0.5", features = ["std"] }
-# Bundled Mozilla root certificates for FTPS TLS verification when no custom
-# CA file is specified. webpki-roots 0.26 is compatible with rustls 0.23.
-webpki-roots = "0.26"
 rc4 = { version = "0.2", optional = true }
 once_cell = "1.19"
 dashmap = "5.5"
@@ -125,7 +121,8 @@ base64.workspace = true
 aria2-protocol.workspace = true
 # Local SFTP E2E fixture. Reuses the production lockfile version and stays
 # test-only so it does not expand the engine's runtime dependency surface.
-russh = { version = "0.59", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.61", default-features = false, features = ["ring", "rsa"] }
+getrandom = "0.4"
 # sysinfo is used by the memory-footprint regression test (Phase F6) to sample
 # the process RSS while writing a file via PositionedDiskWriter. Pinned to 0.30
 # where `Process::memory()` returns bytes (in newer versions the API was split

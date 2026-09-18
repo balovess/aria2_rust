@@ -150,6 +150,19 @@ Upstream method responses must not contain extension fields. Runtime data such a
 | `aria2.getDhtStatus` | none | Aggregate DHT status for active BT/magnet tasks; requires BitTorrent |
 | `aria2.getGlobalStat` | none | Global speeds and task counts |
 
+`aria2.getFiles(gid)` is the standard query for file paths, total lengths,
+completed lengths, and URI metadata. Numeric fields are serialized as strings
+to match the aria2 RPC contract. It queries an existing task; it is not a
+standalone URL-inspection method:
+
+- HTTP/FTP tasks need to complete their metadata probe before the length is known.
+- A local torrent is parsed by `addTorrent`, so its file list is available even with `pause=true`.
+- A magnet link needs metadata exchange before its file names and lengths are available.
+- `dry-run` only performs HTTP/FTP availability and length probing; it is not a general file-list API.
+
+The Python and Node.js bindings expose this as `client.get_files(gid)` and
+`client.getFiles(gid)` respectively.
+
 Common `tellStatus` keys include `gid`, `status`, `totalLength`, `completedLength`, `uploadLength`, `downloadSpeed`, `uploadSpeed`, `pieceLength`, `numPieces`, `connections`, `errorCode`, `errorMessage`, `followedBy`, `following`, `belongsTo`, `dir`, `files`, `bittorrent`, and `infoHash`.
 
 BitTorrent status details: `bittorrent` is a nested torrent metadata object. It

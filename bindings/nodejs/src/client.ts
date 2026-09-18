@@ -3,9 +3,13 @@ import { HttpTransport, WebSocketTransport } from './transport.js';
 import { Aria2EventEmitter } from './events.js';
 import type {
   StatusInfo,
+  FileInfo,
   GlobalStat,
   VersionInfo,
   SessionInfo,
+  UriEntry,
+  ServerInfoIndex,
+  PeerInfo,
   ClientOptions,
 } from './types.js';
 import { ConnectionError } from './errors.js';
@@ -61,22 +65,42 @@ export class Aria2Client {
     return this.eventEmitter;
   }
 
-  async addUri(uris: string[], options?: Record<string, unknown>): Promise<string> {
+  async addUri(
+    uris: string[],
+    options?: Record<string, unknown>,
+    position?: number,
+  ): Promise<string> {
     const params: unknown[] = [uris];
-    if (options) params.push(options);
+    if (options !== undefined || position !== undefined) params.push(options ?? {});
+    if (position !== undefined) params.push(position);
     return (await this.transport.sendRequest('aria2.addUri', params)) as string;
   }
 
-  async addTorrent(torrent: Buffer, options?: Record<string, unknown>): Promise<string> {
+  async addTorrent(
+    torrent: Buffer,
+    options?: Record<string, unknown>,
+    webSeedUris?: string[],
+    position?: number,
+  ): Promise<string> {
     const params: unknown[] = [torrent.toString('base64')];
-    if (options) params.push(options);
+    if (webSeedUris !== undefined || options !== undefined || position !== undefined) {
+      params.push(webSeedUris ?? []);
+    }
+    if (options !== undefined || position !== undefined) params.push(options ?? {});
+    if (position !== undefined) params.push(position);
     return (await this.transport.sendRequest('aria2.addTorrent', params)) as string;
   }
 
-  async addMetalink(metalink: Buffer, options?: Record<string, unknown>): Promise<string> {
+  async addMetalink(
+    metalink: Buffer,
+    options?: Record<string, unknown>,
+    position?: number,
+  ): Promise<string[]> {
     const params: unknown[] = [metalink.toString('base64')];
-    if (options) params.push(options);
-    return (await this.transport.sendRequest('aria2.addMetalink', params)) as string;
+    if (options !== undefined) params.push(options);
+    else if (position !== undefined) params.push({});
+    if (position !== undefined) params.push(position);
+    return (await this.transport.sendRequest('aria2.addMetalink', params)) as string[];
   }
 
   async remove(gid: string): Promise<string> {
@@ -99,14 +123,54 @@ export class Aria2Client {
     return (await this.transport.sendRequest('aria2.forceRemove', [gid])) as string;
   }
 
-  async forceUnpause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forceUnpause', [gid])) as string;
+  async pauseAll(): Promise<string> {
+    return (await this.transport.sendRequest('aria2.pauseAll', [])) as string;
+  }
+
+  async forcePauseAll(): Promise<string> {
+    return (await this.transport.sendRequest('aria2.forcePauseAll', [])) as string;
+  }
+
+  async unpauseAll(): Promise<string> {
+    return (await this.transport.sendRequest('aria2.unpauseAll', [])) as string;
+  }
+
+  async changePosition(gid: string, position: number, mode: string): Promise<number> {
+    return (await this.transport.sendRequest('aria2.changePosition', [gid, position, mode])) as number;
+  }
+
+  async changeUri(
+    gid: string,
+    fileIndex: number,
+    deleteUris: string[],
+    addUris: string[],
+    position?: number,
+  ): Promise<string[]> {
+    const params: unknown[] = [gid, fileIndex, deleteUris, addUris];
+    if (position !== undefined) params.push(position);
+    return (await this.transport.sendRequest('aria2.changeUri', params)) as string[];
   }
 
   async tellStatus(gid: string, keys?: string[]): Promise<StatusInfo> {
     const params: unknown[] = [gid];
     if (keys) params.push(keys);
     return (await this.transport.sendRequest('aria2.tellStatus', params)) as StatusInfo;
+  }
+
+  async getFiles(gid: string): Promise<FileInfo[]> {
+    return (await this.transport.sendRequest('aria2.getFiles', [gid])) as FileInfo[];
+  }
+
+  async getUris(gid: string): Promise<UriEntry[]> {
+    return (await this.transport.sendRequest('aria2.getUris', [gid])) as UriEntry[];
+  }
+
+  async getServers(gid: string): Promise<ServerInfoIndex[]> {
+    return (await this.transport.sendRequest('aria2.getServers', [gid])) as ServerInfoIndex[];
+  }
+
+  async getPeers(gid: string): Promise<PeerInfo[]> {
+    return (await this.transport.sendRequest('aria2.getPeers', [gid])) as PeerInfo[];
   }
 
   async tellActive(keys?: string[]): Promise<StatusInfo[]> {
@@ -173,6 +237,28 @@ export class Aria2Client {
 
   async saveSession(): Promise<string> {
     return (await this.transport.sendRequest('aria2.saveSession', [])) as string;
+  }
+
+  async updateBrowserContext(context: unknown): Promise<string> {
+    return (await this.transport.sendRequest('aria2.updateBrowserContext', [context])) as string;
+  }
+
+  async clearBrowserContext(): Promise<string> {
+    return (await this.transport.sendRequest('aria2.clearBrowserContext', [])) as string;
+  }
+
+  async systemMulticall(
+    calls: Array<{ methodName: string; params?: unknown[] }>,
+  ): Promise<unknown[]> {
+    return (await this.transport.sendRequest('system.multicall', [calls])) as unknown[];
+  }
+
+  async systemListMethods(): Promise<string[]> {
+    return (await this.transport.sendRequest('system.listMethods', [])) as string[];
+  }
+
+  async systemListNotifications(): Promise<string[]> {
+    return (await this.transport.sendRequest('system.listNotifications', [])) as string[];
   }
 
   on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {

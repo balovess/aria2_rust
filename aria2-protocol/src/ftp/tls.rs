@@ -1,149 +1,41 @@
-//! FTPS (FTP over TLS) stream upgrade per RFC 4217.
+//! FTPS transport primitives and RFC 4217 negotiation.
 //!
-//! After the FTP server accepts `AUTH TLS` (234 response), the control
-//! connection must be upgraded from a plain TCP stream to a TLS stream.
-//! This module provides:
-//!
-//! - [`FtpControlStream`] — enum wrapping either a plain `TcpStream` or a
-//!   TLS-encrypted `TlsStream<TcpStream>`, implementing `AsyncRead` +
-//!   `AsyncWrite` so it can be used as a drop-in replacement.
-//!
-//! - [`FtpsConfig`] — TLS configuration (CA certificate> certificate path,
-//!   certificate verification toggle, minimum TLS version).
-//!
-//! - [`build_tls_connector`] — constructs a `tokio_rustls::TlsConnector`
-//!   from an [`FtpsConfig`].
-//!
-//! - [`upgrade_stream`] — performs the TLS handshake on an existing
-//!   `TcpStream`, returning a `TlsStream<TcpStream>`.
+//! This module owns the protocol-level TLS implementation used by FTP
+//! callers.  The download engine is responsible only for choosing when to
+//! use it and mapping application configuration into [`FtpsConfig`].
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use rustls::DigitallySignedStruct;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 use tracing::{debug, info, warn};
 
-// =============================================================================
-// FtpControlStream — polymorphic stream for plain or TLS FTP connections
-// =============================================================================
-
-/// Wrapper supporting both plain and TLS-encrypted FTP control streams.
-///
-/// After `AUTH TLS` is accepted (RFC 4217 section 3), the underlying
-/// `TcpStream` is replaced with `TlsStream<TcpStream>`. This enum lets the
-/// `FtpConnection` hold either variant without boxing or generics.
-///
-/// Both variants implement `AsyncRead + AsyncWrite + Unpin`, so the enum
-/// dispatches I/O calls to the active variant at zero cost (no vtable).
-#[derive(Debug)]
-pub enum FtpControlStream {
-    /// Unencrypted TCP connection (plain FTP)
-    Plain(TcpStream),
-    /// TLS-encrypted connection (FTPS, RFC 4217)
-    Tls(TlsStream<TcpStream>),
-}
-
-impl FtpControlStream {
-    /// Returns `true` if this stream is TLS-encrypted.
-    pub fn is_tls(&self) -> bool {
-        matches!(self, FtpControlStream::Tls(_))
-    }
-
-    /// Consumes self and returns the inner `TcpStream` if plain, or `None`
-    /// if TLS-wrapped (the TLS stream owns the TCP stream internally).
-    pub fn into_plain(self) -> Option<TcpStream> {
-        match self {
-            FtpControlStream::Plain(s) => Some(s),
-            FtpControlStream::Tls(_) => None,
-        }
-    }
-}
-
-// Both TcpStream and TlsStream<TcpStream> are Unpin (no self-referential
-// data), so Pin::new on &mut is always safe. Implement AsyncRead/AsyncWrite
-// by delegating to the active variant.
-
-impl AsyncRead for FtpControlStream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            FtpControlStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
-            FtpControlStream::Tls(s) => Pin::new(s).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for FtpControlStream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            FtpControlStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
-            FtpControlStream::Tls(s) => Pin::new(s).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            FtpControlStream::Plain(s) => Pin::new(s).poll_flush(cx),
-            FtpControlStream::Tls(s) => Pin::new(s).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            FtpControlStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
-            FtpControlStream::Tls(s) => Pin::new(s).poll_shutdown(cx),
-        }
-    }
-}
-
-// =============================================================================
-// FtpsConfig — TLS configuration for FTPS connections
-// =============================================================================
-
-/// Minimum TLS protocol version for FTPS connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TlsVersion {
-    /// TLS 1.2 (RFC 5246) — default, widely supported
-    #[default]
-    Tls12,
-    /// TLS 1.3 (RFC 8446) — latest, preferred when available
-    Tls13,
-}
-
 /// FTPS (FTP over TLS) configuration per RFC 4217.
 ///
-/// Controls TLS handshake behaviour when upgrading an FTP control
-/// connection after `AUTH TLS`. Matches the C++ aria2 options
-/// `--check-certificate` and `--ca-certificate`.
+/// The engine maps its user-facing options into this transport configuration.
+/// The protocol module then applies it consistently to control and data
+/// channels.
 #[derive(Debug, Clone)]
 pub struct FtpsConfig {
-    /// Enable FTPS: send `AUTH TLS` after connecting and upgrade to TLS.
-    /// Corresponds to C++ aria2 `--ftp-tls` (off by default; explicit FTPS
-    /// via `ftps://` URL also sets this to true).
+    /// Whether the caller requested an FTPS connection.
     pub enabled: bool,
-
-    /// Verify the server's TLS certificate chain.
-    /// When `false`, accepts any certificate (insecure, for testing only).
-    /// Corresponds to C++ aria2 `--check-certificate`.
+    /// Verify the server certificate chain.
+    ///
+    /// Disabling verification is insecure and should only be used when the
+    /// caller explicitly opts into it.
     pub check_certificate: bool,
-
-    /// Path to a PEM file containing trusted CA certificates.
-    /// When `None`, falls back to bundled Mozilla roots (webpki-roots).
-    /// Corresponds to C++ aria2 `--ca-certificate`.
+    /// Optional PEM file containing trusted CA certificates.
+    ///
+    /// When omitted, the bundled Mozilla roots are used.
     pub ca_certificate: Option<PathBuf>,
-
     /// Minimum TLS protocol version to negotiate.
     pub min_tls_version: TlsVersion,
 }
@@ -159,30 +51,85 @@ impl Default for FtpsConfig {
     }
 }
 
+/// Minimum TLS protocol version for FTPS connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TlsVersion {
+    /// TLS 1.2 (RFC 5246).
+    #[default]
+    Tls12,
+    /// TLS 1.3 (RFC 8446).
+    Tls13,
+}
+
+/// FTP control stream which can be plain TCP or TLS-protected.
+#[derive(Debug)]
+pub enum FtpControlStream {
+    /// Unencrypted FTP control connection.
+    Plain(TcpStream),
+    /// TLS-encrypted FTP control connection.
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl FtpControlStream {
+    /// Returns whether this stream is TLS-protected.
+    pub fn is_tls(&self) -> bool {
+        matches!(self, Self::Tls(_))
+    }
+
+    /// Returns the underlying TCP stream reference.
+    pub fn get_ref(&self) -> Option<&TcpStream> {
+        match self {
+            Self::Plain(stream) => Some(stream),
+            Self::Tls(stream) => Some(stream.get_ref().0),
+        }
+    }
+}
+
+/// FTP data stream which can be plain TCP or protected by `PROT P`.
+#[derive(Debug)]
+pub enum FtpDataStream {
+    /// Unencrypted FTP data connection.
+    Plain(TcpStream),
+    /// TLS-encrypted FTP data connection.
+    Tls(Box<TlsStream<TcpStream>>),
+}
+
+impl FtpDataStream {
+    /// Set TCP_NODELAY on the underlying socket.
+    pub fn set_nodelay(&self, enabled: bool) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.set_nodelay(enabled),
+            Self::Tls(stream) => stream.get_ref().0.set_nodelay(enabled),
+        }
+    }
+}
+
+fn parse_response_code(response: &str, command: &str) -> Result<u16, String> {
+    let code_bytes = response
+        .as_bytes()
+        .get(..3)
+        .ok_or_else(|| format!("{} response too short: {}", command, response))?;
+    let code_text = std::str::from_utf8(code_bytes)
+        .map_err(|_| format!("Invalid {} response code: {}", command, response))?;
+    code_text
+        .parse()
+        .map_err(|_| format!("Invalid {} response code: {}", command, response))
+}
+
 // =============================================================================
 // TLS connector construction
 // =============================================================================
 
-/// Build a `tokio_rustls::TlsConnector` from the given [`FtpsConfig`].
-///
-/// Root certificate resolution order:
-/// 1. If `config.ca_certificate` is `Some(path)`, load PEM certs from file.
-/// 2. Otherwise, use the bundled Mozilla roots from `webpki-roots`.
-///
-/// If `config.check_certificate` is `false`, all certificate verification
-/// is disabled (dangerous: susceptible to MITM attacks).
+/// Build a `tokio_rustls::TlsConnector` from an [`FtpsConfig`].
 pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConnector, String> {
-    use rustls::crypto::ring::default_provider;
     use rustls::ClientConfig;
+    use rustls::crypto::ring::default_provider;
 
-    // Install the ring crypto provider (idempotent if already installed)
     let _ = default_provider().install_default();
-
     let mut root_store = rustls::RootCertStore::empty();
 
     if config.check_certificate {
         if let Some(ref ca_path) = config.ca_certificate {
-            // Load CA certificates from user-specified PEM file
             let certs = load_pem_certs(ca_path)?;
             let (added, rejected) = root_store.add_parsable_certificates(certs);
             if added == 0 {
@@ -199,34 +146,30 @@ pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConne
                 rejected
             );
         } else {
-            // Fallback: use bundled Mozilla root certificates.
-            // For rustls 0.23 + webpki-roots 0.26, directly set the roots vec.
             root_store.roots = webpki_roots::TLS_SERVER_ROOTS.to_vec();
             if root_store.is_empty() {
                 return Err("No bundled root certificates available".to_string());
             }
-            debug!("Using {} bundled Mozilla root certificates", root_store.len());
+            debug!(
+                "Using {} bundled Mozilla root certificates",
+                root_store.len()
+            );
         }
     } else {
-        // Dangerous: accept any certificate.
         warn!("Certificate verification DISABLED — FTPS connection is insecure");
     }
 
-    // Build ClientConfig with appropriate TLS version.
     let mut client_config = match config.min_tls_version {
         TlsVersion::Tls12 => ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth(),
-        TlsVersion::Tls13 => {
-            ClientConfig::builder_with_provider(Arc::new(default_provider()))
-                .with_protocol_versions(&[&rustls::version::TLS13])
-                .map_err(|e| format!("Failed to set TLS 1.3 only: {}", e))?
-                .with_root_certificates(root_store)
-                .with_no_client_auth()
-        }
+        TlsVersion::Tls13 => ClientConfig::builder_with_provider(Arc::new(default_provider()))
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|e| format!("Failed to set TLS 1.3 only: {}", e))?
+            .with_root_certificates(root_store)
+            .with_no_client_auth(),
     };
 
-    // If certificate verification is disabled, install a dangerous verifier
     if !config.check_certificate {
         client_config
             .dangerous()
@@ -236,10 +179,7 @@ pub fn build_tls_connector(config: &FtpsConfig) -> Result<tokio_rustls::TlsConne
     Ok(tokio_rustls::TlsConnector::from(Arc::new(client_config)))
 }
 
-/// Load PEM-encoded certificates from a file path.
-fn load_pem_certs(
-    path: &std::path::Path,
-) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
     use std::io::BufReader as SyncBufReader;
 
     let file = std::fs::File::open(path).map_err(|e| {
@@ -251,7 +191,7 @@ fn load_pem_certs(
     })?;
 
     let mut reader = SyncBufReader::new(file);
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             format!(
@@ -262,30 +202,15 @@ fn load_pem_certs(
         })?;
 
     if certs.is_empty() {
-        return Err(format!(
-            "No PEM certificates found in {}",
-            path.display()
-        ));
+        return Err(format!("No PEM certificates found in {}", path.display()));
     }
 
     Ok(certs)
 }
 
-// =============================================================================
-// NoCertificateVerification — dangerous verifier for --check-certificate=false
-// =============================================================================
-
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::DigitallySignedStruct;
-
-/// A certificate verifier that accepts everything.
-///
-/// **DANGER:** This disables all certificate validation, making the
-/// connection vulnerable to man-in-the-middle attacks. Only use for
-/// testing or when `--check-certificate=false` is explicitly set.
+/// Certificate verifier used when certificate checking is explicitly disabled.
 #[derive(Debug)]
-struct NoCertificateVerification;
+pub(crate) struct NoCertificateVerification;
 
 impl ServerCertVerifier for NoCertificateVerification {
     fn verify_server_cert(
@@ -296,7 +221,6 @@ impl ServerCertVerifier for NoCertificateVerification {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        // Accept any certificate — dangerous, only for --check-certificate=false
         Ok(ServerCertVerified::assertion())
     }
 
@@ -319,9 +243,6 @@ impl ServerCertVerifier for NoCertificateVerification {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        // Return all schemes supported by the ring crypto provider.
-        // This ensures the TLS handshake can proceed regardless of
-        // which signature algorithm the server uses.
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
@@ -329,31 +250,126 @@ impl ServerCertVerifier for NoCertificateVerification {
 }
 
 // =============================================================================
-// TLS stream upgrade
+// RFC 4217 control-channel negotiation
 // =============================================================================
 
-/// Upgrade a plain `TcpStream` to a TLS-encrypted stream.
+/// Negotiate protected FTP data channels on an established control stream.
 ///
-/// This is called after the FTP server accepts `AUTH TLS` (234 response).
-/// The TLS handshake is performed asynchronously. On success, returns
-/// `TlsStream<TcpStream>` which replaces the plain stream in
-/// `FtpControlStream`.
-///
-/// # Errors
-///
-/// Returns an error if:
-/// - The TLS connector cannot be built (bad CA file, no roots)
-/// - The TLS handshake fails (server cert invalid, handshake timeout)
-pub async fn upgrade_stream(
+/// This sends `PBSZ 0` followed by `PROT P`. It is shared by explicit FTPS
+/// after `AUTH TLS` and implicit FTPS after the initial TLS handshake.
+/// Returning an error for either rejected response keeps callers from
+/// accidentally treating a TLS control channel as a protected FTPS session
+/// when its data channel would still be plaintext.
+pub async fn negotiate_protected_data_channel<R>(reader: &mut R) -> Result<(), String>
+where
+    R: AsyncBufRead + AsyncWrite + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    debug!("Sending PBSZ 0");
+    reader
+        .write_all(b"PBSZ 0\r\n")
+        .await
+        .map_err(|e| format!("Failed to send PBSZ 0: {}", e))?;
+    reader
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush PBSZ 0: {}", e))?;
+
+    let mut line_buf = String::new();
+    reader
+        .read_line(&mut line_buf)
+        .await
+        .map_err(|e| format!("Failed to read PBSZ response: {}", e))?;
+    let pbsz_resp = line_buf.trim();
+    debug!("PBSZ response: {}", pbsz_resp);
+    let pbsz_code = parse_response_code(pbsz_resp, "PBSZ")?;
+    if pbsz_code != 200 {
+        return Err(format!(
+            "PBSZ 0 rejected by server: {} (expected 200)",
+            pbsz_resp
+        ));
+    }
+
+    debug!("Sending PROT P");
+    reader
+        .write_all(b"PROT P\r\n")
+        .await
+        .map_err(|e| format!("Failed to send PROT P: {}", e))?;
+    reader
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush PROT P: {}", e))?;
+
+    line_buf.clear();
+    reader
+        .read_line(&mut line_buf)
+        .await
+        .map_err(|e| format!("Failed to read PROT response: {}", e))?;
+    let prot_resp = line_buf.trim();
+    debug!("PROT response: {}", prot_resp);
+    let prot_code = parse_response_code(prot_resp, "PROT")?;
+    if prot_code != 200 {
+        return Err(format!(
+            "PROT P rejected by server: {} (data channel would be unencrypted)",
+            prot_resp
+        ));
+    }
+
+    info!("PBSZ 0 and PROT P accepted — data channel will be TLS-protected");
+    Ok(())
+}
+
+/// Perform `AUTH TLS`, the TLS handshake, `PBSZ 0`, and `PROT P`.
+pub async fn upgrade_control_stream(
+    mut stream: TcpStream,
+    host: &str,
+    config: &FtpsConfig,
+) -> Result<TlsStream<TcpStream>, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    debug!("Sending AUTH TLS to {}", host);
+    stream
+        .write_all(b"AUTH TLS\r\n")
+        .await
+        .map_err(|e| format!("Failed to send AUTH TLS: {}", e))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush AUTH TLS: {}", e))?;
+
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut line_buf = String::new();
+    reader
+        .read_line(&mut line_buf)
+        .await
+        .map_err(|e| format!("Failed to read AUTH TLS response: {}", e))?;
+
+    let response = line_buf.trim();
+    debug!("AUTH TLS response: {}", response);
+    let code = parse_response_code(response, "AUTH TLS")?;
+    if code != 234 {
+        return Err(format!(
+            "AUTH TLS rejected by server: {} (expected 234)",
+            response
+        ));
+    }
+    info!("AUTH TLS accepted (234) — proceeding with TLS handshake");
+
+    let stream = reader.into_inner();
+    let mut tls_stream = perform_tls_handshake(stream, host, config).await?;
+    let mut reader = tokio::io::BufReader::new(&mut tls_stream);
+    negotiate_protected_data_channel(&mut reader).await?;
+    Ok(tls_stream)
+}
+
+/// Perform a TLS handshake on an FTP control or implicit-FTPS connection.
+pub async fn perform_tls_handshake(
     stream: TcpStream,
     host: &str,
     config: &FtpsConfig,
 ) -> Result<TlsStream<TcpStream>, String> {
     let connector = build_tls_connector(config)?;
-
-    // Create an owned ServerName<'static> from the host string.
-    // We need 'static lifetime because tokio_rustls::TlsConnector::connect
-    // requires ServerName<'static>.
     let server_name: ServerName<'static> = ServerName::try_from(host.to_string())
         .map_err(|e| format!("Invalid FTPS server name '{}': {:?}", host, e))?;
 
@@ -362,21 +378,108 @@ pub async fn upgrade_stream(
         .connect(server_name, stream)
         .await
         .map_err(|e| format!("FTPS TLS handshake failed for {}: {}", host, e))?;
-
     info!("TLS handshake completed successfully with {}", host);
     Ok(tls_stream)
 }
 
-// =============================================================================
-// Unit tests
-// =============================================================================
+/// Upgrade a `PROT P` FTP data connection to TLS.
+pub async fn upgrade_data_stream(
+    stream: TcpStream,
+    host: &str,
+    config: &FtpsConfig,
+) -> Result<TlsStream<TcpStream>, String> {
+    debug!("Upgrading FTP data connection to TLS for {}", host);
+    let tls_stream = perform_tls_handshake(stream, host, config).await?;
+    info!("FTPS data connection TLS handshake completed with {}", host);
+    Ok(tls_stream)
+}
+
+impl AsyncRead for FtpControlStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for FtpControlStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
+
+impl AsyncRead for FtpDataStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for FtpDataStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            Self::Tls(stream) => Pin::new(stream.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_ftps_config_default() {
+    fn ftps_config_default() {
         let config = FtpsConfig::default();
         assert!(!config.enabled);
         assert!(config.check_certificate);
@@ -385,64 +488,118 @@ mod tests {
     }
 
     #[test]
-    fn test_tls_version_default() {
+    fn tls_version_default() {
         assert_eq!(TlsVersion::default(), TlsVersion::Tls12);
     }
 
     #[test]
-    fn test_ftp_control_stream_plain_is_not_tls() {
-        let config = FtpsConfig::default();
-        assert!(!config.enabled);
+    fn response_code_requires_ascii_three_digit_prefix() {
+        assert_eq!(parse_response_code("200 OK", "TEST").unwrap(), 200);
+        assert!(parse_response_code("20", "TEST").is_err());
+        assert!(parse_response_code("é00 OK", "TEST").is_err());
+        assert!(parse_response_code("ABC OK", "TEST").is_err());
     }
 
     #[test]
-    fn test_build_tls_connector_with_check_enabled() {
+    fn connector_builds_with_check_enabled() {
         let config = FtpsConfig {
             enabled: true,
             check_certificate: true,
             ca_certificate: None,
             min_tls_version: TlsVersion::Tls12,
         };
-        let result = build_tls_connector(&config);
-        assert!(result.is_ok(), "Connector should build with bundled roots");
+        assert!(build_tls_connector(&config).is_ok());
     }
 
     #[test]
-    fn test_build_tls_connector_with_check_disabled() {
+    fn connector_builds_with_check_disabled() {
         let config = FtpsConfig {
             enabled: true,
             check_certificate: false,
             ca_certificate: None,
             min_tls_version: TlsVersion::Tls12,
         };
-        let result = build_tls_connector(&config);
-        assert!(
-            result.is_ok(),
-            "Connector should build even without cert verification"
-        );
+        assert!(build_tls_connector(&config).is_ok());
     }
 
     #[test]
-    fn test_build_tls_connector_with_nonexistent_ca_file() {
+    fn connector_rejects_missing_ca_file() {
         let config = FtpsConfig {
             enabled: true,
             check_certificate: true,
             ca_certificate: Some(PathBuf::from("/nonexistent/ca.pem")),
             min_tls_version: TlsVersion::Tls12,
         };
-        let result = build_tls_connector(&config);
-        assert!(result.is_err(), "Should fail with nonexistent CA file");
+        assert!(build_tls_connector(&config).is_err());
     }
 
     #[test]
-    fn test_build_tls_connector_tls13() {
+    fn connector_builds_with_tls13() {
         let config = FtpsConfig {
             enabled: true,
             check_certificate: true,
             ca_certificate: None,
             min_tls_version: TlsVersion::Tls13,
         };
-        let result = build_tls_connector(&config);
-        assert!(result.is_ok(), "Connector should build with TLS 1.3 only");
+        assert!(build_tls_connector(&config).is_ok());
+    }
+
+    #[tokio::test]
+    async fn protected_data_channel_negotiation_requires_both_responses() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let (client, server) = tokio::io::duplex(256);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "PBSZ 0\r\n");
+            reader
+                .get_mut()
+                .write_all(b"200 PBSZ ok\r\n")
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            assert_eq!(line, "PROT P\r\n");
+            reader
+                .get_mut()
+                .write_all(b"200 PROT ok\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::io::BufReader::new(client);
+        negotiate_protected_data_channel(&mut client).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn protected_data_channel_negotiation_fails_closed_on_prot_rejection() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+        let (client, server) = tokio::io::duplex(256);
+        let server = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(server);
+            let mut line = String::new();
+            reader.read_line(&mut line).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"200 PBSZ ok\r\n")
+                .await
+                .unwrap();
+            line.clear();
+            reader.read_line(&mut line).await.unwrap();
+            reader
+                .get_mut()
+                .write_all(b"534 PROT rejected\r\n")
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::io::BufReader::new(client);
+        let result = negotiate_protected_data_channel(&mut client).await;
+        assert!(result.is_err());
+        server.await.unwrap();
     }
 }

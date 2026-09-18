@@ -257,6 +257,29 @@ impl DownloadResult {
         self.info_hash = group.info_hash_hex().unwrap_or_default();
         self.in_memory_download = group.is_in_memory_download();
 
+        let fallback_path = {
+            let options = group.options();
+            let name = group
+                .output_name()
+                .or_else(|| options.out.clone())
+                .or_else(|| {
+                    group.uris().first().and_then(|uri| {
+                        uri.rsplit('/')
+                            .next()
+                            .map(|name| name.split(['?', '#']).next().unwrap_or(name))
+                            .map(str::to_owned)
+                            .filter(|name| !name.is_empty())
+                    })
+                })
+                .unwrap_or_default();
+            match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
+                Some(dir) if !name.is_empty() => std::path::PathBuf::from(dir)
+                    .join(name)
+                    .to_string_lossy()
+                    .into_owned(),
+                _ => name,
+            }
+        };
         let files = if let Some(context) = group.get_download_context() {
             context
                 .get_file_entries()
@@ -307,10 +330,7 @@ impl DownloadResult {
                 .collect();
             vec![FileEntry {
                 index: 1,
-                path: group
-                    .output_name()
-                    .or_else(|| group.options().out.clone())
-                    .unwrap_or_default(),
+                path: fallback_path.clone(),
                 length: self.total_length,
                 completed_length: self.completed_length,
                 selected: true,
@@ -328,10 +348,7 @@ impl DownloadResult {
                 .collect();
             vec![FileEntry {
                 index: 1,
-                path: group
-                    .output_name()
-                    .or_else(|| group.options().out.clone())
-                    .unwrap_or_default(),
+                path: fallback_path,
                 length: self.total_length,
                 completed_length: self.completed_length,
                 selected: true,
@@ -352,6 +369,23 @@ impl DownloadResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_from_group_derives_ddl_filename_when_no_output_is_configured() {
+        let group = crate::request::request_group::RequestGroup::new(
+            GroupId::new(1),
+            vec!["https://example.com/releases/file.zip?download=1".to_string()],
+            crate::request::request_group::DownloadOptions::default(),
+        );
+        group.set_total_length(4096);
+
+        let mut result = DownloadResult::finished();
+        result.fill_from_group(&group);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "file.zip");
+        assert_eq!(result.files[0].length, 4096);
+    }
 
     #[test]
     fn test_result_code_roundtrip() {

@@ -15,7 +15,9 @@ use url::Url;
 use crate::dns::dns_cache::DnsCache;
 use crate::engine::progress_checkpoint::ProgressCheckpoint;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::ftp::connection::{FtpProxyConfig, FtpsConfig, ProxyMethod, TlsVersion};
+use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
+
+use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
 
@@ -77,7 +79,7 @@ impl FtpDownloadCommand {
             vec![uri.to_string()],
             options.clone(),
         )));
-        if options.uses_memory_download() {
+        if options.uses_memory_download_for_uri(uri) {
             group.recover().mark_in_memory_download();
         }
         Self::new_with_group(group, output_dir, output_name)
@@ -106,7 +108,7 @@ impl FtpDownloadCommand {
             (uri, opts)
         };
 
-        if options.uses_memory_download() {
+        if options.uses_memory_download_for_uri(&uri) {
             group.recover().mark_in_memory_download();
         }
 

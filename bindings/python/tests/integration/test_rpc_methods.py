@@ -26,10 +26,10 @@ class TestRpcMethods:
         assert isinstance(gid, str)
         assert gid.startswith("gid-")
 
-    async def test_add_metalink_returns_gid(self, client):
-        gid = await client.add_metalink(b"<metalink>data</metalink>")
-        assert isinstance(gid, str)
-        assert gid.startswith("gid-")
+    async def test_add_metalink_returns_gids(self, client):
+        gids = await client.add_metalink(b"<metalink>data</metalink>")
+        assert len(gids) == 2
+        assert all(gid.startswith("gid-") for gid in gids)
 
     async def test_remove_existing_task(self, client):
         gid = await client.add_uri(["http://example.com/file.zip"])

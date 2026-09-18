@@ -82,6 +82,181 @@ async fn test_e2e_http_download_small_file() {
 }
 
 #[tokio::test]
+async fn test_e2e_http_follow_torrent_memory_preserves_payload_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "payload.bin";
+    let output_path = dir.path().join(output_name);
+    let url = format!("{}/files/small.bin", server.base_url());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+
+    let mut command = DownloadCommand::new(
+        GroupId::new(0x680),
+        &url,
+        &options,
+        dir.path().to_str(),
+        Some(output_name),
+    )
+    .expect("create HTTP follow-torrent command");
+    let group = command
+        .request_group()
+        .expect("HTTP command should expose its request group");
+
+    command
+        .execute()
+        .await
+        .expect("ordinary HTTP payload should download successfully");
+
+    assert!(
+        !group.recover().is_in_memory_download(),
+        "follow-torrent=mem must not classify an ordinary HTTP payload as metadata"
+    );
+    assert_eq!(
+        tokio::fs::read(&output_path).await.unwrap(),
+        small_content(),
+        "follow-torrent=mem must preserve the configured HTTP output file"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_http_follow_torrent_memory_preserves_payload_file() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_name = "engine-payload.bin";
+    let output_path = dir.path().join(output_name);
+    let url = format!("{}/files/small.bin", server.base_url());
+    let options = DownloadOptions {
+        follow_torrent: Some(FollowMode::Memory),
+        dir: Some(dir.path().to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(0x681);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let manager = Arc::new(aria2_core::request::request_group_man::RequestGroupMan::new());
+    let mut engine = DownloadEngine::new();
+    engine.set_request_group_man(Arc::clone(&manager));
+    engine
+        .engine_command_sender()
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP follow-torrent command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine(engine_task, "HTTP follow-torrent engine should complete").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+    assert!(!group.read().unwrap().is_in_memory_download());
+    assert_eq!(
+        tokio::fs::read(&output_path).await.unwrap(),
+        small_content()
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_http_dry_run_does_not_create_or_download_output() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_dir = dir.path().join("dry-run-output");
+    let output_name = "checked-only.bin";
+    let output_path = output_dir.join(output_name);
+    let url = format!("{}/files/small.bin", server.base_url());
+    let options = DownloadOptions {
+        dry_run: true,
+        dir: Some(output_dir.to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1000);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new();
+    engine.set_request_group_man(Arc::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("HTTP dry-run engine command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine(engine_task, "HTTP dry-run engine command did not complete").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+    assert_eq!(group.read().unwrap().total_length(), 4);
+    assert!(
+        !output_path.exists(),
+        "dry-run must not create an output file"
+    );
+    assert!(
+        !output_dir.exists(),
+        "dry-run must not create the output directory"
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_engine_add_download_honors_initial_pause() {
+    let server = start_server().await;
+    let dir = tmp_dir();
+    let output_dir = dir.path().join("paused-output");
+    let output_name = "paused.bin";
+    let output_path = output_dir.join(output_name);
+    let url = format!("{}/files/small.bin", server.base_url());
+    let options = DownloadOptions {
+        pause: true,
+        dir: Some(output_dir.to_string_lossy().into_owned()),
+        out: Some(output_name.to_string()),
+        ..DownloadOptions::default()
+    };
+    let gid = GroupId::new(1001);
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        gid,
+        vec![url],
+        options,
+    )));
+    let mut engine = DownloadEngine::new();
+    engine.set_request_group_man(Arc::new(
+        aria2_core::request::request_group_man::RequestGroupMan::new(),
+    ));
+    let command_tx = engine.engine_command_sender();
+    command_tx
+        .send(EngineCommand::AddDownload {
+            group: Arc::clone(&group),
+        })
+        .expect("paused HTTP engine command should be accepted");
+    let engine_task = tokio::spawn(engine.run());
+
+    wait_for_http_engine_status(&group, DownloadStatus::Paused).await;
+    assert!(
+        !output_path.exists(),
+        "a paused queued task must not start downloading"
+    );
+
+    command_tx
+        .send(EngineCommand::Unpause { gid })
+        .expect("HTTP unpause command should be accepted");
+    wait_for_http_engine(engine_task, "paused HTTP task did not finish after unpause").await;
+
+    assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);
+    assert_eq!(tokio::fs::metadata(output_path).await.unwrap().len(), 4);
+}
+
+#[tokio::test]
 async fn test_e2e_http_check_integrity_applies_trailing_cleanup_plan() {
     let server = start_server().await;
     let dir = tmp_dir();
@@ -484,6 +659,7 @@ async fn test_e2e_in_memory_max_file_not_found_preserves_result_code() {
         vec![url.clone()],
         options.clone(),
     )));
+    group.recover().mark_in_memory_download();
     group
         .write()
         .unwrap()
@@ -1206,6 +1382,7 @@ async fn test_e2e_in_memory_http_pause_interrupts_stalled_body_read() {
         vec![url.clone()],
         options.clone(),
     )));
+    group.recover().mark_in_memory_download();
     let mut command =
         DownloadCommand::new_with_group(Arc::clone(&group), &url, &options, None, None).unwrap();
 

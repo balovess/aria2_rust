@@ -121,6 +121,42 @@ pub(crate) fn build_download_context_from_meta(
     Ok(ctx)
 }
 
+/// Parse local torrent metadata into an existing request group before the
+/// download command is promoted.
+///
+/// The original libaria2 path has a parsed `DownloadContext` available to a
+/// caller after `addTorrent`, even when the task is paused. Keeping this
+/// preparation separate from command construction gives RPC and library
+/// callers the same observable file metadata without starting network work.
+pub fn prepare_group_metadata(
+    group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+    torrent_bytes: &[u8],
+    options: &DownloadOptions,
+    output_dir: Option<&str>,
+) -> Result<()> {
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+        .map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {error}")))
+        })?;
+    let dir = output_dir
+        .map(str::to_owned)
+        .or_else(|| options.dir.clone())
+        .unwrap_or_else(|| ".".to_string());
+    let path = std::path::PathBuf::from(&dir).join(&meta.info.name);
+    let mut context = build_download_context_from_meta(&meta, path.to_string_lossy().into_owned())?;
+    apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
+    apply_select_file_filter(&mut context, options.select_file.as_deref())?;
+
+    let group = group.recover();
+    group.set_bt_metadata(
+        meta.num_pieces() as u32,
+        meta.info.piece_length,
+        meta.info_hash.as_hex(),
+    );
+    group.set_download_context(std::sync::Arc::new(context));
+    Ok(())
+}
+
 /// Apply Metalink-selected paths and mirrors to a parsed torrent context.
 ///
 /// The torrent parser owns the canonical file order and byte offsets. This
@@ -540,7 +576,6 @@ impl BtDownloadCommand {
                 options.bt_max_peers,
                 10,
             ),
-            peer_sources: HashMap::new(),
             dht_engine: None,
             public_trackers: None,
             choking_algo,

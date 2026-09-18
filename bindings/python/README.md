@@ -1,4 +1,4 @@
-# aria2-rust-client
+# aria2-rust
 
 Python SDK for the aria2-rust JSON-RPC and WebSocket interface. The client
 surface has complete type annotations and current binding coverage; full
@@ -20,7 +20,7 @@ original-client compatibility remains tracked in the repository matrix.
 ## Installation
 
 ```bash
-pip install aria2-rust-client
+pip install aria2-rust
 ```
 
 Or from source:
@@ -101,25 +101,49 @@ Aria2Client(
 
 #### Methods
 
-All RPC methods are async and follow aria2 specification:
+The async client exposes the standard aria2 RPC methods listed below. Methods
+not listed here can still be called through the transport layer.
 
 **Task Management:**
-- `add_uri(uris, options=None)` - Add HTTP/FTP download
-- `add_torrent(torrent, options=None)` - Add BitTorrent download
-- `add_metalink(metalink, options=None)` - Add Metalink download
+- `add_uri(uris, options=None, position=None)` - Add HTTP/FTP download
+- `add_torrent(torrent, options=None, web_seed_uris=None, position=None)` - Add BitTorrent download
+- `add_metalink(metalink, options=None, position=None)` - Add Metalink download; returns all created GIDs
 - `remove(gid)` - Remove download
 - `pause(gid)` - Pause download
 - `unpause(gid)` - Resume download
 - `force_pause(gid)` - Force pause
 - `force_remove(gid)` - Force remove
-- `force_unpause(gid)` - Force unpause
+- `pause_all()` / `force_pause_all()` / `unpause_all()` - Batch task control
+- `change_position(gid, position, mode)` - Change queue position
+- `change_uri(gid, file_index, delete_uris, add_uris, position=None)` - Replace task URIs
 
 **Status Queries:**
 - `tell_status(gid, keys=None)` - Get task status
+- `get_files(gid)` - Get file paths, sizes, completion, and URI metadata for a task
+- `get_uris(gid)` / `get_servers(gid)` / `get_peers(gid)` - Get transfer connection metadata
 - `tell_active(keys=None)` - Get active tasks
 - `tell_waiting(offset, num, keys=None)` - Get waiting tasks
 - `tell_stopped(offset, num, keys=None)` - Get stopped tasks
 - `get_global_stat()` - Get global statistics
+
+**Session and browser context:**
+- `update_browser_context(context)` / `clear_browser_context()`
+
+**System methods:**
+- `system_multicall(calls)` / `system_list_methods()` / `system_list_notifications()`
+
+`get_files(gid)` is the direct binding for aria2's `aria2.getFiles` method:
+
+```python
+files = await client.get_files(gid)
+for file in files:
+    print(file.path, file.length)
+```
+
+For HTTP/FTP URLs, the length may be unknown until the metadata probe has
+completed. For magnet links, the file list is unavailable until metadata
+exchange completes. A local torrent is parsed when it is added, so its file
+metadata can be queried even when the task is created with `pause=true`.
 
 **Options:**
 - `get_global_option()` - Get global options

@@ -289,6 +289,7 @@ fn test_parse_pasv_response_minimal() {
 fn test_parse_pasv_response_invalid() {
     assert!(parse_pasv_response("no parentheses").is_none());
     assert!(parse_pasv_response("(1,2,3)").is_none()); // Too few parts
+    assert!(parse_pasv_response("(1,2,3,4,256,1)").is_none());
 }
 
 #[test]
@@ -303,6 +304,7 @@ fn test_parse_epsv_response_minimal() {
     let resp = "|||60000|";
     let result = parse_epsv_response(resp).unwrap();
     assert_eq!(result, 60000);
+    assert!(parse_epsv_response("|||0|").is_none());
 }
 
 #[test]

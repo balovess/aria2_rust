@@ -6,6 +6,9 @@ export type {
   SessionInfo,
   FileInfo,
   UriEntry,
+  ServerInfo,
+  ServerInfoIndex,
+  PeerInfo,
   DownloadEvent,
   ClientOptions,
 } from './types.js';
