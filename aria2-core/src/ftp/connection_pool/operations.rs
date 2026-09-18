@@ -100,9 +100,8 @@ impl FtpConnectionPool {
 
     /// Return a raw TCP control connection to the pool.
     ///
-    /// This is the primary method called by `FtpFinishHandler` after a
-    /// successful download (226 response). The stream, host, port,
-    /// username, mode, and base_working_dir are stored for later reuse.
+    /// The stream, host, port, username, mode, and base_working_dir are
+    /// stored for later reuse by the caller's download lifecycle.
     ///
     /// Matches C++ `DownloadEngine::poolSocket(request, username, proxy, socket, baseWorkingDir)`.
     pub async fn return_raw_connection(

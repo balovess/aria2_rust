@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 mod commands;
 mod connector;
 mod feat;
-mod ftp_finish;
 mod negotiation;
 mod parser;
 mod proxy_get;
@@ -49,9 +48,6 @@ pub(crate) use negotiation::{
     cwd_targets, parse_epsv_response, parse_mdtm_timestamp, parse_pasv_response,
     parse_pwd_response, percent_decode, read_response_impl, split_decoded_remote_path,
 };
-
-// Re-export finish handler types
-pub use ftp_finish::{FtpFinishConfig, FtpFinishHandler, FtpFinishResult, PooledFtpControl};
 
 // Re-export proxy tunnel types
 pub use proxy_tunnel::{FtpProxyTunnel, FtpProxyTunnelConfig, FtpProxyTunnelResult};

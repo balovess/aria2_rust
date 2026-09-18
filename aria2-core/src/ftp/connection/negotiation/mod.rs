@@ -21,8 +21,8 @@
 //!     - Verify data connection is alive before REST (C++ sendRestPasv)
 //! 13. RETR
 //!
-//! After data transfer completes, use `FtpFinishHandler::finish()` to read the
-//! 226 transfer-complete response and optionally pool the connection.
+//! The active download command owns the post-transfer 226 response and
+//! control-connection cleanup after negotiation returns its streams.
 //!
 //! # Module organization
 //!

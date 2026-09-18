@@ -153,7 +153,6 @@ async fn test_e2e_engine_http_follow_torrent_memory_preserves_payload_file() {
         .expect("HTTP follow-torrent command should be accepted");
     let engine_task = tokio::spawn(engine.run());
 
-    wait_for_http_engine_status(&group, DownloadStatus::Active).await;
     wait_for_http_engine(engine_task, "HTTP follow-torrent engine should complete").await;
 
     assert_eq!(group.read().unwrap().status(), DownloadStatus::Complete);

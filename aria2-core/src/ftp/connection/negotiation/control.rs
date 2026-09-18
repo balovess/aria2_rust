@@ -33,8 +33,8 @@ pub(super) trait ControlSession {
 /// Raw FTP control connection handler.
 ///
 /// Wraps the control socket for command/response I/O after the
-/// negotiation phase. `FtpFinishHandler` consumes this interface to read the
-/// 226 response and optionally return the connection to the pool.
+/// negotiation phase. The caller owns the post-transfer response and
+/// connection-cleanup policy after negotiation returns this control stream.
 pub struct RawFtpControl {
     pub(super) reader: BufReader<TcpStream>,
     pub(super) host: String,
