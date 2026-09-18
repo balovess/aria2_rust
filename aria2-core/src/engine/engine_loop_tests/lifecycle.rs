@@ -292,7 +292,7 @@ async fn idle_loop_exits_without_keep_alive() {
 #[tokio::test]
 async fn engine_cleanup_cancels_only_its_running_gids() {
     use crate::filesystem::file_allocation::AllocationStrategy;
-    use crate::filesystem::file_allocation_man::{FileAllocationEntry, FileAllocationProtocol};
+    use crate::filesystem::file_allocation_man::FileAllocationEntry;
     use tokio::sync::oneshot;
 
     let mut ctx = test_ctx(false);
@@ -308,7 +308,6 @@ async fn engine_cleanup_cancels_only_its_running_gids() {
             100,
             AllocationStrategy::Trunc,
             false,
-            FileAllocationProtocol::Http,
             target_tx,
         ));
         man.push_entry(FileAllocationEntry::single(
@@ -317,7 +316,6 @@ async fn engine_cleanup_cancels_only_its_running_gids() {
             100,
             AllocationStrategy::Trunc,
             false,
-            FileAllocationProtocol::Http,
             other_tx,
         ));
     }
