@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-#[cfg(feature = "metalink")]
+#[cfg(any(feature = "bittorrent", feature = "metalink"))]
 use std::sync::Arc;
 
 use aria2_core::engine::engine_command::EngineCommand;
@@ -26,6 +26,23 @@ impl CoreRpcBackend {
             .group_man
             .group_by_id(gid)
             .ok_or_else(|| BackendError::Internal("Group not found after insert".into()))?;
+        #[cfg(feature = "bittorrent")]
+        if let Some(data) = torrent_data.as_deref() {
+            let options = group
+                .read()
+                .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?
+                .options()
+                .clone();
+            if let Err(error) = aria2_core::engine::bt_download_command::prepare_group_metadata(
+                Arc::clone(&group),
+                data,
+                &options,
+                options.dir.as_deref(),
+            ) {
+                let _ = self.group_man.remove_group_by_id(gid);
+                return Err(Self::invalid(error.to_string()));
+            }
+        }
         {
             let mut group = group
                 .write()

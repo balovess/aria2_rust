@@ -34,6 +34,12 @@ typedef struct Aria2RustDownloadInfo {
   uint32_t error_code;
 } Aria2RustDownloadInfo;
 
+typedef struct Aria2RustFileInfo {
+  uint64_t length;
+  uint64_t completed_length;
+  uint8_t selected;
+} Aria2RustFileInfo;
+
 typedef struct Aria2RustGlobalStat {
   uint64_t download_speed;
   uint64_t upload_speed;
@@ -59,6 +65,11 @@ int32_t aria2_rust_add_uri(Aria2RustSession *session, const char *const *uris,
                             size_t uri_count,
                             const Aria2RustKeyValue *options,
                             size_t option_count, uint64_t *gid_out);
+int32_t aria2_rust_add_torrent(
+    Aria2RustSession *session, const uint8_t *torrent_data,
+    size_t torrent_length, const char *const *web_seed_uris,
+    size_t web_seed_uri_count, const Aria2RustKeyValue *options,
+    size_t option_count, uint64_t *gid_out);
 int32_t aria2_rust_remove(Aria2RustSession *session, uint64_t gid,
                           uint8_t force);
 int32_t aria2_rust_pause(Aria2RustSession *session, uint64_t gid,
@@ -73,6 +84,15 @@ int32_t aria2_rust_change_global_option(Aria2RustSession *session,
 
 int32_t aria2_rust_get_download_info(Aria2RustSession *session, uint64_t gid,
                                      Aria2RustDownloadInfo *output);
+/* File indexes are 1-based, matching aria2.getFiles and libaria2. */
+size_t aria2_rust_get_file_count(Aria2RustSession *session, uint64_t gid);
+int32_t aria2_rust_get_file_info(Aria2RustSession *session, uint64_t gid,
+                                 size_t file_index,
+                                 Aria2RustFileInfo *output);
+/* Returns required bytes including NUL; returns 0 when the file is absent. */
+size_t aria2_rust_get_file_path(Aria2RustSession *session, uint64_t gid,
+                                size_t file_index, char *output,
+                                size_t capacity);
 int32_t aria2_rust_get_global_stat(Aria2RustSession *session,
                                    Aria2RustGlobalStat *output);
 /* Returns the required number of entries. Pass NULL/0 to query the size. */

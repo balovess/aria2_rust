@@ -384,7 +384,12 @@ fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
                 group
                     .uris()
                     .first()
-                    .and_then(|uri| uri.rsplit('/').next().map(str::to_owned))
+                    .and_then(|uri| {
+                        uri.rsplit('/')
+                            .next()
+                            .map(|name| name.split(['?', '#']).next().unwrap_or(name))
+                            .map(str::to_owned)
+                    })
                     .filter(|name| !name.is_empty())
             })
             .unwrap_or_default();

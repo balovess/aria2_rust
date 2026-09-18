@@ -25,6 +25,7 @@ pub use crate::engine::bt_peer_interaction::{
 pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 
 // Re-export sub-module public items
+pub use constructor::prepare_group_metadata;
 pub(crate) use constructor::{
     apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
 };

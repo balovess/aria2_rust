@@ -10,6 +10,7 @@ from .events import EventSubscriber
 from .transport import HttpTransport, Transport, WebSocketTransport
 from .types import (
     EventType,
+    FileInfo,
     GlobalStat,
     SessionInfo,
     StatusInfo,
@@ -114,6 +115,19 @@ class Aria2Client:
         if isinstance(result, dict):
             return StatusInfo.from_dict(result)
         raise Aria2Error(f"Unexpected result type for tellStatus: {type(result)}")
+
+    async def get_files(self, gid: str) -> List[FileInfo]:
+        """Return the file metadata associated with a download GID.
+
+        This is the Python binding for aria2's ``aria2.getFiles`` method.
+        For HTTP/FTP downloads the length may remain unknown until the
+        metadata probe has completed.  Magnet downloads likewise require
+        metadata exchange before their file list is complete.
+        """
+        result = await self._call("aria2.getFiles", [gid])
+        if isinstance(result, list):
+            return [FileInfo.from_dict(item) for item in result if isinstance(item, dict)]
+        raise Aria2Error(f"Unexpected result type for getFiles: {type(result)}")
 
     async def tell_active(
         self, keys: Optional[List[str]] = None

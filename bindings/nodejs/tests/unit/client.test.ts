@@ -132,6 +132,27 @@ describe('Aria2Client', () => {
     });
   });
 
+  describe('getFiles', () => {
+    it('returns file metadata for a GID', async () => {
+      const files = [
+        {
+          index: '1',
+          path: '/downloads/file.zip',
+          length: '1024',
+          completedLength: '0',
+          selected: 'true',
+          uris: [],
+        },
+      ];
+      mockTransport.sendRequest.mockResolvedValue(files);
+
+      const result = await client.getFiles('gid1');
+
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getFiles', ['gid1']);
+      expect(result).toEqual(files);
+    });
+  });
+
   describe('tellActive/tellWaiting/tellStopped', () => {
     it('tellActive returns StatusInfo[]', async () => {
       const items = [{ gid: 'gid1', status: 'active' }];

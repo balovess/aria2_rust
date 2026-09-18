@@ -1,4 +1,4 @@
-# aria2-rust-client
+# aria2-rust
 
 Python SDK for the aria2-rust JSON-RPC and WebSocket interface. The client
 surface has complete type annotations and current binding coverage; full
@@ -20,7 +20,7 @@ original-client compatibility remains tracked in the repository matrix.
 ## Installation
 
 ```bash
-pip install aria2-rust-client
+pip install aria2-rust
 ```
 
 Or from source:
@@ -116,10 +116,24 @@ All RPC methods are async and follow aria2 specification:
 
 **Status Queries:**
 - `tell_status(gid, keys=None)` - Get task status
+- `get_files(gid)` - Get file paths, sizes, completion, and URI metadata for a task
 - `tell_active(keys=None)` - Get active tasks
 - `tell_waiting(offset, num, keys=None)` - Get waiting tasks
 - `tell_stopped(offset, num, keys=None)` - Get stopped tasks
 - `get_global_stat()` - Get global statistics
+
+`get_files(gid)` is the direct binding for aria2's `aria2.getFiles` method:
+
+```python
+files = await client.get_files(gid)
+for file in files:
+    print(file.path, file.length)
+```
+
+For HTTP/FTP URLs, the length may be unknown until the metadata probe has
+completed. For magnet links, the file list is unavailable until metadata
+exchange completes. A local torrent is parsed when it is added, so its file
+metadata can be queried even when the task is created with `pause=true`.
 
 **Options:**
 - `get_global_option()` - Get global options

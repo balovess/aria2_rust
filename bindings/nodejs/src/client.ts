@@ -3,6 +3,7 @@ import { HttpTransport, WebSocketTransport } from './transport.js';
 import { Aria2EventEmitter } from './events.js';
 import type {
   StatusInfo,
+  FileInfo,
   GlobalStat,
   VersionInfo,
   SessionInfo,
@@ -107,6 +108,10 @@ export class Aria2Client {
     const params: unknown[] = [gid];
     if (keys) params.push(keys);
     return (await this.transport.sendRequest('aria2.tellStatus', params)) as StatusInfo;
+  }
+
+  async getFiles(gid: string): Promise<FileInfo[]> {
+    return (await this.transport.sendRequest('aria2.getFiles', [gid])) as FileInfo[];
   }
 
   async tellActive(keys?: string[]): Promise<StatusInfo[]> {

@@ -287,13 +287,13 @@ jobs:
           publish_if_missing aria2-rpc
 
   publish-python:
-    name: Publish Python SDK (optional)
+    name: Publish Python SDK
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
     environment: pypi
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v5
@@ -302,24 +302,66 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.9'
+      - name: Align SDK version with the binary release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          python - "$RELEASE_VERSION" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          version = sys.argv[1]
+          path = Path("bindings/python/pyproject.toml")
+          text = path.read_text(encoding="utf-8")
+          updated, count = re.subn(
+              r'(?m)^version = "[^"]+"$',
+              f'version = "{version}"',
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("Unable to update Python SDK version")
+          path.write_text(updated, encoding="utf-8")
+          PY
       - name: Build Python SDK
         shell: bash
         run: |
           set -euo pipefail
+          rm -rf bindings/python/dist
           cd bindings/python
           python -m pip install --upgrade build
           python -m build
+      - name: Verify Python package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_dir="$RUNNER_TEMP/aria2-python-sdk-smoke"
+          python -m pip install --target "$smoke_dir" bindings/python/dist/*.whl
+          PYTHONPATH="$smoke_dir" python -c "from aria2_rust_client import Aria2Client; print(Aria2Client.__name__)"
       - name: Check PyPI version
         id: pypi-version
         shell: bash
         run: |
+          set -euo pipefail
+          PACKAGE_NAME=$(sed -n 's/^name = "\([^"]*\)"/\1/p' bindings/python/pyproject.toml | head -n 1)
           VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' bindings/python/pyproject.toml | head -n 1)
-          if curl --fail --silent --show-error --location "https://pypi.org/pypi/Aria2_rust/$VERSION/json" >/dev/null; then
+          STATUS=$(curl --silent --show-error --location --output /dev/null --write-out '%{http_code}' "https://pypi.org/pypi/${PACKAGE_NAME}/${VERSION}/json")
+          case "$STATUS" in
+            200)
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Aria2_rust@$VERSION is already published; skipping."
-          else
+            echo "$PACKAGE_NAME@$VERSION is already published; skipping."
+            ;;
+            404)
             echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
+            ;;
+            *)
+            echo "Unexpected PyPI response while checking $PACKAGE_NAME@$VERSION: HTTP $STATUS" >&2
+            exit 1
+            ;;
+          esac
       - name: Publish to PyPI
         if: steps.pypi-version.outputs.exists != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
@@ -327,11 +369,10 @@ jobs:
           packages-dir: bindings/python/dist
 
   publish-nodejs:
-    name: Publish Node.js SDK (optional)
+    name: Publish Node.js SDK
     needs: [prepare, build]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       contents: read
       id-token: write
@@ -343,18 +384,67 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Align SDK version with the binary release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          node - "$RELEASE_VERSION" <<'NODE'
+          const fs = require('node:fs');
+          const version = process.argv[2];
+          for (const file of ['bindings/nodejs/package.json', 'bindings/nodejs/package-lock.json']) {
+            const path = file;
+            const packageJson = JSON.parse(fs.readFileSync(path, 'utf8'));
+            packageJson.version = version;
+            if (packageJson.packages?.['']) {
+              packageJson.packages[''].version = version;
+            }
+            fs.writeFileSync(path, `${JSON.stringify(packageJson, null, 2)}\n`);
+          }
+          NODE
       - name: Build and publish Node.js SDK
         shell: bash
         run: |
           set -euo pipefail
           cd bindings/nodejs
           npm ci
+          npm run typecheck
+          npm run test:unit
+          npm run test:integration
           npm run build
-          if npm view "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")" version --registry=https://registry.npmjs.org >/dev/null 2>&1; then
-            echo "$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version") is already published; skipping."
-          else
-            npm publish --access public --provenance
-          fi
+          npm pack --dry-run --json > "$RUNNER_TEMP/aria2-nodejs-sdk-pack.json"
+          node - "$RUNNER_TEMP/aria2-nodejs-sdk-pack.json" <<'NODE'
+          const fs = require('node:fs');
+          const parsed = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const report = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
+          if (!report || !Array.isArray(report.files)) {
+            throw new Error('npm pack did not return a package file report');
+          }
+          const required = new Set(['dist/index.js', 'dist/index.mjs', 'dist/index.d.ts']);
+          const files = new Set(report.files.map(({ path }) => path));
+          for (const file of required) {
+            if (!files.has(file)) throw new Error(`npm package is missing ${file}`);
+          }
+          NODE
+          PACKAGE_SPEC="$(node -p "require('./package.json').name")@$(node -p "require('./package.json').version")"
+          PACKAGE_NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          ENCODED_PACKAGE_NAME="$(node -p "encodeURIComponent(process.argv[1])" "$PACKAGE_NAME")"
+          STATUS=$(curl --silent --show-error --location --output /dev/null --write-out '%{http_code}' "https://registry.npmjs.org/${ENCODED_PACKAGE_NAME}/${VERSION}")
+          case "$STATUS" in
+            200)
+            echo "$PACKAGE_SPEC is already published; skipping."
+            ;;
+            404)
+            npm publish
+            ;;
+            *)
+            echo "Unexpected npm registry response while checking $PACKAGE_SPEC: HTTP $STATUS" >&2
+            exit 1
+            ;;
+          esac
 
   docker:
     name: Publish Docker image
@@ -395,8 +485,8 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    # Only platform builds and crate publication gate the binary release.
-    needs: [prepare, build, publish-crates]
+    # All published artifacts must succeed before the release is created.
+    needs: [prepare, build, publish-crates, publish-python, publish-nodejs]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:

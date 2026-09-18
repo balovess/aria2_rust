@@ -1,7 +1,11 @@
 {
   "name": "@aria2-rust/aria2-rust",
-  "version": "0.3.2",
+  "version": "0.3.9",
   "description": "Production-grade Node.js client for aria2-rust JSON-RPC & WebSocket interface",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/balovess/aria2_rust.git"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -23,5 +27,6 @@
   "dependencies": { "ws": "^8.16" },
   "devDependencies": { "typescript": "^5.3", "tsup": "^8.0", "vitest": "^1.2", "@types/ws": "^8.5", "@types/node": "^20.11" },
   "engines": { "node": ">=18.0" },
-  "license": "GPL-3.0-or-later"
+  "license": "GPL-3.0-or-later",
+  "publishConfig": { "access": "public" }
 }

@@ -63,6 +63,15 @@ pub struct Aria2RustDownloadInfo {
     pub error_code: u32,
 }
 
+/// File metadata returned by the C-compatible per-file query functions.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Aria2RustFileInfo {
+    pub length: u64,
+    pub completed_length: u64,
+    pub selected: u8,
+}
+
 /// Snapshot returned by `aria2_rust_get_global_stat`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -318,6 +327,59 @@ impl Aria2RustSession {
         Ok(gid)
     }
 
+    #[cfg(feature = "bittorrent")]
+    fn add_torrent(
+        &mut self,
+        data: Vec<u8>,
+        web_seed_uris: Vec<String>,
+        overrides: Vec<(String, String)>,
+    ) -> std::result::Result<u64, String> {
+        if data.is_empty() {
+            return Err("torrent data must not be empty".to_string());
+        }
+        let options = self.merged_options(overrides)?;
+        let gid = self.request_man.next_available_gid();
+        let mut uris = Vec::with_capacity(1 + web_seed_uris.len());
+        uris.push(format!("bt://{}", gid.to_hex_string()));
+        uris.extend(web_seed_uris);
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            uris,
+            options.clone(),
+        )));
+        if options.pause {
+            group
+                .recover_mut()
+                .pause()
+                .map_err(|error| error.to_string())?;
+        }
+        crate::engine::bt_download_command::prepare_group_metadata(
+            Arc::clone(&group),
+            &data,
+            &options,
+            options.dir.as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
+        group.recover().set_bt_metadata_data(data);
+        self.request_man.add_group_arc(Arc::clone(&group));
+        if let Err(error) = self.command_tx.send(EngineCommand::AddDownload { group }) {
+            let _ = self.request_man.remove_group_by_id(gid);
+            return Err(error.to_string());
+        }
+        Ok(gid.value())
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
+    fn add_torrent(
+        &mut self,
+        data: Vec<u8>,
+        web_seed_uris: Vec<String>,
+        overrides: Vec<(String, String)>,
+    ) -> std::result::Result<u64, String> {
+        let _ = (data, web_seed_uris, overrides);
+        Err("BitTorrent is not enabled".to_string())
+    }
+
     fn run(&mut self, mode: u32) -> i32 {
         let keep_running = self.keep_running;
         let request_man = Arc::clone(&self.request_man);
@@ -491,6 +553,15 @@ impl Aria2RustSession {
             .map(result_info)
     }
 
+    fn file_entries(&self, gid: u64) -> Option<Vec<crate::request::request_group::FileEntry>> {
+        if let Some(group) = self.request_man.find_group(GroupId::new(gid)) {
+            return Some(group.recover().create_download_result().files);
+        }
+        self.request_man
+            .find_stopped_result(&GroupId::new(gid).to_hex_string())
+            .map(|result| result.files)
+    }
+
     fn global_stat(&mut self) -> Aria2RustGlobalStat {
         let manager = &self.request_man;
         let mut stat = Aria2RustGlobalStat {
@@ -654,6 +725,69 @@ pub unsafe extern "C" fn aria2_rust_add_uri(
         // the opaque handle for this synchronous C call.
         let session = unsafe { &mut *session };
         match session.add_uri(uris, options) {
+            Ok(gid) => {
+                unsafe { *gid_out = gid };
+                0
+            }
+            Err(error) => session.fail(error, INVALID_ARGUMENT),
+        }
+    })
+}
+
+/// Add a local torrent from its bencoded bytes, optionally with web-seed URIs.
+/// The torrent is parsed before the task is queued, so file metadata is
+/// available immediately when the task is paused.
+///
+/// # Safety
+/// `session` must point to a live session. `torrent_data` must point to
+/// `torrent_length` readable bytes. `web_seed_uris` must be null only when
+/// `web_seed_uri_count` is zero; otherwise it must point to valid C strings.
+/// `options` must be null or point to `option_count` valid key/value entries,
+/// and `gid_out` must point to writable storage for one `u64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aria2_rust_add_torrent(
+    session: *mut Aria2RustSession,
+    torrent_data: *const u8,
+    torrent_length: usize,
+    web_seed_uris: *const *const c_char,
+    web_seed_uri_count: usize,
+    options: *const Aria2RustKeyValue,
+    option_count: usize,
+    gid_out: *mut u64,
+) -> i32 {
+    ffi_result(INTERNAL_ERROR, || {
+        if session.is_null()
+            || torrent_data.is_null()
+            || torrent_length == 0
+            || (web_seed_uri_count > 0 && web_seed_uris.is_null())
+            || gid_out.is_null()
+        {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: The caller contract supplies exactly `torrent_length`
+        // readable bytes for this synchronous call.
+        let data = unsafe { slice::from_raw_parts(torrent_data, torrent_length) }.to_vec();
+        let web_seed_uris = if web_seed_uri_count == 0 {
+            Vec::new()
+        } else {
+            // SAFETY: The pointer and count were checked above; each entry is
+            // validated as a NUL-terminated C string.
+            let uri_ptrs = unsafe { slice::from_raw_parts(web_seed_uris, web_seed_uri_count) };
+            match uri_ptrs
+                .iter()
+                .map(|uri| unsafe { read_c_string(*uri) })
+                .collect::<std::result::Result<Vec<_>, _>>()
+            {
+                Ok(uris) => uris,
+                Err(_) => return INVALID_ARGUMENT,
+            }
+        };
+        let options = match unsafe { read_key_values(options, option_count) } {
+            Ok(options) => options,
+            Err(_) => return INVALID_ARGUMENT,
+        };
+        let session = unsafe { &mut *session };
+        match session.add_torrent(data, web_seed_uris, options) {
             Ok(gid) => {
                 unsafe { *gid_out = gid };
                 0
@@ -882,6 +1016,89 @@ pub unsafe extern "C" fn aria2_rust_get_download_info(
     })
 }
 
+/// Return the number of file entries for a live or stopped download.
+/// Returns zero when the GID is absent.
+///
+/// # Safety
+/// `session` must be null or point to a live session not accessed concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aria2_rust_get_file_count(
+    session: *mut Aria2RustSession,
+    gid: u64,
+) -> usize {
+    ffi_result(0, || {
+        if session.is_null() {
+            return 0;
+        }
+        unsafe { (&*session).file_entries(gid).map_or(0, |files| files.len()) }
+    })
+}
+
+/// Get size/progress metadata for one 1-based file index.
+/// Returns 0 on success and -1 when the GID or file index is absent.
+///
+/// # Safety
+/// `session` must point to a live session, `output` must point to writable
+/// storage for one [`Aria2RustFileInfo`], and the session must not be accessed
+/// through another mutable pointer concurrently.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aria2_rust_get_file_info(
+    session: *mut Aria2RustSession,
+    gid: u64,
+    file_index: usize,
+    output: *mut Aria2RustFileInfo,
+) -> i32 {
+    ffi_result(INTERNAL_ERROR, || {
+        if session.is_null() || output.is_null() || file_index == 0 {
+            return INVALID_ARGUMENT;
+        }
+        let entry = unsafe { (&*session).file_entries(gid) }
+            .and_then(|files| files.into_iter().nth(file_index - 1));
+        match entry {
+            Some(entry) => {
+                unsafe {
+                    *output = Aria2RustFileInfo {
+                        length: entry.length,
+                        completed_length: entry.completed_length,
+                        selected: u8::from(entry.selected),
+                    };
+                }
+                0
+            }
+            None => unsafe { (&mut *session).fail("file entry not found", INVALID_ARGUMENT) },
+        }
+    })
+}
+
+/// Copy the path for one 1-based file index into a caller-owned buffer.
+/// Returns required bytes including the NUL terminator, or zero when absent.
+/// A short buffer is not written; call once with NULL/0 to query the size.
+///
+/// # Safety
+/// `session` must point to a live session. If `capacity` is non-zero,
+/// `output` must point to a writable buffer of at least `capacity` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aria2_rust_get_file_path(
+    session: *mut Aria2RustSession,
+    gid: u64,
+    file_index: usize,
+    output: *mut c_char,
+    capacity: usize,
+) -> usize {
+    ffi_result(0, || {
+        if session.is_null() || file_index == 0 {
+            return 0;
+        }
+        let Some(path) = (unsafe { (&*session).file_entries(gid) })
+            .and_then(|files| files.into_iter().nth(file_index - 1))
+            .map(|entry| entry.path)
+        else {
+            return 0;
+        };
+        write_c_string(&path, output, capacity)
+    })
+}
+
 /// Get aggregate session statistics.
 ///
 /// # Safety
@@ -1093,6 +1310,61 @@ mod tests {
         }
         assert_eq!(removed_info_result, 0);
         assert_eq!(info.status, Aria2RustDownloadStatus::Removed as u32);
+
+        assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
+        assert_eq!(aria2_rust_library_deinit(), 0);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn c_api_torrent_file_metadata_is_available_before_start() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(aria2_rust_library_init(), 0);
+        let (pause_entry, pause_name, pause_value) = kv("pause", "true");
+        let session = unsafe { aria2_rust_session_new(&pause_entry, 1, ptr::null_mut()) };
+        let _keep_alive = [pause_name, pause_value];
+        assert!(!session.is_null());
+
+        let torrent =
+            b"d8:announce27:http://example.com/announce4:infod6:lengthi4e4:name8:file.bin12:piece lengthi4e6:pieces20:12345678901234567890eee";
+        let mut gid = 0;
+        assert_eq!(
+            unsafe {
+                aria2_rust_add_torrent(
+                    session,
+                    torrent.as_ptr(),
+                    torrent.len(),
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                    0,
+                    &mut gid,
+                )
+            },
+            0
+        );
+
+        assert_eq!(unsafe { aria2_rust_get_file_count(session, gid) }, 1);
+        let mut info = Aria2RustFileInfo::default();
+        assert_eq!(
+            unsafe { aria2_rust_get_file_info(session, gid, 1, &mut info) },
+            0
+        );
+        assert_eq!(info.length, 4);
+        assert_eq!(info.completed_length, 0);
+        assert_eq!(info.selected, 1);
+
+        let required = unsafe { aria2_rust_get_file_path(session, gid, 1, ptr::null_mut(), 0) };
+        assert!(required > 1);
+        let mut path = vec![0 as c_char; required];
+        assert_eq!(
+            unsafe { aria2_rust_get_file_path(session, gid, 1, path.as_mut_ptr(), path.len()) },
+            required
+        );
+        let path = unsafe { CStr::from_ptr(path.as_ptr()) }.to_str().unwrap();
+        assert!(path.ends_with("file.bin"));
 
         assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
         assert_eq!(aria2_rust_library_deinit(), 0);

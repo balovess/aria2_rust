@@ -87,6 +87,7 @@ declare class Aria2Client {
     forceRemove(gid: string): Promise<string>;
     forceUnpause(gid: string): Promise<string>;
     tellStatus(gid: string, keys?: string[]): Promise<StatusInfo>;
+    getFiles(gid: string): Promise<FileInfo[]>;
     tellActive(keys?: string[]): Promise<StatusInfo[]>;
     tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
     tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;

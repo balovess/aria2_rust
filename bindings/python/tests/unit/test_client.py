@@ -8,7 +8,7 @@ import pytest
 
 from aria2_rust_client.client import Aria2Client
 from aria2_rust_client.errors import Aria2Error
-from aria2_rust_client.types import GlobalStat, SessionInfo, StatusInfo, VersionInfo
+from aria2_rust_client.types import FileInfo, GlobalStat, SessionInfo, StatusInfo, VersionInfo
 
 
 class MockTransport:
@@ -153,6 +153,29 @@ class TestTellStatus:
         assert isinstance(result, StatusInfo)
         assert result.gid == "2089b05ecca3d829"
         assert result.status == "complete"
+
+
+class TestGetFiles:
+    @pytest.mark.asyncio
+    async def test_returns_file_info_list(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {
+                "index": "1",
+                "path": "/downloads/file.zip",
+                "length": "1024",
+                "completedLength": "0",
+                "selected": "true",
+                "uris": [],
+            }
+        ]
+
+        result = await client.get_files("gid1")
+
+        mock_transport.send_request.assert_called_once_with("aria2.getFiles", ["gid1"])
+        assert len(result) == 1
+        assert isinstance(result[0], FileInfo)
+        assert result[0].path == "/downloads/file.zip"
+        assert result[0].length == "1024"
 
     @pytest.mark.asyncio
     async def test_with_keys(self, client, mock_transport):

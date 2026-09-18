@@ -494,6 +494,9 @@ var Aria2Client = class {
     if (keys) params.push(keys);
     return await this.transport.sendRequest("aria2.tellStatus", params);
   }
+  async getFiles(gid) {
+    return await this.transport.sendRequest("aria2.getFiles", [gid]);
+  }
   async tellActive(keys) {
     const params = [];
     if (keys) params.push(keys);
