@@ -1,6 +1,8 @@
 name: Release
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       retry_package_managers:
@@ -19,10 +21,6 @@ on:
           - Homebrew macOS Intel
           - Homebrew macOS ARM
           - Scoop Windows x64
-  pull_request:
-    branches: [master]
-    types: [closed]
-
 permissions:
   contents: write
 
@@ -34,8 +32,8 @@ jobs:
   prepare:
     name: Prepare binary release
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') ||
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'master')
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
@@ -43,11 +41,11 @@ jobs:
       package_manager_matrix: ${{ steps.release.outputs.package_manager_matrix }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
+      sha: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - id: release
         shell: bash
