@@ -372,6 +372,8 @@ impl RpcEngine {
             "aria2.getOption" => handlers::options::parse_get_option(&mut req),
             "aria2.changeOption" => handlers::options::parse_change_option(&mut req),
             "aria2.getPeers" => handlers::bittorrent::parse_get_peers(&mut req),
+            "aria2.getTrackers" => handlers::bittorrent::parse_get_trackers(&mut req),
+            "aria2.getDhtStatus" => handlers::bittorrent::parse_get_dht_status(&mut req),
             "aria2.pauseAll" => Ok(handlers::bittorrent::parse_pause_all(&mut req)),
             "aria2.forcePauseAll" => Ok(handlers::bittorrent::parse_force_pause_all(&mut req)),
             "aria2.unpauseAll" => Ok(handlers::bittorrent::parse_unpause_all(&mut req)),

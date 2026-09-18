@@ -1,6 +1,24 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      retry_package_managers:
+        description: Recheck Homebrew and Scoop for an existing release
+        required: false
+        default: false
+        type: boolean
+      package_manager_target:
+        description: Package-manager job to retry
+        required: false
+        default: All
+        type: choice
+        options:
+          - All
+          - Homebrew Linux
+          - Homebrew macOS Intel
+          - Homebrew macOS ARM
+          - Scoop Windows x64
   pull_request:
     branches: [master]
     types: [closed]
@@ -15,17 +33,21 @@ concurrency:
 jobs:
   prepare:
     name: Prepare binary release
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'master'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'master')
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release.outputs.should_release }}
+      retry_package_managers: ${{ steps.release.outputs.retry_package_managers }}
+      package_manager_matrix: ${{ steps.release.outputs.package_manager_matrix }}
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      sha: ${{ github.event.pull_request.merge_commit_sha }}
+      sha: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.sha || github.event.pull_request.merge_commit_sha }}
           fetch-depth: 0
       - id: release
         shell: bash
@@ -40,7 +62,17 @@ jobs:
 
           TAG="v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+           echo "retry_package_managers=${{ github.event_name == 'workflow_dispatch' && inputs.retry_package_managers || false }}" >> "$GITHUB_OUTPUT"
+           TARGET="${{ github.event_name == 'workflow_dispatch' && inputs.package_manager_target || 'All' }}"
+           case "$TARGET" in
+             "Homebrew Linux") MATRIX='{"include":[{"name":"Homebrew Linux","os":"ubuntu-latest"}]}' ;;
+             "Homebrew macOS Intel") MATRIX='{"include":[{"name":"Homebrew macOS Intel","os":"macos-15-intel"}]}' ;;
+             "Homebrew macOS ARM") MATRIX='{"include":[{"name":"Homebrew macOS ARM","os":"macos-15"}]}' ;;
+             "Scoop Windows x64") MATRIX='{"include":[{"name":"Scoop Windows x64","os":"windows-latest"}]}' ;;
+             *) MATRIX='{"include":[{"name":"Homebrew Linux","os":"ubuntu-latest"},{"name":"Homebrew macOS Intel","os":"macos-15-intel"},{"name":"Homebrew macOS ARM","os":"macos-15"},{"name":"Scoop Windows x64","os":"windows-latest"}]}' ;;
+           esac
+           echo "package_manager_matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -172,7 +204,7 @@ jobs:
             $expected = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -replace '\s+.*$', ''
             $actual = (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($expected -ne $actual) {
-              throw "Checksum mismatch for $artifact: expected $expected, got $actual"
+              throw "Checksum mismatch for ${artifact}: expected $expected, got $actual"
             }
           }
       - name: Generate Linux/macOS artifact checksums
@@ -523,8 +555,6 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "# aria2_rust ${RELEASE_VERSION}"
-            echo
             echo "## Changes"
             echo "${RELEASE_CHANGELOG}"
             echo
@@ -555,3 +585,111 @@ jobs:
           body_path: release-notes.md
           files: artifacts/*/*
           prerelease: ${{ contains(needs.prepare.outputs.version, '-') }}
+
+  update-package-managers:
+    name: Update package-manager manifests
+    needs: [prepare, github-release]
+    if: >-
+      always() && !contains(needs.prepare.outputs.version, '-') &&
+      (
+        (needs.prepare.outputs.should_release == 'true' && needs.github-release.result == 'success') ||
+        needs.prepare.outputs.retry_package_managers == 'true'
+      )
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+      - name: Update and validate Homebrew formula
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ./scripts/update-homebrew.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
+          ./scripts/update-homebrew.ps1 -Check
+      - name: Update and validate Scoop manifest
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          ./scripts/update-scoop.ps1 -Version $env:RELEASE_TAG -Repository $env:REPOSITORY
+          ./scripts/update-scoop.ps1 -Check
+      - name: Commit package-manager manifests
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/aria2-rust.rb bucket/aria2-rust.json
+          if (git diff --cached --quiet) {
+            Write-Host "Package-manager manifests are already up to date."
+            exit 0
+          }
+          git commit -m "chore: update package-manager manifests for $env:RELEASE_TAG"
+          git push origin HEAD:master
+
+  package-manager-smoke:
+    name: Verify package managers (${{ matrix.name }})
+    needs: [prepare, update-package-managers]
+    if: always() && needs.update-package-managers.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.package_manager_matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: master
+      - name: Install Homebrew on Linux
+        if: startsWith(matrix.name, 'Homebrew') && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+      - name: Verify Homebrew formula
+        if: startsWith(matrix.name, 'Homebrew')
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # GitHub-hosted macOS/Linux runners may already have aria2 installed.
+          # Unlink it so the tap smoke test can link aria2-rust's aria2c.
+          brew unlink aria2 >/dev/null 2>&1 || true
+          brew trust --formula balovess/aria2-rust/aria2-rust
+          brew tap balovess/aria2-rust "https://github.com/${GITHUB_REPOSITORY}.git"
+          brew install balovess/aria2-rust/aria2-rust
+          brew test aria2-rust
+          brew update
+          brew upgrade aria2-rust
+          aria2c --version | grep -F "${RELEASE_TAG#v}"
+      - name: Install Scoop
+        if: matrix.name == 'Scoop Windows x64'
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          Invoke-RestMethod -Uri https://get.scoop.sh | Invoke-Expression
+          Add-Content -Path $env:GITHUB_PATH -Value "$env:USERPROFILE\scoop\shims"
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop --version
+      - name: Verify Scoop manifest
+        if: matrix.name == 'Scoop Windows x64'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          scoop bucket add aria2 "https://github.com/$env:GITHUB_REPOSITORY.git"
+          scoop install aria2/aria2-rust
+          scoop update
+          scoop update aria2-rust
+          $versionOutput = (& aria2c --version | Out-String)
+          if ($versionOutput -notmatch [regex]::Escape($env:RELEASE_TAG.TrimStart('v'))) {
+            throw "Scoop installation version does not match $env:RELEASE_TAG: $versionOutput"
+          }
+          Write-Host $versionOutput

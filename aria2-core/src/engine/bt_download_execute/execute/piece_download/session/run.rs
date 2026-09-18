@@ -4,7 +4,7 @@ use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, Result};
-use crate::request::request_group::{DownloadResultCode, HaltReason};
+use crate::request::request_group::{BtPeerSource, DownloadResultCode, HaltReason};
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::{debug, info, warn};
 
@@ -141,6 +141,7 @@ impl PieceDownloadSession<'_> {
                     .command
                     .connect_to_discovered_peers(
                         &all_new_pex_peers,
+                        BtPeerSource::Pex,
                         &self.meta.network_info_hash(),
                         self.num_pieces,
                         self.active_connections,
@@ -183,6 +184,7 @@ impl PieceDownloadSession<'_> {
                         .command
                         .connect_to_discovered_peers(
                             &new_peers,
+                            BtPeerSource::Tracker,
                             &self.meta.network_info_hash(),
                             self.num_pieces,
                             self.active_connections,
@@ -225,6 +227,7 @@ impl PieceDownloadSession<'_> {
                     .command
                     .connect_to_discovered_peers(
                         &dht_peers,
+                        BtPeerSource::Dht,
                         &self.meta.network_info_hash(),
                         self.num_pieces,
                         self.active_connections,

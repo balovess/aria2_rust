@@ -39,13 +39,23 @@ JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。
 SFTP 和 Metalink 需要分别启用对应 Cargo feature。
 
-### 当前迁移状态（2026-09-13）
+## GUI 下载工具
 
-最新可复现验证已覆盖 CLI、RPC、协议、BitTorrent、Metalink、FTP/SFTP、
-Node.js 和 Python 路径：`aria2-core` 通过 3,307 个库测试，
-`aria2-protocol` 通过 872 个测试，`aria2-rpc` 通过 404 个测试，
-`aria2` 通过 292 个测试，Node.js 绑定通过 123 个测试，Python 绑定通过
-137 个测试。详细命令和证据见[兼容性状态矩阵](docs/compatibility-status.md)。
+[Phosona Manager](https://github.com/balovess/Phosona_Manager) 是一款高度基于
+`aria2_rust` 构建的跨平台 GUI 下载工具。它的桌面应用、安装包和 GUI 版本将
+发布在 [Phosona_Manager 仓库](https://github.com/balovess/Phosona_Manager)；
+本仓库继续负责 Rust 下载引擎、协议库和 RPC 服务。
+
+一种注重分享与奖励机制的新型 P2P 网络形态（类似 BT、eMule 等）也将随
+Phosona Manager 一同发布。
+
+### 当前迁移状态（2026-09-14）
+
+最新聚焦验证已覆盖 CLI、RPC、协议、BitTorrent、Metalink、FTP/SFTP、
+Node.js 和 Python 路径：`aria2-core` 通过 3,733 个库测试（忽略 1 个），
+`aria2-protocol` 通过 866 个测试（忽略 1 个），`aria2-rpc` 通过 319 个测试，
+`aria2` 通过 379 个测试（忽略 3 个），Node.js 绑定通过 123 个测试，
+Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩阵](docs/compatibility-status.md)。
 
 剩余工作主要是兼容性证据和发布收尾：完整原版客户端/浏览器插件互操作、
 公共 C ABI 对等性、跨平台真实协议与绑定验证、少量 Metalink 及暂停/移除
@@ -70,13 +80,39 @@ Node.js 和 Python 路径：`aria2-core` 通过 3,307 个库测试，
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（按编译 feature 返回方法/通知目录：核心 35 个方法和 5 个通知，BitTorrent/Metalink 启用后分别增加对应能力；全 feature 为 38/6）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 40 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
 - **公共 Tracker 列表**: 自动从 trackerslist.com 更新 BT Peer 发现
 
 ## 快速开始
+
+### 安装 Release
+
+预编译产物发布在 [GitHub Releases](https://github.com/balovess/aria2_rust/releases)。
+每个平台提供 `minimal`、`standard`、`tui` 和 `full` 四种版本，并附带对应的
+SHA-256 校验文件。选择版本前请先阅读 [Release 产物说明](docs/release-artifacts-cn.md)。
+
+### 一键安装
+
+**Linux / macOS：**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/balovess/aria2_rust/main/install.sh | bash
+```
+
+**Windows（PowerShell，当前 Release 提供 x86_64）：**
+
+```powershell
+irm https://raw.githubusercontent.com/balovess/aria2_rust/main/install.ps1 | iex
+```
+
+**Docker（Linux amd64 镜像）：**
+
+```bash
+docker run -d --name aria2 -p 6800:6800 -v ~/downloads:/downloads ghcr.io/balovess/aria2-rust:latest
+```
 
 ### 前置条件
 
@@ -140,8 +176,8 @@ Homebrew 会从对应版本的源码构建完整 feature；Scoop 会安装经过
 校验的 Windows x64 full 发布包，并提供 `aria2c` 命令。两个清单都会在
 Release 发布后由 GitHub Actions 自动更新，不需要手动修改版本配置。
 
-Chocolatey 包会由 GitHub Actions 根据 Windows full 发布包自动构建并校验。
-只有配置仓库 `CHOCO_API_KEY` secret 后，workflow 才会自动推送到 Chocolatey。
+Chocolatey 不是本项目支持的安装渠道。Windows 请使用 GitHub Release ZIP、
+PowerShell 安装脚本或 Scoop。
 
 ## 初始化持久化目录
 
@@ -348,8 +384,8 @@ Windows release 构建中的 Rust-only Criterion 基准（`50,000` pieces，同�
 运行专项基准：
 
 ```bash
-cargo bench -p aria2-core --bench segment_scan_bench -- --noplot
-cargo bench -p aria2-protocol --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
+cargo bench -p aria2-core --features bittorrent --bench segment_scan_bench -- --noplot
+cargo bench -p aria2-core --features bittorrent --bench sequential_picker_bench -- rarest_selection --noplot
 ```
 
 ## 库使用
@@ -436,7 +472,7 @@ cargo test --workspace
 cargo doc --workspace --no-deps
 
 # 运行特定示例
-cargo run --example simple_download -- http://example.com/test.bin
+cargo run -p aria2 --example simple_download -- http://example.com/test.bin
 ```
 
 ## 测试
@@ -491,7 +527,7 @@ cargo tarpaulin --workspace --out Lcov --output-dir coverage/
 cargo bench --workspace
 
 # 运行特定性能测试
-cargo bench --bench config_bench
+cargo bench -p aria2-core --bench config_bench
 ```
 
 详细测试指南请参阅 [docs/testing-guide.md](docs/testing-guide.md)。
@@ -512,7 +548,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
-| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/37/38）；RPC E2E 通过，原版客户端矩阵仍在验证 |
+| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/37/40）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
 | XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
 | WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
@@ -538,6 +574,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 - `aria2.forceShutdown`、`system.listMethods` 和 `system.listNotifications` 已实现，并有 handler/集成测试覆盖。
 - HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
 - IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
+- BT RPC 已覆盖 torrent 元数据、tracker 分层及实时运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；peer 首次发现来源只保留在内部，不加入原版 `getPeers` wire 响应。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
 - 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
 - `aria2-core/src/c_api.rs` 已提供 opaque-handle `extern "C"`/cdylib 迁移接口；它不是原版 C++ STL 类 ABI 的二进制兼容实现。
 - Metalink torrent `metaurl` 依赖生命周期、完整性回调路径和部分协议互操作仍未闭环。

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::download::DownloadContext;
 use crate::engine::bt_peer_storage::{PeerRejectionState, PeerStorage, SharedPeerRejection};
 use crate::engine::bt_progress_info_file::BtProgressManager;
-use crate::engine::bt_tracker_comm::BtAnnounce;
+use crate::engine::bt_tracker_comm::{BtAnnounce, SharedTrackerRuntime};
 use crate::segment::piece_storage::PieceStorage;
 
 // ===========================================================================
@@ -48,6 +48,9 @@ pub struct BtObject {
     /// C++ uses `shared_ptr<BtAnnounce>`.
     pub bt_announce: Option<Arc<BtAnnounce>>,
 
+    /// Shared live tracker state published by the executing download command.
+    pub tracker_runtime: Option<SharedTrackerRuntime>,
+
     /// Shared BT progress manager for this download.
     /// Equivalent to C++ `shared_ptr<BtProgressInfoFile>`.
     pub bt_progress_manager: Option<Arc<BtProgressManager>>,
@@ -62,6 +65,7 @@ impl BtObject {
             peer_storage: None,
             peer_rejection: None,
             bt_announce: None,
+            tracker_runtime: None,
             bt_progress_manager: None,
         }
     }
@@ -104,6 +108,13 @@ impl fmt::Debug for BtObject {
                 &self.bt_announce.as_ref().map(|_| "<BtAnnounce>"),
             )
             .field(
+                "tracker_runtime",
+                &self
+                    .tracker_runtime
+                    .as_ref()
+                    .map(|_| "<TrackerRuntimeSnapshot>"),
+            )
+            .field(
                 "bt_progress_manager",
                 &self
                     .bt_progress_manager
@@ -142,6 +153,7 @@ pub struct BtObjectBuilder {
     peer_storage: Option<Arc<dyn PeerStorage>>,
     peer_rejection: Option<SharedPeerRejection>,
     bt_announce: Option<Arc<BtAnnounce>>,
+    tracker_runtime: Option<SharedTrackerRuntime>,
     bt_progress_manager: Option<Arc<BtProgressManager>>,
 }
 
@@ -182,6 +194,12 @@ impl BtObjectBuilder {
         self
     }
 
+    /// Set the shared live tracker runtime state.
+    pub fn tracker_runtime(mut self, runtime: SharedTrackerRuntime) -> Self {
+        self.tracker_runtime = Some(runtime);
+        self
+    }
+
     /// Set the BT progress manager.
     pub fn bt_progress_manager(mut self, mgr: Arc<BtProgressManager>) -> Self {
         self.bt_progress_manager = Some(mgr);
@@ -196,6 +214,7 @@ impl BtObjectBuilder {
             peer_storage: self.peer_storage,
             peer_rejection: self.peer_rejection,
             bt_announce: self.bt_announce,
+            tracker_runtime: self.tracker_runtime,
             bt_progress_manager: self.bt_progress_manager,
         }
     }

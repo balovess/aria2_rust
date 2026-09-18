@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::config::{ConfigManager, project_initial_options};
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_registry::BtRegistry;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::request::request_group_man::RequestGroupMan;
@@ -36,6 +38,8 @@ pub struct CoreRpcBackend {
     config: Arc<RwLock<ConfigManager>>,
     save_session_path: Option<PathBuf>,
     metadata: BackendMetadata,
+    #[cfg(feature = "bittorrent")]
+    bt_registry: Option<Arc<std::sync::RwLock<BtRegistry>>>,
 }
 impl CoreRpcBackend {
     pub fn new(
@@ -65,7 +69,14 @@ impl CoreRpcBackend {
             config,
             save_session_path,
             metadata,
+            #[cfg(feature = "bittorrent")]
+            bt_registry: None,
         }
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub fn set_bt_registry(&mut self, registry: Arc<std::sync::RwLock<BtRegistry>>) {
+        self.bt_registry = Some(registry);
     }
 
     fn invalid(message: impl Into<String>) -> BackendError {

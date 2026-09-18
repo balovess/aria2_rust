@@ -9,6 +9,18 @@ pub(crate) fn parse_get_peers(req: &mut JsonRpcRequest) -> Result<BackendRequest
     })
 }
 
+pub(crate) fn parse_get_trackers(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::GetTrackers {
+        gid: req.take_param(0)?,
+    })
+}
+
+pub(crate) fn parse_get_dht_status(
+    _req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::GetDhtStatus)
+}
+
 pub(crate) fn parse_get_uris(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     Ok(BackendRequest::GetUris {
         gid: req.take_param(0)?,

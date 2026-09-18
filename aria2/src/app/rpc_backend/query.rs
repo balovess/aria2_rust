@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+#[cfg(feature = "bittorrent")]
+use aria2_core::engine::bt_tracker_comm::TrackerRuntimeSnapshot;
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_rpc::{
@@ -222,8 +224,11 @@ impl CoreRpcBackend {
                     .map(|byte| format!("{byte:02x}"))
                     .collect(),
                 ip: peer.addr.ip().to_string(),
+                source: peer.source.as_str().to_string(),
                 port: rpc_peer_port(peer.addr, peer.is_incoming),
-                bitfield: None,
+                bitfield: peer
+                    .bitfield
+                    .map(|bitfield| bitfield.iter().map(|byte| format!("{byte:02x}")).collect()),
                 am_choking: peer.am_choking,
                 peer_choking: peer.peer_choking,
                 download_speed: peer.download_speed.max(0.0) as u64,
@@ -232,6 +237,102 @@ impl CoreRpcBackend {
             })
             .collect();
         Ok(BackendResult::response(BackendResponse::Peers(peers)))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) fn get_trackers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let registry = self
+            .bt_registry
+            .as_ref()
+            .ok_or_else(|| Self::execution("BitTorrent registry is unavailable"))?;
+        let gid = u64::from_str_radix(&gid, 16)
+            .map_err(|_| Self::execution(format!("Invalid GID {gid}")))?;
+        let guard = registry
+            .read()
+            .map_err(|_| BackendError::Internal("Failed to lock BitTorrent registry".into()))?;
+        let object = guard
+            .get(gid)
+            .ok_or_else(|| Self::execution(format!("GID {gid:x} is not a BitTorrent task")))?;
+        if let Some(runtime) = object.tracker_runtime.as_ref() {
+            let snapshot = runtime.read().map_err(|_| {
+                BackendError::Internal("Failed to lock tracker runtime snapshot".into())
+            })?;
+            return Ok(BackendResult::response(BackendResponse::Trackers(
+                tracker_infos_from_runtime(&snapshot),
+            )));
+        }
+        let announce = object
+            .bt_announce
+            .as_ref()
+            .ok_or_else(|| Self::execution("Tracker announcer is unavailable"))?;
+        let current_announce = announce.as_ref();
+        let current = current_announce
+            .announce_list()
+            .get_announce()
+            .map(str::to_owned);
+        let mut trackers = Vec::new();
+        for tier in 0..current_announce.announce_list().tier_count() {
+            let mut entry = 0;
+            while let Some(uri) = current_announce
+                .announce_list()
+                .get_tracker_url(tier, entry)
+            {
+                trackers.push(aria2_rpc::TrackerInfo {
+                    uri: uri.clone(),
+                    tier: tier + 1,
+                    current: current.as_deref() == Some(uri.as_str()),
+                    last_attempt: false,
+                    announce_ready: announce.is_announce_ready(),
+                    all_failed: announce.is_all_announce_failed(),
+                    in_flight: current_announce.in_flight_announces(),
+                    interval: announce.interval().as_secs(),
+                    min_interval: announce.min_interval().as_secs(),
+                    seeders: current_announce.complete(),
+                    leechers: current_announce.incomplete(),
+                    tracker_id: current_announce.tracker_id().to_string(),
+                    seconds_since_last_success: current_announce.seconds_since_last_success(),
+                });
+                entry += 1;
+            }
+        }
+        Ok(BackendResult::response(BackendResponse::Trackers(trackers)))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) async fn get_dht_status(&self) -> Result<BackendResult, BackendError> {
+        let engines = self
+            .bt_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .read()
+                    .ok()
+                    .map(|registry| registry.get_dht_engines())
+            })
+            .unwrap_or_default();
+        let mut stats = aria2_protocol::bittorrent::dht::engine::DhtEngineStats {
+            total_nodes: 0,
+            good_nodes: 0,
+            pending_transactions: 0,
+            state: aria2_protocol::bittorrent::dht::engine::DhtEngineState::Stopped,
+        };
+        for engine in engines {
+            let current = engine.stats().await;
+            stats.total_nodes += current.total_nodes;
+            stats.good_nodes += current.good_nodes;
+            stats.pending_transactions += current.pending_transactions;
+            if dht_state_priority(current.state) > dht_state_priority(stats.state) {
+                stats.state = current.state;
+            }
+        }
+        Ok(BackendResult::response(BackendResponse::DhtStatus(
+            aria2_rpc::DhtStatus {
+                state: format!("{:?}", stats.state).to_lowercase(),
+                total_nodes: stats.total_nodes,
+                good_nodes: stats.good_nodes,
+                pending_transactions: stats.pending_transactions,
+            },
+        )))
     }
 
     pub(super) fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {
@@ -300,6 +401,43 @@ impl CoreRpcBackend {
             })
             .unwrap_or_default();
         Ok(BackendResult::response(BackendResponse::Servers(servers)))
+    }
+}
+
+#[cfg(feature = "bittorrent")]
+fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rpc::TrackerInfo> {
+    snapshot
+        .tracker_tiers
+        .iter()
+        .enumerate()
+        .flat_map(|(tier, uris)| {
+            uris.iter().map(move |uri| aria2_rpc::TrackerInfo {
+                uri: uri.clone(),
+                tier: tier + 1,
+                current: snapshot.current_url.as_deref() == Some(uri.as_str()),
+                last_attempt: snapshot.last_attempt_url.as_deref() == Some(uri.as_str()),
+                announce_ready: snapshot.announce_ready,
+                all_failed: snapshot.all_failed,
+                in_flight: snapshot.in_flight,
+                interval: snapshot.interval_secs,
+                min_interval: snapshot.min_interval_secs,
+                seeders: snapshot.seeders,
+                leechers: snapshot.leechers,
+                tracker_id: snapshot.tracker_id.clone(),
+                seconds_since_last_success: snapshot.seconds_since_last_success,
+            })
+        })
+        .collect()
+}
+
+#[cfg(feature = "bittorrent")]
+fn dht_state_priority(state: aria2_protocol::bittorrent::dht::engine::DhtEngineState) -> u8 {
+    use aria2_protocol::bittorrent::dht::engine::DhtEngineState;
+    match state {
+        DhtEngineState::Stopped => 1,
+        DhtEngineState::ShuttingDown => 2,
+        DhtEngineState::Bootstrapping => 3,
+        DhtEngineState::Running => 4,
     }
 }
 

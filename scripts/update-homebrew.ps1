@@ -8,10 +8,10 @@ if ($Check) {
     if ($formula -notmatch 'url "https://github\.com/[^/"]+/[^/"]+/archive/refs/tags/v[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz"') {
         throw "Formula must use a versioned GitHub source archive"
     }
-    if ($formula -notmatch '(?m)^  sha256 "[0-9a-f]{64}"$') {
+    if ($formula -notmatch '(?m)^  sha256 "[0-9a-f]{64}"\r?$') {
         throw "Formula must contain a valid source archive SHA-256"
     }
-    if ($formula -notmatch '(?m)^  depends_on "rust" => :build$' -or
+    if ($formula -notmatch '(?m)^  depends_on "rust" => :build\r?$' -or
         $formula -notmatch '"--features", "full"') {
         throw "Formula must build the full feature set with Rust"
     }
@@ -21,7 +21,6 @@ if ($Check) {
 if (-not $Version) { throw "-Version is required" }
 $tag = $Version.TrimStart('v')
 if ($tag -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "Invalid release version: $Version" }
-$null = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/tags/v$tag" -Headers @{ "User-Agent" = "aria2-rust-homebrew" }
 $sourceUrl = "https://github.com/$Repository/archive/refs/tags/v$tag.tar.gz"
 $sourcePath = [IO.Path]::GetTempFileName()
 try {

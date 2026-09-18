@@ -85,8 +85,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(v) = opts.mmap_threshold {
         map.insert("mmap-threshold".to_string(), v.to_string());
     }
-    if opts.enable_mmap {
-        map.insert("enable-mmap".to_string(), "true".to_string());
+    if !opts.enable_mmap {
+        map.insert("enable-mmap".to_string(), "false".to_string());
     }
     if let Some(v) = opts.max_mmap_limit {
         map.insert("max-mmap-limit".to_string(), v.to_string());
@@ -154,8 +154,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     {
         map.insert("min-split-size".to_string(), v.to_string());
     }
-    if opts.parameterized_uri {
-        map.insert("parameterized-uri".to_string(), "true".to_string());
+    if !opts.parameterized_uri {
+        map.insert("parameterized-uri".to_string(), "false".to_string());
     }
     map.insert("reuse-uri".to_string(), opts.reuse_uri.to_string());
     if !opts.uri_selector.is_empty() {
@@ -197,8 +197,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(ref v) = opts.bt_external_ip {
         map.insert("bt-external-ip".to_string(), v.clone());
     }
-    if opts.bt_load_saved_metadata {
-        map.insert("bt-load-saved-metadata".to_string(), "true".to_string());
+    if !opts.bt_load_saved_metadata {
+        map.insert("bt-load-saved-metadata".to_string(), "false".to_string());
     }
     if opts.bt_metadata_only {
         map.insert("bt-metadata-only".to_string(), "true".to_string());
@@ -215,8 +215,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
             opts.bt_request_peer_speed_limit.to_string(),
         );
     }
-    if opts.bt_save_metadata {
-        map.insert("bt-save-metadata".to_string(), "true".to_string());
+    if !opts.bt_save_metadata {
+        map.insert("bt-save-metadata".to_string(), "false".to_string());
     }
     if !opts.bt_enable_web_seed {
         map.insert("bt-enable-web-seed".to_string(), "false".to_string());
@@ -449,8 +449,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if !opts.enable_http_keep_alive {
         map.insert("enable-http-keep-alive".to_string(), "false".to_string());
     }
-    if opts.enable_http_pipelining {
-        map.insert("enable-http-pipelining".to_string(), "true".to_string());
+    if !opts.enable_http_pipelining {
+        map.insert("enable-http-pipelining".to_string(), "false".to_string());
     }
     if opts.http_accept_gzip {
         map.insert("http-accept-gzip".to_string(), "true".to_string());
@@ -458,8 +458,8 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if opts.http_no_cache {
         map.insert("http-no-cache".to_string(), "true".to_string());
     }
-    if opts.use_head {
-        map.insert("use-head".to_string(), "true".to_string());
+    if !opts.use_head {
+        map.insert("use-head".to_string(), "false".to_string());
     }
     if opts.no_want_digest_header {
         map.insert("no-want-digest-header".to_string(), "true".to_string());

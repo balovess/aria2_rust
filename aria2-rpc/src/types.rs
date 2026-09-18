@@ -14,9 +14,13 @@ mod transfer;
 pub type GlobalOptions = Arc<RwLock<HashMap<String, serde_json::Value>>>;
 pub type TaskOptions = Arc<RwLock<HashMap<String, HashMap<String, serde_json::Value>>>>;
 
-pub use session::{GlobalStat, SessionInfo, VersionInfo, create_gid, generate_session_id};
+pub use session::{
+    DhtStatus, GlobalStat, SessionInfo, VersionInfo, create_gid, generate_session_id,
+};
 pub use status::{BittorrentInfo, BittorrentMetaInfo, DownloadStatus, FileInfo, StatusInfo};
-pub use transfer::{PeerInfo, ServerInfo, ServerInfoIndex, UriEntry, UriInfo, UriStatus};
+pub use transfer::{
+    PeerInfo, ServerInfo, ServerInfoIndex, TrackerInfo, UriEntry, UriInfo, UriStatus,
+};
 
 #[cfg(test)]
 #[path = "types_tests/basic.rs"]

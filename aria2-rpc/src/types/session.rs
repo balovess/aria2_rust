@@ -47,6 +47,28 @@ pub struct GlobalStat {
     pub num_stopped_total: usize,
 }
 
+/// Process-wide DHT runtime counters returned by `aria2.getDhtStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct DhtStatus {
+    pub state: String,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub total_nodes: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub good_nodes: usize,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub pending_transactions: usize,
+}
+
 impl GlobalStat {
     /// Serialize as JSON matching original aria2 wire format where all
     /// numeric values are strings (e.g. `"downloadSpeed": "0"`, `"numActive": "1"`).

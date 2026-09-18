@@ -134,6 +134,30 @@ impl ServerInfo {
     }
 }
 
+/// Runtime state for one tracker URL returned by `aria2.getTrackers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackerInfo {
+    pub uri: String,
+    pub tier: usize,
+    pub current: bool,
+    pub last_attempt: bool,
+    pub announce_ready: bool,
+    pub all_failed: bool,
+    pub in_flight: u32,
+    #[serde(
+        serialize_with = "wire::serialize_display_as_string",
+        deserialize_with = "wire::deserialize_string_or_number"
+    )]
+    pub interval: u64,
+    pub min_interval: u64,
+    pub seeders: i64,
+    pub leechers: i64,
+    pub tracker_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds_since_last_success: Option<u64>,
+}
+
 /// BitTorrent peer information.
 ///
 /// Returned by `aria2.getPeers`. Contains peer connection state and
@@ -145,6 +169,9 @@ impl ServerInfo {
 pub struct PeerInfo {
     pub peer_id: String,
     pub ip: String,
+    /// Discovery mechanism that supplied this peer address; internal only.
+    #[serde(default = "default_peer_source", skip_serializing)]
+    pub source: String,
     /// Peer port (serialized as string matching original util::uitos)
     #[serde(
         serialize_with = "wire::serialize_display_as_string",
@@ -181,4 +208,8 @@ pub struct PeerInfo {
     /// Seeder status as "true"/"false" string (matches original VLB_TRUE/VLB_FALSE)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seeder: Option<String>,
+}
+
+fn default_peer_source() -> String {
+    "unknown".to_string()
 }

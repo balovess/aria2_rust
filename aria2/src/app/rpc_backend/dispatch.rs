@@ -110,6 +110,18 @@ impl RpcBackend for CoreRpcBackend {
             BackendRequest::GetOption { gid } => self.get_option(gid).await,
             BackendRequest::ChangeOption { gid, options } => self.change_option(gid, options),
             BackendRequest::GetPeers { gid } => self.get_peers(gid),
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::GetTrackers { gid } => self.get_trackers(gid),
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::GetTrackers { .. } => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::GetDhtStatus => self.get_dht_status().await,
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::GetDhtStatus => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
             BackendRequest::PauseAll => {
                 let gids = self.lifecycle_gids();
                 self.group_man.pause_all();

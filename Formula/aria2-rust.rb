@@ -1,14 +1,14 @@
 # Homebrew Formula for aria2-rust
 #
 # Installation:
-#   brew tap balovess/aria2_rust https://github.com/balovess/aria2_rust.git
-#   brew install balovess/aria2_rust/aria2-rust
+#   brew tap balovess/aria2-rust https://github.com/balovess/aria2_rust.git
+#   brew install balovess/aria2-rust/aria2-rust
 
 class Aria2Rust < Formula
   desc "The ultra fast download utility - rewritten in Rust"
   homepage "https://github.com/balovess/aria2_rust"
-  url "https://github.com/balovess/aria2_rust/archive/refs/tags/v0.3.6.tar.gz"
-  sha256 "2fbcbc81a782e1985bee5060a85893bdc78204c94d33789dddfdcdd4cfe223eb"
+  url "https://github.com/balovess/aria2_rust/archive/refs/tags/v0.3.8.tar.gz"
+  sha256 "287d53bfb3125cefb5ca438d1bea3f35f028a94d302e1a920c626461426e0037"
   license "GPL-3.0-or-later"
 
   depends_on "rust" => :build

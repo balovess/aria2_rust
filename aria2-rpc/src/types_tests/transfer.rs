@@ -31,6 +31,7 @@ fn test_peer_info_with_bitfield_seeder() {
     let peer = PeerInfo {
         peer_id: "peer-abc123".to_string(),
         ip: "192.168.1.100".to_string(),
+        source: "unknown".to_string(),
         port: 6881,
         bitfield: Some("ff00ff00".to_string()),
         am_choking: false,

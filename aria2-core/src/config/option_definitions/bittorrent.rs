@@ -68,7 +68,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-save-metadata".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Save metadata as .torrent file".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
@@ -257,7 +257,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-load-saved-metadata".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Load saved metadata from previous session".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()

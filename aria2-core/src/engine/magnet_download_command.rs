@@ -154,6 +154,35 @@ impl MagnetDownloadCommand {
         self.group.recover()
     }
 
+    fn register_dht_engine(
+        &self,
+        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
+        if let Some(registry) = self.bt_registry.as_ref()
+            && let Ok(mut registry) = registry.write()
+        {
+            registry.set_dht_engine_for_gid(self.group.recover().gid().value(), Arc::clone(engine));
+        }
+    }
+
+    fn clear_registered_dht_engine(
+        &self,
+        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
+        if let Some(registry) = self.bt_registry.as_ref()
+            && let Ok(mut registry) = registry.write()
+        {
+            registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
+        }
+    }
+
+    async fn shutdown_dht_engine(&mut self) {
+        if let Some(engine) = self.dht_engine.take() {
+            self.clear_registered_dht_engine(&engine);
+            engine.shutdown_async().await;
+        }
+    }
+
     fn saved_metadata_path(&self, info_hash: &[u8; 20]) -> std::path::PathBuf {
         self.output_path
             .parent()
@@ -295,6 +324,8 @@ impl MagnetDownloadCommand {
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
+                    let engine = self.dht_engine.as_ref().unwrap();
+                    self.register_dht_engine(engine);
                     info!("Magnet: DHT engine started for peer discovery");
                 }
                 Err(error) => {
@@ -379,9 +410,7 @@ impl MagnetDownloadCommand {
 
         if is_private {
             info!("Private torrent detected after metadata exchange: shutting down DHT (BEP 0027)");
-            if let Some(ref engine) = self.dht_engine {
-                engine.shutdown_async().await;
-            }
+            self.shutdown_dht_engine().await;
             // Clear the field so the trailing shutdown() call in execute()
             // does not attempt to shut down an already-stopped engine, and
             // so the downstream BtDownloadCommand cannot accidentally reuse
@@ -395,6 +424,10 @@ impl MagnetDownloadCommand {
 
 #[async_trait]
 impl Command for MagnetDownloadCommand {
+    async fn shutdown(&mut self) {
+        self.shutdown_dht_engine().await;
+    }
+
     async fn execute(&mut self) -> Result<()> {
         if !self.started {
             self.group.recover_mut().start()?;
@@ -467,6 +500,7 @@ impl Command for MagnetDownloadCommand {
         }
 
         if metadata_only {
+            self.shutdown_dht_engine().await;
             self.group.recover_mut().complete()?;
             self.metadata_complete = true;
             DownloadEventHooks::shared().notify_metadata_resolved(MetadataResolvedEvent::new(
@@ -506,9 +540,7 @@ impl Command for MagnetDownloadCommand {
 
         bt_cmd.execute().await?;
 
-        if let Some(ref engine) = self.dht_engine {
-            engine.shutdown();
-        }
+        self.shutdown_dht_engine().await;
 
         self.completed_bytes = self.group.recover().total_length();
 

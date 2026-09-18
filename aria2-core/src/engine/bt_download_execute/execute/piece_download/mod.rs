@@ -46,7 +46,12 @@ fn sync_peer_snapshots(
             Some(BtPeerSnapshot {
                 peer_id: conn.peer_id.unwrap_or(conn.stats.peer_id),
                 addr: conn.remote_endpoint()?,
-                is_incoming: false,
+                is_incoming: conn.incoming,
+                source: conn.source,
+                bitfield: conn
+                    .session_resource
+                    .as_ref()
+                    .map(|resource| resource.bitfield().to_vec()),
                 uploaded_bytes: conn.stats.uploaded_bytes,
                 downloaded_bytes: conn.stats.downloaded_bytes,
                 upload_speed: conn.stats.upload_speed,

@@ -292,7 +292,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "enable-http-pipelining".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Enable HTTP/1.1 pipelining".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
@@ -332,7 +332,7 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "use-head".into(),
             opt_type: OptionType::Boolean,
-            default_value: OptionValue::Bool(false),
+            default_value: OptionValue::Bool(true),
             description: "Use HEAD method for file existence checks".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()

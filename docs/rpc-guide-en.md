@@ -103,6 +103,25 @@ Base events are `aria2.onDownloadStart`, `aria2.onDownloadPause`, `aria2.onDownl
 
 All parameters are positional items in the JSON-RPC `params` array. Optional `options` values are string-keyed objects. Values may be strings, numbers, or booleans; cumulative options also accept arrays.
 
+### 6.1 Upstream compatibility matrix
+
+The compatibility baseline is the official C++ aria2 1.37.0 JSON-RPC/XML-RPC contract. “Upstream” means that method names, parameter order, result shape, wire types, and error semantics remain compatible. Extension methods may be added, but they must not change responses from upstream methods.
+
+| Scope | Upstream baseline | aria2-rust | Conclusion |
+| --- | --- | --- | --- |
+| Core tasks/queue | `addUri`, `remove`, `pause`, `unpause`, `changePosition`, `changeUri`, etc. | Provided | Compatibility baseline |
+| Status queries | `tellStatus`, `tellActive`, `tellWaiting`, `tellStopped` | Provided, including `keys` projection | Compatibility baseline |
+| Files/URIs/servers | `getFiles`, `getUris`, `getServers` | Provided | Compatibility baseline |
+| BT task status | `infoHash`, `numSeeders`, `seeder`, `bitfield`, `pieceLength`, `numPieces`, `connections`, etc. | Provided | Compatibility baseline |
+| BT peers | Standard `getPeers` fields and string wire types | Provided; discovery source is internal only | Compatibility baseline |
+| Global statistics | `getGlobalStat` speeds and task counts | Provided | Compatibility baseline |
+| Version/options/session/system | Corresponding upstream methods | Provided | Compatibility baseline |
+| DHT internals | No dedicated upstream RPC | `getDhtStatus` | Extension |
+| Tracker runtime snapshot | Upstream has no `getTrackers` | `getTrackers` | Extension |
+| Browser session context | Not present upstream | `updateBrowserContext`, `clearBrowserContext` | Extension |
+
+Upstream method responses must not contain extension fields. Runtime data such as `source`, `completedPieces`, and `missingPieces` may still be maintained internally, but is not emitted by upstream `getPeers`/`tellStatus`; extension data belongs in separate extension methods. Numbers and booleans continue to use aria2's string wire format.
+
 ### Task creation and queue
 
 | Method | Parameters | Result |
@@ -127,6 +146,8 @@ All parameters are positional items in the JSON-RPC `params` array. Optional `op
 | `aria2.getFiles` | `gid` | File object array |
 | `aria2.getServers` | `gid` | Server object array; normally active tasks only |
 | `aria2.getPeers` | `gid` | Peer object array; requires BitTorrent |
+| `aria2.getTrackers` | `gid` | Live tracker runtime array; requires BitTorrent |
+| `aria2.getDhtStatus` | none | Aggregate DHT status for active BT/magnet tasks; requires BitTorrent |
 | `aria2.getGlobalStat` | none | Global speeds and task counts |
 
 `aria2.getFiles(gid)` is the standard query for file paths, total lengths,
@@ -143,6 +164,40 @@ The Python and Node.js bindings expose this as `client.get_files(gid)` and
 `client.getFiles(gid)` respectively.
 
 Common `tellStatus` keys include `gid`, `status`, `totalLength`, `completedLength`, `uploadLength`, `downloadSpeed`, `uploadSpeed`, `pieceLength`, `numPieces`, `connections`, `errorCode`, `errorMessage`, `followedBy`, `following`, `belongsTo`, `dir`, `files`, `bittorrent`, and `infoHash`.
+
+BitTorrent status details: `bittorrent` is a nested torrent metadata object. It
+contains tiered `announceList` and, when present, `comment`, `creationDate`,
+`mode`, and `info.name`. Piece progress is exposed through `bitfield`,
+`pieceLength`, and `numPieces`; BT runtime statistics also include `seeder`,
+`numSeeders`, `verifiedLength`, and `verifyIntegrityPending`.
+`completedPieces` and `missingPieces` are internal runtime statistics and are
+not part of the upstream `tellStatus` wire response. Lengths, speeds, and
+counters that belong to the aria2-compatible status contract are serialized as
+strings on the wire.
+
+`aria2.getPeers` reports currently active connections, not historical peers. In
+addition to the standard `peerId`, `ip`, `port`, `amChoking`, `peerChoking`,
+`downloadSpeed`, and `seeder` fields, `bitfield` is the peer's raw piece
+bitfield encoded as lowercase hexadecimal and is omitted when unknown. The
+first discovery source (`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
+`unknown`) is retained internally and is not emitted in the upstream response.
+Port, speed, boolean, and seeder values follow aria2's string wire format.
+
+`aria2.getTrackers` returns a live tracker snapshot for the specified GID. Each
+entry contains `uri`, 1-based `tier`, `current`, `lastAttempt`, `announceReady`,
+`allFailed`, `inFlight`, `interval`, `minInterval`, `seeders`, `leechers`,
+`trackerId`, and optional `secondsSinceLastSuccess`. The snapshot is published
+by the executing BitTorrent command and is removed when that command exits.
+`current` identifies the next tracker selected by the announce state machine;
+`lastAttempt` identifies the most recently attempted tracker. In this extension
+interface `interval` is serialized as a string; other tracker numbers and
+boolean state use native JSON types.
+
+`aria2.getDhtStatus` is process-wide. It aggregates the DHT engines registered
+by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
+`running`, or `shuttingDown`) plus `totalNodes`, `goodNodes`, and
+`pendingTransactions`. The three counters use aria2's string wire format. With
+no active DHT engine, the result is `stopped` with zero counters.
 
 ### Options, session, and process
 
@@ -178,7 +233,7 @@ The same request can be sent through `POST /jsonrpc` or the existing `ws://host:
 
 `system.listMethods` returns methods supported by the current build. `system.listNotifications` returns event names. `system.multicall` accepts an array of `{"methodName":"...","params":[...]}` objects.
 
-The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, and `aria2.addMetalink` as applicable.
+The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, `aria2.getTrackers`, `aria2.getDhtStatus`, and `aria2.addMetalink` as applicable; an all-features build exposes 40 methods.
 
 ## 7. Errors and limits
 
@@ -203,3 +258,23 @@ The certificate and private key must be PEM files. Set CORS to explicit origins,
 3. Create a task with `aria2.addUri` and retain its GID.
 4. Poll with `tellStatus`, or subscribe to WebSocket events.
 5. Check JSON-RPC `error.code` before reading `result`; HTTP 200 alone does not prove business success.
+
+## 10. Official differential testing
+
+The repository provides an official-aria2c differential harness at `scripts/rpc-differential.ps1`. It starts the official aria2c and the current build separately, then compares JSON-RPC, XML-RPC, WebSocket, task status, field omission, error codes, and a paused minimal BitTorrent torrent for result shape and wire types.
+
+Provide an official C++ aria2c binary and run:
+
+```powershell
+$env:ARIA2_ORIGINAL_BIN = 'C:\tools\aria2c-original.exe'
+cargo build -p aria2 --features standard --bin aria2c
+pwsh -File .\scripts\rpc-differential.ps1 -BuildCurrent
+```
+
+Paths may also be passed explicitly:
+
+```powershell
+pwsh -File .\scripts\rpc-differential.ps1 `
+  -Original C:\tools\aria2c-original.exe `
+  -Current .\target\debug\aria2c.exe
+```
