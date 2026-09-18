@@ -1,7 +1,13 @@
-//! FTP protocol client implementation
+//! FTP connection primitives and standalone adapters.
 //!
-//! Provides an async FTP client supporting passive/active mode, binary transfer,
-//! directory listing parsing, FTPS (FTP over TLS per RFC 4217), and more.
+//! The production download engine uses [`FtpControlStream`], [`FtpDataStream`],
+//! and the negotiation API. [`FtpClient`] is retained as a standalone legacy
+//! adapter for library users and tests; it is not the engine's download path.
+//!
+//! `FtpClient` exposes passive and active helpers that return plain
+//! [`std::net::TcpStream`] values. Consequently, callers requiring an FTPS
+//! protected data channel must use [`FtpNegotiator`] instead of treating those
+//! helpers as a complete RFC 4217 data-channel implementation.
 
 use std::net::SocketAddr;
 

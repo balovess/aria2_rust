@@ -1,6 +1,11 @@
-//! FTP protocol client module
+//! FTP protocol client module.
 //!
-//! Provides a complete FTP protocol implementation with support for:
+//! The engine's FTP path is built from the connection streams and negotiation
+//! primitives in [`connection`]. [`connection::FtpClient`] remains a legacy
+//! standalone adapter for external library users; it is not injected into the
+//! download engine.
+//!
+//! The module provides support for:
 //! - Passive mode (PASV/EPSV) and active mode (PORT/EPRT)
 //! - Binary/ASCII transfer mode switching
 //! - Directory listing parsing (Unix/Windows formats)

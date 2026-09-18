@@ -178,14 +178,26 @@ pub struct FtpFileInfo {
     pub is_dir: bool,
 }
 
-/// FTP client
+/// Legacy standalone FTP client adapter.
 ///
-/// Async FTP protocol implementation, supporting:
+/// This type is kept for callers that need the original high-level client
+/// surface. The production download engine uses [`super::FtpControlStream`],
+/// [`super::FtpDataStream`], and [`super::FtpNegotiator`] directly instead of
+/// this adapter.
+///
+/// The adapter supports:
 /// - Passive mode priority, with active mode fallback
 /// - Binary/ASCII transfer mode switching
 /// - Resume transfer (REST command)
 /// - Directory listing parsing (Unix/Windows format)
 /// - FTPS (FTP over TLS) with explicit (AUTH TLS) and implicit modes
+///
+/// # FTPS data-channel limitation
+///
+/// [`FtpClient::passive_mode`] and [`FtpClient::active_mode`] return plain
+/// [`std::net::TcpStream`] values. They cannot expose the TLS-wrapped data
+/// stream required by `PROT P`; use [`super::FtpNegotiator`] for protected
+/// FTPS data transfers.
 ///
 /// # Examples
 ///
