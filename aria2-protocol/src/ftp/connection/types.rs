@@ -1,5 +1,5 @@
 use tokio::io::BufReader;
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
 
 /// FTP connection configuration options.
@@ -127,4 +127,43 @@ pub struct FtpConnection {
     pub host: String,
     #[allow(dead_code)]
     pub port: u16,
+}
+
+/// A listener retained for one FTP active-mode data transfer.
+///
+/// Active mode is a two-step operation: the client advertises a local
+/// listener with `PORT`/`EPRT`, then accepts the server connection after the
+/// transfer command is sent. Keeping the listener in this value prevents the
+/// socket from being dropped between those steps.
+pub struct FtpActiveDataListener {
+    listener: TcpListener,
+    local_addr: std::net::SocketAddr,
+}
+
+impl FtpActiveDataListener {
+    pub(crate) fn new(listener: TcpListener, local_addr: std::net::SocketAddr) -> Self {
+        Self {
+            listener,
+            local_addr,
+        }
+    }
+
+    /// Local address advertised to the FTP server.
+    pub fn local_addr(&self) -> std::net::SocketAddr {
+        self.local_addr
+    }
+
+    /// Local port advertised to the FTP server.
+    pub fn port(&self) -> u16 {
+        self.local_addr.port()
+    }
+
+    /// Accept the server's active-mode data connection.
+    pub async fn accept(self) -> Result<TcpStream, String> {
+        self.listener
+            .accept()
+            .await
+            .map(|(stream, _)| stream)
+            .map_err(|e| format!("Failed to accept FTP active data connection: {}", e))
+    }
 }

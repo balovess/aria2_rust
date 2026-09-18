@@ -4,7 +4,7 @@ mod commands;
 mod data;
 mod types;
 
-pub use types::{FtpConnection, FtpOptions, FtpResponse, FtpResponseClass};
+pub use types::{FtpActiveDataListener, FtpConnection, FtpOptions, FtpResponse, FtpResponseClass};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

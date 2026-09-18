@@ -3,7 +3,7 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
-use super::connection::{FtpConnection, FtpResponseClass};
+use super::connection::{FtpActiveDataListener, FtpConnection, FtpResponseClass};
 use super::listing::parse_ftp_list_response;
 
 const DEFAULT_BUFFER_SIZE: usize = 65536;
@@ -101,6 +101,34 @@ pub struct FtpDownload<'a> {
     options: FtpDownloadOptions,
 }
 
+enum FtpDataConnection {
+    Passive { host: String, port: u16 },
+    Active(FtpActiveDataListener),
+}
+
+impl FtpDataConnection {
+    async fn open(self, timeout_duration: Duration) -> Result<TcpStream, String> {
+        match self {
+            Self::Passive { host, port } => {
+                match timeout(timeout_duration, TcpStream::connect((host.as_str(), port))).await {
+                    Ok(result) => result.map_err(|e| format!("FTP data connection failed: {}", e)),
+                    Err(_) => Err(format!(
+                        "FTP data connection timeout ({}s)",
+                        timeout_duration.as_secs()
+                    )),
+                }
+            }
+            Self::Active(listener) => match timeout(timeout_duration, listener.accept()).await {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "FTP active data connection timeout ({}s)",
+                    timeout_duration.as_secs()
+                )),
+            },
+        }
+    }
+}
+
 impl<'a> FtpDownload<'a> {
     /// Create a new FTP download manager
     pub fn new(conn: &'a mut FtpConnection, options: Option<FtpDownloadOptions>) -> Self {
@@ -140,20 +168,14 @@ impl<'a> FtpDownload<'a> {
         }
 
         // Establish data connection (try passive mode first)
-        let (data_host, data_port) = self.establish_data_connection().await?;
+        let data_connection = self.establish_data_connection().await?;
 
         // Send RETR command to initiate transfer
         self.conn.retr(remote_path).await?;
 
         // Connect to data port and receive file content
         let result = self
-            .receive_data_to_file(
-                &data_host,
-                data_port,
-                local_path,
-                file_size,
-                progress_callback,
-            )
+            .receive_data_to_file(data_connection, local_path, file_size, progress_callback)
             .await?;
 
         Ok(result)
@@ -175,14 +197,14 @@ impl<'a> FtpDownload<'a> {
         }
 
         // Establish data connection
-        let (data_host, data_port) = self.establish_data_connection().await?;
+        let data_connection = self.establish_data_connection().await?;
 
         // Initiate RETR command
         self.conn.retr(remote_path).await?;
 
         // Receive data into memory
         let data = self
-            .receive_data_to_memory(&data_host, data_port, file_size)
+            .receive_data_to_memory(data_connection, file_size)
             .await?;
 
         Ok(data)
@@ -213,12 +235,10 @@ impl<'a> FtpDownload<'a> {
         }
 
         // Establish data connection for LIST response
-        let (data_host, data_port) = self.establish_data_connection().await?;
+        let data_connection = self.establish_data_connection().await?;
 
         // Read directory listing from data connection
-        let listing_data = self
-            .receive_data_to_memory(&data_host, data_port, None)
-            .await?;
+        let listing_data = self.receive_data_to_memory(data_connection, None).await?;
 
         // Parse listing
         let listing_str = String::from_utf8_lossy(&listing_data);
@@ -255,27 +275,31 @@ impl<'a> FtpDownload<'a> {
     }
 
     /// Establish data connection using configured mode (passive/active)
-    async fn establish_data_connection(&mut self) -> Result<(String, u16), String> {
+    async fn establish_data_connection(&mut self) -> Result<FtpDataConnection, String> {
         if self.conn.options.passive_mode {
             // Try EPSV first (supports IPv6), fallback to PASV
             match self.conn.epsv().await {
                 Ok(port) => {
                     // For EPSV, use same host as control connection
-                    Ok((self.conn.host.clone(), port))
+                    Ok(FtpDataConnection::Passive {
+                        host: self.conn.host.clone(),
+                        port,
+                    })
                 }
                 Err(_) => {
                     // Fallback to PASV
-                    self.conn.pasv().await
+                    let (host, port) = self.conn.pasv().await?;
+                    Ok(FtpDataConnection::Passive { host, port })
                 }
             }
         } else {
             // Active mode
-            match self.conn.eprt_active().await {
-                Ok((host, port)) => Ok((host, port)),
+            match self.conn.prepare_eprt_active().await {
+                Ok(listener) => Ok(FtpDataConnection::Active(listener)),
                 Err(_) => {
                     // Try PORT for IPv4
-                    let port = self.conn.port_active().await?;
-                    Ok(("127.0.0.1".to_string(), port))
+                    let listener = self.conn.prepare_port_active().await?;
+                    Ok(FtpDataConnection::Active(listener))
                 }
             }
         }
@@ -284,25 +308,14 @@ impl<'a> FtpDownload<'a> {
     /// Receive data stream and write to file with error handling and retries
     async fn receive_data_to_file(
         &mut self,
-        data_host: &str,
-        data_port: u16,
+        data_connection: FtpDataConnection,
         local_path: &str,
         file_size: Option<u64>,
         progress_callback: Option<fn(DownloadProgress)>,
     ) -> Result<DownloadResult, String> {
-        // Connect to data port with timeout
-        let mut data_stream: TcpStream = timeout(
-            self.options.data_connect_timeout,
-            TcpStream::connect((data_host, data_port)),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "FTP data connection timeout ({}s)",
-                self.options.data_connect_timeout.as_secs()
-            )
-        })?
-        .map_err(|e| format!("FTP data connection failed: {}", e))?;
+        let mut data_stream = data_connection
+            .open(self.options.data_connect_timeout)
+            .await?;
 
         // Open/create local file
         let mut file = tokio::fs::File::create(local_path)
@@ -416,18 +429,12 @@ impl<'a> FtpDownload<'a> {
     /// Receive data stream into memory buffer
     async fn receive_data_to_memory(
         &mut self,
-        data_host: &str,
-        data_port: u16,
+        data_connection: FtpDataConnection,
         expected_size: Option<u64>,
     ) -> Result<Vec<u8>, String> {
-        // Connect to data port
-        let mut data_stream = timeout(
-            self.options.data_connect_timeout,
-            TcpStream::connect((data_host, data_port)),
-        )
-        .await
-        .map_err(|_| "FTP data connection timeout")?
-        .map_err(|e| format!("FTP data connection failed: {}", e))?;
+        let mut data_stream = data_connection
+            .open(self.options.data_connect_timeout)
+            .await?;
 
         // Pre-allocate buffer based on expected size
         let capacity = expected_size.unwrap_or(1024 * 1024) as usize;

@@ -2,7 +2,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
 
-use super::{FtpConnection, FtpResponse};
+use super::{FtpActiveDataListener, FtpConnection, FtpResponse};
 
 impl FtpConnection {
     pub async fn pasv(&mut self) -> Result<(String, u16), String> {
@@ -39,16 +39,21 @@ impl FtpConnection {
         Err(format!("EPSV failed: {} {}", resp.code, resp.message))
     }
 
-    /// Enter active mode using PORT command (IPv4).
-    pub async fn port_active(&mut self) -> Result<u16, String> {
+    /// Prepare active mode using the IPv4 `PORT` command.
+    pub async fn prepare_port_active(&mut self) -> Result<FtpActiveDataListener, String> {
         debug!("Requesting active mode data connection (IPv4)");
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:0")
+        let control_addr = self
+            .stream
+            .get_ref()
+            .local_addr()
+            .map_err(|e| format!("Failed to get control local address: {}", e))?;
+        let ip = control_addr.ip();
+        let listener = tokio::net::TcpListener::bind(std::net::SocketAddr::new(ip, 0))
             .await
             .map_err(|e| format!("Failed to bind local port: {}", e))?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| format!("Failed to get local address: {}", e))?;
-        let ip = local_addr.ip();
         let port = local_addr.port();
         let octets = match ip {
             std::net::IpAddr::V4(v4) => v4.octets(),
@@ -73,16 +78,31 @@ impl FtpConnection {
         }
 
         debug!("Waiting for active mode data connection on port {}", port);
-        drop(listener);
-        Ok(port)
+        Ok(FtpActiveDataListener::new(listener, local_addr))
     }
 
-    /// Enter active mode using EPRT command (IPv6/IPv4).
-    pub async fn eprt_active(&mut self) -> Result<(String, u16), String> {
+    /// Enter active mode using PORT command (IPv4).
+    ///
+    /// This legacy method returns only the port. Call
+    /// [`Self::prepare_port_active`] when the listener must remain alive until
+    /// the server opens the data connection.
+    pub async fn port_active(&mut self) -> Result<u16, String> {
+        let listener = self.prepare_port_active().await?;
+        Ok(listener.port())
+    }
+
+    /// Prepare active mode using the extended `EPRT` command.
+    pub async fn prepare_eprt_active(&mut self) -> Result<FtpActiveDataListener, String> {
         debug!("Requesting extended active mode data connection");
-        let listener = tokio::net::TcpListener::bind("::0")
-            .await
-            .map_err(|e| format!("Failed to bind local port: {}", e))?;
+        let control_addr = self
+            .stream
+            .get_ref()
+            .local_addr()
+            .map_err(|e| format!("Failed to get control local address: {}", e))?;
+        let listener =
+            tokio::net::TcpListener::bind(std::net::SocketAddr::new(control_addr.ip(), 0))
+                .await
+                .map_err(|e| format!("Failed to bind local port: {}", e))?;
         let local_addr = listener
             .local_addr()
             .map_err(|e| format!("Failed to get local address: {}", e))?;
@@ -102,8 +122,18 @@ impl FtpConnection {
         }
 
         debug!("EPRT successful, listening {}:{}", addr_str, port);
-        drop(listener);
-        Ok((addr_str, port))
+        Ok(FtpActiveDataListener::new(listener, local_addr))
+    }
+
+    /// Enter active mode using EPRT and return the advertised endpoint.
+    ///
+    /// This legacy method returns only the endpoint. Call
+    /// [`Self::prepare_eprt_active`] when the listener must remain alive until
+    /// the server opens the data connection.
+    pub async fn eprt_active(&mut self) -> Result<(String, u16), String> {
+        let listener = self.prepare_eprt_active().await?;
+        let addr = listener.local_addr();
+        Ok((addr.ip().to_string(), addr.port()))
     }
 
     /// Send LIST command to get directory listing (detailed format).
@@ -163,5 +193,35 @@ impl FtpConnection {
         let start = message.rfind('|')?;
         let prev_pipe = message[..start].rfind('|')?;
         message[prev_pipe + 1..start].parse::<u16>().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn active_data_listener_accepts_connection_after_preparation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind active data listener");
+        let local_addr = listener.local_addr().expect("read listener address");
+        let active = FtpActiveDataListener::new(listener, local_addr);
+
+        let connector = tokio::spawn(async move {
+            tokio::net::TcpStream::connect(local_addr)
+                .await
+                .expect("connect to active data listener")
+        });
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(1), active.accept())
+            .await
+            .expect("active data connection should not time out")
+            .expect("accept active data connection");
+
+        assert_eq!(
+            accepted.peer_addr().expect("read peer address").ip(),
+            local_addr.ip()
+        );
+        connector.await.expect("connector task should finish");
     }
 }
