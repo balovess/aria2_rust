@@ -162,10 +162,28 @@ impl FtpConnection {
         }
     }
 
-    /// Start a placeholder keep-alive task.
+    /// Run the control-channel keep-alive loop.
     ///
-    /// The task currently emits a tick only; it does not own the control
-    /// stream and therefore cannot send `NOOP` safely.
+    /// The caller must dedicate this mutable connection to the loop while it
+    /// is running. A shared background task cannot safely write `NOOP` through
+    /// the same stream that another operation is using.
+    pub async fn run_keepalive(&mut self) -> Result<(), String> {
+        let Some(keepalive_duration) = self.options.keepalive_interval else {
+            return Ok(());
+        };
+
+        let mut ticker = interval(keepalive_duration);
+        loop {
+            ticker.tick().await;
+            self.noop().await?;
+        }
+    }
+
+    /// Start the legacy placeholder keep-alive task.
+    ///
+    /// This method only emits a tick and never sends `NOOP`. Use
+    /// [`Self::run_keepalive`] when the caller owns the connection exclusively.
+    #[deprecated(note = "use run_keepalive with an exclusively owned connection")]
     pub fn start_keepalive(&self) -> Option<tokio::task::JoinHandle<()>> {
         let keepalive_duration = self.options.keepalive_interval?;
 
@@ -176,5 +194,63 @@ impl FtpConnection {
                 debug!("FTP keep-alive tick");
             }
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ftp::connection::FtpOptions;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn run_keepalive_sends_noop_on_the_control_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind FTP control listener");
+        let address = listener
+            .local_addr()
+            .expect("read control listener address");
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener
+                .accept()
+                .await
+                .expect("accept FTP control connection");
+            let mut reader = BufReader::new(stream);
+            let mut command = String::new();
+            reader
+                .read_line(&mut command)
+                .await
+                .expect("read NOOP command");
+            assert_eq!(command, "NOOP\r\n");
+            reader
+                .get_mut()
+                .write_all(b"200 NOOP ok\r\n")
+                .await
+                .expect("write NOOP response");
+        });
+
+        let stream = TcpStream::connect(address)
+            .await
+            .expect("connect FTP control stream");
+        let options = FtpOptions {
+            keepalive_interval: Some(Duration::from_millis(1)),
+            ..Default::default()
+        };
+        let mut connection = FtpConnection {
+            stream: BufReader::new(stream),
+            options,
+            host: "localhost".to_string(),
+            port: address.port(),
+        };
+
+        let result = timeout(Duration::from_secs(1), connection.run_keepalive())
+            .await
+            .expect("keepalive should observe the closed test server");
+        assert!(result.is_err());
+        server.await.expect("FTP test server should finish");
     }
 }

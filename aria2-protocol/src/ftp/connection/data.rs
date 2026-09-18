@@ -166,8 +166,16 @@ impl FtpConnection {
         self.read_response().await
     }
 
-    pub fn get_data_stream(&mut self) -> &mut BufReader<TcpStream> {
+    /// Borrow the FTP control stream.
+    pub fn control_stream(&mut self) -> &mut BufReader<TcpStream> {
         &mut self.stream
+    }
+
+    /// Legacy misnamed accessor that returns the control stream, not a data
+    /// connection. Use [`Self::control_stream`] or the data-channel methods.
+    #[deprecated(note = "this returns the control stream; use control_stream")]
+    pub fn get_data_stream(&mut self) -> &mut BufReader<TcpStream> {
+        self.control_stream()
     }
 
     pub(crate) fn parse_pasv_response(message: &str) -> Option<(String, u16)> {
