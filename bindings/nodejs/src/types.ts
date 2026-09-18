@@ -5,10 +5,26 @@ export interface StatusInfo {
   uploadLength?: string;
   downloadSpeed?: string;
   uploadSpeed?: string;
+  connections?: string;
   errorCode?: string;
+  errorMessage?: string;
   status: DownloadStatus;
   dir?: string;
   files?: FileInfo[];
+  bittorrent?: Record<string, unknown>;
+  following?: string;
+  seeder?: string;
+  bitfield?: string;
+  pieceLength?: string;
+  numPieces?: string;
+  completedPieces?: string;
+  missingPieces?: string;
+  followedBy?: string[];
+  belongsTo?: string;
+  infoHash?: string;
+  numSeeders?: string;
+  verifiedLength?: string;
+  verifyIntegrityPending?: string;
 }
 
 export interface GlobalStat {
@@ -41,6 +57,29 @@ export interface FileInfo {
 export interface UriEntry {
   uri: string;
   status: 'used' | 'waiting';
+}
+
+export interface ServerInfo {
+  uri: string;
+  currentUri: string;
+  downloadSpeed: string;
+}
+
+export interface ServerInfoIndex {
+  index: string;
+  servers: ServerInfo[];
+}
+
+export interface PeerInfo {
+  peerId: string;
+  ip: string;
+  port: string;
+  bitfield?: string;
+  amChoking: string;
+  peerChoking: string;
+  downloadSpeed: string;
+  uploadSpeed: string;
+  seeder?: string;
 }
 
 export interface DownloadEvent {

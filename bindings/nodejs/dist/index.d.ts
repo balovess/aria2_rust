@@ -7,10 +7,26 @@ interface StatusInfo {
     uploadLength?: string;
     downloadSpeed?: string;
     uploadSpeed?: string;
+    connections?: string;
     errorCode?: string;
+    errorMessage?: string;
     status: DownloadStatus;
     dir?: string;
     files?: FileInfo[];
+    bittorrent?: Record<string, unknown>;
+    following?: string;
+    seeder?: string;
+    bitfield?: string;
+    pieceLength?: string;
+    numPieces?: string;
+    completedPieces?: string;
+    missingPieces?: string;
+    followedBy?: string[];
+    belongsTo?: string;
+    infoHash?: string;
+    numSeeders?: string;
+    verifiedLength?: string;
+    verifyIntegrityPending?: string;
 }
 interface GlobalStat {
     downloadSpeed: string;
@@ -38,6 +54,26 @@ interface FileInfo {
 interface UriEntry {
     uri: string;
     status: 'used' | 'waiting';
+}
+interface ServerInfo {
+    uri: string;
+    currentUri: string;
+    downloadSpeed: string;
+}
+interface ServerInfoIndex {
+    index: string;
+    servers: ServerInfo[];
+}
+interface PeerInfo {
+    peerId: string;
+    ip: string;
+    port: string;
+    bitfield?: string;
+    amChoking: string;
+    peerChoking: string;
+    downloadSpeed: string;
+    uploadSpeed: string;
+    seeder?: string;
 }
 interface DownloadEvent {
     type: EventType;
@@ -77,17 +113,24 @@ declare class Aria2Client {
     private options;
     constructor(url?: string, options?: ClientOptions);
     private ensureEventEmitter;
-    addUri(uris: string[], options?: Record<string, unknown>): Promise<string>;
-    addTorrent(torrent: Buffer, options?: Record<string, unknown>): Promise<string>;
-    addMetalink(metalink: Buffer, options?: Record<string, unknown>): Promise<string>;
+    addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>;
+    addTorrent(torrent: Buffer, options?: Record<string, unknown>, webSeedUris?: string[], position?: number): Promise<string>;
+    addMetalink(metalink: Buffer, options?: Record<string, unknown>, position?: number): Promise<string[]>;
     remove(gid: string): Promise<string>;
     pause(gid: string): Promise<string>;
     unpause(gid: string): Promise<string>;
     forcePause(gid: string): Promise<string>;
     forceRemove(gid: string): Promise<string>;
-    forceUnpause(gid: string): Promise<string>;
+    pauseAll(): Promise<string>;
+    forcePauseAll(): Promise<string>;
+    unpauseAll(): Promise<string>;
+    changePosition(gid: string, position: number, mode: string): Promise<number>;
+    changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>;
     tellStatus(gid: string, keys?: string[]): Promise<StatusInfo>;
     getFiles(gid: string): Promise<FileInfo[]>;
+    getUris(gid: string): Promise<UriEntry[]>;
+    getServers(gid: string): Promise<ServerInfoIndex[]>;
+    getPeers(gid: string): Promise<PeerInfo[]>;
     tellActive(keys?: string[]): Promise<StatusInfo[]>;
     tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
     tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
@@ -103,6 +146,8 @@ declare class Aria2Client {
     shutdown(): Promise<string>;
     forceShutdown(): Promise<string>;
     saveSession(): Promise<string>;
+    updateBrowserContext(context: unknown): Promise<string>;
+    clearBrowserContext(): Promise<string>;
     on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
     close(): Promise<void>;
     destroy(): void;
@@ -141,4 +186,4 @@ declare class Aria2EventEmitter extends EventEmitter {
     close(): Promise<void>;
 }
 
-export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, RpcError, type SessionInfo, type StatusInfo, TimeoutError, type UriEntry, type VersionInfo };
+export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type UriEntry, type VersionInfo };

@@ -129,26 +129,36 @@ interface ClientOptions {
 
 #### Methods
 
-All RPC methods return Promises and follow aria2 specification:
+The client exposes the standard aria2 RPC methods listed below. Methods not
+listed here can still be called through a custom transport.
 
 **Task Management:**
-- `addUri(uris: string[], options?: Record<string, unknown>): Promise<string>`
-- `addTorrent(torrent: Buffer, options?: Record<string, unknown>): Promise<string>`
-- `addMetalink(metalink: Buffer, options?: Record<string, unknown>): Promise<string>`
+- `addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>`
+- `addTorrent(torrent: Buffer, options?: Record<string, unknown>, webSeedUris?: string[], position?: number): Promise<string>`
+- `addMetalink(metalink: Buffer, options?: Record<string, unknown>, position?: number): Promise<string[]>`
 - `remove(gid: string): Promise<string>`
 - `pause(gid: string): Promise<string>`
 - `unpause(gid: string): Promise<string>`
 - `forcePause(gid: string): Promise<string>`
 - `forceRemove(gid: string): Promise<string>`
-- `forceUnpause(gid: string): Promise<string>`
+- `pauseAll(): Promise<string>` / `forcePauseAll(): Promise<string>` / `unpauseAll(): Promise<string>`
+- `changePosition(gid: string, position: number, mode: string): Promise<number>`
+- `changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>`
 
 **Status Queries:**
 - `tellStatus(gid: string, keys?: string[]): Promise<StatusInfo>`
 - `getFiles(gid: string): Promise<FileInfo[]>`
+- `getUris(gid: string): Promise<UriEntry[]>`
+- `getServers(gid: string): Promise<ServerInfoIndex[]>`
+- `getPeers(gid: string): Promise<PeerInfo[]>`
 - `tellActive(keys?: string[]): Promise<StatusInfo[]>`
 - `tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `getGlobalStat(): Promise<GlobalStat>`
+
+**Session and browser context:**
+- `updateBrowserContext(context: unknown): Promise<string>`
+- `clearBrowserContext(): Promise<string>`
 
 `getFiles(gid)` is the direct binding for aria2's `aria2.getFiles` method:
 

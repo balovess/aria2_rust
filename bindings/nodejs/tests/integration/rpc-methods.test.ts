@@ -31,10 +31,10 @@ describe('RPC Methods Integration', () => {
     expect(gid).toBe('2089b05ecca3d829');
   });
 
-  it('addMetalink returns GID', async () => {
+  it('addMetalink returns GIDs', async () => {
     const metalink = Buffer.from('fake-metalink-data');
-    const gid = await client.addMetalink(metalink);
-    expect(gid).toBe('2089b05ecca3d829');
+    const gids = await client.addMetalink(metalink);
+    expect(gids).toEqual(['2089b05ecca3d829-metadata', '2089b05ecca3d829-payload']);
   });
 
   it('remove existing task', async () => {

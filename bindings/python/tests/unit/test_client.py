@@ -8,7 +8,16 @@ import pytest
 
 from aria2_rust_client.client import Aria2Client
 from aria2_rust_client.errors import Aria2Error
-from aria2_rust_client.types import FileInfo, GlobalStat, SessionInfo, StatusInfo, VersionInfo
+from aria2_rust_client.types import (
+    FileInfo,
+    GlobalStat,
+    PeerInfo,
+    ServerInfoIndex,
+    SessionInfo,
+    StatusInfo,
+    UriEntry,
+    VersionInfo,
+)
 
 
 class MockTransport:
@@ -79,7 +88,7 @@ class TestAddTorrent:
         await client.add_torrent(torrent_data, {"dir": "/tmp"})
         expected_encoded = base64.b64encode(torrent_data).decode("ascii")
         mock_transport.send_request.assert_called_once_with(
-            "aria2.addTorrent", [expected_encoded, {"dir": "/tmp"}]
+            "aria2.addTorrent", [expected_encoded, [], {"dir": "/tmp"}]
         )
 
 
@@ -87,13 +96,13 @@ class TestAddMetalink:
     @pytest.mark.asyncio
     async def test_base64_encodes_metalink(self, client, mock_transport):
         metalink_data = b"<metalink>content</metalink>"
-        mock_transport.send_request.return_value = "metalink-gid"
+        mock_transport.send_request.return_value = ["metalink-gid-1", "metalink-gid-2"]
         result = await client.add_metalink(metalink_data)
         expected_encoded = base64.b64encode(metalink_data).decode("ascii")
         mock_transport.send_request.assert_called_once_with(
             "aria2.addMetalink", [expected_encoded]
         )
-        assert result == "metalink-gid"
+        assert result == ["metalink-gid-1", "metalink-gid-2"]
 
 
 class TestSimpleMethods:
@@ -133,12 +142,39 @@ class TestSimpleMethods:
         assert result == "gid1"
 
     @pytest.mark.asyncio
-    async def test_force_unpause(self, client, mock_transport):
-        mock_transport.send_request.return_value = "gid1"
-        result = await client.force_unpause("gid1")
-        mock_transport.send_request.assert_called_once_with("aria2.forceUnpause", ["gid1"])
-        assert result == "gid1"
+    async def test_pause_all(self, client, mock_transport):
+        mock_transport.send_request.return_value = "OK"
+        assert await client.pause_all() == "OK"
+        mock_transport.send_request.assert_called_once_with("aria2.pauseAll", [])
 
+    @pytest.mark.asyncio
+    async def test_force_pause_all(self, client, mock_transport):
+        mock_transport.send_request.return_value = "OK"
+        assert await client.force_pause_all() == "OK"
+        mock_transport.send_request.assert_called_once_with("aria2.forcePauseAll", [])
+
+    @pytest.mark.asyncio
+    async def test_unpause_all(self, client, mock_transport):
+        mock_transport.send_request.return_value = "OK"
+        assert await client.unpause_all() == "OK"
+        mock_transport.send_request.assert_called_once_with("aria2.unpauseAll", [])
+
+    @pytest.mark.asyncio
+    async def test_change_position(self, client, mock_transport):
+        mock_transport.send_request.return_value = 2
+        assert await client.change_position("gid1", 2, "POS_SET") == 2
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.changePosition", ["gid1", 2, "POS_SET"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_change_uri(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["1", "2"]
+        result = await client.change_uri("gid1", 1, ["old"], ["new"], 0)
+        assert result == ["1", "2"]
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.changeUri", ["gid1", 1, ["old"], ["new"], 0]
+        )
 
 class TestTellStatus:
     @pytest.mark.asyncio
@@ -176,6 +212,31 @@ class TestGetFiles:
         assert isinstance(result[0], FileInfo)
         assert result[0].path == "/downloads/file.zip"
         assert result[0].length == "1024"
+
+    @pytest.mark.asyncio
+    async def test_get_uris(self, client, mock_transport):
+        mock_transport.send_request.return_value = [{"uri": "https://example.com/a", "status": "waiting"}]
+        result = await client.get_uris("gid1")
+        assert isinstance(result[0], UriEntry)
+        mock_transport.send_request.assert_called_once_with("aria2.getUris", ["gid1"])
+
+    @pytest.mark.asyncio
+    async def test_get_servers(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {"index": "1", "servers": [{"uri": "https://example.com/a", "currentUri": "https://example.com/a", "downloadSpeed": "0"}]}
+        ]
+        result = await client.get_servers("gid1")
+        assert isinstance(result[0], ServerInfoIndex)
+        assert result[0].servers[0].download_speed == "0"
+
+    @pytest.mark.asyncio
+    async def test_get_peers(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {"peerId": "peer", "ip": "127.0.0.1", "port": "6881"}
+        ]
+        result = await client.get_peers("gid1")
+        assert isinstance(result[0], PeerInfo)
+        mock_transport.send_request.assert_called_once_with("aria2.getPeers", ["gid1"])
 
     @pytest.mark.asyncio
     async def test_with_keys(self, client, mock_transport):
@@ -346,6 +407,26 @@ class TestShutdown:
         result = await client.save_session()
         mock_transport.send_request.assert_called_once_with("aria2.saveSession", [])
         assert result == "OK"
+
+    @pytest.mark.asyncio
+    async def test_system_multicall(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["gid1", "OK"]
+        calls = [{"methodName": "aria2.getVersion", "params": []}]
+        result = await client.system_multicall(calls)
+        assert result == ["gid1", "OK"]
+        mock_transport.send_request.assert_called_once_with("system.multicall", [calls])
+
+    @pytest.mark.asyncio
+    async def test_system_list_methods(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["aria2.addUri"]
+        assert await client.system_list_methods() == ["aria2.addUri"]
+        mock_transport.send_request.assert_called_once_with("system.listMethods", [])
+
+    @pytest.mark.asyncio
+    async def test_system_list_notifications(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["aria2.onDownloadStart"]
+        assert await client.system_list_notifications() == ["aria2.onDownloadStart"]
+        mock_transport.send_request.assert_called_once_with("system.listNotifications", [])
 
 
 class TestContextManager:

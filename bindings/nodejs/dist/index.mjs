@@ -412,19 +412,26 @@ var Aria2Client = class {
     await this.eventEmitter.connect();
     return this.eventEmitter;
   }
-  async addUri(uris, options) {
+  async addUri(uris, options, position) {
     const params = [uris];
-    if (options) params.push(options);
+    if (options !== void 0 || position !== void 0) params.push(options ?? {});
+    if (position !== void 0) params.push(position);
     return await this.transport.sendRequest("aria2.addUri", params);
   }
-  async addTorrent(torrent, options) {
+  async addTorrent(torrent, options, webSeedUris, position) {
     const params = [torrent.toString("base64")];
-    if (options) params.push(options);
+    if (webSeedUris !== void 0 || options !== void 0 || position !== void 0) {
+      params.push(webSeedUris ?? []);
+    }
+    if (options !== void 0 || position !== void 0) params.push(options ?? {});
+    if (position !== void 0) params.push(position);
     return await this.transport.sendRequest("aria2.addTorrent", params);
   }
-  async addMetalink(metalink, options) {
+  async addMetalink(metalink, options, position) {
     const params = [metalink.toString("base64")];
-    if (options) params.push(options);
+    if (options !== void 0) params.push(options);
+    else if (position !== void 0) params.push({});
+    if (position !== void 0) params.push(position);
     return await this.transport.sendRequest("aria2.addMetalink", params);
   }
   async remove(gid) {
@@ -442,8 +449,22 @@ var Aria2Client = class {
   async forceRemove(gid) {
     return await this.transport.sendRequest("aria2.forceRemove", [gid]);
   }
-  async forceUnpause(gid) {
-    return await this.transport.sendRequest("aria2.forceUnpause", [gid]);
+  async pauseAll() {
+    return await this.transport.sendRequest("aria2.pauseAll", []);
+  }
+  async forcePauseAll() {
+    return await this.transport.sendRequest("aria2.forcePauseAll", []);
+  }
+  async unpauseAll() {
+    return await this.transport.sendRequest("aria2.unpauseAll", []);
+  }
+  async changePosition(gid, position, mode) {
+    return await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
+  }
+  async changeUri(gid, fileIndex, deleteUris, addUris, position) {
+    const params = [gid, fileIndex, deleteUris, addUris];
+    if (position !== void 0) params.push(position);
+    return await this.transport.sendRequest("aria2.changeUri", params);
   }
   async tellStatus(gid, keys) {
     const params = [gid];
@@ -452,6 +473,15 @@ var Aria2Client = class {
   }
   async getFiles(gid) {
     return await this.transport.sendRequest("aria2.getFiles", [gid]);
+  }
+  async getUris(gid) {
+    return await this.transport.sendRequest("aria2.getUris", [gid]);
+  }
+  async getServers(gid) {
+    return await this.transport.sendRequest("aria2.getServers", [gid]);
+  }
+  async getPeers(gid) {
+    return await this.transport.sendRequest("aria2.getPeers", [gid]);
   }
   async tellActive(keys) {
     const params = [];
@@ -503,6 +533,12 @@ var Aria2Client = class {
   }
   async saveSession() {
     return await this.transport.sendRequest("aria2.saveSession", []);
+  }
+  async updateBrowserContext(context) {
+    return await this.transport.sendRequest("aria2.updateBrowserContext", [context]);
+  }
+  async clearBrowserContext() {
+    return await this.transport.sendRequest("aria2.clearBrowserContext", []);
   }
   on(event, handler) {
     this.ensureEventEmitter().then((emitter) => {
