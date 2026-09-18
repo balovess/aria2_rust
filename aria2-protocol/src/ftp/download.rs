@@ -226,16 +226,17 @@ impl<'a> FtpDownload<'a> {
         // Change to remote directory
         self.conn.cwd(remote_dir).await?;
 
-        // Request directory listing
-        let list_resp = self.conn.list(None).await?;
-
-        if list_resp.code != 150 && list_resp.code != 125 && list_resp.code != 226 {
-            // If LIST didn't open data connection, we need to handle it differently
-            // For now, assume listing will come through data channel
-        }
-
-        // Establish data connection for LIST response
+        // Negotiate the data channel before sending LIST. The server opens the
+        // negotiated channel only after it receives the transfer command.
         let data_connection = self.establish_data_connection().await?;
+
+        let list_resp = self.conn.list(None).await?;
+        if !list_resp.is_positive_preliminary() {
+            return Err(format!(
+                "LIST failed: {} {}",
+                list_resp.code, list_resp.message
+            ));
+        }
 
         // Read directory listing from data connection
         let listing_data = self.receive_data_to_memory(data_connection, None).await?;
@@ -318,9 +319,20 @@ impl<'a> FtpDownload<'a> {
             .await?;
 
         // Open/create local file
-        let mut file = tokio::fs::File::create(local_path)
-            .await
-            .map_err(|e| format!("Failed to create local file: {}", e))?;
+        let has_resume_offset = self.options.resume_offset.is_some_and(|offset| offset > 0);
+        let mut file = if has_resume_offset {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(local_path)
+                .await
+                .map_err(|e| format!("Failed to open local file for resume: {}", e))?
+        } else {
+            tokio::fs::File::create(local_path)
+                .await
+                .map_err(|e| format!("Failed to create local file: {}", e))?
+        };
 
         // Seek to resume offset if resuming
         if let Some(offset) = self.options.resume_offset
@@ -336,8 +348,6 @@ impl<'a> FtpDownload<'a> {
         let mut total_downloaded = self.options.resume_offset.unwrap_or(0);
         let start_time = std::time::Instant::now();
         let mut read_retry_count = 0u32;
-        const MAX_READ_RETRIES: u32 = 3;
-
         loop {
             let read_result = data_stream.read(&mut buffer).await;
 
@@ -371,7 +381,9 @@ impl<'a> FtpDownload<'a> {
                         });
                     }
                 }
-                Err(ref e) if is_transient_io_error(e) && read_retry_count < MAX_READ_RETRIES => {
+                Err(ref e)
+                    if is_transient_io_error(e) && read_retry_count < self.options.max_retries =>
+                {
                     // Transient error - retry with exponential backoff
                     read_retry_count += 1;
                     let wait_ms = 1000u64 * (1 << (read_retry_count - 1));
@@ -397,16 +409,7 @@ impl<'a> FtpDownload<'a> {
             .map_err(|e| format!("Failed to flush file: {}", e))?;
         drop(data_stream); // Close data connection
 
-        // Read final response from control channel
-        let final_resp = self.conn.read_response().await?;
-        if final_resp.class() != FtpResponseClass::PositiveCompletion
-            && final_resp.class() != FtpResponseClass::PositivePreliminary
-        {
-            return Err(format!(
-                "Download completed but server reported error: {} {}",
-                final_resp.code, final_resp.message
-            ));
-        }
+        self.read_transfer_complete().await?;
 
         // Calculate statistics
         let elapsed = start_time.elapsed().as_secs_f64();
@@ -441,25 +444,52 @@ impl<'a> FtpDownload<'a> {
         let mut result = Vec::with_capacity(capacity);
         let mut buffer = vec![0u8; self.options.buffer_size];
 
+        let mut read_retry_count = 0u32;
         loop {
-            let bytes_read = data_stream
-                .read(&mut buffer)
-                .await
-                .map_err(|e| format!("FTP data read error: {}", e))?;
-
-            if bytes_read == 0 {
-                break;
+            match data_stream.read(&mut buffer).await {
+                Ok(0) => break,
+                Ok(bytes_read) => {
+                    read_retry_count = 0;
+                    result.extend_from_slice(&buffer[..bytes_read]);
+                }
+                Err(ref e)
+                    if is_transient_io_error(e) && read_retry_count < self.options.max_retries =>
+                {
+                    read_retry_count += 1;
+                    let wait_ms = 1000u64 * (1 << (read_retry_count - 1));
+                    warn!(
+                        "FTP memory read error (#{}), retrying in {}ms...",
+                        read_retry_count, wait_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "FTP memory read failed after {} retries: {}",
+                        read_retry_count, e
+                    ));
+                }
             }
-
-            result.extend_from_slice(&buffer[..bytes_read]);
         }
 
         drop(data_stream);
 
-        // Read final response (may timeout for some servers)
-        let _final_resp = self.conn.read_response().await.ok(); // Ignore errors
+        self.read_transfer_complete().await?;
 
         Ok(result)
+    }
+
+    async fn read_transfer_complete(&mut self) -> Result<(), String> {
+        let final_resp = self.conn.read_response().await?;
+        if final_resp.class() != FtpResponseClass::PositiveCompletion
+            && final_resp.class() != FtpResponseClass::PositivePreliminary
+        {
+            return Err(format!(
+                "FTP transfer failed: {} {}",
+                final_resp.code, final_resp.message
+            ));
+        }
+        Ok(())
     }
 }
 
