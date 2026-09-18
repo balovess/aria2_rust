@@ -23,8 +23,8 @@ impl FtpNegotiator {
     /// a sequential async function. The ordering matches the C++ and adds
     /// FEAT/SYST/OPTS for capability detection:
     ///
-    /// 1. Connect + greeting (or skip for pooled)
-    /// 2. Authenticate (or skip for pooled)
+    /// 1. Connect + greeting
+    /// 2. Authenticate
     /// 3. FEAT -> detect capabilities
     /// 4. OPTS UTF8 ON (if FEAT reports UTF8)
     /// 5. SYST -> detect server type
@@ -49,27 +49,20 @@ impl FtpNegotiator {
             remote_time,
             connect_timeout,
             command_timeout,
-            is_pooled,
             pooled_base_working_dir: _,
             data_proxy,
         } = config;
 
-        // Step 1-2: Connect + authenticate (or skip if pooled)
-        let (mut ctrl, mut capabilities) = if is_pooled {
-            return Err(Aria2Error::DownloadFailed(
-                "Pooled connection negotiation requires a pre-established control stream".into(),
-            ));
-        } else {
-            Self::connect_and_authenticate(
-                &host,
-                port,
-                &username,
-                &password,
-                connect_timeout,
-                command_timeout,
-            )
-            .await?
-        };
+        // Step 1-2: Connect + authenticate.
+        let (mut ctrl, mut capabilities) = Self::connect_and_authenticate(
+            &host,
+            port,
+            &username,
+            &password,
+            connect_timeout,
+            command_timeout,
+        )
+        .await?;
 
         // Steps 3-4 (FEAT + OPTS UTF8 ON) are already done inside
         // connect_and_authenticate, matching the C++ aria2 flow where
@@ -183,7 +176,6 @@ impl FtpNegotiator {
             remote_time,
             connect_timeout,
             command_timeout,
-            is_pooled: _,
             pooled_base_working_dir,
             data_proxy,
         } = config;

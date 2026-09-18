@@ -268,13 +268,11 @@ fn test_ftp_negotiation_config_defaults() {
         remote_time: false,
         connect_timeout: Duration::from_secs(30),
         command_timeout: Duration::from_secs(30),
-        is_pooled: false,
         pooled_base_working_dir: None,
         data_proxy: None,
     };
     assert_eq!(config.host, "example.com");
     assert_eq!(config.port, 21);
-    assert!(!config.is_pooled);
 }
 
 #[test]

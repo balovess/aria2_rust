@@ -81,9 +81,10 @@ pub struct FtpNegotiationConfig {
     pub connect_timeout: Duration,
     /// Read/response timeout for FTP commands
     pub command_timeout: Duration,
-    /// Whether this is a pooled connection (skip connect + auth)
-    pub is_pooled: bool,
-    /// Base working directory for pooled connections (must match)
+    /// Base working directory for pooled connections (must match).
+    ///
+    /// This field is read only by [`FtpNegotiator::negotiate_pooled`]; fresh
+    /// negotiation ignores it.
     pub pooled_base_working_dir: Option<String>,
     /// Proxy configuration for PASV data channel tunneling.
     ///
@@ -109,17 +110,19 @@ impl Default for FtpNegotiationConfig {
             remote_time: false,
             connect_timeout: Duration::from_secs(30),
             command_timeout: Duration::from_secs(60),
-            is_pooled: false,
             pooled_base_working_dir: None,
             data_proxy: None,
         }
     }
 }
 
-/// FTP negotiation orchestrator.
+/// Public standalone FTP negotiation orchestrator.
 ///
-/// Performs the full FTP negotiation flow as a linear async function
-/// instead of the C++ state machine with 30+ states.
+/// Performs the full FTP negotiation flow as a linear async function instead
+/// of the C++ state machine with 30+ states. Use [`Self::negotiate`] for a
+/// fresh connection and [`Self::negotiate_pooled`] when a pre-authenticated
+/// control stream is already available; the distinction is expressed by the
+/// method Interface rather than a boolean configuration flag.
 pub struct FtpNegotiator;
 
 /// Intermediate result from PASV negotiation that separates port resolution
