@@ -1,4 +1,4 @@
-//! FTP connection pool for connection reuse and performance optimization.
+//! Optional FTP connection pool for callers that own the FTP lifecycle.
 //!
 //! This module provides a connection pool for FTP control connections that:
 //! - Reuses existing connections to avoid repeated authentication
@@ -6,12 +6,11 @@
 //! - Supports concurrent access from multiple download tasks
 //! - Provides health checking for stale connections
 //!
-//! # Performance Benefits
-//!
-//! Connection pooling provides 40-60% speed improvement by:
-//! - Eliminating 10-second connection establishment overhead
-//! - Avoiding repeated authentication handshakes
-//! - Reducing TCP connection setup latency
+//! The main download engine does not inject this pool into its FTP command.
+//! That command supports TLS and proxy-specific control streams, while this
+//! pool deliberately stores only plain `TcpStream` control connections. Keep
+//! the pool as a standalone adapter until those transport invariants share a
+//! real seam.
 //!
 //! # Example
 //!
@@ -59,7 +58,7 @@ use crate::ftp::connection::FtpMode;
 /// `username@host(port)` -- when `base_working_dir` differs,
 /// connections are pooled separately so CWD traversal can be skipped
 /// on reuse when the base directory matches.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ConnectionKey {
     /// Server hostname
     pub host: String,
@@ -73,6 +72,18 @@ pub struct ConnectionKey {
     /// Matches C++ `FtpConnection::getBaseWorkingDir()` stored in
     /// `SocketPoolEntry::options_`.
     pub base_working_dir: String,
+}
+
+impl std::fmt::Debug for ConnectionKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionKey")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("base_working_dir", &self.base_working_dir)
+            .finish()
+    }
 }
 
 impl ConnectionKey {
@@ -218,6 +229,15 @@ impl PooledConnection {
     /// Check if this connection is still healthy.
     pub fn is_healthy(&self, max_idle_time: Duration) -> bool {
         self.control.is_healthy(max_idle_time)
+    }
+
+    /// Check whether the connection is eligible for another pooled lease.
+    pub(crate) fn is_reusable(
+        &self,
+        max_idle_time: Duration,
+        max_connection_age: Duration,
+    ) -> bool {
+        self.is_healthy(max_idle_time) && self.age() <= max_connection_age
     }
 
     /// Get the age of this connection.

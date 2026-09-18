@@ -6,6 +6,38 @@ use crate::ftp::connection::FtpMode;
 use super::{ConnectionKey, FtpConnectionPool, LruEntry, PooledConnection};
 
 impl FtpConnectionPool {
+    fn find_matching_key(
+        connections: &std::collections::HashMap<ConnectionKey, PooledConnection>,
+        host: &str,
+        port: u16,
+        username: &str,
+        password: &str,
+        base_working_dir: Option<&str>,
+    ) -> Option<ConnectionKey> {
+        let mut preauthenticated = None;
+        for key in connections.keys() {
+            if key.host != host
+                || key.port != port
+                || key.username != username
+                || base_working_dir.is_some_and(|base| key.base_working_dir != base)
+            {
+                continue;
+            }
+
+            if key.password == password {
+                return Some(key.clone());
+            }
+            if key.password.is_empty() {
+                preauthenticated = Some(key.clone());
+            }
+        }
+        preauthenticated
+    }
+
+    fn is_reusable(&self, connection: &PooledConnection) -> bool {
+        connection.is_reusable(self.config.max_idle_time, self.config.max_connection_age)
+    }
+
     /// Try to get an existing healthy connection from the pool.
     ///
     /// Returns `None` if no matching healthy connection is found.
@@ -24,23 +56,34 @@ impl FtpConnectionPool {
         password: &str,
         base_working_dir: &str,
     ) -> Option<PooledConnection> {
-        let key = ConnectionKey::new(host, port, username, password, base_working_dir);
-
         let mut connections = self.connections.lock().await;
+        let key = Self::find_matching_key(
+            &connections,
+            host,
+            port,
+            username,
+            password,
+            Some(base_working_dir),
+        )?;
+
         if let Some(conn) = connections.get_mut(&key) {
-            if conn.is_healthy(self.config.max_idle_time) {
+            if self.is_reusable(conn) {
                 conn.mark_used();
-                self.update_lru_access(&key).await;
+                let reuse_count = conn.control.reuse_count;
+                let connection_base = conn.key.base_working_dir.clone();
+                let conn = connections.remove(&key).unwrap();
+                self.remove_from_lru(&key).await;
 
                 let mut stats = self.stats.lock().await;
                 stats.connections_reused += 1;
+                stats.current_size = connections.len();
 
                 debug!(
                     "Reusing FTP connection to {}:{} (reuse #{}, baseWorkingDir={})",
-                    host, port, conn.control.reuse_count, conn.key.base_working_dir
+                    host, port, reuse_count, connection_base
                 );
 
-                return Some(connections.remove(&key).unwrap());
+                return Some(conn);
             } else {
                 // Connection is stale, remove it
                 debug!("Removing stale FTP connection to {}:{}", host, port);
@@ -49,6 +92,7 @@ impl FtpConnectionPool {
 
                 let mut stats = self.stats.lock().await;
                 stats.connections_evicted += 1;
+                stats.current_size = connections.len();
             }
         }
 
@@ -70,29 +114,34 @@ impl FtpConnectionPool {
     ) -> Option<PooledConnection> {
         let mut connections = self.connections.lock().await;
 
-        // Find any healthy connection matching host/port/username
-        let matching_key = connections
-            .iter()
-            .filter(|(k, _)| {
-                k.host == host && k.port == port && k.username == username && k.password == password
-            })
-            .find(|(_, conn)| conn.is_healthy(self.config.max_idle_time))
-            .map(|(k, _)| k.clone());
+        let matching_key =
+            Self::find_matching_key(&connections, host, port, username, password, None);
 
         if let Some(key) = matching_key {
             let conn = connections.get_mut(&key).unwrap();
-            conn.mark_used();
-            self.update_lru_access(&key).await;
+            if self.is_reusable(conn) {
+                conn.mark_used();
+                let base_working_dir = conn.key.base_working_dir.clone();
+                let conn = connections.remove(&key).unwrap();
+                self.remove_from_lru(&key).await;
 
+                let mut stats = self.stats.lock().await;
+                stats.connections_reused += 1;
+                stats.current_size = connections.len();
+
+                debug!(
+                    "Reusing FTP connection (relaxed) to {}:{} (baseWorkingDir={})",
+                    host, port, base_working_dir
+                );
+
+                return Some(conn);
+            }
+
+            connections.remove(&key);
+            self.remove_from_lru(&key).await;
             let mut stats = self.stats.lock().await;
-            stats.connections_reused += 1;
-
-            debug!(
-                "Reusing FTP connection (relaxed) to {}:{} (baseWorkingDir={})",
-                host, port, conn.key.base_working_dir
-            );
-
-            return Some(connections.remove(&key).unwrap());
+            stats.connections_evicted += 1;
+            stats.current_size = connections.len();
         }
 
         None
@@ -113,8 +162,12 @@ impl FtpConnectionPool {
         mode: FtpMode,
         base_working_dir: &str,
     ) -> Result<()> {
-        // Check if we need to evict first
-        self.evict_if_needed().await?;
+        if self.config.max_connections == 0 {
+            return Ok(());
+        }
+
+        // Check if we need to evict first.
+        self.evict_if_needed().await;
 
         let key = ConnectionKey::new(
             host,
@@ -152,6 +205,12 @@ impl FtpConnectionPool {
     /// The connection is only returned if it's still healthy and
     /// hasn't exceeded its maximum age.
     pub async fn return_connection(&self, mut conn: PooledConnection) {
+        if self.config.max_connections == 0 {
+            let mut stats = self.stats.lock().await;
+            stats.connections_evicted += 1;
+            return;
+        }
+
         // Check if connection is still healthy before returning
         if !conn.is_healthy(self.config.max_idle_time) {
             debug!(
@@ -176,6 +235,7 @@ impl FtpConnectionPool {
             return;
         }
 
+        self.evict_if_needed().await;
         conn.mark_used();
 
         let mut connections = self.connections.lock().await;
@@ -186,6 +246,7 @@ impl FtpConnectionPool {
 
         let mut stats = self.stats.lock().await;
         stats.current_size = connections.len();
+        stats.peak_size = stats.peak_size.max(connections.len());
 
         debug!(
             "Returned FTP connection to pool: {}",
@@ -194,7 +255,11 @@ impl FtpConnectionPool {
     }
 
     /// Evict connections if pool is full
-    pub(crate) async fn evict_if_needed(&self) -> Result<()> {
+    pub(crate) async fn evict_if_needed(&self) {
+        if self.config.max_connections == 0 {
+            return;
+        }
+
         let mut connections = self.connections.lock().await;
 
         while connections.len() >= self.config.max_connections {
@@ -216,12 +281,14 @@ impl FtpConnectionPool {
             }
         }
 
-        Ok(())
+        let mut stats = self.stats.lock().await;
+        stats.current_size = connections.len();
     }
 
     /// Add a key to the LRU tracking
     pub(crate) async fn add_to_lru(&self, key: ConnectionKey) {
         let mut lru = self.lru_order.lock().await;
+        lru.retain(|entry| entry.key != key);
         lru.push(LruEntry {
             key,
             last_access: std::time::Instant::now(),
@@ -233,6 +300,11 @@ impl FtpConnectionPool {
         let mut lru = self.lru_order.lock().await;
         if let Some(entry) = lru.iter_mut().find(|e| &e.key == key) {
             entry.last_access = std::time::Instant::now();
+        } else {
+            lru.push(LruEntry {
+                key: key.clone(),
+                last_access: std::time::Instant::now(),
+            });
         }
     }
 
@@ -256,9 +328,7 @@ impl FtpConnectionPool {
         let mut to_remove = Vec::new();
 
         for (key, conn) in connections.iter() {
-            if !conn.is_healthy(self.config.max_idle_time)
-                || conn.age() > self.config.max_connection_age
-            {
+            if !self.is_reusable(conn) {
                 to_remove.push(key.clone());
             }
         }
@@ -301,11 +371,14 @@ impl FtpConnectionPool {
         info!("FTP connection pool cleared: {} connections removed", count);
     }
 
-    /// Check if the pool has a connection for the given key
+    /// Check if the pool has a reusable connection for the given endpoint.
     pub async fn has_connection(&self, host: &str, port: u16, username: &str) -> bool {
         let connections = self.connections.lock().await;
-        connections
-            .keys()
-            .any(|k| k.host == host && k.port == port && k.username == username)
+        connections.iter().any(|(key, connection)| {
+            key.host == host
+                && key.port == port
+                && key.username == username
+                && self.is_reusable(connection)
+        })
     }
 }

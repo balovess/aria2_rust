@@ -156,14 +156,6 @@ pub(super) async fn run_event_cleanup(ctx: &EngineLoopContext) {
     if stale_stats > 0 {
         debug!("Removed {} stale server statistics", stale_stats);
     }
-
-    // reqwest owns the HTTP/TLS pool and enforces its idle timeout internally.
-    // The FTP pool is engine-owned, so clean it when a download event gives
-    // the engine a useful point to do the bounded scan.
-    let evicted = ctx.ftp_pool.cleanup_stale_count().await;
-    if evicted > 0 {
-        debug!("Evicted {} stale FTP connections", evicted);
-    }
 }
 
 pub(super) async fn request_shutdown_and_wait(

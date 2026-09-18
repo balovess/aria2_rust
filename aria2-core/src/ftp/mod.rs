@@ -6,7 +6,8 @@
 //! - Directory listing parsing (Unix/Windows formats)
 //! - Resume/restart transfers (REST command)
 //! - Comprehensive error handling
-//! - Connection pool reuse (40-60% performance improvement)
+//! - Optional standalone connection-pool support for callers that can safely
+//!   reuse plain FTP control streams
 //! - Post-SIZE file reconciliation and resume handling
 
 pub mod connection;

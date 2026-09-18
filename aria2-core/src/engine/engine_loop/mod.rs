@@ -26,7 +26,6 @@ use super::task_spawner::{CommandDependencies, spawn_download_task};
 use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
-use crate::ftp::FtpConnectionPool;
 use crate::network::ConnectionContext;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId, HaltReason};
@@ -77,9 +76,6 @@ async fn mark_failed_connection(
 pub struct EngineLoopContext {
     /// The request group manager (active/reserved/stopped queues).
     pub group_man: Arc<RequestGroupMan>,
-
-    /// FTP connection pool for dependency injection into download commands.
-    pub ftp_pool: Arc<FtpConnectionPool>,
 
     /// DNS cache for dependency injection.
     pub dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,

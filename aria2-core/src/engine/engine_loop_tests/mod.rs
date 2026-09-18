@@ -6,7 +6,6 @@ use crate::request::request_group::{DownloadOptions, DownloadStatus, HaltReason}
 fn test_ctx(keep_alive: bool) -> EngineLoopContext {
     EngineLoopContext {
         group_man: Arc::new(RequestGroupMan::new()),
-        ftp_pool: Arc::new(FtpConnectionPool::new(1)),
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
         auto_save: None,
         auto_save_dirty_signal: None,

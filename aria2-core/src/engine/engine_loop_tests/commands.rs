@@ -21,7 +21,6 @@ async fn state_changing_command_marks_dirty_and_persists() {
     // commands mutate, otherwise it serializes a stale/empty snapshot.
     let mut ctx = EngineLoopContext {
         group_man: man,
-        ftp_pool: Arc::new(FtpConnectionPool::new(1)),
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
         auto_save: Some(auto_save.clone()),
         auto_save_dirty_signal: Some(auto_save_dirty_signal),
