@@ -85,9 +85,6 @@ p12_q3 = { workspace = true }
 # focused on the PBES2 algorithms required by the existing client contract.
 pkcs5 = { version = "0.7.1", default-features = false, features = ["alloc", "pbes2", "sha1-insecure"] }
 yasna = { version = "0.5", features = ["std"] }
-# Bundled Mozilla root certificates for FTPS TLS verification when no custom
-# CA file is specified. webpki-roots 0.26 is compatible with rustls 0.23.
-webpki-roots = "0.26"
 rc4 = { version = "0.2", optional = true }
 once_cell = "1.19"
 dashmap = "5.5"

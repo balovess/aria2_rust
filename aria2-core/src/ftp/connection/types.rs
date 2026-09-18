@@ -3,11 +3,9 @@
 //! Defines the core types used throughout the FTP client implementation:
 //! connection mode, TLS mode, server response, file metadata, and the client struct.
 
-use std::path::PathBuf;
-
-use tokio::net::TcpStream;
 use tokio::time::Duration;
-use tokio_rustls::client::TlsStream;
+
+use aria2_protocol::ftp::tls::{FtpControlStream, FtpsConfig};
 
 /// FTP data connection mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -41,99 +39,6 @@ pub enum FtpTlsMode {
     /// protocol exchange. No `AUTH TLS` command is sent. This is the
     /// legacy FTPS mode predating RFC 4217.
     Implicit,
-}
-
-/// FTPS (FTP over TLS) configuration per RFC 4217.
-///
-/// Controls TLS handshake behaviour when upgrading an FTP control
-/// connection after `AUTH TLS`. Matches the C++ aria2 options
-/// `--check-certificate` and `--ca-certificate`.
-#[derive(Debug, Clone)]
-pub struct FtpsConfig {
-    /// Enable FTPS: send `AUTH TLS` after connecting and upgrade to TLS.
-    /// Corresponds to C++ aria2 `--ftp-tls` (off by default; explicit FTPS
-    /// via `ftps://` URL also sets this to true).
-    pub enabled: bool,
-
-    /// Verify the server's TLS certificate chain.
-    /// When `false`, accepts any certificate (insecure, for testing only).
-    /// Corresponds to C++ aria2 `--check-certificate`.
-    pub check_certificate: bool,
-
-    /// Path to a PEM file containing trusted CA certificates.
-    /// When `None`, falls back to bundled Mozilla roots (webpki-roots).
-    /// Corresponds to C++ aria2 `--ca-certificate`.
-    pub ca_certificate: Option<PathBuf>,
-
-    /// Minimum TLS protocol version to negotiate.
-    pub min_tls_version: TlsVersion,
-}
-
-impl Default for FtpsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            check_certificate: true,
-            ca_certificate: None,
-            min_tls_version: TlsVersion::Tls12,
-        }
-    }
-}
-
-/// Minimum TLS protocol version for FTPS connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TlsVersion {
-    /// TLS 1.2 (RFC 5246) — default, widely supported
-    #[default]
-    Tls12,
-    /// TLS 1.3 (RFC 8446) — latest, preferred when available
-    Tls13,
-}
-
-/// Polymorphic stream that wraps either a plain or TLS-encrypted FTP connection.
-///
-/// After `AUTH TLS` is accepted (RFC 4217 section 3), the underlying
-/// `TcpStream` is replaced with `TlsStream<TcpStream>`. This enum lets the
-/// `FtpClient` hold either variant without boxing or generics.
-///
-/// Both variants implement `AsyncRead + AsyncWrite + Unpin`, so the enum
-/// dispatches I/O calls to the active variant at zero cost (no vtable).
-#[derive(Debug)]
-pub enum FtpControlStream {
-    /// Unencrypted TCP connection (plain FTP)
-    Plain(TcpStream),
-    /// TLS-encrypted connection (FTPS, RFC 4217)
-    Tls(Box<TlsStream<TcpStream>>),
-}
-
-impl FtpControlStream {
-    /// Returns `true` if this stream is TLS-encrypted.
-    pub fn is_tls(&self) -> bool {
-        matches!(self, FtpControlStream::Tls(_))
-    }
-}
-
-/// FTP data stream that is either plain or protected by TLS.
-///
-/// The data channel has the same transport choices as the control channel,
-/// but it is kept as a separate type so callers cannot accidentally use a
-/// control-only abstraction for payload I/O.
-#[derive(Debug)]
-pub enum FtpDataStream {
-    /// Unencrypted data connection used by plain FTP.
-    Plain(TcpStream),
-    /// TLS-protected data connection negotiated by `PROT P`.
-    Tls(Box<TlsStream<TcpStream>>),
-}
-
-impl FtpDataStream {
-    /// Set TCP_NODELAY on the underlying TCP socket for either stream kind.
-    pub fn set_nodelay(&self, enabled: bool) -> std::io::Result<()> {
-        match self {
-            Self::Plain(stream) => stream.set_nodelay(enabled),
-            Self::Tls(stream) => stream.get_ref().0.set_nodelay(enabled),
-        }
-    }
 }
 
 /// FTP response struct

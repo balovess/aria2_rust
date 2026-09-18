@@ -271,7 +271,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "url",
- "webpki-roots 0.26.11",
  "windows-sys 0.59.0",
  "yasna",
  "zeroize",
@@ -304,6 +303,7 @@ dependencies = [
  "reqwest",
  "russh",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "sha1 0.10.6",
@@ -311,9 +311,11 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "tracing",
  "url",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

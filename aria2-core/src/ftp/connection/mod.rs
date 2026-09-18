@@ -18,7 +18,6 @@ mod negotiation;
 mod parser;
 mod proxy_get;
 mod proxy_tunnel;
-mod tls;
 mod transfer;
 mod types;
 
@@ -35,14 +34,13 @@ pub(crate) fn active_data_bind_addr(local_addr: SocketAddr) -> SocketAddr {
 mod tests;
 
 // Re-export all public types to preserve the original API
-pub use types::{
-    FtpClient, FtpControlStream, FtpDataStream, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse,
-    FtpTlsMode, FtpsConfig, TlsVersion,
-};
+pub use types::{FtpClient, FtpFeatures, FtpFileInfo, FtpMode, FtpResponse, FtpTlsMode};
 
-// Re-export FTPS TLS functions
-pub use tls::{
-    build_tls_connector, perform_tls_handshake, upgrade_control_stream, upgrade_data_stream,
+// Keep the historical core paths as thin compatibility re-exports. The TLS
+// implementation and stream types live in aria2-protocol::ftp::tls.
+pub use aria2_protocol::ftp::tls::{
+    FtpControlStream, FtpDataStream, FtpsConfig, TlsVersion, build_tls_connector,
+    perform_tls_handshake, upgrade_control_stream, upgrade_data_stream,
 };
 
 // Re-export negotiation types

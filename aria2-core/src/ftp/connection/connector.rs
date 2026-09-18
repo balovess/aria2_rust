@@ -9,8 +9,9 @@ use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
-use super::tls;
-use super::types::{FtpClient, FtpControlStream, FtpMode, FtpTlsMode, FtpsConfig};
+use aria2_protocol::ftp::tls::{self, FtpControlStream, FtpsConfig};
+
+use super::types::{FtpClient, FtpMode, FtpTlsMode};
 
 impl FtpClient {
     /// Default connection timeout: 30 seconds
