@@ -149,6 +149,9 @@ pub use engine::bt_piece::{
     PieceManager, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
     PieceSelectionStrategy,
 };
+pub use engine::download_event_hooks::{
+    DownloadEvent, DownloadEventHooks, DownloadEventListener, MetadataResolvedEvent,
+};
 #[cfg(feature = "bittorrent")]
 pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{

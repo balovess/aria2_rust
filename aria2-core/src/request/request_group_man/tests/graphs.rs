@@ -1,5 +1,35 @@
 use super::*;
 
+#[cfg(feature = "metalink")]
+#[derive(Default)]
+struct MetadataListener {
+    events: std::sync::Mutex<Vec<crate::engine::download_event_hooks::MetadataResolvedEvent>>,
+}
+
+#[cfg(feature = "metalink")]
+impl MetadataListener {
+    fn events(&self) -> Vec<crate::engine::download_event_hooks::MetadataResolvedEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[cfg(feature = "metalink")]
+impl crate::engine::download_event_hooks::DownloadEventListener for MetadataListener {
+    fn on_download_event(
+        &self,
+        _event: crate::engine::download_event_hooks::DownloadEvent,
+        _gid: &str,
+    ) {
+    }
+
+    fn on_metadata_resolved(
+        &self,
+        event: &crate::engine::download_event_hooks::MetadataResolvedEvent,
+    ) {
+        self.events.lock().unwrap().push(event.clone());
+    }
+}
+
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[test]
 fn test_add_metalink_graph_is_metadata_first_and_dependency_gated() {
@@ -25,6 +55,47 @@ fn test_add_metalink_graph_is_metadata_first_and_dependency_gated() {
             .unwrap()
             .recover()
             .is_dependency_resolved()
+    );
+}
+
+#[cfg(all(feature = "metalink", feature = "bittorrent"))]
+#[test]
+fn metadata_dependency_emits_resolved_event_for_payload_gid() {
+    let man = RequestGroupMan::new();
+    let metadata_gid = GroupId::new(52);
+    let payload_gid = GroupId::new(53);
+    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory(
+        "https://example.test/file.torrent",
+        "file.bin",
+        &DownloadOptions::default(),
+        metadata_gid,
+        payload_gid,
+    )
+    .unwrap();
+    graph
+        .metadata
+        .recover()
+        .set_in_memory_data(crate::engine::bt_download_command_tests::build_test_torrent());
+    man.add_metalink_graph(graph).unwrap();
+
+    let hooks = crate::engine::download_event_hooks::DownloadEventHooks::new();
+    let listener = Arc::new(MetadataListener::default());
+    hooks.add_listener(listener.clone());
+
+    man.resolve_dependencies_for_status_with_events(
+        metadata_gid,
+        DownloadStatus::Complete,
+        Some(&hooks),
+    );
+
+    assert_eq!(
+        listener.events(),
+        vec![
+            crate::engine::download_event_hooks::MetadataResolvedEvent::new(
+                metadata_gid,
+                vec![payload_gid],
+            )
+        ]
     );
 }
 
@@ -222,6 +293,9 @@ fn test_failed_metadata_with_direct_fallback_releases_payload() {
 #[test]
 fn completed_stopped_result_includes_followed_by_child_gids() {
     let man = RequestGroupMan::new();
+    let hooks = crate::engine::download_event_hooks::DownloadEventHooks::new();
+    let listener = Arc::new(MetadataListener::default());
+    hooks.add_listener(listener.clone());
     let parent_gid = man
         .add_group(
             vec!["https://example.test/index.meta4".to_string()],
@@ -239,7 +313,7 @@ fn completed_stopped_result_includes_followed_by_child_gids() {
     man.fill_from_reserver();
     parent.recover().mark_complete();
 
-    let demoted = man.remove_stopped_groups(None);
+    let demoted = man.remove_stopped_groups(Some(&hooks));
 
     assert_eq!(demoted, vec![parent_gid]);
     let result = man
@@ -250,6 +324,15 @@ fn completed_stopped_result_includes_followed_by_child_gids() {
     assert!(child_gid != parent_gid);
     assert!(man.find_group(child_gid).is_some());
     assert_eq!(man.reserved.len(), 1);
+    assert_eq!(
+        listener.events(),
+        vec![
+            crate::engine::download_event_hooks::MetadataResolvedEvent::new(
+                parent_gid,
+                vec![child_gid],
+            )
+        ]
+    );
 }
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]

@@ -10,7 +10,8 @@ use tracing::{debug, info, warn};
 
 use super::RequestGroup;
 use crate::engine::download_event_hooks::{
-    DownloadEvent, DownloadEventContext, DownloadEventHooks, determine_stop_event,
+    DownloadEvent, DownloadEventContext, DownloadEventHooks, MetadataResolvedEvent,
+    determine_stop_event,
 };
 use crate::engine::post_download_handler::{
     build_handler_chain, extract_download_info, run_post_download_processing_with_allocator,
@@ -253,6 +254,17 @@ impl super::RequestGroupMan {
             } else {
                 Vec::new()
             };
+            let metadata_event = if child_groups.is_empty() {
+                None
+            } else {
+                Some(MetadataResolvedEvent::new(
+                    gid,
+                    child_groups
+                        .iter()
+                        .map(|child| child.recover().gid())
+                        .collect(),
+                ))
+            };
 
             // Post-download processing may add followed-by child GIDs to a
             // completed parent. Refresh the result after that mutation so
@@ -279,6 +291,13 @@ impl super::RequestGroupMan {
                 );
             }
 
+            // Notify after insertion so observers can immediately resolve the
+            // child GIDs through the request manager. This is a library event,
+            // not a standard aria2 lifecycle/RPC notification.
+            if let (Some(hooks), Some(event)) = (event_hooks, metadata_event) {
+                hooks.notify_metadata_resolved(event);
+            }
+
             // ── Resolve dependencies ────────────────────────────────────
             // When a download completes successfully, resolve any
             // CompletionDependency waiting on this GID.
@@ -286,7 +305,7 @@ impl super::RequestGroupMan {
                 status,
                 DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
             ) {
-                self.resolve_dependencies_for_status(gid, status.clone());
+                self.resolve_dependencies_for_status_with_events(gid, status.clone(), event_hooks);
             }
 
             // ── Fire download event hooks ───────────────────────────────
@@ -401,9 +420,26 @@ impl super::RequestGroupMan {
         completed_gid: crate::request::request_group::GroupId,
         prerequisite_status: DownloadStatus,
     ) {
+        self.resolve_dependencies_for_status_with_events(completed_gid, prerequisite_status, None);
+    }
+
+    /// Resolve dependencies and optionally notify observers when BitTorrent
+    /// metadata has been injected into a payload group.
+    ///
+    /// The event-aware form is used by the engine demotion path. The existing
+    /// two-argument method remains the compatibility entry point for callers
+    /// that do not need event delivery.
+    pub fn resolve_dependencies_for_status_with_events(
+        &self,
+        completed_gid: crate::request::request_group::GroupId,
+        prerequisite_status: DownloadStatus,
+        event_hooks: Option<&DownloadEventHooks>,
+    ) {
         let mut failed_dependencies: Vec<(GroupId, String)> = Vec::new();
         #[cfg(feature = "bittorrent")]
         let mut failed_payloads: Vec<(crate::request::request_group::GroupId, String)> = Vec::new();
+        #[cfg(feature = "bittorrent")]
+        let mut resolved_metadata: Vec<MetadataResolvedEvent> = Vec::new();
 
         for group in self.reserved.iter_snapshot() {
             let (payload_gid, dependency) = {
@@ -452,6 +488,8 @@ impl super::RequestGroupMan {
                 {
                     match bt_dep.resolve_after_prerequisite(&prerequisite_status) {
                         crate::request::request_group::BtDependencyResolution::Resolved => {
+                            resolved_metadata
+                                .push(MetadataResolvedEvent::new(completed_gid, vec![payload_gid]));
                             debug!(
                                 gid = payload_gid.value(),
                                 depends_on = completed_gid.value(),
@@ -482,5 +520,15 @@ impl super::RequestGroupMan {
                 &format!("BitTorrent metadata dependency failed: {error}"),
             );
         }
+
+        #[cfg(feature = "bittorrent")]
+        if let Some(hooks) = event_hooks {
+            for event in resolved_metadata {
+                hooks.notify_metadata_resolved(event);
+            }
+        }
+
+        #[cfg(not(feature = "bittorrent"))]
+        let _ = event_hooks;
     }
 }

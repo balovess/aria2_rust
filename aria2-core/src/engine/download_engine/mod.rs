@@ -356,9 +356,10 @@ impl DownloadEngine {
     ///
     /// Layers above `aria2-core` use this to install a
     /// [`DownloadEventListener`](super::download_event_hooks::DownloadEventListener)
-    /// **before** `run()` consumes the engine — for example the
-    /// adapter in the `aria2` binary that republishes lifecycle events as
-    /// JSON-RPC WebSocket notifications.
+    /// **before** `run()` consumes the engine. The listener receives lifecycle
+    /// events and, when metadata creates child download groups, the structured
+    /// `MetadataResolvedEvent` callback. The latter is a Rust-library event
+    /// and is not forwarded as a standard aria2 RPC notification.
     pub fn event_hooks(&self) -> &Arc<super::download_event_hooks::DownloadEventHooks> {
         &self.event_hooks
     }
