@@ -106,9 +106,8 @@ impl FtpNegotiator {
         let data_stream = match mode {
             FtpMode::Passive => {
                 // Get the PASV port first
-                let pasv_result = Self::enter_passive_mode_get_port(
+                let pasv_result = super::data_flow::enter_passive_mode_get_port(
                     &mut ctrl,
-                    &host,
                     connect_timeout,
                     &capabilities,
                 )
@@ -138,7 +137,7 @@ impl FtpNegotiator {
                 data_stream
             }
             FtpMode::Active => {
-                Self::enter_active_mode(&mut ctrl, connect_timeout, &capabilities).await?
+                super::data_flow::enter_active_mode(&mut ctrl, connect_timeout).await?
             }
         };
 
@@ -219,9 +218,8 @@ impl FtpNegotiator {
         // Step 11: Data connection
         let data_stream = match mode {
             FtpMode::Passive => {
-                let pasv_result = Self::enter_passive_mode_pooled_get_port(
+                let pasv_result = super::data_flow::enter_passive_mode_get_port(
                     &mut ctrl,
-                    &host,
                     connect_timeout,
                     &capabilities,
                 )
@@ -243,7 +241,7 @@ impl FtpNegotiator {
                 data_stream
             }
             FtpMode::Active => {
-                Self::enter_active_mode_pooled(&mut ctrl, connect_timeout, &capabilities).await?
+                super::data_flow::enter_active_mode(&mut ctrl, connect_timeout).await?
             }
         };
 

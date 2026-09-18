@@ -31,19 +31,19 @@
 //! - [`parsing`]       - Stateless response and path parsers
 //! - [`fresh_commands`] - Fresh-control command helpers
 //! - [`pooled_commands`] - Pooled-control command helpers
-//! - [`fresh_flow`]    - FtpNegotiator methods for fresh (non-pooled) connections
-//! - [`pooled_flow`]   - FtpNegotiator methods for pooled (pre-authenticated) connections
+//! - [`fresh_flow`]    - Fresh connection and authentication flow
+//! - [`data_flow`]     - Shared EPSV/PASV and EPRT/PORT data-channel flow
 //! - [`orchestration`] - Public negotiation entry points and data-channel orchestration
 //! - [`types`]         - Public configuration and result types
 
 mod capabilities;
 mod control;
+mod data_flow;
 mod fresh_commands;
 mod fresh_flow;
 mod orchestration;
 mod parsing;
 mod pooled_commands;
-mod pooled_flow;
 
 #[cfg(test)]
 mod tests;

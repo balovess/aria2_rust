@@ -3,12 +3,28 @@
 //! Contains `RawFtpControl` (public, used after negotiation), and internal
 //! `FreshControl` / `PooledControl` wrappers used during negotiation.
 
+use std::net::{IpAddr, SocketAddr};
+
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
+
+/// Minimal control-channel interface required by shared data negotiation.
+///
+/// Fresh and pooled sessions remain distinct concrete types. This private
+/// seam only exposes the command and socket-address operations that are
+/// genuinely common to their data-channel flow.
+#[allow(async_fn_in_trait)]
+pub(super) trait ControlSession {
+    async fn command(&mut self, cmd: &str) -> Result<(u16, String)>;
+
+    fn peer_ip(&self) -> Result<IpAddr>;
+
+    fn local_addr(&self) -> Result<SocketAddr>;
+}
 
 // =============================================================================
 // RawFtpControl - public control connection wrapper
@@ -123,16 +139,6 @@ pub(super) struct FreshControl {
 }
 
 impl FreshControl {
-    pub(super) fn peer_ip(&self) -> Result<std::net::IpAddr> {
-        self.reader
-            .get_ref()
-            .peer_addr()
-            .map(|address| address.ip())
-            .map_err(|error| {
-                Aria2Error::Network(format!("FTP control peer unavailable: {}", error))
-            })
-    }
-
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
         debug!("FTP CMD: {}", cmd.trim());
         send_command_impl(self.reader.get_mut(), cmd, "FTP write").await
@@ -145,6 +151,20 @@ impl FreshControl {
     pub(super) async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
         self.send_command(cmd).await?;
         self.read_response(self.command_timeout).await
+    }
+}
+
+impl ControlSession for FreshControl {
+    async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
+        FreshControl::command(self, cmd).await
+    }
+
+    fn peer_ip(&self) -> Result<IpAddr> {
+        peer_ip(&self.reader)
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr> {
+        local_addr(&self.reader)
     }
 }
 
@@ -162,16 +182,6 @@ pub(super) struct PooledControl {
 }
 
 impl PooledControl {
-    pub(super) fn peer_ip(&self) -> Result<std::net::IpAddr> {
-        self.reader
-            .get_ref()
-            .peer_addr()
-            .map(|address| address.ip())
-            .map_err(|error| {
-                Aria2Error::Network(format!("FTP control peer unavailable: {}", error))
-            })
-    }
-
     pub(super) async fn send_command(&mut self, cmd: &str) -> Result<()> {
         debug!("FTP CMD (pooled): {}", cmd.trim());
         send_command_impl(self.reader.get_mut(), cmd, "FTP write").await
@@ -187,6 +197,34 @@ impl PooledControl {
         self.send_command(cmd).await?;
         self.read_response(self.read_timeout).await
     }
+}
+
+impl ControlSession for PooledControl {
+    async fn command(&mut self, cmd: &str) -> Result<(u16, String)> {
+        PooledControl::command(self, cmd).await
+    }
+
+    fn peer_ip(&self) -> Result<IpAddr> {
+        peer_ip(&self.reader)
+    }
+
+    fn local_addr(&self) -> Result<SocketAddr> {
+        local_addr(&self.reader)
+    }
+}
+
+fn peer_ip(reader: &BufReader<TcpStream>) -> Result<IpAddr> {
+    reader
+        .get_ref()
+        .peer_addr()
+        .map(|address| address.ip())
+        .map_err(|error| Aria2Error::Network(format!("FTP control peer unavailable: {error}")))
+}
+
+fn local_addr(reader: &BufReader<TcpStream>) -> Result<SocketAddr> {
+    reader.get_ref().local_addr().map_err(|error| {
+        Aria2Error::Network(format!("FTP control local address unavailable: {error}"))
+    })
 }
 
 /// Write one complete FTP command and make it visible to the server.
