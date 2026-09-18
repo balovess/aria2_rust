@@ -11,6 +11,7 @@ pub mod download_command;
 pub mod download_cookie;
 pub mod download_engine;
 pub mod download_event_hooks;
+pub mod download_manager;
 pub mod download_progress;
 pub mod engine_command;
 pub mod engine_loop;

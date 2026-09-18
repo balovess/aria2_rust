@@ -343,6 +343,20 @@ impl RequestGroupMan {
         self.activity_signal.notify();
     }
 
+    /// Retain one terminal result and publish the state change after the
+    /// result is visible. Consumers waiting for a handle must not wake in the
+    /// small window between unregistering the live group and inserting its
+    /// stopped result.
+    pub(super) fn record_stopped_result(
+        &self,
+        result: crate::request::request_group::DownloadResult,
+    ) {
+        if self.stopped.add(result) {
+            self.download_finished_notify.notify_waiters();
+            self.activity_signal.notify();
+        }
+    }
+
     /// Return the event signal for live group and progress snapshots.
     pub fn activity_signal(&self) -> Arc<ActivitySignal> {
         Arc::clone(&self.activity_signal)

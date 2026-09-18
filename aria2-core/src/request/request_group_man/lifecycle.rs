@@ -65,7 +65,7 @@ impl RequestGroupMan {
             group.remove()?;
             self.unregister_group(gid);
             info!("Removing reserved download task #{}", gid.value());
-            self.stopped.add(group.create_download_result());
+            self.record_stopped_result(group.create_download_result());
         }
         Ok(())
     }
@@ -120,7 +120,7 @@ impl RequestGroupMan {
             self.unregister_group(gid);
             group.recover_mut().mark_error(message.to_string());
             let result = group.recover().create_download_result();
-            self.stopped.add(result);
+            self.record_stopped_result(result);
             debug!(
                 gid = gid.value(),
                 "Removed failed-spawn group from active and recorded error"
@@ -151,7 +151,7 @@ impl RequestGroupMan {
 
         self.unregister_group(gid);
         group.recover().mark_error_with_code(code, message);
-        self.stopped.add(group.recover().create_download_result());
+        self.record_stopped_result(group.recover().create_download_result());
         info!(
             gid = gid.value(),
             "Recorded failed reserved dependency group"
@@ -367,7 +367,7 @@ impl RequestGroupMan {
             let mut group = group_lock.recover_mut();
             let _ = group.remove();
             self.unregister_group(gid);
-            self.stopped.add(group.create_download_result());
+            self.record_stopped_result(group.create_download_result());
         }
         if removed > 0 {
             info!(removed, "Removed reserved downloads during force shutdown");

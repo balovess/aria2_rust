@@ -90,7 +90,7 @@ impl super::RequestGroupMan {
                 g.rate_limiter.recover_mut().take(); // Drop rate limiter
             }
 
-            self.stopped.add(result);
+            self.record_stopped_result(result);
 
             info!(gid = gid.value(), "Demoted group from active to stopped");
             true
