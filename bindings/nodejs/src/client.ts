@@ -10,6 +10,8 @@ import type {
   UriEntry,
   ServerInfoIndex,
   PeerInfo,
+  TrackerInfo,
+  DhtStatus,
   ClientOptions,
 } from './types.js';
 import { ConnectionError } from './errors.js';
@@ -63,6 +65,10 @@ export class Aria2Client {
     this.eventEmitter = new Aria2EventEmitter(wsUrl, this.options);
     await this.eventEmitter.connect();
     return this.eventEmitter;
+  }
+
+  async call<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
+    return (await this.transport.sendRequest(method, params)) as T;
   }
 
   async addUri(
@@ -171,6 +177,14 @@ export class Aria2Client {
 
   async getPeers(gid: string): Promise<PeerInfo[]> {
     return (await this.transport.sendRequest('aria2.getPeers', [gid])) as PeerInfo[];
+  }
+
+  async getTrackers(gid: string): Promise<TrackerInfo[]> {
+    return (await this.transport.sendRequest('aria2.getTrackers', [gid])) as TrackerInfo[];
+  }
+
+  async getDhtStatus(): Promise<DhtStatus> {
+    return (await this.transport.sendRequest('aria2.getDhtStatus', [])) as DhtStatus;
   }
 
   async tellActive(keys?: string[]): Promise<StatusInfo[]> {

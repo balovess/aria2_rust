@@ -82,6 +82,29 @@ export interface PeerInfo {
   seeder?: string;
 }
 
+export interface TrackerInfo {
+  uri: string;
+  tier: number;
+  current: boolean;
+  lastAttempt: boolean;
+  announceReady: boolean;
+  allFailed: boolean;
+  inFlight: number;
+  interval: string;
+  minInterval: number;
+  seeders: number;
+  leechers: number;
+  trackerId: string;
+  secondsSinceLastSuccess?: number;
+}
+
+export interface DhtStatus {
+  state: string;
+  totalNodes: string;
+  goodNodes: string;
+  pendingTransactions: string;
+}
+
 export interface DownloadEvent {
   type: EventType;
   gid: string;

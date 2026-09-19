@@ -207,6 +207,25 @@ impl RpcServer {
         self.serve_on_listener(listener).await
     }
 
+    /// Start the RPC server and stop accepting new connections when
+    /// `shutdown` completes.
+    ///
+    /// Existing connection tasks are allowed to finish independently. This
+    /// keeps shutdown ownership with the application that owns the listener,
+    /// while preserving the established `serve` behavior for callers that
+    /// intentionally run the server for the process lifetime.
+    pub async fn serve_with_shutdown<F>(
+        &self,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
+        let listener = self.bind_listener().await?;
+        self.serve_on_listener_with_shutdown(listener, shutdown)
+            .await
+    }
+
     /// Serve requests on a listener that was bound by the caller.
     ///
     /// This keeps listener ownership separate from router construction so an
@@ -216,6 +235,22 @@ impl RpcServer {
         &self,
         listener: tokio::net::TcpListener,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.serve_on_listener_with_shutdown(listener, std::future::pending())
+            .await
+    }
+
+    /// Serve requests on a caller-owned listener until `shutdown` completes.
+    ///
+    /// The listener is closed by returning from this method. Connections that
+    /// were already accepted are handled by their existing detached tasks.
+    pub async fn serve_on_listener_with_shutdown<F>(
+        &self,
+        listener: tokio::net::TcpListener,
+        shutdown: F,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: std::future::Future<Output = ()> + Send,
+    {
         use axum::{
             Router, middleware,
             routing::{get, post},
@@ -252,9 +287,10 @@ impl RpcServer {
             // HTTPS mode — accept TCP connections, perform TLS handshake,
             // then hand the encrypted stream to hyper/axum.
             tracing::info!("TLS enabled, serving HTTPS");
-            self.serve_tls(listener, tls_acceptor.clone(), app).await?;
+            self.serve_tls(listener, tls_acceptor.clone(), app, shutdown)
+                .await?;
         } else {
-            self.serve_http(listener, app).await?;
+            self.serve_http(listener, app, shutdown).await?;
         }
 
         Ok(())
@@ -270,14 +306,19 @@ impl RpcServer {
         &self,
         listener: tokio::net::TcpListener,
         app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::extract::Request;
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::net::SocketAddr;
         use tower_service::Service;
 
+        let mut shutdown = Box::pin(shutdown);
         loop {
-            let (connection, remote_addr) = listener.accept().await?;
+            let (connection, remote_addr) = tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                accepted = listener.accept() => accepted?,
+            };
             let mut make_service = app
                 .clone()
                 .into_make_service_with_connect_info::<SocketAddr>();
@@ -323,14 +364,19 @@ impl RpcServer {
         listener: tokio::net::TcpListener,
         tls_acceptor: tokio_rustls::TlsAcceptor,
         app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         use axum::extract::Request;
         use hyper_util::rt::{TokioExecutor, TokioIo};
         use std::net::SocketAddr;
         use tower_service::Service;
 
+        let mut shutdown = Box::pin(shutdown);
         loop {
-            let (cnx, remote_addr) = listener.accept().await?;
+            let (cnx, remote_addr) = tokio::select! {
+                _ = &mut shutdown => break Ok(()),
+                accepted = listener.accept() => accepted?,
+            };
             let tls_acceptor = tls_acceptor.clone();
 
             // Convert the Router into a MakeService that provides
@@ -441,5 +487,29 @@ mod tests {
     fn test_rpc_server_tls_acceptor_none_for_http() {
         let server = RpcServer::new_http("127.0.0.1", 6800);
         assert!(server.tls_acceptor().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_stops_accepting_after_shutdown_signal() {
+        let server = RpcServer::new_http("127.0.0.1", 0);
+        let listener = server.bind_listener().await.expect("listener should bind");
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            server
+                .serve_on_listener_with_shutdown(listener, async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+        });
+
+        shutdown_tx
+            .send(())
+            .expect("shutdown receiver should exist");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .expect("server should stop after shutdown")
+            .expect("server task should not panic");
+        assert!(result.is_ok());
     }
 }

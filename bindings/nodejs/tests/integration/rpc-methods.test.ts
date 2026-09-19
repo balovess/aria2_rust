@@ -103,6 +103,18 @@ describe('RPC Methods Integration', () => {
     expect(stat.numActive).toBe('1');
   });
 
+  it('getTrackers', async () => {
+    const trackers = await client.getTrackers('2089b05ecca3d829');
+    expect(trackers).toHaveLength(1);
+    expect(trackers[0].trackerId).toBe('tracker-id');
+  });
+
+  it('getDhtStatus', async () => {
+    const status = await client.getDhtStatus();
+    expect(status.state).toBe('running');
+    expect(status.goodNodes).toBe('8');
+  });
+
   it('getVersion', async () => {
     const version = await client.getVersion();
     expect(version.version).toBe('0.3.2');

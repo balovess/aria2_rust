@@ -27,7 +27,7 @@ async-trait.workspace = true
 
 # Use rustls-no-provider to avoid pulling in aws-lc-rs (STATUS_STACK_BUFFER_OVERRUN on Windows).
 # ring is available via direct dependencies, so rustls auto-selects it.
-reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider", "gzip", "http2"] }
+reqwest = { workspace = true, default-features = false, features = ["rustls-no-provider", "gzip", "http2", "stream"] }
 # rustls with ring — used to self-install the crypto provider so that
 # reqwest (built with rustls-no-provider) can build clients independently
 # of aria2-core.

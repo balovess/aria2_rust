@@ -412,6 +412,9 @@ var Aria2Client = class {
     await this.eventEmitter.connect();
     return this.eventEmitter;
   }
+  async call(method, params = []) {
+    return await this.transport.sendRequest(method, params);
+  }
   async addUri(uris, options, position) {
     const params = [uris];
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
@@ -482,6 +485,12 @@ var Aria2Client = class {
   }
   async getPeers(gid) {
     return await this.transport.sendRequest("aria2.getPeers", [gid]);
+  }
+  async getTrackers(gid) {
+    return await this.transport.sendRequest("aria2.getTrackers", [gid]);
+  }
+  async getDhtStatus() {
+    return await this.transport.sendRequest("aria2.getDhtStatus", []);
   }
   async tellActive(keys) {
     const params = [];

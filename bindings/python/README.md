@@ -121,6 +121,8 @@ not listed here can still be called through the transport layer.
 - `tell_status(gid, keys=None)` - Get task status
 - `get_files(gid)` - Get file paths, sizes, completion, and URI metadata for a task
 - `get_uris(gid)` / `get_servers(gid)` / `get_peers(gid)` - Get transfer connection metadata
+- `get_trackers(gid)` - Get BitTorrent tracker runtime state
+- `get_dht_status()` - Get process-wide BitTorrent DHT counters
 - `tell_active(keys=None)` - Get active tasks
 - `tell_waiting(offset, num, keys=None)` - Get waiting tasks
 - `tell_stopped(offset, num, keys=None)` - Get stopped tasks
@@ -131,6 +133,9 @@ not listed here can still be called through the transport layer.
 
 **System methods:**
 - `system_multicall(calls)` / `system_list_methods()` / `system_list_notifications()`
+
+**Custom RPC methods:**
+- `call(method, params=None)` - Call an extension or any method not wrapped above
 
 `get_files(gid)` is the direct binding for aria2's `aria2.getFiles` method:
 

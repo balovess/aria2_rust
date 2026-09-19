@@ -1,6 +1,8 @@
 use std::sync::Once;
 use std::time::Duration;
 
+use bytes::Bytes;
+use futures::{StreamExt, stream::BoxStream};
 use reqwest::{Certificate, Client, ClientBuilder, redirect};
 use tracing::{debug, info};
 
@@ -16,6 +18,74 @@ pub struct HttpClientOptions {
     pub accept_gzip: bool,
     pub verify_tls: bool,
     pub ca_cert_path: Option<String>,
+}
+
+/// A response body stream returned by [`HttpClient::execute_stream`].
+///
+/// Response metadata is available immediately after headers arrive. Body
+/// bytes are read on demand, so dropping this value cancels the in-flight
+/// response instead of buffering the remaining payload.
+pub struct HttpResponseStream {
+    status_code: u16,
+    status_text: String,
+    headers: Vec<(String, String)>,
+    body: HttpBodyStream,
+}
+
+/// The body stream type exposed by [`HttpResponseStream::into_stream`].
+pub type HttpBodyStream = BoxStream<'static, Result<Bytes, String>>;
+
+impl HttpResponseStream {
+    /// Return the HTTP status code received from the server.
+    pub fn status_code(&self) -> u16 {
+        self.status_code
+    }
+
+    /// Return the canonical status text received from the server.
+    pub fn status_text(&self) -> &str {
+        &self.status_text
+    }
+
+    /// Return the response headers captured before body streaming began.
+    pub fn headers(&self) -> &[(String, String)] {
+        &self.headers
+    }
+
+    /// Look up a response header without regard to ASCII case.
+    pub fn header(&self, name: &str) -> Option<&String> {
+        self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value)
+    }
+
+    /// Read the next body chunk.
+    ///
+    /// `None` means end-of-stream. Transport failures are returned as
+    /// `Err(String)` and do not get silently converted into an empty body.
+    pub async fn next_chunk(&mut self) -> Option<Result<Bytes, String>> {
+        self.body.next().await
+    }
+
+    /// Take ownership of the underlying body stream.
+    pub fn into_stream(self) -> HttpBodyStream {
+        self.body
+    }
+
+    /// Collect the streamed body into the existing buffered response type.
+    pub async fn collect(mut self) -> Result<HttpResponse, String> {
+        let mut body = Vec::new();
+        while let Some(chunk) = self.next_chunk().await {
+            body.extend_from_slice(&chunk?);
+        }
+
+        Ok(HttpResponse {
+            status_code: self.status_code,
+            status_text: self.status_text,
+            headers: self.headers,
+            body,
+        })
+    }
 }
 
 impl Default for HttpClientOptions {
@@ -99,7 +169,7 @@ impl HttpClient {
         Self::new(HttpClientOptions::default())
     }
 
-    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, String> {
+    fn build_request(&self, request: HttpRequest) -> Result<reqwest::RequestBuilder, String> {
         debug!("Sending HTTP request: {} {}", request.method, request.url);
 
         let mut reqwest_request = match request.method.to_uppercase().as_str() {
@@ -125,20 +195,18 @@ impl HttpClient {
             reqwest_request = reqwest_request.body(body);
         }
 
-        let response = reqwest_request
+        Ok(reqwest_request)
+    }
+
+    pub async fn execute(&self, request: HttpRequest) -> Result<HttpResponse, String> {
+        let response = self
+            .build_request(request)?
             .send()
             .await
             .map_err(|e| format!("HTTP request failed: {}", e))?;
 
-        let status = response.status();
-        let status_code = status.as_u16();
+        let (status_code, status_text, headers_map) = response_metadata(&response);
         debug!("Received HTTP response: status_code={}", status_code);
-
-        let headers_map: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
-            .collect();
 
         let body_bytes = response
             .bytes()
@@ -148,9 +216,39 @@ impl HttpClient {
 
         Ok(HttpResponse {
             status_code,
-            status_text: status.canonical_reason().unwrap_or("Unknown").to_string(),
+            status_text,
             headers: headers_map,
             body: body_bytes,
+        })
+    }
+
+    /// Execute a request without buffering its response body.
+    ///
+    /// The returned metadata is available after response headers arrive. Use
+    /// [`HttpResponseStream::next_chunk`] for incremental reads, or drop the
+    /// stream to cancel the remaining transfer.
+    pub async fn execute_stream(&self, request: HttpRequest) -> Result<HttpResponseStream, String> {
+        let response = self
+            .build_request(request)?
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+        let (status_code, status_text, headers) = response_metadata(&response);
+        debug!(
+            "Received HTTP response headers: status_code={}",
+            status_code
+        );
+        let body = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| format!("Failed to read response body: {}", e)))
+            .boxed();
+
+        Ok(HttpResponseStream {
+            status_code,
+            status_text,
+            headers,
+            body,
         })
     }
 
@@ -169,6 +267,25 @@ impl HttpClient {
     pub fn options_ref(&self) -> &HttpClientOptions {
         &self.options
     }
+}
+
+fn response_metadata(response: &reqwest::Response) -> (u16, String, Vec<(String, String)>) {
+    let status = response.status();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.as_str().to_string(),
+                value.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    (
+        status.as_u16(),
+        status.canonical_reason().unwrap_or("Unknown").to_string(),
+        headers,
+    )
 }
 
 pub struct HttpRequestBuilder<'a> {
@@ -237,21 +354,40 @@ impl<'a> HttpRequestBuilder<'a> {
         self.header("Referer", referer)
     }
 
-    pub async fn send(self) -> Result<HttpResponse, String> {
-        let headers_map = self.headers.map(|h| {
+    fn into_request(self) -> (&'a HttpClient, HttpRequest) {
+        let Self {
+            client,
+            method,
+            url,
+            headers,
+            body,
+        } = self;
+        let headers_map = headers.map(|h| {
             h.iter()
                 .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect::<Vec<_>>()
         });
 
-        let request = HttpRequest {
-            method: self.method.clone(),
-            url: self.url.clone(),
-            headers: headers_map,
-            body: self.body,
-        };
+        (
+            client,
+            HttpRequest {
+                method,
+                url,
+                headers: headers_map,
+                body,
+            },
+        )
+    }
 
-        self.client.execute(request).await
+    pub async fn send(self) -> Result<HttpResponse, String> {
+        let (client, request) = self.into_request();
+        client.execute(request).await
+    }
+
+    /// Send this request while keeping the response body incremental.
+    pub async fn send_stream(self) -> Result<HttpResponseStream, String> {
+        let (client, request) = self.into_request();
+        client.execute_stream(request).await
     }
 }
 
@@ -336,6 +472,8 @@ pub enum RedirectAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn default_options_do_not_advertise_gzip() {
@@ -406,5 +544,79 @@ mod tests {
         if let Some(action) = action {
             assert!(matches!(action, RedirectAction::FollowKeepMethod));
         }
+    }
+
+    #[tokio::test]
+    async fn execute_stream_exposes_metadata_and_incremental_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            connection.read(&mut request).await.unwrap();
+            connection
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nX-Test: stream\r\nConnection: close\r\n\r\nhello world",
+                )
+                .await
+                .unwrap();
+            connection.shutdown().await.unwrap();
+        });
+
+        let client = HttpClient::default_client().unwrap();
+        let mut response = client
+            .get(format!("http://{address}/payload"))
+            .send_stream()
+            .await
+            .unwrap();
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(response.status_text(), "OK");
+        assert_eq!(response.header("x-test"), Some(&"stream".to_string()));
+
+        let mut body = Vec::new();
+        let mut chunks = 0;
+        while let Some(chunk) = response.next_chunk().await {
+            chunks += 1;
+            body.extend_from_slice(&chunk.unwrap());
+        }
+        assert!(chunks > 0);
+        assert_eq!(body, b"hello world");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_stream_propagates_truncated_body_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut connection, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 1024];
+            connection.read(&mut request).await.unwrap();
+            connection
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nshort",
+                )
+                .await
+                .unwrap();
+            connection.shutdown().await.unwrap();
+        });
+
+        let client = HttpClient::default_client().unwrap();
+        let mut response = client
+            .execute_stream(HttpRequest::get(format!("http://{address}/truncated")))
+            .await
+            .unwrap();
+        let mut saw_error = false;
+        while let Some(chunk) = response.next_chunk().await {
+            if chunk.is_err() {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(
+            saw_error,
+            "premature EOF must not look like a successful body"
+        );
+        server.await.unwrap();
     }
 }

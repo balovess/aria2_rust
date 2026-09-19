@@ -75,6 +75,27 @@ interface PeerInfo {
     uploadSpeed: string;
     seeder?: string;
 }
+interface TrackerInfo {
+    uri: string;
+    tier: number;
+    current: boolean;
+    lastAttempt: boolean;
+    announceReady: boolean;
+    allFailed: boolean;
+    inFlight: number;
+    interval: string;
+    minInterval: number;
+    seeders: number;
+    leechers: number;
+    trackerId: string;
+    secondsSinceLastSuccess?: number;
+}
+interface DhtStatus {
+    state: string;
+    totalNodes: string;
+    goodNodes: string;
+    pendingTransactions: string;
+}
 interface DownloadEvent {
     type: EventType;
     gid: string;
@@ -113,6 +134,7 @@ declare class Aria2Client {
     private options;
     constructor(url?: string, options?: ClientOptions);
     private ensureEventEmitter;
+    call<T = unknown>(method: string, params?: unknown[]): Promise<T>;
     addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>;
     addTorrent(torrent: Buffer, options?: Record<string, unknown>, webSeedUris?: string[], position?: number): Promise<string>;
     addMetalink(metalink: Buffer, options?: Record<string, unknown>, position?: number): Promise<string[]>;
@@ -131,6 +153,8 @@ declare class Aria2Client {
     getUris(gid: string): Promise<UriEntry[]>;
     getServers(gid: string): Promise<ServerInfoIndex[]>;
     getPeers(gid: string): Promise<PeerInfo[]>;
+    getTrackers(gid: string): Promise<TrackerInfo[]>;
+    getDhtStatus(): Promise<DhtStatus>;
     tellActive(keys?: string[]): Promise<StatusInfo[]>;
     tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
     tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>;
@@ -192,4 +216,4 @@ declare class Aria2EventEmitter extends EventEmitter {
     close(): Promise<void>;
 }
 
-export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type UriEntry, type VersionInfo };
+export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerInfo, type UriEntry, type VersionInfo };

@@ -130,7 +130,10 @@ interface ClientOptions {
 #### Methods
 
 The client exposes the standard aria2 RPC methods listed below. Methods not
-listed here can still be called through a custom transport.
+listed here can be called with `call(method, params)`.
+
+**Custom RPC:**
+- `call<T = unknown>(method: string, params?: unknown[]): Promise<T>`
 
 **Task Management:**
 - `addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>`
@@ -151,6 +154,8 @@ listed here can still be called through a custom transport.
 - `getUris(gid: string): Promise<UriEntry[]>`
 - `getServers(gid: string): Promise<ServerInfoIndex[]>`
 - `getPeers(gid: string): Promise<PeerInfo[]>`
+- `getTrackers(gid: string): Promise<TrackerInfo[]>`
+- `getDhtStatus(): Promise<DhtStatus>`
 - `tellActive(keys?: string[]): Promise<StatusInfo[]>`
 - `tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`
 - `tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]>`

@@ -37,6 +37,16 @@ describe('Aria2Client', () => {
         { dir: '/tmp' },
       ]);
     });
+
+    it('sends with position', async () => {
+      mockTransport.sendRequest.mockResolvedValue('gid1');
+      await client.addUri(['http://example.com/file.zip'], undefined, 3);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addUri', [
+        ['http://example.com/file.zip'],
+        {},
+        3,
+      ]);
+    });
   });
 
   describe('addTorrent', () => {
@@ -59,6 +69,23 @@ describe('Aria2Client', () => {
         { dir: '/tmp' },
       ]);
     });
+
+    it('sends web seeds, options, and position in aria2 order', async () => {
+      mockTransport.sendRequest.mockResolvedValue('gid1');
+      const torrent = Buffer.from('torrent-data');
+      await client.addTorrent(
+        torrent,
+        { dir: '/tmp' },
+        ['https://example.com/file'],
+        2,
+      );
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addTorrent', [
+        torrent.toString('base64'),
+        ['https://example.com/file'],
+        { dir: '/tmp' },
+        2,
+      ]);
+    });
   });
 
   describe('addMetalink', () => {
@@ -70,6 +97,34 @@ describe('Aria2Client', () => {
         metalink.toString('base64'),
       ]);
       expect(gids).toEqual(['gid1', 'gid2']);
+    });
+
+    it('sends an empty options object when only position is set', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['gid1']);
+      const metalink = Buffer.from('metalink-data');
+      await client.addMetalink(metalink, undefined, 1);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.addMetalink', [
+        metalink.toString('base64'),
+        {},
+        1,
+      ]);
+    });
+  });
+
+  describe('call', () => {
+    it('sends an arbitrary RPC method and returns its result', async () => {
+      mockTransport.sendRequest.mockResolvedValue({ ok: true });
+
+      const result = await client.call<{ ok: boolean }>('aria2.customMethod', [
+        'value',
+        7,
+      ]);
+
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.customMethod', [
+        'value',
+        7,
+      ]);
+      expect(result).toEqual({ ok: true });
     });
   });
 
@@ -212,6 +267,40 @@ describe('Aria2Client', () => {
       mockTransport.sendRequest.mockResolvedValue(peers);
       expect(await client.getPeers('gid1')).toEqual(peers);
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getPeers', ['gid1']);
+    });
+
+    it('queries trackers', async () => {
+      const trackers = [
+        {
+          uri: 'udp://tracker.example/announce',
+          tier: 1,
+          current: true,
+          lastAttempt: false,
+          announceReady: true,
+          allFailed: false,
+          inFlight: 0,
+          interval: '1800',
+          minInterval: 60,
+          seeders: 3,
+          leechers: 1,
+          trackerId: 'tracker-id',
+        },
+      ];
+      mockTransport.sendRequest.mockResolvedValue(trackers);
+      expect(await client.getTrackers('gid1')).toEqual(trackers);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getTrackers', ['gid1']);
+    });
+
+    it('queries DHT status', async () => {
+      const status = {
+        state: 'running',
+        totalNodes: '10',
+        goodNodes: '8',
+        pendingTransactions: '1',
+      };
+      mockTransport.sendRequest.mockResolvedValue(status);
+      expect(await client.getDhtStatus()).toEqual(status);
+      expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getDhtStatus', []);
     });
   });
 

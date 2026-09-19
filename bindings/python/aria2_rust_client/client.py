@@ -9,6 +9,7 @@ from .errors import Aria2Error
 from .events import EventSubscriber
 from .transport import HttpTransport, Transport, WebSocketTransport
 from .types import (
+    DhtStatus,
     EventType,
     FileInfo,
     GlobalStat,
@@ -16,6 +17,7 @@ from .types import (
     ServerInfoIndex,
     SessionInfo,
     StatusInfo,
+    TrackerInfo,
     UriEntry,
     VersionInfo,
 )
@@ -54,6 +56,12 @@ class Aria2Client:
 
     async def _call(self, method: str, params: Optional[list] = None) -> Any:
         return await self._transport.send_request(method, params or [])
+
+    async def call(
+        self, method: str, params: Optional[List[Any]] = None
+    ) -> Any:
+        """Call an arbitrary JSON-RPC method, including fork-specific extensions."""
+        return await self._call(method, params)
 
     async def add_uri(
         self,
@@ -205,6 +213,22 @@ class Aria2Client:
         if isinstance(result, list):
             return [PeerInfo.from_dict(item) for item in result if isinstance(item, dict)]
         raise Aria2Error(f"Unexpected result type for getPeers: {type(result)}")
+
+    async def get_trackers(self, gid: str) -> List[TrackerInfo]:
+        result = await self._call("aria2.getTrackers", [gid])
+        if isinstance(result, list):
+            return [
+                TrackerInfo.from_dict(item)
+                for item in result
+                if isinstance(item, dict)
+            ]
+        raise Aria2Error(f"Unexpected result type for getTrackers: {type(result)}")
+
+    async def get_dht_status(self) -> DhtStatus:
+        result = await self._call("aria2.getDhtStatus")
+        if isinstance(result, dict):
+            return DhtStatus.from_dict(result)
+        raise Aria2Error(f"Unexpected result type for getDhtStatus: {type(result)}")
 
     async def tell_active(
         self, keys: Optional[List[str]] = None

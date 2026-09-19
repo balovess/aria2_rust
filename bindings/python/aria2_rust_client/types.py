@@ -116,6 +116,42 @@ class ServerInfoIndex:
 
 
 @dataclass
+class TrackerInfo:
+    uri: Optional[str] = None
+    tier: Optional[int] = None
+    current: Optional[bool] = None
+    last_attempt: Optional[bool] = None
+    announce_ready: Optional[bool] = None
+    all_failed: Optional[bool] = None
+    in_flight: Optional[int] = None
+    interval: Optional[str] = None
+    min_interval: Optional[int] = None
+    seeders: Optional[int] = None
+    leechers: Optional[int] = None
+    tracker_id: Optional[str] = None
+    seconds_since_last_success: Optional[int] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> TrackerInfo:
+        converted = _convert_keys(data)
+        return cls(
+            uri=converted.get("uri"),
+            tier=converted.get("tier"),
+            current=converted.get("current"),
+            last_attempt=converted.get("last_attempt"),
+            announce_ready=converted.get("announce_ready"),
+            all_failed=converted.get("all_failed"),
+            in_flight=converted.get("in_flight"),
+            interval=converted.get("interval"),
+            min_interval=converted.get("min_interval"),
+            seeders=converted.get("seeders"),
+            leechers=converted.get("leechers"),
+            tracker_id=converted.get("tracker_id"),
+            seconds_since_last_success=converted.get("seconds_since_last_success"),
+        )
+
+
+@dataclass
 class PeerInfo:
     peer_id: Optional[str] = None
     ip: Optional[str] = None
@@ -252,6 +288,24 @@ class SessionInfo:
     def from_dict(cls, data: Dict[str, Any]) -> SessionInfo:
         converted = _convert_keys(data)
         return cls(session_id=converted.get("session_id"))
+
+
+@dataclass
+class DhtStatus:
+    state: Optional[str] = None
+    total_nodes: Optional[str] = None
+    good_nodes: Optional[str] = None
+    pending_transactions: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DhtStatus:
+        converted = _convert_keys(data)
+        return cls(
+            state=converted.get("state"),
+            total_nodes=converted.get("total_nodes"),
+            good_nodes=converted.get("good_nodes"),
+            pending_transactions=converted.get("pending_transactions"),
+        )
 
 
 @dataclass

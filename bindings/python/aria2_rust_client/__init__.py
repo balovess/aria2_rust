@@ -2,6 +2,7 @@ from .client import Aria2Client
 from .errors import Aria2Error, AuthError, ConnectionError, RpcError, TimeoutError
 from .events import EventSubscriber
 from .types import (
+    DhtStatus,
     DownloadEvent,
     DownloadStatus,
     EventType,
@@ -12,6 +13,7 @@ from .types import (
     ServerInfoIndex,
     SessionInfo,
     StatusInfo,
+    TrackerInfo,
     UriEntry,
     VersionInfo,
 )
@@ -26,6 +28,7 @@ __all__ = [
     "EventSubscriber",
     "DownloadEvent",
     "DownloadStatus",
+    "DhtStatus",
     "EventType",
     "FileInfo",
     "GlobalStat",
@@ -34,6 +37,7 @@ __all__ = [
     "ServerInfoIndex",
     "SessionInfo",
     "StatusInfo",
+    "TrackerInfo",
     "UriEntry",
     "VersionInfo",
 ]

@@ -8,6 +8,8 @@ from aria2_rust_client.types import (
     GlobalStat,
     SessionInfo,
     StatusInfo,
+    TrackerInfo,
+    DhtStatus,
     UriEntry,
     VersionInfo,
 )
@@ -232,6 +234,46 @@ class TestSessionInfo:
     def test_from_dict_missing(self):
         info = SessionInfo.from_dict({})
         assert info.session_id is None
+
+
+class TestTrackerInfo:
+    def test_from_dict(self):
+        info = TrackerInfo.from_dict(
+            {
+                "uri": "udp://tracker.example/announce",
+                "tier": 1,
+                "current": True,
+                "lastAttempt": False,
+                "announceReady": True,
+                "allFailed": False,
+                "inFlight": 0,
+                "interval": "1800",
+                "minInterval": 60,
+                "seeders": 3,
+                "leechers": 1,
+                "trackerId": "tracker-id",
+                "secondsSinceLastSuccess": 4,
+            }
+        )
+        assert info.uri == "udp://tracker.example/announce"
+        assert info.last_attempt is False
+        assert info.interval == "1800"
+        assert info.seconds_since_last_success == 4
+
+
+class TestDhtStatus:
+    def test_from_dict(self):
+        info = DhtStatus.from_dict(
+            {
+                "state": "running",
+                "totalNodes": "10",
+                "goodNodes": "8",
+                "pendingTransactions": "1",
+            }
+        )
+        assert info.state == "running"
+        assert info.total_nodes == "10"
+        assert info.pending_transactions == "1"
 
 
 class TestDownloadEvent:

@@ -5,7 +5,14 @@ import pytest_asyncio
 
 from aria2_rust_client.client import Aria2Client
 from aria2_rust_client.errors import RpcError
-from aria2_rust_client.types import GlobalStat, SessionInfo, StatusInfo, VersionInfo
+from aria2_rust_client.types import (
+    DhtStatus,
+    GlobalStat,
+    SessionInfo,
+    StatusInfo,
+    TrackerInfo,
+    VersionInfo,
+)
 
 
 @pytest_asyncio.fixture
@@ -76,6 +83,17 @@ class TestRpcMethods:
         assert isinstance(stat, GlobalStat)
         assert stat.download_speed is not None
         assert stat.num_active is not None
+
+    async def test_get_trackers(self, client):
+        trackers = await client.get_trackers("gid-00000001")
+        assert isinstance(trackers, list)
+        assert isinstance(trackers[0], TrackerInfo)
+        assert trackers[0].tracker_id == "tracker-id"
+
+    async def test_get_dht_status(self, client):
+        status = await client.get_dht_status()
+        assert isinstance(status, DhtStatus)
+        assert status.good_nodes == "8"
 
     async def test_get_version(self, client):
         version = await client.get_version()

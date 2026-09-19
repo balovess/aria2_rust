@@ -9,6 +9,8 @@ import type {
   FileInfo,
   UriEntry,
   DownloadEvent,
+  TrackerInfo,
+  DhtStatus,
 } from '../../src/types.js';
 
 describe('EventType', () => {
@@ -178,5 +180,35 @@ describe('DownloadEvent', () => {
     };
     expect(event.type).toBe('aria2.onDownloadStart');
     expect(event.gid).toBe('2089b05ecca3d829');
+  });
+});
+
+describe('TrackerInfo and DhtStatus', () => {
+  it('can represent tracker runtime state', () => {
+    const tracker: TrackerInfo = {
+      uri: 'udp://tracker.example/announce',
+      tier: 1,
+      current: true,
+      lastAttempt: false,
+      announceReady: true,
+      allFailed: false,
+      inFlight: 0,
+      interval: '1800',
+      minInterval: 60,
+      seeders: 3,
+      leechers: 1,
+      trackerId: 'tracker-id',
+    };
+    expect(tracker.trackerId).toBe('tracker-id');
+  });
+
+  it('can represent DHT counters', () => {
+    const status: DhtStatus = {
+      state: 'running',
+      totalNodes: '10',
+      goodNodes: '8',
+      pendingTransactions: '1',
+    };
+    expect(status.goodNodes).toBe('8');
   });
 });

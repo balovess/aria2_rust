@@ -15,6 +15,8 @@ from aria2_rust_client.types import (
     ServerInfoIndex,
     SessionInfo,
     StatusInfo,
+    TrackerInfo,
+    DhtStatus,
     UriEntry,
     VersionInfo,
 )
@@ -68,6 +70,14 @@ class TestAddUri:
         )
         assert result == "gid1"
 
+    @pytest.mark.asyncio
+    async def test_with_position(self, client, mock_transport):
+        mock_transport.send_request.return_value = "gid1"
+        await client.add_uri(["http://example.com/file.zip"], position=3)
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.addUri", [["http://example.com/file.zip"], {}, 3]
+        )
+
 
 class TestAddTorrent:
     @pytest.mark.asyncio
@@ -91,6 +101,27 @@ class TestAddTorrent:
             "aria2.addTorrent", [expected_encoded, [], {"dir": "/tmp"}]
         )
 
+    @pytest.mark.asyncio
+    async def test_with_web_seeds_and_position(self, client, mock_transport):
+        torrent_data = b"data"
+        mock_transport.send_request.return_value = "gid"
+        await client.add_torrent(
+            torrent_data,
+            options={"dir": "/tmp"},
+            web_seed_uris=["https://example.com/file"],
+            position=2,
+        )
+        expected_encoded = base64.b64encode(torrent_data).decode("ascii")
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.addTorrent",
+            [
+                expected_encoded,
+                ["https://example.com/file"],
+                {"dir": "/tmp"},
+                2,
+            ],
+        )
+
 
 class TestAddMetalink:
     @pytest.mark.asyncio
@@ -103,6 +134,27 @@ class TestAddMetalink:
             "aria2.addMetalink", [expected_encoded]
         )
         assert result == ["metalink-gid-1", "metalink-gid-2"]
+
+    @pytest.mark.asyncio
+    async def test_with_position(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["metalink-gid"]
+        await client.add_metalink(b"<metalink />", position=1)
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.addMetalink", [base64.b64encode(b"<metalink />").decode("ascii"), {}, 1]
+        )
+
+
+class TestGenericCall:
+    @pytest.mark.asyncio
+    async def test_calls_arbitrary_rpc_method(self, client, mock_transport):
+        mock_transport.send_request.return_value = {"ok": True}
+
+        result = await client.call("aria2.customMethod", ["value", 7])
+
+        assert result == {"ok": True}
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.customMethod", ["value", 7]
+        )
 
 
 class TestSimpleMethods:
@@ -237,6 +289,44 @@ class TestGetFiles:
         result = await client.get_peers("gid1")
         assert isinstance(result[0], PeerInfo)
         mock_transport.send_request.assert_called_once_with("aria2.getPeers", ["gid1"])
+
+    @pytest.mark.asyncio
+    async def test_get_trackers(self, client, mock_transport):
+        mock_transport.send_request.return_value = [
+            {
+                "uri": "udp://tracker.example/announce",
+                "tier": 1,
+                "current": True,
+                "lastAttempt": False,
+                "announceReady": True,
+                "allFailed": False,
+                "inFlight": 0,
+                "interval": "1800",
+                "minInterval": 60,
+                "seeders": 3,
+                "leechers": 1,
+                "trackerId": "tracker-id",
+            }
+        ]
+        result = await client.get_trackers("gid1")
+        assert isinstance(result[0], TrackerInfo)
+        assert result[0].tracker_id == "tracker-id"
+        mock_transport.send_request.assert_called_once_with(
+            "aria2.getTrackers", ["gid1"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_dht_status(self, client, mock_transport):
+        mock_transport.send_request.return_value = {
+            "state": "running",
+            "totalNodes": "10",
+            "goodNodes": "8",
+            "pendingTransactions": "1",
+        }
+        result = await client.get_dht_status()
+        assert isinstance(result, DhtStatus)
+        assert result.good_nodes == "8"
+        mock_transport.send_request.assert_called_once_with("aria2.getDhtStatus", [])
 
     @pytest.mark.asyncio
     async def test_with_keys(self, client, mock_transport):

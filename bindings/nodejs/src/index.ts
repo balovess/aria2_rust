@@ -9,6 +9,8 @@ export type {
   ServerInfo,
   ServerInfoIndex,
   PeerInfo,
+  TrackerInfo,
+  DhtStatus,
   DownloadEvent,
   ClientOptions,
 } from './types.js';
