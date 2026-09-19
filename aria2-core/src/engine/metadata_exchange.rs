@@ -5,10 +5,10 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
-use aria2_protocol::bittorrent::extension::ut_metadata::{
-    ExtensionHandshake, MetadataCollector, UtMetadataMsg,
-};
+use aria2_protocol::bittorrent::extension::ut_metadata::{ExtensionHandshake, MetadataCollector};
 use aria2_protocol::bittorrent::extension::ut_metadata_tracker::UTMetadataRequestTracker;
+use aria2_protocol::bittorrent::message::extension::UtMetadataMessage;
+use aria2_protocol::bittorrent::message::serializer::serialize_extended;
 use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
 
 const METADATA_MAX_SIZE: u64 = 100 * 1024 * 1024;
@@ -34,12 +34,7 @@ pub enum MetadataExchangeError {
 
 impl MetadataExchangeError {
     fn is_fatal(&self) -> bool {
-        matches!(
-            self,
-            MetadataExchangeError::MetadataTooLarge { .. }
-                | MetadataExchangeError::BencodeDecodeFailed { .. }
-                | MetadataExchangeError::NoPeersAvailable
-        )
+        matches!(self, MetadataExchangeError::NoPeersAvailable)
     }
 
     pub fn addr(&self) -> Option<&str> {
@@ -172,10 +167,6 @@ impl MetadataExchangeSession {
         let mut last_error = String::new();
 
         for peer_addr in peers.iter().take(self.config.max_peers_to_try) {
-            if attempt_count >= self.config.max_attempts {
-                break;
-            }
-
             match self.exchange_with_peer(info_hash, peer_addr).await {
                 Ok(torrent_bytes) => {
                     info!(
@@ -195,8 +186,8 @@ impl MetadataExchangeSession {
                     }
 
                     warn!(
-                        "Recoverable metadata exchange error with {} (attempt {}/{}): {}",
-                        peer_addr, attempt_count, self.config.max_attempts, e
+                        "Recoverable metadata exchange error with {} (peer {}/{}): {}",
+                        peer_addr, attempt_count, self.config.max_peers_to_try, e
                     );
                 }
             }
@@ -238,12 +229,11 @@ impl MetadataExchangeSession {
 
         debug!("Connected to {}, sending extension handshake", peer_addr);
 
-        let hs_payload = ExtensionHandshake::new(0).to_bencode();
-        let hs_encoded = hs_payload.encode();
+        let mut local_hs = ExtensionHandshake::new(0);
+        local_hs.metadata_size = None;
+        let hs_payload = local_hs.to_bencode().encode();
+        let hs_encoded = serialize_extended(0, hs_payload);
 
-        conn.stream_write(&[0])
-            .await
-            .map_err(|e| MetadataExchangeError::IoError(format!("stream_write failed: {}", e)))?;
         conn.stream_write(&hs_encoded)
             .await
             .map_err(|e| MetadataExchangeError::IoError(format!("stream_write failed: {}", e)))?;
@@ -259,6 +249,15 @@ impl MetadataExchangeSession {
                 detail: "Failed to parse remote extension handshake".to_string(),
             }
         })?;
+
+        let metadata_ext_id = remote_hs
+            .get_ut_metadata_id()
+            .and_then(|id| u8::try_from(id).ok())
+            .filter(|id| *id != 0)
+            .ok_or_else(|| MetadataExchangeError::UnsupportedPeer {
+                addr: addr_str.clone(),
+                reason: "Remote did not advertise a valid ut_metadata extension ID".to_string(),
+            })?;
 
         let metadata_size = match remote_hs.metadata_size {
             Some(size) => size,
@@ -297,7 +296,7 @@ impl MetadataExchangeSession {
         // Collect pieces while treating max_attempts as the total attempts per piece.
         let mut retry_counts: std::collections::HashMap<u32, usize> =
             std::collections::HashMap::new();
-        let mut pending_pieces: Vec<u32> = (0..num_pieces).collect();
+        let mut pending_pieces: Vec<u32> = (0..num_pieces).rev().collect();
 
         while !pending_pieces.is_empty() && !collector.is_complete() {
             // Check for timed-out requests and requeue them
@@ -335,8 +334,8 @@ impl MetadataExchangeSession {
                     break;
                 }
 
-                let req_msg = UtMetadataMsg::Request(piece_idx);
-                let encoded = req_msg.encode(20);
+                let req_msg = UtMetadataMessage::Request { piece: piece_idx };
+                let encoded = serialize_extended(metadata_ext_id, req_msg.to_payload());
 
                 conn.stream_write(&encoded).await.map_err(|e| {
                     MetadataExchangeError::IoError(format!("stream_write failed: {}", e))
@@ -351,11 +350,15 @@ impl MetadataExchangeSession {
             // Wait for a response (with timeout)
             match timeout(
                 self.config.request_timeout,
-                self.read_ut_metadata_response(&mut conn),
+                self.read_ut_metadata_response(&mut conn, metadata_ext_id),
             )
             .await
             {
-                Ok(Ok(UtMetadataMsg::Data(recv_piece, data))) => {
+                Ok(Ok(UtMetadataMessage::Data {
+                    piece: recv_piece,
+                    data,
+                    ..
+                })) => {
                     tracker.remove(recv_piece);
                     collector.add_piece(recv_piece, &data);
                     debug!(
@@ -365,7 +368,7 @@ impl MetadataExchangeSession {
                         data.len()
                     );
                 }
-                Ok(Ok(UtMetadataMsg::Reject(piece))) => {
+                Ok(Ok(UtMetadataMessage::Reject { piece })) => {
                     tracker.remove(piece);
                     debug!("Piece {} rejected by {}", piece, peer_addr);
                     // Requeue for retry
@@ -377,7 +380,7 @@ impl MetadataExchangeSession {
                         return Err(MetadataExchangeError::PieceRejected { piece });
                     }
                 }
-                Ok(Ok(UtMetadataMsg::Request(_))) => {
+                Ok(Ok(UtMetadataMessage::Request { .. })) => {
                     // Peer is requesting metadata from us; ignore for now
                     // (we're in metadata fetch mode, not serving mode)
                     debug!("Ignoring unexpected ut_metadata Request from peer");
@@ -415,60 +418,68 @@ impl MetadataExchangeSession {
         &self,
         conn: &mut PeerConnection,
     ) -> Result<BencodeValue, MetadataExchangeError> {
-        let mut len_buf = [0u8; 4];
-        conn.stream_read_exact(&mut len_buf).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("Read message length failed: {}", e))
-        })?;
+        loop {
+            let payload = self.read_message_frame(conn, "extension").await?;
+            if payload.is_empty() || payload[0] != 20 {
+                continue;
+            }
+            if payload.len() < 2 || payload[1] != 0 {
+                continue;
+            }
 
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len == 0 || msg_len > 10 * 1024 * 1024 {
-            return Err(MetadataExchangeError::BencodeDecodeFailed {
-                detail: "Invalid extension message length".to_string(),
-            });
+            return BencodeValue::decode(&payload[2..])
+                .map(|(v, _)| v)
+                .map_err(|e| MetadataExchangeError::BencodeDecodeFailed {
+                    detail: format!("Decode BEncode failed: {}", e),
+                });
         }
-
-        let mut payload = vec![0u8; msg_len];
-        conn.stream_read_exact(&mut payload).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("Read message body failed: {}", e))
-        })?;
-
-        if payload.first().copied() != Some(20u8) {
-            return Err(MetadataExchangeError::BencodeDecodeFailed {
-                detail: "Expected extended message ID 20".to_string(),
-            });
-        }
-
-        BencodeValue::decode(&payload[1..])
-            .map(|(v, _)| v)
-            .map_err(|e| MetadataExchangeError::BencodeDecodeFailed {
-                detail: format!("Decode BEncode failed: {}", e),
-            })
     }
 
     async fn read_ut_metadata_response(
         &self,
         conn: &mut PeerConnection,
-    ) -> Result<UtMetadataMsg, MetadataExchangeError> {
+        metadata_ext_id: u8,
+    ) -> Result<UtMetadataMessage, MetadataExchangeError> {
+        loop {
+            let payload = self.read_message_frame(conn, "ut_metadata").await?;
+            if payload.is_empty() || payload[0] != 20 {
+                continue;
+            }
+            if payload.len() < 2 || payload[1] != metadata_ext_id {
+                continue;
+            }
+
+            return UtMetadataMessage::from_payload(&payload[2..]).map_err(|e| {
+                MetadataExchangeError::BencodeDecodeFailed {
+                    detail: format!("ut_metadata decode failed: {}", e),
+                }
+            });
+        }
+    }
+
+    async fn read_message_frame(
+        &self,
+        conn: &mut PeerConnection,
+        message_name: &str,
+    ) -> Result<Vec<u8>, MetadataExchangeError> {
         let mut len_buf = [0u8; 4];
         conn.stream_read_exact(&mut len_buf).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("Read ut_metadata length failed: {}", e))
+            MetadataExchangeError::IoError(format!("Read {} length failed: {}", message_name, e))
         })?;
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
-        if msg_len == 0 || msg_len > 10 * 1024 * 1024 {
+        if msg_len > 10 * 1024 * 1024 {
             return Err(MetadataExchangeError::BencodeDecodeFailed {
-                detail: "Invalid ut_metadata message length".to_string(),
+                detail: format!("Invalid {} message length", message_name),
             });
         }
 
         let mut payload = vec![0u8; msg_len];
         conn.stream_read_exact(&mut payload).await.map_err(|e| {
-            MetadataExchangeError::IoError(format!("Read ut_metadata body failed: {}", e))
+            MetadataExchangeError::IoError(format!("Read {} body failed: {}", message_name, e))
         })?;
 
-        UtMetadataMsg::decode(&payload).map_err(|e| MetadataExchangeError::BencodeDecodeFailed {
-            detail: format!("ut_metadata decode failed: {}", e),
-        })
+        Ok(payload)
     }
 }
 
@@ -540,16 +551,16 @@ mod tests {
 
     #[test]
     fn test_fatal_vs_recoverable_errors() {
-        let fatal = MetadataExchangeError::MetadataTooLarge {
+        let peer_specific_size_error = MetadataExchangeError::MetadataTooLarge {
             size: 200_000_000,
             max: METADATA_MAX_SIZE,
         };
-        assert!(fatal.is_fatal());
+        assert!(!peer_specific_size_error.is_fatal());
 
-        let fatal2 = MetadataExchangeError::BencodeDecodeFailed {
+        let peer_specific_decode_error = MetadataExchangeError::BencodeDecodeFailed {
             detail: "bad".to_string(),
         };
-        assert!(fatal2.is_fatal());
+        assert!(!peer_specific_decode_error.is_fatal());
 
         let recoverable = MetadataExchangeError::PeerTimeout {
             addr: "1.2.3.4:6881".to_string(),
@@ -558,6 +569,38 @@ mod tests {
 
         let recoverable2 = MetadataExchangeError::InvalidMetadataSize { size: 0 };
         assert!(!recoverable2.is_fatal());
+
+        assert!(MetadataExchangeError::NoPeersAvailable.is_fatal());
+    }
+
+    #[test]
+    fn test_extension_handshake_uses_complete_bep10_frame() {
+        let mut handshake = ExtensionHandshake::new(0);
+        handshake.metadata_size = None;
+        let frame = serialize_extended(0, handshake.to_bencode().encode());
+        let frame_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+
+        assert_eq!(frame_len, frame.len() - 4);
+        assert_eq!(&frame[4..6], &[20, 0]);
+
+        let (payload, consumed) = BencodeValue::decode(&frame[6..]).unwrap();
+        assert_eq!(consumed, frame.len() - 6);
+        let parsed = ExtensionHandshake::parse(&payload).unwrap();
+        assert_eq!(parsed.get_ut_metadata_id(), Some(1));
+        assert_eq!(parsed.metadata_size, None);
+    }
+
+    #[test]
+    fn test_ut_metadata_request_uses_negotiated_extension_id() {
+        let frame = serialize_extended(7, UtMetadataMessage::Request { piece: 3 }.to_payload());
+        let frame_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
+
+        assert_eq!(frame_len, frame.len() - 4);
+        assert_eq!(&frame[4..6], &[20, 7]);
+        assert_eq!(
+            UtMetadataMessage::from_payload(&frame[6..]).unwrap(),
+            UtMetadataMessage::Request { piece: 3 }
+        );
     }
 
     #[test]

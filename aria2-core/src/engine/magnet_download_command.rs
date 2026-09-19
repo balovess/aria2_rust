@@ -1,16 +1,62 @@
 use async_trait::async_trait;
 use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::command::{Command, CommandStatus};
 use crate::engine::download_event_hooks::{DownloadEventHooks, MetadataResolvedEvent};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::http::client_identity::ClientTlsConfig;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
+
+const MAX_MAGNET_TRACKERS_TO_TRY: usize = 10;
+
+fn metadata_tracker_urls(
+    magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+    options: &DownloadOptions,
+) -> Vec<String> {
+    let excluded = options.bt_exclude_tracker.as_deref().unwrap_or_default();
+    if excluded.iter().any(|url| url == "*") {
+        return Vec::new();
+    }
+
+    let mut urls = magnet.trackers.clone();
+    if let Some(overrides) = options.bt_tracker.as_ref() {
+        urls.extend(overrides.iter().cloned());
+    }
+
+    urls.into_iter()
+        .map(|url| url.trim().to_owned())
+        .filter(|url| {
+            !url.is_empty()
+                && matches!(
+                    reqwest::Url::parse(url)
+                        .ok()
+                        .as_ref()
+                        .map(reqwest::Url::scheme),
+                    Some("http" | "https" | "udp")
+                )
+                && !excluded.iter().any(|excluded| excluded == url)
+        })
+        .fold(Vec::new(), |mut unique, url| {
+            if !unique.iter().any(|known| known == &url) {
+                unique.push(url);
+            }
+            unique
+        })
+}
+
+fn tracker_peer_socket_addr(ip: &str, port: u16) -> Option<SocketAddr> {
+    ip.parse::<IpAddr>()
+        .ok()
+        .map(|ip| SocketAddr::new(ip, port))
+}
 
 pub struct MagnetDownloadCommand {
     group: Arc<std::sync::RwLock<RequestGroup>>,
@@ -235,6 +281,73 @@ impl MagnetDownloadCommand {
         Vec::new()
     }
 
+    async fn discover_magnet_tracker_peers(
+        &self,
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+        options: &DownloadOptions,
+    ) -> Vec<SocketAddr> {
+        let tracker_urls = metadata_tracker_urls(magnet, options);
+        if tracker_urls.is_empty() {
+            return Vec::new();
+        }
+
+        let peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
+            &options.peer_id_prefix,
+        );
+        let tracker_tls = ClientTlsConfig::from_download_options(options);
+        let max_tracker_timeout = Duration::from_secs(options.bt_tracker_timeout.max(1));
+        let connect_timeout = Duration::from_secs(options.bt_tracker_connect_timeout.max(1));
+        let announce_port = options
+            .listen_port
+            .as_deref()
+            .and_then(|value| value.split(['-', ',']).next())
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(0);
+
+        for tracker_url in tracker_urls.into_iter().take(MAX_MAGNET_TRACKERS_TO_TRY) {
+            let tracker_tiers = vec![vec![tracker_url.clone()]];
+            let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
+            announcer.set_http_tls_config(tracker_tls.clone());
+            announcer.set_timeouts(max_tracker_timeout, connect_timeout);
+            announcer.set_tcp_port(announce_port);
+
+            if let Ok(client) = crate::engine::udp_tracker_client::UdpTrackerClient::new(0).await {
+                announcer.set_udp_client(Arc::new(tokio::sync::Mutex::new(client)));
+            }
+
+            let result = announcer
+                .announce(
+                    &magnet.info_hash,
+                    &peer_id,
+                    0,
+                    magnet.exact_length.unwrap_or(0),
+                    0,
+                )
+                .await;
+
+            let Some(result) = result else {
+                warn!(tracker = %tracker_url, "Magnet tracker announce failed");
+                continue;
+            };
+
+            let peers: Vec<SocketAddr> = result
+                .peers
+                .iter()
+                .filter_map(|(ip, port)| tracker_peer_socket_addr(ip, *port))
+                .collect();
+            info!(
+                tracker = %tracker_url,
+                peers = peers.len(),
+                "Magnet tracker announce returned peers"
+            );
+            if !peers.is_empty() {
+                return peers;
+            }
+        }
+
+        Vec::new()
+    }
+
     async fn shutdown_dht_engine(&mut self) {
         if let Some(engine) = self.dht_engine.take() {
             self.clear_registered_dht_engine(&engine);
@@ -351,6 +464,144 @@ impl MagnetDownloadCommand {
         Ok(())
     }
 
+    /// Fetch torrent metadata from BEP 9's `xs` exact-source parameter.
+    ///
+    /// An exact source is a complete `.torrent` file, so it is a cheaper and
+    /// more deterministic metadata path than starting DHT and waiting for a
+    /// metadata-capable peer. Only HTTP(S) sources are handled here; other
+    /// source schemes remain available to callers through the normal peer
+    /// discovery fallbacks.
+    async fn fetch_magnet_exact_source(
+        &self,
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+        options: &DownloadOptions,
+    ) -> Option<Vec<u8>> {
+        let sources = magnet.exact_sources.iter().filter_map(|source| {
+            let url = reqwest::Url::parse(source).ok()?;
+            matches!(url.scheme(), "http" | "https").then_some((source, url))
+        });
+        let sources: Vec<_> = sources.collect();
+        if sources.is_empty() {
+            return None;
+        }
+
+        let request_timeout = options.timeout.unwrap_or(options.bt_tracker_timeout).max(1);
+        let connect_timeout = options
+            .connect_timeout
+            .unwrap_or(options.bt_tracker_connect_timeout)
+            .max(1);
+        let tls = ClientTlsConfig::from_download_options(options);
+        let client =
+            match crate::engine::http_tracker_client::build_tracker_client_with_tls_and_timeouts(
+                request_timeout,
+                connect_timeout,
+                &tls,
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    warn!(%error, "Magnet exact-source HTTP client creation failed");
+                    return None;
+                }
+            };
+
+        for (source, url) in sources {
+            let response = match client.get(url).send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    warn!(source = %source, %error, "Magnet exact-source request failed");
+                    continue;
+                }
+            };
+            if !response.status().is_success() {
+                warn!(
+                    source = %source,
+                    status = %response.status(),
+                    "Magnet exact-source request returned an error status"
+                );
+                continue;
+            }
+
+            let body = match response.bytes().await {
+                Ok(body) => body,
+                Err(error) => {
+                    warn!(source = %source, %error, "Magnet exact-source response read failed");
+                    continue;
+                }
+            };
+            match Self::metadata_matches_magnet(magnet, &body) {
+                Ok(()) => {
+                    info!(source = %source, bytes = body.len(), "Loaded magnet metadata from exact source");
+                    return Some(body.to_vec());
+                }
+                Err(error) => {
+                    warn!(source = %source, %error, "Ignoring exact-source metadata with mismatched info-hash");
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Add web seeds from the magnet URI to the resolved torrent metadata.
+    ///
+    /// `ws` is a root-level torrent field, so adding it does not change the
+    /// info dictionary or its v1/v2 info-hash. Keeping it in the resolved
+    /// metadata lets the existing BitTorrent context and web-seed manager
+    /// consume it without introducing a second magnet-only configuration
+    /// path.
+    fn merge_magnet_web_seeds(
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+        torrent_bytes: &[u8],
+    ) -> std::result::Result<Vec<u8>, String> {
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+        if magnet.ws.is_empty() {
+            return Ok(torrent_bytes.to_vec());
+        }
+
+        let (mut root, consumed) = BencodeValue::decode(torrent_bytes)?;
+        if consumed != torrent_bytes.len() {
+            return Err("Torrent metadata contains trailing bytes".to_string());
+        }
+        let dict = match &mut root {
+            BencodeValue::Dict(dict) => dict,
+            _ => return Err("Torrent metadata root is not a dictionary".to_string()),
+        };
+
+        let mut web_seeds = Vec::new();
+        if let Some(existing) = dict.remove(b"url-list".as_slice()) {
+            match existing {
+                BencodeValue::Bytes(url) => web_seeds.push(url),
+                BencodeValue::List(urls) => {
+                    web_seeds.extend(urls.into_iter().filter_map(|url| match url {
+                        BencodeValue::Bytes(url) => Some(url),
+                        _ => None,
+                    }));
+                }
+                _ => {}
+            }
+        }
+        for url in &magnet.ws {
+            let url = url.as_bytes().to_vec();
+            if !web_seeds.iter().any(|existing| existing == &url) {
+                web_seeds.push(url);
+            }
+        }
+
+        if web_seeds.len() == 1 {
+            dict.insert(
+                b"url-list".to_vec(),
+                BencodeValue::Bytes(web_seeds[0].clone()),
+            );
+        } else {
+            dict.insert(
+                b"url-list".to_vec(),
+                BencodeValue::List(web_seeds.into_iter().map(BencodeValue::Bytes).collect()),
+            );
+        }
+        Ok(root.encode())
+    }
+
     fn save_metadata_file(path: &std::path::Path, data: &[u8]) -> std::io::Result<bool> {
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
@@ -378,6 +629,23 @@ impl MagnetDownloadCommand {
             (group.options().enable_dht, group.options().clone())
         };
 
+        // `xs` points to complete torrent metadata. Try it before starting
+        // DHT so a magnet with a working exact source does not pay the DHT
+        // bootstrap/lookup cost at all.
+        if let Some(metadata) = self.fetch_magnet_exact_source(magnet, &options).await {
+            return Ok(metadata);
+        }
+
+        let metadata_session = |max_peers_to_try| {
+            MetadataExchangeSession::new(MetadataExchangeConfig {
+                max_peers_to_try,
+                connect_timeout: Duration::from_secs(15),
+                request_timeout: Duration::from_secs(10),
+                piece_size: 16 * 1024,
+                ..MetadataExchangeConfig::default()
+            })
+        };
+
         if enable_dht && self.dht_engine.is_none() {
             let dht_config = crate::engine::dht_config::build_dht_engine_config(&options).await?;
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
@@ -393,37 +661,52 @@ impl MagnetDownloadCommand {
             }
         }
 
-        let discovered_peers = if let Some(ref engine) = self.dht_engine {
-            self.discover_magnet_peers(engine, &magnet.info_hash).await
-        } else {
-            warn!("Magnet: DHT disabled, no peers available");
-            vec![]
-        };
-
-        if discovered_peers.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: "No peers found via DHT".into(),
-                },
-            ));
+        // Magnet links commonly carry tracker URLs, and tracker discovery is
+        // available even when DHT bootstrap is blocked by NAT or a firewall.
+        // Try those peers first so a working tracker does not wait for a DHT
+        // lookup that may never produce a result.
+        let tracker_peers = self.discover_magnet_tracker_peers(magnet, &options).await;
+        let mut last_error = None;
+        if !tracker_peers.is_empty() {
+            match metadata_session(tracker_peers.len().min(5))
+                .fetch_metadata(&magnet.info_hash, &tracker_peers)
+                .await
+            {
+                Ok(metadata) => return Ok(metadata),
+                Err(error) => {
+                    warn!(
+                        "Magnet: metadata fetch from tracker peers failed: {}",
+                        error
+                    );
+                    last_error = Some(error.to_string());
+                }
+            }
         }
 
-        let meta_session = MetadataExchangeSession::new(MetadataExchangeConfig {
-            max_peers_to_try: discovered_peers.len().min(5),
-            connect_timeout: Duration::from_secs(15),
-            request_timeout: Duration::from_secs(10),
-            piece_size: 16 * 1024,
-            ..MetadataExchangeConfig::default()
-        });
+        let dht_peers = if let Some(ref engine) = self.dht_engine {
+            self.discover_magnet_peers(engine, &magnet.info_hash).await
+        } else {
+            warn!("Magnet: DHT disabled and tracker discovery returned no usable peers");
+            Vec::new()
+        };
 
-        meta_session
-            .fetch_metadata(&magnet.info_hash, &discovered_peers)
-            .await
-            .map_err(|error| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: format!("Metadata fetch failed: {}", error),
-                })
-            })
+        if !dht_peers.is_empty() {
+            match metadata_session(dht_peers.len().min(5))
+                .fetch_metadata(&magnet.info_hash, &dht_peers)
+                .await
+            {
+                Ok(metadata) => return Ok(metadata),
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+
+        let message = last_error.map_or_else(
+            || "No peers found via trackers or DHT".to_string(),
+            |error| format!("Metadata fetch failed after tracker and DHT discovery: {error}"),
+        );
+        Err(Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure { message },
+        ))
     }
 
     /// BEP 0027 (Private Torrent) enforcement after metadata exchange.
@@ -530,6 +813,12 @@ impl Command for MagnetDownloadCommand {
         } else {
             self.fetch_magnet_metadata(&ml).await?
         };
+
+        let torrent_bytes = Self::merge_magnet_web_seeds(&ml, &torrent_bytes).map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!(
+                "Fetched metadata could not include magnet web seeds: {error}"
+            )))
+        })?;
 
         Self::metadata_matches_magnet(&ml, &torrent_bytes).map_err(|error| {
             Aria2Error::Fatal(FatalError::Config(format!(
@@ -714,6 +1003,128 @@ mod tests {
         assert_eq!(
             command.output_path,
             std::path::PathBuf::from(".").join("test_file")
+        );
+    }
+
+    #[test]
+    fn magnet_metadata_discovery_uses_embedded_and_configured_trackers() {
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(
+            "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&tr=udp%3A%2F%2Fembedded.test%3A6969&tr=http%3A%2F%2Fexcluded.test%2Fannounce",
+        )
+        .expect("test magnet should parse");
+        let options = DownloadOptions {
+            bt_tracker: Some(vec![
+                "https://configured.test/announce".to_string(),
+                "udp://embedded.test:6969".to_string(),
+            ]),
+            bt_exclude_tracker: Some(vec!["http://excluded.test/announce".to_string()]),
+            ..DownloadOptions::default()
+        };
+
+        assert_eq!(
+            metadata_tracker_urls(&magnet, &options),
+            vec![
+                "udp://embedded.test:6969".to_string(),
+                "https://configured.test/announce".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn tracker_peer_addresses_accept_ipv4_and_ipv6() {
+        assert_eq!(
+            tracker_peer_socket_addr("192.0.2.10", 6881),
+            Some("192.0.2.10:6881".parse().unwrap())
+        );
+        assert_eq!(
+            tracker_peer_socket_addr("2001:db8::10", 6881),
+            Some("[2001:db8::10]:6881".parse().unwrap())
+        );
+        assert!(tracker_peer_socket_addr("not-an-ip", 6881).is_none());
+    }
+
+    #[tokio::test]
+    async fn magnet_exact_source_returns_matching_torrent_without_dht() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let torrent = build_test_torrent();
+        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+            .expect("test torrent should parse")
+            .info_hash
+            .bytes;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind exact-source test server");
+        let address = listener.local_addr().expect("read test server address");
+        let server_torrent = torrent.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("accept exact-source request");
+            let mut request = [0u8; 4096];
+            let _request_len = socket
+                .read(&mut request)
+                .await
+                .expect("read exact-source request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_torrent.len()
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write exact-source headers");
+            socket
+                .write_all(&server_torrent)
+                .await
+                .expect("write exact-source torrent");
+        });
+
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
+            "magnet:?xt=urn:btih:{}&xs=http://{}/metadata.torrent",
+            hex::encode(info_hash),
+            address
+        ))
+        .expect("exact-source magnet should parse");
+        assert_eq!(magnet.exact_sources.len(), 1);
+        MagnetDownloadCommand::metadata_matches_magnet(&magnet, &torrent)
+            .expect("test magnet hash should match test torrent");
+        let command = make_test_command();
+        let metadata = command
+            .fetch_magnet_exact_source(&magnet, &DownloadOptions::default())
+            .await
+            .expect("exact source should return metadata");
+        server.await.expect("exact-source server should finish");
+
+        assert_eq!(metadata, torrent);
+        assert!(command.dht_engine.is_none());
+    }
+
+    #[test]
+    fn magnet_web_seeds_are_added_without_changing_info_hash() {
+        let torrent = build_test_torrent();
+        let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+            .expect("test torrent should parse");
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
+            "magnet:?xt=urn:btih:{}&ws=https%3A%2F%2Fseed.example%2Ffiles%2F&ws=https%3A%2F%2Fseed.example%2Fmirror%2F",
+            meta.info_hash.as_hex()
+        ))
+        .expect("web-seed magnet should parse");
+
+        let merged = MagnetDownloadCommand::merge_magnet_web_seeds(&magnet, &torrent)
+            .expect("web seeds should be merged into torrent metadata");
+        let merged_meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&merged)
+            .expect("merged torrent should parse");
+
+        assert_eq!(merged_meta.info_hash, meta.info_hash);
+        assert_eq!(
+            merged_meta.web_seeds,
+            vec![
+                "https://seed.example/files/".to_string(),
+                "https://seed.example/mirror/".to_string(),
+            ]
         );
     }
 

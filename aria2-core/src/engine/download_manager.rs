@@ -8,13 +8,14 @@
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use super::download_engine::DownloadEngine;
 use super::download_event_hooks::{DownloadEventHooks, DownloadEventStream};
 use super::engine_command::{EngineCommand, EngineCommandSendError, EngineCommandSender};
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{
-    DownloadOptions, DownloadResult, DownloadStatus, DownloadStatusSnapshot, GroupId, RequestGroup,
+    DownloadOptions, DownloadResult, DownloadStatusSnapshot, GroupId, RequestGroup,
 };
 use crate::request::request_group_man::RequestGroupMan;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -24,6 +25,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 pub enum DownloadManagerError {
     #[error("engine command submission failed: {0}")]
     Command(#[from] EngineCommandSendError),
+    #[error("waiting for the download was cancelled")]
+    WaitCancelled,
 }
 
 /// A small, cloneable interface for submitting and controlling downloads.
@@ -181,20 +184,34 @@ impl DownloadHandle {
     /// published before this method starts waiting is still observed. Paused
     /// downloads remain live and therefore do not complete this future.
     pub async fn wait(&self) -> std::result::Result<DownloadResult, DownloadManagerError> {
+        self.wait_with_cancellation(&CancellationToken::new()).await
+    }
+
+    /// Wait for a terminal result while allowing the caller to cancel the wait.
+    ///
+    /// Cancelling the token only stops this future; it does not pause, remove,
+    /// or otherwise change the download. The same event-driven generation
+    /// signal used by [`Self::wait`] wakes the future when the download changes.
+    pub async fn wait_with_cancellation(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<DownloadResult, DownloadManagerError> {
         let signal = self.manager.group_man.activity_signal();
         let mut observed = signal.generation();
 
         loop {
             if let Some(result) = self.download_result()
-                && matches!(
-                    result.status,
-                    DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
-                )
+                && result.status.is_terminal()
             {
                 return Ok(result);
             }
 
-            signal.wait_for_change(&mut observed).await;
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(DownloadManagerError::WaitCancelled);
+                }
+                _ = signal.wait_for_change(&mut observed) => {}
+            }
         }
     }
 
@@ -300,6 +317,35 @@ mod tests {
             .expect("wait task must not panic")
             .expect("terminal result");
         assert_eq!(result.status, DownloadStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn handle_wait_can_be_cancelled_without_changing_download_state() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["http://example.test/file".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let cancellation = CancellationToken::new();
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            let cancellation = cancellation.clone();
+            async move { handle.wait_with_cancellation(&cancellation).await }
+        });
+
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("cancellation must wake the wait")
+            .expect("wait task must not panic");
+        assert!(matches!(result, Err(DownloadManagerError::WaitCancelled)));
+        assert!(handle.status_snapshot().is_some());
     }
 
     #[test]

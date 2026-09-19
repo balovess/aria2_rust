@@ -80,6 +80,18 @@ impl DownloadStatus {
         matches!(self, DownloadStatus::Complete)
     }
 
+    /// Whether the task reached a state from which it cannot resume.
+    ///
+    /// Metadata resolution is intentionally not represented here. It is a
+    /// separate library event, while `Complete`, `Error`, and `Removed` are
+    /// the terminal download outcomes used by [`crate::DownloadHandle::wait`].
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            DownloadStatus::Complete | DownloadStatus::Error(_) | DownloadStatus::Removed
+        )
+    }
+
     pub fn is_paused(&self) -> bool {
         matches!(self, DownloadStatus::Paused)
     }
@@ -97,5 +109,20 @@ impl DownloadStatus {
             DownloadStatus::Complete => "complete",
             DownloadStatus::Removed => "removed",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DownloadStatus;
+
+    #[test]
+    fn terminal_statuses_are_distinct_from_paused_and_active_states() {
+        assert!(!DownloadStatus::Waiting.is_terminal());
+        assert!(!DownloadStatus::Active.is_terminal());
+        assert!(!DownloadStatus::Paused.is_terminal());
+        assert!(DownloadStatus::Complete.is_terminal());
+        assert!(DownloadStatus::Error("failed".to_string()).is_terminal());
+        assert!(DownloadStatus::Removed.is_terminal());
     }
 }

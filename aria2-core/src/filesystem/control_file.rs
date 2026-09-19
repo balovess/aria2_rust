@@ -373,6 +373,14 @@ impl ControlFile {
     }
 
     pub fn control_path_for(output_path: &Path) -> PathBuf {
+        // A multi-file BitTorrent download uses its output directory as the
+        // command path. `PathBuf::set_extension` cannot turn `.` (or another
+        // directory path) into a sidecar file and leaves it unchanged, which
+        // later makes the checkpoint code try to read/write the directory.
+        if output_path.is_dir() {
+            return output_path.join(".aria2");
+        }
+
         let mut p = output_path.to_path_buf();
         p.set_extension("aria2");
         p
@@ -401,6 +409,13 @@ mod tests {
             ControlFile::control_path_for(Path::new("payload.bin")),
             PathBuf::from("payload.aria2")
         );
+    }
+
+    #[test]
+    fn test_control_path_for_current_directory_is_a_sidecar_file() {
+        let path = ControlFile::control_path_for(Path::new("."));
+        assert_ne!(path, Path::new("."));
+        assert_eq!(path.file_name(), Some(std::ffi::OsStr::new(".aria2")));
     }
 
     #[tokio::test]

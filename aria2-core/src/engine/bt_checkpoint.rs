@@ -233,6 +233,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checkpoint_accepts_a_multi_file_output_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let info_hash = [0x77; 20];
+        let mut checkpoint = BtCheckpoint::open(dir.path(), false, 8, 4, 2, info_hash)
+            .await
+            .expect("a multi-file output directory needs a sidecar checkpoint");
+
+        checkpoint.save(&[0xC0], 8).await.unwrap();
+
+        let sidecar = dir.path().join(".aria2");
+        assert!(sidecar.is_file());
+        let restored = BtCheckpoint::open(dir.path(), true, 8, 4, 2, info_hash)
+            .await
+            .unwrap();
+        assert_eq!(restored.completed_length(), 8);
+    }
+
+    #[tokio::test]
     async fn checkpoint_discards_different_piece_length() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("payload.bin");

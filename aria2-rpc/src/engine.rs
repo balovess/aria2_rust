@@ -286,7 +286,16 @@ impl RpcEngine {
         operation.await
     }
 
+    /// Handle one typed JSON-RPC request.
+    ///
+    /// Unlike the HTTP/JSON wire adapter, this method is the library-facing
+    /// boundary and validates the request before it reaches the backend. The
+    /// wire adapter intentionally keeps aria2's original parsing semantics
+    /// and dispatches through the private owned path instead.
     pub async fn handle_request(&self, req: &JsonRpcRequest) -> JsonRpcResponse {
+        if let Err(error) = req.validate() {
+            return error.into_response(req.id.clone());
+        }
         self.handle_request_owned(req.clone()).await
     }
 

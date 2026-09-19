@@ -65,6 +65,14 @@ impl DownloadStatus {
         matches!(self, Self::Active | Self::Waiting)
     }
 
+    /// Whether the task reached a terminal outcome.
+    ///
+    /// Metadata resolution is reported as a separate event and is not a wire
+    /// status variant, so it is deliberately absent from this predicate.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Complete | Self::Error(_) | Self::Removed)
+    }
+
     pub fn is_stopped(&self) -> bool {
         !self.is_active()
     }
