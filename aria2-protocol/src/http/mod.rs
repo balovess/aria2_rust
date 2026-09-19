@@ -7,7 +7,8 @@ pub mod request;
 pub mod response;
 
 pub use client::{
-    HttpBodyStream, HttpClient, HttpClientOptions, HttpRequestBuilder, HttpResponseStream,
+    HttpBodyStream, HttpClient, HttpClientOptions, HttpRequestBuilder, HttpRequestBuilderError,
+    HttpResponseStream,
 };
 pub use request::HttpRequest;
 pub use response::{ContentRange, HttpResponse};

@@ -150,7 +150,7 @@ impl MockBtPeerServer {
         let mut response_hs = [0u8; 68];
         response_hs[0] = 19;
         response_hs[1..=19].copy_from_slice(PROTOCOL_STR);
-        response_hs[20..28].copy_from_slice(&[0x01, 0, 0, 0, 0, 0x02, 0, 0]);
+        response_hs[20..28].copy_from_slice(&[0, 0, 0, 0, 0, 0x10, 0, 0]);
         response_hs[28..48].copy_from_slice(expected_info_hash);
         response_hs[48..68].copy_from_slice(&peer_id);
 
@@ -170,6 +170,7 @@ impl MockBtPeerServer {
 
         let msg_bitfield = build_message(5, &bitfield);
         stream.write_all(&msg_bitfield).await.ok();
+        let mut client_ut_metadata_id = 1u8;
 
         loop {
             let mut len_buf = [0u8; 4];
@@ -234,11 +235,17 @@ impl MockBtPeerServer {
                 }
                 Some(20) => {
                     if let Some(meta) = torrent_metadata
-                        && payload.len() > 1
-                        && let Some(ext_dict) = parse_bencode_from_slice(&payload[1..])
+                        && payload.len() > 2
+                        && let Some(ext_dict) = parse_bencode_from_slice(&payload[2..])
                         && (has_key(&ext_dict, b"m") || has_key(&ext_dict, b"msg_type"))
                     {
-                        let ext_resp = handle_extension_message(&ext_dict, meta);
+                        if payload[1] == 0
+                            && let Some(id) = find_ut_metadata_id(&ext_dict)
+                        {
+                            client_ut_metadata_id = id;
+                        }
+                        let ext_resp =
+                            handle_extension_message(&ext_dict, meta, client_ut_metadata_id);
                         if let Some(resp) = ext_resp {
                             stream.write_all(&resp).await.ok();
                             stream.flush().await.ok();
@@ -261,11 +268,12 @@ fn build_message(msg_id: u8, payload: &[u8]) -> Vec<u8> {
     buf
 }
 
-fn build_extended_message(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len() as u32;
-    let mut buf = Vec::with_capacity(4 + payload.len());
+fn build_extended_message(ext_id: u8, payload: &[u8]) -> Vec<u8> {
+    let len = (2 + payload.len()) as u32;
+    let mut buf = Vec::with_capacity(6 + payload.len());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.push(20);
+    buf.push(ext_id);
     buf.extend_from_slice(payload);
     buf
 }
@@ -370,9 +378,23 @@ fn find_entry<'a>(
         .map(|(_, v)| v)
 }
 
+fn find_ut_metadata_id(
+    dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>,
+) -> Option<u8> {
+    let extensions = match find_entry(dict, b"m")? {
+        BencodeValueForMock::Dict(extensions) => extensions,
+        _ => return None,
+    };
+    match find_entry(extensions, b"ut_metadata")? {
+        BencodeValueForMock::Int(id) => u8::try_from(*id).ok().filter(|id| *id != 0),
+        _ => None,
+    }
+}
+
 fn handle_extension_message(
     dict: &std::collections::BTreeMap<Vec<u8>, BencodeValueForMock>,
     metadata: &[u8],
+    response_ext_id: u8,
 ) -> Option<Vec<u8>> {
     if find_entry(dict, b"msg_type").and_then(|v| match v {
         BencodeValueForMock::Int(i) => Some(*i),
@@ -383,29 +405,31 @@ fn handle_extension_message(
         let total_size = metadata.len() as u64;
         let num_pieces = total_size.div_ceil(piece_size as u64) as u32;
 
-        let mut responses = Vec::new();
-        for i in 0..num_pieces {
-            let offset = (i as usize) * piece_size as usize;
-            let end = std::cmp::min(offset + piece_size as usize, metadata.len());
-            let chunk = &metadata[offset..end];
-
-            use std::collections::BTreeMap;
-            let mut resp_dict = BTreeMap::new();
-            resp_dict.insert(b"msg_type".to_vec(), BencodeValueForMock::Int(1));
-            resp_dict.insert(b"piece".to_vec(), BencodeValueForMock::Int(i as i64));
-            resp_dict.insert(b"data".to_vec(), BencodeValueForMock::Bytes(chunk.to_vec()));
-
-            let mut encoded = Vec::new();
-            encode_bencode_dict_for_mock(&resp_dict, &mut encoded);
-
-            responses.push(build_extended_message(&encoded));
+        let piece = find_entry(dict, b"piece").and_then(|value| match value {
+            BencodeValueForMock::Int(piece) => u32::try_from(*piece).ok(),
+            _ => None,
+        })?;
+        if piece >= num_pieces {
+            return None;
         }
 
-        let mut all = Vec::new();
-        for r in responses {
-            all.extend(r);
-        }
-        return Some(all);
+        let offset = (piece as usize) * piece_size as usize;
+        let end = std::cmp::min(offset + piece_size as usize, metadata.len());
+        let chunk = &metadata[offset..end];
+
+        use std::collections::BTreeMap;
+        let mut resp_dict = BTreeMap::new();
+        resp_dict.insert(b"msg_type".to_vec(), BencodeValueForMock::Int(1));
+        resp_dict.insert(b"piece".to_vec(), BencodeValueForMock::Int(piece as i64));
+        resp_dict.insert(
+            b"total_size".to_vec(),
+            BencodeValueForMock::Int(metadata.len() as i64),
+        );
+
+        let mut encoded = Vec::new();
+        encode_bencode_dict_for_mock(&resp_dict, &mut encoded);
+        encoded.extend_from_slice(chunk);
+        return Some(build_extended_message(response_ext_id, &encoded));
     }
 
     let mut hs_dict = std::collections::BTreeMap::new();
@@ -419,7 +443,7 @@ fn handle_extension_message(
 
     let mut encoded = Vec::new();
     encode_bencode_dict_for_mock(&hs_dict, &mut encoded);
-    Some(build_extended_message(&encoded))
+    Some(build_extended_message(0, &encoded))
 }
 
 fn encode_bencode_dict_for_mock(

@@ -15,6 +15,7 @@ use aria2_protocol::bittorrent::extension::ut_metadata::{
 };
 use aria2_protocol::bittorrent::magnet::MagnetLink;
 use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
+use fixtures::mock_bt_peer::MockBtPeerServer;
 use fixtures::mock_dht_node::MockDhtNode;
 use fixtures::test_torrent_builder::build_test_torrent;
 use std::net::SocketAddr;
@@ -423,6 +424,43 @@ async fn test_e2e_metadata_exchange_extension_handshake_cycle() {
     }
 
     info!("Extension handshake cycle test completed successfully");
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_over_peer_wire() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "metadata_wire_test",
+        512,
+        256,
+        "http://tracker.test/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse torrent");
+    let info_hash = meta.info_hash.bytes;
+    let (root, consumed) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    assert_eq!(consumed, torrent_data.len());
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("test torrent should contain info dictionary")
+        .encode();
+    let peer =
+        MockBtPeerServer::start_with_metadata(info_hash, Vec::new(), Some(info_metadata.clone()))
+            .await;
+
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        max_peers_to_try: 1,
+        connect_timeout: std::time::Duration::from_secs(2),
+        request_timeout: std::time::Duration::from_secs(2),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    });
+    let received = session
+        .fetch_metadata(&info_hash, &[peer.addr()])
+        .await
+        .expect("metadata exchange should complete over the peer wire");
+
+    assert_eq!(received, info_metadata);
 }
 
 #[tokio::test]

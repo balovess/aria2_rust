@@ -1,3 +1,4 @@
+use futures::{StreamExt, stream};
 use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -15,6 +16,7 @@ const METADATA_MAX_SIZE: u64 = 100 * 1024 * 1024;
 const PIECE_SIZE_MIN: u32 = 1024;
 const PIECE_SIZE_MAX: u32 = 65536;
 const DEFAULT_MAX_ATTEMPTS: usize = 3;
+const MAX_CONCURRENT_PEER_EXCHANGES: usize = 4;
 
 #[derive(Debug, Clone)]
 pub enum MetadataExchangeError {
@@ -163,11 +165,20 @@ impl MetadataExchangeSession {
             return Err(MetadataExchangeError::NoPeersAvailable);
         }
 
+        let max_peers = peers.len().min(self.config.max_peers_to_try);
         let mut attempt_count = 0usize;
         let mut last_error = String::new();
 
-        for peer_addr in peers.iter().take(self.config.max_peers_to_try) {
-            match self.exchange_with_peer(info_hash, peer_addr).await {
+        let mut exchanges = stream::iter(peers.iter().take(max_peers).copied().map(
+            |peer_addr| async move {
+                let result = self.exchange_with_peer(info_hash, &peer_addr).await;
+                (peer_addr, result)
+            },
+        ))
+        .buffer_unordered(MAX_CONCURRENT_PEER_EXCHANGES);
+
+        while let Some((peer_addr, result)) = exchanges.next().await {
+            match result {
                 Ok(torrent_bytes) => {
                     info!(
                         "Metadata fetched successfully from {} ({} bytes)",
@@ -187,7 +198,7 @@ impl MetadataExchangeSession {
 
                     warn!(
                         "Recoverable metadata exchange error with {} (peer {}/{}): {}",
-                        peer_addr, attempt_count, self.config.max_peers_to_try, e
+                        peer_addr, attempt_count, max_peers, e
                     );
                 }
             }
@@ -243,7 +254,14 @@ impl MetadataExchangeSession {
 
         debug!("Extension handshake sent to {}", peer_addr);
 
-        let remote_hs_data = self.read_extension_message(&mut conn).await?;
+        let remote_hs_data = timeout(
+            self.config.request_timeout,
+            self.read_extension_message(&mut conn),
+        )
+        .await
+        .map_err(|_| MetadataExchangeError::PeerTimeout {
+            addr: addr_str.clone(),
+        })??;
         let remote_hs = ExtensionHandshake::parse(&remote_hs_data).ok_or_else(|| {
             MetadataExchangeError::BencodeDecodeFailed {
                 detail: "Failed to parse remote extension handshake".to_string(),
@@ -291,7 +309,7 @@ impl MetadataExchangeSession {
         let mut collector = MetadataCollector::new(metadata_size, self.config.piece_size);
 
         // Track in-flight metadata requests with timeout (C++ UTMetadataRequestTracker)
-        let mut tracker = UTMetadataRequestTracker::new();
+        let mut tracker = UTMetadataRequestTracker::with_timeout(self.config.request_timeout);
 
         // Collect pieces while treating max_attempts as the total attempts per piece.
         let mut retry_counts: std::collections::HashMap<u32, usize> =

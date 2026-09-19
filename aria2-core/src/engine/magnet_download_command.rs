@@ -18,6 +18,8 @@ use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
 const MAX_MAGNET_TRACKERS_TO_TRY: usize = 10;
+const MAX_MAGNET_TRACKER_PEERS: usize = 50;
+const MAX_MAGNET_METADATA_PEERS_TO_TRY: usize = 20;
 
 fn metadata_tracker_urls(
     magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
@@ -58,6 +60,17 @@ fn tracker_peer_socket_addr(ip: &str, port: u16) -> Option<SocketAddr> {
     ip.parse::<IpAddr>()
         .ok()
         .map(|ip| SocketAddr::new(ip, port))
+}
+
+fn append_unique_tracker_peers(discovered: &mut Vec<SocketAddr>, peers: Vec<SocketAddr>) {
+    for peer in peers {
+        if !discovered.contains(&peer) {
+            discovered.push(peer);
+            if discovered.len() >= MAX_MAGNET_TRACKER_PEERS {
+                break;
+            }
+        }
+    }
 }
 
 pub struct MagnetDownloadCommand {
@@ -305,6 +318,7 @@ impl MagnetDownloadCommand {
             .and_then(|value| value.split(['-', ',']).next())
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(0);
+        let mut discovered_peers = Vec::new();
 
         for tracker_url in tracker_urls.into_iter().take(MAX_MAGNET_TRACKERS_TO_TRY) {
             let tracker_scheme = reqwest::Url::parse(&tracker_url)
@@ -333,7 +347,7 @@ impl MagnetDownloadCommand {
                             peers = response.peers.len(),
                             "WebSocket tracker announce returned peers"
                         );
-                        return response.peers;
+                        append_unique_tracker_peers(&mut discovered_peers, response.peers);
                     }
                     Ok(_) => {
                         warn!(tracker = %tracker_url, "WebSocket tracker returned no TCP peers");
@@ -341,6 +355,9 @@ impl MagnetDownloadCommand {
                     Err(error) => {
                         warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
                     }
+                }
+                if discovered_peers.len() >= MAX_MAGNET_TRACKER_PEERS {
+                    break;
                 }
                 continue;
             }
@@ -380,12 +397,20 @@ impl MagnetDownloadCommand {
                 peers = peers.len(),
                 "Magnet tracker announce returned peers"
             );
-            if !peers.is_empty() {
-                return peers;
+            append_unique_tracker_peers(&mut discovered_peers, peers);
+
+            if discovered_peers.len() >= MAX_MAGNET_TRACKER_PEERS {
+                break;
             }
         }
 
-        Vec::new()
+        if !discovered_peers.is_empty() {
+            info!(
+                peers = discovered_peers.len(),
+                "Magnet tracker peer discovery completed"
+            );
+        }
+        discovered_peers
     }
 
     async fn shutdown_dht_engine(&mut self) {
@@ -502,6 +527,63 @@ impl MagnetDownloadCommand {
             ));
         }
         Ok(())
+    }
+
+    /// Convert BEP 9's raw `info` dictionary into the complete metainfo
+    /// document consumed by the torrent parser and saved-metadata path.
+    ///
+    /// `ut_metadata` transfers only the bencoded `info` dictionary.  Exact
+    /// sources and previously saved metadata already contain a torrent root,
+    /// so those inputs are kept unchanged.
+    fn normalize_magnet_metadata(
+        magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
+        metadata: &[u8],
+    ) -> std::result::Result<Vec<u8>, String> {
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+        use std::collections::BTreeMap;
+
+        let (value, consumed) = BencodeValue::decode(metadata)?;
+        if consumed != metadata.len() {
+            return Err("BEP 9 metadata contains trailing bytes".to_string());
+        }
+
+        let BencodeValue::Dict(info_dict) = value else {
+            return Err("BEP 9 metadata is not a dictionary".to_string());
+        };
+
+        // Keep complete .torrent documents from xs and the saved-metadata
+        // path idempotent. A BEP 9 info dictionary is itself also a dict, so
+        // the presence of the root-level `info` key is the discriminator.
+        if info_dict
+            .get(b"info".as_slice())
+            .is_some_and(|value| matches!(value, BencodeValue::Dict(_)))
+        {
+            return Ok(metadata.to_vec());
+        }
+
+        let announce = magnet
+            .trackers
+            .first()
+            .map_or_else(Vec::new, |url| url.as_bytes().to_vec());
+        let announce_list = (!magnet.trackers.is_empty()).then(|| {
+            BencodeValue::List(
+                magnet
+                    .trackers
+                    .iter()
+                    .map(|url| {
+                        BencodeValue::List(vec![BencodeValue::Bytes(url.as_bytes().to_vec())])
+                    })
+                    .collect(),
+            )
+        });
+
+        let mut root = BTreeMap::new();
+        root.insert(b"announce".to_vec(), BencodeValue::Bytes(announce));
+        if let Some(announce_list) = announce_list {
+            root.insert(b"announce-list".to_vec(), announce_list);
+        }
+        root.insert(b"info".to_vec(), BencodeValue::Dict(info_dict));
+        Ok(BencodeValue::Dict(root).encode())
     }
 
     /// Fetch torrent metadata from BEP 9's `xs` exact-source parameter.
@@ -891,7 +973,7 @@ impl MagnetDownloadCommand {
         let tracker_peers = self.discover_magnet_tracker_peers(magnet, &options).await;
         let mut last_error = None;
         if !tracker_peers.is_empty() {
-            match metadata_session(tracker_peers.len().min(5))
+            match metadata_session(tracker_peers.len().min(MAX_MAGNET_METADATA_PEERS_TO_TRY))
                 .fetch_metadata(&magnet.info_hash, &tracker_peers)
                 .await
             {
@@ -914,7 +996,7 @@ impl MagnetDownloadCommand {
         };
 
         if !dht_peers.is_empty() {
-            match metadata_session(dht_peers.len().min(5))
+            match metadata_session(dht_peers.len().min(MAX_MAGNET_METADATA_PEERS_TO_TRY))
                 .fetch_metadata(&magnet.info_hash, &dht_peers)
                 .await
             {
@@ -1036,6 +1118,13 @@ impl Command for MagnetDownloadCommand {
         } else {
             self.fetch_magnet_metadata(&ml).await?
         };
+
+        let torrent_bytes =
+            Self::normalize_magnet_metadata(&ml, &torrent_bytes).map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "Fetched magnet metadata is invalid: {error}"
+                )))
+            })?;
 
         let torrent_bytes = Self::merge_magnet_web_seeds(&ml, &torrent_bytes).map_err(|error| {
             Aria2Error::Fatal(FatalError::Config(format!(
@@ -1265,6 +1354,63 @@ mod tests {
             Some("[2001:db8::10]:6881".parse().unwrap())
         );
         assert!(tracker_peer_socket_addr("not-an-ip", 6881).is_none());
+    }
+
+    #[test]
+    fn tracker_peer_collection_deduplicates_and_bounds_results() {
+        let mut discovered = Vec::new();
+        let peers = (0..(MAX_MAGNET_TRACKER_PEERS + 5))
+            .map(|offset| SocketAddr::from(([192, 0, 2, 1], 10_000 + offset as u16)))
+            .collect();
+
+        append_unique_tracker_peers(&mut discovered, peers);
+        assert_eq!(discovered.len(), MAX_MAGNET_TRACKER_PEERS);
+
+        let duplicate = discovered[0];
+        append_unique_tracker_peers(&mut discovered, vec![duplicate]);
+        assert_eq!(discovered.len(), MAX_MAGNET_TRACKER_PEERS);
+    }
+
+    #[test]
+    fn normalize_bep9_info_metadata_builds_a_complete_torrent() {
+        use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+        let torrent = build_test_torrent();
+        let (root, consumed) = BencodeValue::decode(&torrent).expect("decode test torrent");
+        assert_eq!(consumed, torrent.len());
+        let info = root.dict_get(b"info").expect("test torrent info dict");
+        let info_bytes = info.encode();
+        let expected_hash =
+            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+                .unwrap()
+                .info_hash;
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
+            "magnet:?xt=urn:btih:{}&tr=http%3A%2F%2Ftracker.test%2Fannounce",
+            expected_hash.as_hex()
+        ))
+        .expect("test magnet should parse");
+
+        let normalized = MagnetDownloadCommand::normalize_magnet_metadata(&magnet, &info_bytes)
+            .expect("BEP 9 info metadata should be wrapped");
+        let parsed = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&normalized)
+            .expect("normalized metadata should parse as a torrent");
+
+        assert_eq!(parsed.info_hash.bytes, magnet.info_hash);
+        assert_eq!(parsed.announce, "http://tracker.test/announce");
+        assert_eq!(parsed.info_hash.bytes, expected_hash.bytes);
+    }
+
+    #[test]
+    fn normalize_magnet_metadata_keeps_complete_torrent_bytes() {
+        let torrent = build_test_torrent();
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(
+            "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678",
+        )
+        .expect("test magnet should parse");
+
+        let normalized = MagnetDownloadCommand::normalize_magnet_metadata(&magnet, &torrent)
+            .expect("complete torrent metadata should remain valid");
+        assert_eq!(normalized, torrent);
     }
 
     #[tokio::test]

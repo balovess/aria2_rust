@@ -25,6 +25,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 pub enum DownloadManagerError {
     #[error("engine command submission failed: {0}")]
     Command(#[from] EngineCommandSendError),
+    #[error("download preparation failed: {0}")]
+    Preparation(#[source] Aria2Error),
     #[error("waiting for the download was cancelled")]
     WaitCancelled,
 }
@@ -96,11 +98,179 @@ impl DownloadManager {
         Ok(self.handle(gid))
     }
 
+    /// Submit an in-memory `.torrent` document and return its stable handle.
+    ///
+    /// The torrent is parsed and its file metadata is prepared before the
+    /// group is registered. A parse or metadata error therefore leaves the
+    /// manager unchanged. Web-seed URIs are attached to the same task and are
+    /// used as fallback HTTP sources by the BitTorrent downloader.
+    #[cfg(feature = "bittorrent")]
+    pub fn add_torrent(
+        &self,
+        data: Vec<u8>,
+        web_seed_uris: Vec<String>,
+        options: DownloadOptions,
+    ) -> std::result::Result<DownloadHandle, DownloadManagerError> {
+        if data.is_empty() {
+            return Err(DownloadManagerError::Preparation(
+                Aria2Error::InvalidArgument("torrent data must not be empty".to_string()),
+            ));
+        }
+
+        let gid = self.group_man.next_available_gid();
+        let mut uris = Vec::with_capacity(web_seed_uris.len() + 1);
+        uris.push(format!("bt://{}", gid.to_hex_string()));
+        uris.extend(web_seed_uris);
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            uris,
+            options.clone(),
+        )));
+
+        if options.pause {
+            group
+                .recover_mut()
+                .pause()
+                .map_err(DownloadManagerError::Preparation)?;
+        }
+
+        super::bt_download_command::prepare_group_metadata(
+            Arc::clone(&group),
+            &data,
+            &options,
+            options.dir.as_deref(),
+        )
+        .map_err(DownloadManagerError::Preparation)?;
+        group.recover().set_bt_metadata_data(data);
+        self.group_man.add_group_arc(Arc::clone(&group));
+
+        if let Err(error) = self
+            .command_sender
+            .send(EngineCommand::AddDownload { group })
+        {
+            self.group_man.remove_group_by_id(gid);
+            return Err(error.into());
+        }
+
+        Ok(self.handle(gid))
+    }
+
+    /// Submit an in-memory Metalink document and return handles for every
+    /// task created from it.
+    ///
+    /// Direct-resource entries produce one handle each. When both the
+    /// `metalink` and `bittorrent` features are enabled, torrent metaurls
+    /// produce a metadata/payload pair, with the metadata handle queued first.
+    /// The document is fully converted before any group is registered, and a
+    /// later queue-send failure rolls back all groups created by this call.
+    #[cfg(feature = "metalink")]
+    pub fn add_metalink(
+        &self,
+        data: Vec<u8>,
+        options: DownloadOptions,
+    ) -> std::result::Result<Vec<DownloadHandle>, DownloadManagerError> {
+        if data.is_empty() {
+            return Err(DownloadManagerError::Preparation(
+                Aria2Error::InvalidArgument("metalink data must not be empty".to_string()),
+            ));
+        }
+
+        let converter = super::metalink_to_request_group::MetalinkToRequestGroup::new()
+            .with_pause_requested(options.pause);
+        let mut resource_gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
+        let resource_groups = converter
+            .create_resource_groups_from_bytes(&data, &options, &mut resource_gids)
+            .map_err(DownloadManagerError::Preparation)?;
+
+        #[cfg(feature = "bittorrent")]
+        let mut graph_gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
+        #[cfg(feature = "bittorrent")]
+        let graphs = converter
+            .create_torrent_graphs_from_bytes(&data, &options, &mut graph_gids)
+            .map_err(DownloadManagerError::Preparation)?;
+
+        let resource_tasks = resource_groups
+            .into_iter()
+            .map(|group| {
+                let gid = group.recover().gid();
+                (gid, group)
+            })
+            .collect::<Vec<_>>();
+        #[cfg(feature = "bittorrent")]
+        let mut tasks = resource_tasks;
+        #[cfg(not(feature = "bittorrent"))]
+        let tasks = resource_tasks;
+        let mut registered_gids = Vec::with_capacity(tasks.len());
+
+        for (gid, group) in &tasks {
+            self.group_man.add_group_arc(Arc::clone(group));
+            registered_gids.push(*gid);
+        }
+
+        #[cfg(feature = "bittorrent")]
+        for graph in graphs {
+            let metadata_gid = graph.metadata.recover().gid();
+            let payload_gid = graph.payload.recover().gid();
+            let metadata = Arc::clone(&graph.metadata);
+            let payload = Arc::clone(&graph.payload);
+            if let Err(error) = self.group_man.add_metalink_graph(graph) {
+                for gid in registered_gids {
+                    self.group_man.remove_group_by_id(gid);
+                }
+                return Err(DownloadManagerError::Preparation(error));
+            }
+            registered_gids.extend([metadata_gid, payload_gid]);
+            tasks.extend([(metadata_gid, metadata), (payload_gid, payload)]);
+        }
+
+        for (_, group) in &tasks {
+            if let Err(error) = self.command_sender.send(EngineCommand::AddDownload {
+                group: Arc::clone(group),
+            }) {
+                for registered_gid in &registered_gids {
+                    self.group_man.remove_group_by_id(*registered_gid);
+                }
+                return Err(error.into());
+            }
+        }
+
+        Ok(tasks.into_iter().map(|(gid, _)| self.handle(gid)).collect())
+    }
+
     /// Return a handle for an existing or not-yet-dispatched GID.
     pub fn handle(&self, gid: GroupId) -> DownloadHandle {
         DownloadHandle {
             gid,
             manager: self.clone(),
+        }
+    }
+
+    /// Return handles for all currently live downloads.
+    ///
+    /// The snapshot contains reserved and active tasks, but not stopped
+    /// results. Retain a returned handle if its terminal result must remain
+    /// addressable after the engine removes the live group.
+    pub fn handles(&self) -> Vec<DownloadHandle> {
+        self.group_man
+            .all_groups()
+            .into_iter()
+            .map(|(gid, _)| self.handle(gid))
+            .collect()
+    }
+
+    /// Find a handle for a live download or a retained stopped result.
+    ///
+    /// A stopped result can disappear later when the result cache is purged.
+    pub fn find(&self, gid: GroupId) -> Option<DownloadHandle> {
+        if self.group_man.find_group(gid).is_some()
+            || self
+                .group_man
+                .find_stopped_result(&gid.to_hex_string())
+                .is_some()
+        {
+            Some(self.handle(gid))
+        } else {
+            None
         }
     }
 
@@ -365,6 +535,25 @@ mod tests {
     }
 
     #[test]
+    fn manager_lists_and_finds_live_handles_without_exposing_groups() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["http://example.test/file".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+
+        let handles = manager.handles();
+        assert_eq!(handles.len(), 1);
+        assert_eq!(handles[0].gid(), handle.gid());
+        assert!(manager.find(handle.gid()).is_some());
+        assert!(manager.find(GroupId::new(0xdead_beef)).is_none());
+    }
+
+    #[test]
     fn handle_exposes_file_snapshot_without_rpc_polling() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
@@ -379,5 +568,90 @@ mod tests {
         let files = handle.get_files().expect("live group snapshot");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "file.zip");
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn add_torrent_prepares_metadata_before_registration() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let mut torrent = b"d8:announce28:http://tracker.test/announce4:infod6:lengthi1e4:name8:file.bin12:piece lengthi1e6:pieces20:".to_vec();
+        torrent.extend_from_slice(&[0; 20]);
+        torrent.extend_from_slice(b"ee");
+
+        let handle = manager
+            .add_torrent(
+                torrent,
+                vec!["https://example.test/file.bin".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("valid torrent submission");
+
+        assert!(handle.status_snapshot().is_some());
+        let files = handle.get_files().expect("prepared file metadata");
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            std::path::Path::new(&files[0].path)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("file.bin")
+        );
+        assert_eq!(group_man.count(), 1);
+    }
+
+    #[cfg(feature = "bittorrent")]
+    #[test]
+    fn add_torrent_rejects_invalid_data_without_registration() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+
+        let result = manager.add_torrent(vec![1, 2, 3], Vec::new(), DownloadOptions::default());
+
+        assert!(matches!(
+            result,
+            Err(DownloadManagerError::Preparation(Aria2Error::Fatal(_)))
+        ));
+        assert_eq!(group_man.count(), 0);
+    }
+
+    #[cfg(feature = "metalink")]
+    #[test]
+    fn add_metalink_returns_handles_for_resource_groups() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="file.bin"><url>https://example.test/file.bin</url></file></metalink>"#;
+
+        let handles = manager
+            .add_metalink(data.to_vec(), DownloadOptions::default())
+            .expect("valid Metalink submission");
+
+        assert_eq!(handles.len(), 1);
+        assert!(handles[0].status_snapshot().is_some());
+        assert_eq!(group_man.count(), 1);
+    }
+
+    #[cfg(all(feature = "metalink", feature = "bittorrent"))]
+    #[test]
+    fn add_metalink_returns_metadata_and_payload_handles_for_torrent_metaurl() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="file.bin"><metaurl mediatype="torrent">https://example.test/file.torrent</metaurl></file></metalink>"#;
+
+        let handles = manager
+            .add_metalink(data.to_vec(), DownloadOptions::default())
+            .expect("valid torrent Metalink submission");
+
+        assert_eq!(handles.len(), 2);
+        assert_ne!(handles[0].gid(), handles[1].gid());
+        assert!(
+            handles
+                .iter()
+                .all(|handle| handle.status_snapshot().is_some())
+        );
+        assert_eq!(group_man.count(), 2);
     }
 }
