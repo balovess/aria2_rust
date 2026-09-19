@@ -79,6 +79,39 @@ impl EncryptedConnection {
             prefer_encryption,
             local_peer_id,
             timeout,
+            false,
+        )
+        .await
+    }
+
+    /// Connect with MSE while explicitly selecting whether the BitTorrent
+    /// handshake advertises BEP 5 DHT support.
+    pub async fn connect_with_mse_with_options_and_dht(
+        addr: &PeerAddr,
+        info_hash: &[u8; 20],
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+    ) -> Result<Self, String> {
+        let socket_addr = addr.to_socket_addr();
+        debug!("MSE connecting to peer: {}", socket_addr);
+
+        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+            .await
+            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
+            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
+
+        Self::complete_mse_handshake(
+            stream,
+            info_hash,
+            None,
+            force_encryption,
+            prefer_encryption,
+            local_peer_id,
+            timeout,
+            dht_enabled,
         )
         .await
     }
@@ -108,6 +141,38 @@ impl EncryptedConnection {
             prefer_encryption,
             local_peer_id,
             timeout,
+            false,
+        )
+        .await
+    }
+
+    /// Connect with MSE on a hybrid torrent while explicitly selecting
+    /// whether the BitTorrent handshake advertises BEP 5 DHT support.
+    pub async fn connect_with_mse_hybrid_with_options_and_dht(
+        addr: &PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        force_encryption: bool,
+        prefer_encryption: bool,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+    ) -> Result<Self, String> {
+        let socket_addr = addr.to_socket_addr();
+        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+            .await
+            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
+            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
+
+        Self::complete_mse_handshake(
+            stream,
+            info_hash_v1,
+            Some(info_hash_v2),
+            force_encryption,
+            prefer_encryption,
+            local_peer_id,
+            timeout,
+            dht_enabled,
         )
         .await
     }
@@ -120,6 +185,7 @@ impl EncryptedConnection {
         prefer_encryption: bool,
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
+        dht_enabled: bool,
     ) -> Result<Self, String> {
         let mut initiator = MseHandshake::new_initiator(*info_hash);
         initiator.set_crypto_preferences(force_encryption, prefer_encryption);
@@ -188,7 +254,7 @@ impl EncryptedConnection {
         );
 
         let mut local_handshake = Handshake::new(info_hash, local_peer_id)
-            .with_dht(true)
+            .with_dht(dht_enabled)
             .with_bep52(info_hash_v2.is_some())
             .to_bytes();
         crypto.encrypt(&mut local_handshake);
@@ -226,7 +292,11 @@ impl EncryptedConnection {
                 );
             }
         }
-        let conn = PeerConnection::from_stream_with_peer(stream, remote_hs.peer_id);
+        let conn = PeerConnection::from_stream_with_peer_and_dht(
+            stream,
+            remote_hs.peer_id,
+            remote_hs.supports_dht(),
+        );
 
         Ok(Self {
             inner: conn,
@@ -392,6 +462,11 @@ impl EncryptedConnection {
 
     pub fn remote_peer_id(&self) -> Option<&[u8; 20]> {
         self.inner.remote_peer_id.as_ref()
+    }
+
+    /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
+    pub fn remote_supports_dht(&self) -> bool {
+        self.inner.remote_supports_dht()
     }
 
     pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {

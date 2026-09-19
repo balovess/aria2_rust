@@ -81,6 +81,8 @@ pub struct PeerConnection {
     remote_addr: Option<std::net::SocketAddr>,
     pub state: PeerState,
     pub remote_peer_id: Option<[u8; 20]>,
+    /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
+    remote_supports_dht: bool,
     pub remote_bitfield: Vec<u8>,
     // Keep partially received frames across cancellation of read_message.
     read_buffer: BytesMut,
@@ -102,6 +104,34 @@ impl PeerConnection {
             .map_err(|e| format!("Peer connection failed: {}", e))?;
 
         Self::from_stream_with_timeout(stream, info_hash, local_peer_id, timeout).await
+    }
+
+    /// Connect using the standard TCP handshake while optionally advertising
+    /// BEP 5 DHT support.
+    pub async fn connect_with_timeout_and_dht(
+        addr: &PeerAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+    ) -> Result<Self, String> {
+        let socket_addr = addr.to_socket_addr();
+        debug!("Connecting to peer: {}", socket_addr);
+
+        let mut stream =
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+                .await
+                .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+                .map_err(|e| format!("Peer connection failed: {}", e))?;
+
+        let handshake = Handshake::new(info_hash, local_peer_id).with_dht(dht_enabled);
+        stream
+            .write_all(&handshake.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to send handshake: {}", e))?;
+
+        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash, timeout).await?;
+        Self::finish_handshake(stream, remote_hs)
     }
 
     pub async fn connect(addr: &PeerAddr, info_hash: &[u8; 20]) -> Result<Self, String> {
@@ -135,6 +165,36 @@ impl PeerConnection {
                 .map_err(|e| format!("Peer connection failed: {}", e))?;
 
         let mut handshake = Handshake::new(info_hash_v1, local_peer_id);
+        handshake.set_bep52_enabled(true);
+        stream
+            .write_all(&handshake.to_bytes())
+            .await
+            .map_err(|e| format!("Failed to send handshake: {}", e))?;
+
+        let remote_hs =
+            Self::read_remote_handshake_hybrid(&mut stream, info_hash_v1, info_hash_v2, timeout)
+                .await?;
+        Self::finish_handshake(stream, remote_hs)
+    }
+
+    /// Connect to a hybrid torrent while optionally advertising BEP 5 DHT.
+    pub async fn connect_hybrid_with_timeout_and_dht(
+        addr: &PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+    ) -> Result<Self, String> {
+        let socket_addr = addr.to_socket_addr();
+        let mut stream =
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+                .await
+                .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+                .map_err(|e| format!("Peer connection failed: {}", e))?;
+
+        let mut handshake = Handshake::new(info_hash_v1, local_peer_id);
+        handshake.set_dht_enabled(dht_enabled);
         handshake.set_bep52_enabled(true);
         stream
             .write_all(&handshake.to_bytes())
@@ -366,18 +426,30 @@ impl PeerConnection {
             remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(remote_hs.peer_id),
+            remote_supports_dht: remote_hs.supports_dht(),
             remote_bitfield: vec![],
             read_buffer: BytesMut::new(),
         })
     }
 
     pub fn from_stream_with_peer(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {
+        Self::from_stream_with_peer_and_dht(stream, peer_id, false)
+    }
+
+    /// Wrap a stream after an external handshake has already captured the
+    /// remote BEP 5 capability.
+    pub fn from_stream_with_peer_and_dht(
+        stream: tokio::net::TcpStream,
+        peer_id: [u8; 20],
+        remote_supports_dht: bool,
+    ) -> Self {
         let remote_addr = stream.peer_addr().ok();
         Self {
             stream,
             remote_addr,
             state: PeerState::new(),
             remote_peer_id: Some(peer_id),
+            remote_supports_dht,
             remote_bitfield: vec![],
             read_buffer: BytesMut::new(),
         }
@@ -498,6 +570,11 @@ impl PeerConnection {
 
     pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
         self.remote_addr
+    }
+
+    /// Whether the remote handshake advertised BEP 5 DHT support.
+    pub fn remote_supports_dht(&self) -> bool {
+        self.remote_supports_dht
     }
 
     pub async fn stream_write(&mut self, data: &[u8]) -> Result<(), String> {
@@ -715,6 +792,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(connection.remote_peer_id, Some([b'Y'; 20]));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_with_timeout_preserves_dht_capability_bits() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 68];
+            stream.read_exact(&mut request).await.unwrap();
+            let request = Handshake::parse(&request).unwrap();
+            assert!(request.supports_dht());
+            let response = Handshake::new(&[1u8; 20], &[b'Y'; 20])
+                .with_dht(true)
+                .to_bytes();
+            stream.write_all(&response).await.unwrap();
+        });
+
+        let connection = PeerConnection::connect_with_timeout_and_dht(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &[1u8; 20],
+            &[b'X'; 20],
+            std::time::Duration::from_secs(1),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(connection.remote_supports_dht());
         server.await.unwrap();
     }
 

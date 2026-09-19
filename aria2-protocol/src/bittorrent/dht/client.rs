@@ -212,12 +212,12 @@ impl DhtClient {
             .recv_with_timeout(&mut buf, self.config.query_timeout)
             .await
         {
-            Ok((len, _)) => {
+            Ok((len, source)) => {
                 if len == 0 {
                     return Ok(false);
                 }
                 match DhtMessage::decode(&buf[..len]) {
-                    Ok(response) => {
+                    Ok(response) if response_matches(&response, tx_id, source, node.addr) => {
                         if response.is_response() {
                             self.routing_table.mark_good(&node.id);
                             Ok(true)
@@ -226,7 +226,7 @@ impl DhtClient {
                             Ok(false)
                         }
                     }
-                    Err(_) => Ok(false),
+                    _ => Ok(false),
                 }
             }
             Err(_) => {
@@ -254,11 +254,13 @@ impl DhtClient {
             socket.send_to(node.addr, &encoded).await?;
 
             let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket
+            if let Ok((len, source)) = socket
                 .recv_with_timeout(&mut buf, self.config.query_timeout)
                 .await
+                && source == node.addr
                 && len > 0
                 && let Ok(response) = DhtMessage::decode(&buf[..len])
+                && response_matches(&response, tx_id, source, node.addr)
             {
                 let new_nodes = extract_compact_nodes_from_response(&response);
                 for (addr, nid) in new_nodes {
@@ -291,11 +293,13 @@ impl DhtClient {
             socket.send_to(node.addr, &encoded).await?;
 
             let mut buf = [0u8; 4096];
-            if let Ok((len, _)) = socket
+            if let Ok((len, source)) = socket
                 .recv_with_timeout(&mut buf, self.config.query_timeout)
                 .await
+                && source == node.addr
                 && len > 0
                 && let Ok(response) = DhtMessage::decode(&buf[..len])
+                && response_matches(&response, tx_id, source, node.addr)
             {
                 let peers = extract_compact_peers_from_response(&response);
                 all_peers.extend(peers);
@@ -317,6 +321,11 @@ impl DhtClient {
     }
 
     /// Send an announce_peer query to announce ourselves to the DHT network
+    ///
+    /// BEP 0005 requires the announce token to be issued by the node in a
+    /// preceding get_peers response. Query each candidate first and announce
+    /// only to nodes that return a token; a locally generated token is not
+    /// valid and will be rejected by compliant nodes.
     pub async fn send_announce_peer(
         &mut self,
         info_hash: &[u8; 20],
@@ -328,19 +337,43 @@ impl DhtClient {
         let nodes_to_query: Vec<DhtNode> = self.routing_table.find_closest(info_hash, 8);
 
         for node in nodes_to_query {
-            // Generate a token for announce (in real implementation, this should come from previous get_peers response)
-            let token = format!("token_{}", rand::random::<u32>());
             let tx_id = rand::random::<u32>();
-            let msg = DhtMessageBuilder::announce_peer(
-                tx_id,
+            let get_peers = DhtMessageBuilder::get_peers(tx_id, &self.config.self_id, info_hash);
+            socket.send_to(node.addr, &get_peers.encode()?).await?;
+
+            let mut buf = [0u8; 4096];
+            let (len, source) = match socket
+                .recv_with_timeout(&mut buf, self.config.query_timeout)
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => continue,
+            };
+            if source != node.addr {
+                continue;
+            }
+
+            let response = match DhtMessage::decode(&buf[..len]) {
+                Ok(response) if response_matches(&response, tx_id, source, node.addr) => response,
+                _ => continue,
+            };
+            let Some(token) = response
+                .r
+                .as_ref()
+                .and_then(|result| result.dict_get(b"token"))
+                .and_then(BencodeValue::as_bytes)
+            else {
+                continue;
+            };
+
+            let announce = DhtMessageBuilder::announce_peer_with_token(
+                rand::random::<u32>(),
                 &self.config.self_id,
                 info_hash,
                 port,
-                &token,
+                token,
             );
-            let encoded = msg.encode()?;
-
-            socket.send_to(node.addr, &encoded).await?;
+            socket.send_to(node.addr, &announce.encode()?).await?;
         }
 
         Ok(())
@@ -486,11 +519,15 @@ impl DhtClient {
 
         let mut buf = [0u8; 4096];
         match socket.recv_with_timeout(&mut buf, query_timeout).await {
-            Ok((len, _from)) => {
+            Ok((len, from)) => {
                 if len == 0 {
                     return Err("Empty response".to_string());
                 }
-                DhtMessage::decode(&buf[..len])
+                let response = DhtMessage::decode(&buf[..len])?;
+                if !response_matches(&response, message_transaction_id(message), from, node_addr) {
+                    return Err("DHT response did not match the request".to_string());
+                }
+                Ok(response)
             }
             Err(e) => Err(e),
         }
@@ -499,6 +536,26 @@ impl DhtClient {
     pub fn routing_table(&self) -> &RoutingTable {
         &self.routing_table
     }
+}
+
+fn message_transaction_id(message: &DhtMessage) -> u32 {
+    message
+        .t
+        .as_slice()
+        .try_into()
+        .map(u32::from_be_bytes)
+        .unwrap_or_default()
+}
+
+fn response_matches(
+    response: &DhtMessage,
+    transaction_id: u32,
+    source: SocketAddr,
+    expected_source: SocketAddr,
+) -> bool {
+    source == expected_source
+        && response.t == transaction_id.to_be_bytes()
+        && response.is_response()
 }
 
 pub fn extract_compact_peers_from_response(response: &DhtMessage) -> Vec<SocketAddr> {
@@ -546,60 +603,56 @@ pub fn extract_compact_nodes_from_response(response: &DhtMessage) -> Vec<(Socket
         None => return vec![],
     };
 
-    let nodes_data = match r.dict_get(b"nodes") {
-        Some(BencodeValue::Bytes(data)) => data,
-        _ => return vec![],
-    };
-
     let mut nodes = Vec::new();
 
-    if nodes_data.is_empty() {
-        return nodes;
+    // BEP 0005 uses separate `nodes` (IPv4) and `nodes6` (IPv6) fields.
+    // Keep the length-based IPv6 fallback for peers that put IPv6 records in
+    // `nodes`, which older clients in the wild sometimes do.
+    if let Some(nodes_data) = r.dict_get(b"nodes").and_then(BencodeValue::as_bytes) {
+        if nodes_data.len().is_multiple_of(26) {
+            append_compact_ipv4_nodes(nodes_data, &mut nodes);
+        } else if nodes_data.len().is_multiple_of(38) {
+            append_compact_ipv6_nodes(nodes_data, &mut nodes);
+        }
     }
-
-    // Detect format: if total length is multiple of 38 -> likely all IPv6 nodes
-    if nodes_data.len() % 38 == 0 && nodes_data.len() >= 38 {
-        // All IPv6 nodes (20 ID + 16 IP + 2 port)
-        for chunk in nodes_data.chunks(38) {
-            if chunk.len() < 38 {
-                continue;
-            }
-            let mut node_id = [0u8; 20];
-            node_id.copy_from_slice(&chunk[0..20]);
-            let octets: [u8; 16] = match chunk[20..36].try_into() {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            let port = u16::from_be_bytes([chunk[36], chunk[37]]);
-            nodes.push((
-                SocketAddr::V6(std::net::SocketAddrV6::new(
-                    std::net::Ipv6Addr::from(octets),
-                    port,
-                    0,
-                    0,
-                )),
-                node_id,
-            ));
-        }
-    } else {
-        // Default: try IPv4 (26 bytes per entry) with fallback
-        let chunk_size = 26;
-        for chunk in nodes_data.chunks(chunk_size) {
-            if chunk.len() < chunk_size {
-                continue;
-            }
-            let mut node_id = [0u8; 20];
-            node_id.copy_from_slice(&chunk[0..20]);
-            let ip_bytes: [u8; 4] = [chunk[20], chunk[21], chunk[22], chunk[23]];
-            let port = u16::from_be_bytes([chunk[24], chunk[25]]);
-            nodes.push((
-                SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)),
-                node_id,
-            ));
-        }
+    if let Some(nodes6_data) = r.dict_get(b"nodes6").and_then(BencodeValue::as_bytes) {
+        append_compact_ipv6_nodes(nodes6_data, &mut nodes);
     }
 
     nodes
+}
+
+fn append_compact_ipv4_nodes(data: &[u8], nodes: &mut Vec<(SocketAddr, [u8; 20])>) {
+    for chunk in data.chunks_exact(26) {
+        let mut node_id = [0u8; 20];
+        node_id.copy_from_slice(&chunk[..20]);
+        let ip_bytes: [u8; 4] = [chunk[20], chunk[21], chunk[22], chunk[23]];
+        let port = u16::from_be_bytes([chunk[24], chunk[25]]);
+        nodes.push((
+            SocketAddr::from((std::net::Ipv4Addr::from(ip_bytes), port)),
+            node_id,
+        ));
+    }
+}
+
+fn append_compact_ipv6_nodes(data: &[u8], nodes: &mut Vec<(SocketAddr, [u8; 20])>) {
+    for chunk in data.chunks_exact(38) {
+        let mut node_id = [0u8; 20];
+        node_id.copy_from_slice(&chunk[..20]);
+        let octets: [u8; 16] = chunk[20..36]
+            .try_into()
+            .expect("chunks_exact(38) guarantees the IPv6 address length");
+        let port = u16::from_be_bytes([chunk[36], chunk[37]]);
+        nodes.push((
+            SocketAddr::V6(std::net::SocketAddrV6::new(
+                std::net::Ipv6Addr::from(octets),
+                port,
+                0,
+                0,
+            )),
+            node_id,
+        ));
+    }
 }
 
 pub fn generate_random_node_id() -> [u8; 20] {
@@ -730,6 +783,26 @@ mod tests {
         assert_eq!(nodes.len(), 2);
         assert_eq!(nodes[0].0.port(), 8000);
         assert_eq!(nodes[1].0.port(), 2000);
+    }
+
+    #[test]
+    fn test_extract_compact_nodes6_response() {
+        use crate::bittorrent::bencode::codec::BencodeValue;
+        use std::collections::BTreeMap;
+
+        let mut compact = Vec::with_capacity(38);
+        compact.extend_from_slice(&[0xCC; 20]);
+        compact.extend_from_slice(&[0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        compact.extend_from_slice(&6881u16.to_be_bytes());
+
+        let mut response = BTreeMap::new();
+        response.insert(b"nodes6".to_vec(), BencodeValue::Bytes(compact));
+        let msg = DhtMessage::new_response(vec![1, 2], BencodeValue::Dict(response));
+
+        let nodes = extract_compact_nodes_from_response(&msg);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].0, "[2001:db8::1]:6881".parse().unwrap());
+        assert_eq!(nodes[0].1, [0xCC; 20]);
     }
 
     #[test]

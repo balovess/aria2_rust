@@ -194,7 +194,7 @@ impl BtPeerInteraction {
                 })?;
             let utp_result = match connection_options.hybrid_info_hash_v2.as_ref() {
                 Some(info_hash_v2) => {
-                    BtPeerConn::connect_utp_hybrid_with_options(
+                    BtPeerConn::connect_utp_hybrid_with_options_and_dht(
                         endpoint,
                         info_hash_raw,
                         info_hash_v2,
@@ -202,17 +202,19 @@ impl BtPeerInteraction {
                         connection_options.connection_timeout,
                         connection_options.utp_listen_port,
                         utp_socket,
+                        connection_options.dht_enabled,
                     )
                     .await
                 }
                 None => {
-                    BtPeerConn::connect_utp_with_options(
+                    BtPeerConn::connect_utp_with_options_and_dht(
                         endpoint,
                         info_hash_raw,
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
                         connection_options.utp_listen_port,
                         utp_socket,
+                        connection_options.dht_enabled,
                     )
                     .await
                 }
@@ -235,7 +237,7 @@ impl BtPeerInteraction {
             // Try MSE encrypted connection
             match connection_options.hybrid_info_hash_v2.as_ref() {
                 Some(info_hash_v2) => {
-                    BtPeerConn::connect_mse_hybrid_with_options(
+                    BtPeerConn::connect_mse_hybrid_with_options_and_dht(
                         addr,
                         info_hash_raw,
                         info_hash_v2,
@@ -243,17 +245,19 @@ impl BtPeerInteraction {
                         connection_options.crypto.prefer_encryption,
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
+                        connection_options.dht_enabled,
                     )
                     .await
                 }
                 None => {
-                    BtPeerConn::connect_mse_with_options(
+                    BtPeerConn::connect_mse_with_options_and_dht(
                         addr,
                         info_hash_raw,
                         connection_options.crypto.force_encryption,
                         connection_options.crypto.prefer_encryption,
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
+                        connection_options.dht_enabled,
                     )
                     .await
                 }
@@ -262,7 +266,7 @@ impl BtPeerInteraction {
             // Try MSE first, fall back to plain
             let mse_result = match connection_options.hybrid_info_hash_v2.as_ref() {
                 Some(info_hash_v2) => {
-                    BtPeerConn::connect_mse_hybrid_with_options(
+                    BtPeerConn::connect_mse_hybrid_with_options_and_dht(
                         addr,
                         info_hash_raw,
                         info_hash_v2,
@@ -270,17 +274,19 @@ impl BtPeerInteraction {
                         connection_options.crypto.prefer_encryption,
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
+                        connection_options.dht_enabled,
                     )
                     .await
                 }
                 None => {
-                    BtPeerConn::connect_mse_with_options(
+                    BtPeerConn::connect_mse_with_options_and_dht(
                         addr,
                         info_hash_raw,
                         connection_options.crypto.force_encryption,
                         connection_options.crypto.prefer_encryption,
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
+                        connection_options.dht_enabled,
                     )
                     .await
                 }
@@ -291,21 +297,23 @@ impl BtPeerInteraction {
                     debug!("[BT] MSE failed, trying plain connection");
                     match connection_options.hybrid_info_hash_v2.as_ref() {
                         Some(info_hash_v2) => {
-                            BtPeerConn::connect_plain_hybrid_with_options(
+                            BtPeerConn::connect_plain_hybrid_with_options_and_dht(
                                 addr,
                                 info_hash_raw,
                                 info_hash_v2,
                                 &connection_options.local_peer_id,
                                 connection_options.connection_timeout,
+                                connection_options.dht_enabled,
                             )
                             .await
                         }
                         None => {
-                            BtPeerConn::connect_plain_with_options(
+                            BtPeerConn::connect_plain_with_options_and_dht(
                                 addr,
                                 info_hash_raw,
                                 &connection_options.local_peer_id,
                                 connection_options.connection_timeout,
+                                connection_options.dht_enabled,
                             )
                             .await
                         }
@@ -332,13 +340,26 @@ impl BtPeerInteraction {
 
         // BEP 10 is part of the real connection setup. The peer-agent option
         // therefore travels on the wire before the piece loop starts.
-        conn.send_extension_handshake(&connection_options.peer_agent)
-            .await?;
+        conn.send_extension_handshake_with_port(
+            &connection_options.peer_agent,
+            connection_options.listen_port,
+        )
+        .await?;
 
         // Send empty bitfield (we have nothing yet)
         let bf_len = (num_pieces as usize).div_ceil(8);
         let empty_bf = vec![0u8; bf_len];
         conn.send_bitfield(empty_bf).await?;
+
+        // BEP 5 requires the Port message only when both sides advertised
+        // DHT support. Private torrents clear `dht_enabled` before reaching
+        // this path, so their info-hash is never announced through peers.
+        if connection_options.dht_enabled
+            && conn.remote_supports_dht()
+            && let Some(port) = connection_options.listen_port
+        {
+            conn.send_port(port).await?;
+        }
 
         // Small delay to allow processing
         tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;

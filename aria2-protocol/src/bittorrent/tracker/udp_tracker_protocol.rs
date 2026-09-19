@@ -1,4 +1,5 @@
 use std::fmt;
+use std::net::{SocketAddr, ToSocketAddrs};
 
 pub const INITIAL_CONNECTION_ID: u64 = 0x41727101980;
 pub const DEFAULT_ANNOUNCE_INTERVAL: u32 = 300;
@@ -105,8 +106,8 @@ pub fn build_announce_request(
     buf.extend_from_slice(info_hash);
     buf.extend_from_slice(peer_id);
     buf.extend_from_slice(&downloaded.to_be_bytes());
-    buf.extend_from_slice(&uploaded.to_be_bytes());
     buf.extend_from_slice(&left.to_be_bytes());
+    buf.extend_from_slice(&uploaded.to_be_bytes());
     buf.extend_from_slice(&(event as i32).to_be_bytes());
     buf.extend_from_slice(&ip.to_be_bytes());
     buf.extend_from_slice(&key.to_be_bytes());
@@ -187,20 +188,29 @@ fn parse_compact_peers(data: &[u8]) -> Vec<(String, u16)> {
 }
 
 pub fn parse_announce_response(data: &[u8]) -> Result<AnnounceResponse, String> {
+    if data.len() < 8 {
+        return Err(format!(
+            "ANNOUNCE response too short: {} bytes (min 8)",
+            data.len()
+        ));
+    }
+    let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    if action == UdpAction::Error as i32 {
+        let msg_len = (data.len() - 8).min(256);
+        let msg = String::from_utf8_lossy(&data[8..8 + msg_len]);
+        return Err(format!("Tracker error: {}", msg));
+    }
+    if action != UdpAction::Announce as i32 {
+        return Err(format!(
+            "Unexpected action in ANNOUNCE response: {}",
+            action
+        ));
+    }
     if data.len() < 20 {
         return Err(format!(
             "ANNOUNCE response too short: {} bytes (min 20)",
             data.len()
         ));
-    }
-    let action = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-    match UdpAction::from_i32(action) {
-        None | Some(UdpAction::Error) => {
-            let msg_len = (data.len() - 8).min(256);
-            let msg = String::from_utf8_lossy(&data[8..8 + msg_len]);
-            return Err(format!("Tracker error: {}", msg));
-        }
-        _ => {}
     }
     let txn_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let interval = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
@@ -301,7 +311,7 @@ pub fn parse_scrape_response(data: &[u8]) -> Result<Vec<ScrapeResult>, String> {
 }
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -368,12 +378,19 @@ impl UdpTrackerClient {
         let addr_str = addr_str.split('/').next().unwrap_or(addr_str);
 
         // Resolve address
-        let addr: SocketAddr = addr_str
-            .parse()
-            .map_err(|e| format!("Failed to parse tracker address '{}': {}", addr_str, e))?;
+        let addr = addr_str
+            .to_socket_addrs()
+            .map_err(|e| format!("Failed to resolve tracker address '{}': {}", addr_str, e))?
+            .next()
+            .ok_or_else(|| format!("Tracker address '{}' resolved to no addresses", addr_str))?;
 
         // Create UDP socket bound to any available port
-        let socket = UdpSocket::bind("0.0.0.0:0")
+        let bind_addr: SocketAddr = if addr.is_ipv6() {
+            "[::]:0".parse().expect("valid IPv6 wildcard address")
+        } else {
+            "0.0.0.0:0".parse().expect("valid IPv4 wildcard address")
+        };
+        let socket = UdpSocket::bind(bind_addr)
             .map_err(|e| format!("Failed to create UDP socket: {}", e))?;
 
         // Set read timeout
@@ -709,6 +726,37 @@ mod tests {
     }
 
     #[test]
+    fn test_build_announce_request_uses_bep15_counter_order() {
+        let downloaded = 0x0102_0304_0506_0708i64;
+        let left = 0x1112_1314_1516_1718i64;
+        let uploaded = 0x2122_2324_2526_2728i64;
+        let request = build_announce_request(
+            0x123456789ABCDEF0,
+            0xDEADBEEF,
+            &[0xAB; 20],
+            &[0xCD; 20],
+            downloaded,
+            left,
+            uploaded,
+            UdpEvent::Started,
+            0,
+            0x12345678,
+            50,
+            6881,
+        );
+
+        assert_eq!(&request[56..64], &downloaded.to_be_bytes());
+        assert_eq!(&request[64..72], &left.to_be_bytes());
+        assert_eq!(&request[72..80], &uploaded.to_be_bytes());
+    }
+
+    #[test]
+    fn test_udp_tracker_client_accepts_hostnames() {
+        let client = UdpTrackerClient::new("udp://localhost:6969").unwrap();
+        assert_eq!(client.tracker_addr().port(), 6969);
+    }
+
+    #[test]
     fn test_parse_connect_response_valid() {
         let mut data = vec![0u8; 16];
         data[0..4].copy_from_slice(&(0i32).to_be_bytes()); // action=connect
@@ -783,6 +831,27 @@ mod tests {
         let result = parse_announce_response(&data);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("tracker offline"));
+    }
+
+    #[test]
+    fn test_parse_short_announce_error_response() {
+        let mut data = vec![0u8; 8];
+        data[0..4].copy_from_slice(&(UdpAction::Error as i32).to_be_bytes());
+        data.extend_from_slice(b"offline");
+
+        let result = parse_announce_response(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("offline"));
+    }
+
+    #[test]
+    fn test_parse_announce_rejects_non_announce_action() {
+        let mut data = vec![0u8; 20];
+        data[0..4].copy_from_slice(&(UdpAction::Connect as i32).to_be_bytes());
+
+        let result = parse_announce_response(&data);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unexpected action"));
     }
 
     #[test]

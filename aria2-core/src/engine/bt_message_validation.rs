@@ -330,14 +330,15 @@ impl BtMessageValidator {
         }
         // C++ checkBitfield: verify that unused bits in the last byte are zero.
         // If num_pieces is not a multiple of 8, the last byte has some
-        // unused high bits that must be zero.
+        // unused low bits that must be zero because BitTorrent numbers bits
+        // from the most significant bit.
         let remainder = (self.num_pieces as usize) % 8;
         if remainder != 0
             && let Some(&last_byte) = data.last()
         {
-            // The valid bits in the last byte are the low `remainder` bits.
-            // All higher bits must be zero.
-            let mask: u8 = !((1 << remainder) - 1);
+            // The valid bits in the last byte are the high `remainder` bits.
+            // All lower bits must be zero.
+            let mask: u8 = (1 << (8 - remainder)) - 1;
             if last_byte & mask != 0 {
                 return Err(BtMessageValidationError::BitfieldLengthMismatch {
                     bitfield_len: data.len(),
@@ -518,6 +519,16 @@ mod tests {
             err,
             BtMessageValidationError::BitfieldLengthMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn bitfield_trailing_bits_are_msb_first() {
+        let v = BtMessageValidator::new(10, 262144);
+
+        // BitTorrent numbers bits from the most significant bit. For ten
+        // pieces, the first two bits of the final byte are meaningful.
+        assert!(v.validate_bitfield(&[0xFF, 0b1100_0000]).is_ok());
+        assert!(v.validate_bitfield(&[0xFF, 0b0000_0011]).is_err());
     }
 
     // -- validate_handshake ------------------------------------------------

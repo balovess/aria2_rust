@@ -24,12 +24,26 @@ impl BtPeerConn {
 
     /// Send the BEP 10 extension handshake using the task's peer-agent value.
     pub async fn send_extension_handshake(&mut self, peer_agent: &str) -> Result<()> {
+        self.send_extension_handshake_with_port(peer_agent, None)
+            .await
+    }
+
+    /// Send the BEP 10 extension handshake and optionally advertise the local
+    /// TCP listen port (`p`), matching aria2's post-handshake setup.
+    pub async fn send_extension_handshake_with_port(
+        &mut self,
+        peer_agent: &str,
+        port: Option<u16>,
+    ) -> Result<()> {
         use aria2_protocol::bittorrent::message::extension::ExtensionHandshake;
         use aria2_protocol::bittorrent::message::serializer::serialize;
         use aria2_protocol::bittorrent::message::types::BtMessage;
 
         let mut handshake = ExtensionHandshake::new();
         handshake.with_version(peer_agent);
+        if let Some(port) = port.filter(|port| *port != 0) {
+            handshake.with_port(port);
+        }
         self.write_raw(&serialize(&BtMessage::Extended {
             ext_id: 0,
             payload: handshake.to_bytes(),
@@ -105,6 +119,33 @@ impl BtPeerConn {
                 use aria2_protocol::bittorrent::message::types::BtMessage;
                 let msg = BtMessage::NotInterested;
                 c.send_message(&serialize(&msg)).await
+            }
+        }
+    }
+
+    /// Send the BEP 5 DHT port message.
+    pub async fn send_port(&mut self, port: u16) -> Result<()> {
+        match &mut self.inner {
+            InnerConnection::Plain(c) => c
+                .send_message(&aria2_protocol::bittorrent::message::types::BtMessage::Port { port })
+                .await
+                .map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e,
+                    })
+                }),
+            InnerConnection::Encrypted(c) => c
+                .send_message(&aria2_protocol::bittorrent::message::types::BtMessage::Port { port })
+                .await
+                .map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e,
+                    })
+                }),
+            InnerConnection::Utp(c) => {
+                use aria2_protocol::bittorrent::message::serializer::serialize;
+                use aria2_protocol::bittorrent::message::types::BtMessage;
+                c.send_message(&serialize(&BtMessage::Port { port })).await
             }
         }
     }
@@ -288,8 +329,15 @@ impl BtPeerConn {
             )),
         };
         let result = result.and_then(|message| {
-            if let (Some(validator), Some(message)) = (validator, message.as_ref()) {
-                validator.validate(message).map_err(|error| {
+            if let Some(message_ref) = message.as_ref() {
+                let validation = if let Some(validator) = validator {
+                    validator.validate(message_ref)
+                } else if let Some(resource) = &self.session_resource {
+                    resource.validate_message(message_ref)
+                } else {
+                    Ok(())
+                };
+                validation.map_err(|error| {
                     Aria2Error::Fatal(FatalError::Config(format!(
                         "invalid BitTorrent peer message: {error}"
                     )))

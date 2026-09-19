@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::engine::bt_message_validation::{BtMessageValidationError, BtMessageValidator};
 use crate::segment::bitfield_util;
 
 /// Per-session resource for an active BitTorrent peer connection.
@@ -24,6 +25,8 @@ pub struct PeerSessionResource {
     total_length: u64,
     /// Number of pieces in the torrent.
     num_pieces: u32,
+    /// Domain validator reused by the connection read path.
+    message_validator: BtMessageValidator,
 
     // Fast Extension (BEP 6)
     /// Whether fast extension is enabled for this peer.
@@ -69,6 +72,7 @@ impl PeerSessionResource {
             piece_length,
             total_length,
             num_pieces,
+            message_validator: BtMessageValidator::new(num_pieces, piece_length),
             fast_extension_enabled: false,
             peer_allowed_index_set: HashSet::new(),
             am_allowed_index_set: HashSet::new(),
@@ -192,6 +196,15 @@ impl PeerSessionResource {
         self.piece_length = piece_length;
         self.total_length = total_length;
         self.num_pieces = num_pieces;
+        self.message_validator = BtMessageValidator::new(num_pieces, piece_length);
+    }
+
+    /// Validate a parsed peer message against this torrent's geometry.
+    pub(crate) fn validate_message(
+        &self,
+        message: &aria2_protocol::bittorrent::message::types::BtMessage,
+    ) -> Result<(), BtMessageValidationError> {
+        self.message_validator.validate(message)
     }
 
     /// Get the number of pieces.

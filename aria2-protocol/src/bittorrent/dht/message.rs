@@ -262,6 +262,18 @@ impl DhtMessageBuilder {
         port: u16,
         token: &str,
     ) -> DhtMessage {
+        Self::announce_peer_with_token(transaction_id, sender_id, info_hash, port, token.as_bytes())
+    }
+
+    /// Build an `announce_peer` query using the opaque token returned by
+    /// `get_peers`.
+    pub fn announce_peer_with_token(
+        transaction_id: u32,
+        sender_id: &[u8; 20],
+        info_hash: &[u8; 20],
+        port: u16,
+        token: &[u8],
+    ) -> DhtMessage {
         let mut args_dict = std::collections::BTreeMap::new();
         args_dict.insert(b"id".to_vec(), BencodeValue::Bytes(sender_id.to_vec()));
         args_dict.insert(
@@ -269,10 +281,7 @@ impl DhtMessageBuilder {
             BencodeValue::Bytes(info_hash.to_vec()),
         );
         args_dict.insert(b"port".to_vec(), BencodeValue::Int(port as i64));
-        args_dict.insert(
-            b"token".to_vec(),
-            BencodeValue::Bytes(token.as_bytes().to_vec()),
-        );
+        args_dict.insert(b"token".to_vec(), BencodeValue::Bytes(token.to_vec()));
         DhtMessage::new_query(
             transaction_id,
             DhtQueryMethod::ANNOUNCE_PEER,
@@ -639,6 +648,21 @@ mod tests {
         assert!(r.dict_get(b"nodes").is_none());
         assert!(r.dict_get(b"values").is_none());
         assert!(r.dict_get(b"token").is_none());
+    }
+
+    #[test]
+    fn test_announce_peer_preserves_opaque_token_bytes() {
+        let token = [0x00, 0xFF, 0x10, 0x80];
+        let msg =
+            DhtMessageBuilder::announce_peer_with_token(7, &[0x11; 20], &[0x22; 20], 6881, &token);
+
+        let decoded = DhtMessage::decode(&msg.encode().unwrap()).unwrap();
+        let args = decoded.a.as_ref().expect("announce_peer must have args");
+        let encoded_token = args
+            .dict_get(b"token")
+            .and_then(|value| value.as_bytes())
+            .expect("announce_peer must include token");
+        assert_eq!(encoded_token, &token);
     }
 
     #[test]

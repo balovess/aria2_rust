@@ -28,6 +28,8 @@ pub struct UtpPeerConnection {
     handshake_complete: bool,
     /// Remote peer ID learned during the handshake
     remote_peer_id: Option<[u8; 20]>,
+    /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
+    remote_supports_dht: bool,
     remote_endpoint: Option<std::net::SocketAddr>,
     /// Receive buffer for partial messages
     recv_buffer: BytesMut,
@@ -47,6 +49,7 @@ impl UtpPeerConnection {
             info_hash_v2: None,
             handshake_complete: false,
             remote_peer_id: None,
+            remote_supports_dht: false,
             remote_endpoint: None,
             recv_buffer: BytesMut::new(),
         }
@@ -73,6 +76,27 @@ impl UtpPeerConnection {
         timeout: std::time::Duration,
         listen_port: Option<u16>,
     ) -> Result<Self> {
+        Self::connect_with_options_and_dht(
+            addr,
+            info_hash,
+            local_peer_id,
+            timeout,
+            listen_port,
+            false,
+        )
+        .await
+    }
+
+    /// Connect and complete the BitTorrent handshake while explicitly
+    /// selecting whether BEP 5 DHT support is advertised.
+    pub async fn connect_with_options_and_dht(
+        addr: std::net::SocketAddr,
+        info_hash: &[u8; 20],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+        dht_enabled: bool,
+    ) -> Result<Self> {
         let socket = match listen_port {
             Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
             None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
@@ -81,7 +105,16 @@ impl UtpPeerConnection {
 
         let socket = Arc::new(Mutex::new(socket));
 
-        Self::connect_with_shared_socket(socket, addr, info_hash, local_peer_id, timeout).await
+        Self::connect_with_shared_socket_hybrid_and_dht(
+            socket,
+            addr,
+            info_hash,
+            None,
+            local_peer_id,
+            timeout,
+            dht_enabled,
+        )
+        .await
     }
 
     /// Connect to a remote peer via uTP using a hybrid BEP 52 identity.
@@ -93,18 +126,42 @@ impl UtpPeerConnection {
         timeout: std::time::Duration,
         listen_port: Option<u16>,
     ) -> Result<Self> {
+        Self::connect_with_hybrid_options_and_dht(
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+            timeout,
+            listen_port,
+            false,
+        )
+        .await
+    }
+
+    /// Connect a hybrid torrent while explicitly selecting whether BEP 5 DHT
+    /// support is advertised in the BitTorrent handshake.
+    pub async fn connect_with_hybrid_options_and_dht(
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: &[u8; 32],
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+        dht_enabled: bool,
+    ) -> Result<Self> {
         let socket = match listen_port {
             Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
             None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
         }
         .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
-        Self::connect_with_shared_socket_hybrid(
+        Self::connect_with_shared_socket_hybrid_and_dht(
             Arc::new(Mutex::new(socket)),
             addr,
             info_hash_v1,
             Some(info_hash_v2),
             local_peer_id,
             timeout,
+            dht_enabled,
         )
         .await
     }
@@ -137,6 +194,29 @@ impl UtpPeerConnection {
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
     ) -> Result<Self> {
+        Self::connect_with_shared_socket_hybrid_and_dht(
+            socket,
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+            timeout,
+            false,
+        )
+        .await
+    }
+
+    /// Connect on a shared uTP socket while explicitly selecting whether BEP
+    /// 5 DHT support is advertised.
+    pub async fn connect_with_shared_socket_hybrid_and_dht(
+        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+    ) -> Result<Self> {
         let conn_id = {
             let mut sock = socket.lock().await;
             sock.connect(addr)
@@ -150,24 +230,33 @@ impl UtpPeerConnection {
             info_hash_v2: info_hash_v2.copied(),
             handshake_complete: false,
             remote_peer_id: None,
+            remote_supports_dht: false,
             remote_endpoint: Some(addr),
             recv_buffer: BytesMut::new(),
         };
 
         connection.wait_until_established(timeout).await?;
-        tokio::time::timeout(timeout, connection.perform_handshake(local_peer_id))
-            .await
-            .map_err(|_| {
-                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                    message: "uTP BitTorrent handshake timed out".to_string(),
-                })
-            })??;
+        tokio::time::timeout(
+            timeout,
+            connection.perform_handshake_with_dht(local_peer_id, dht_enabled),
+        )
+        .await
+        .map_err(|_| {
+            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                message: "uTP BitTorrent handshake timed out".to_string(),
+            })
+        })??;
         Ok(connection)
     }
 
     /// Return the remote peer ID learned during the handshake.
     pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
         self.remote_peer_id
+    }
+
+    /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
+    pub fn remote_supports_dht(&self) -> bool {
+        self.remote_supports_dht
     }
 
     pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
@@ -297,10 +386,21 @@ impl UtpPeerConnection {
 
     /// Perform BitTorrent handshake over uTP.
     pub async fn perform_handshake(&mut self, local_peer_id: &[u8; 20]) -> Result<()> {
+        self.perform_handshake_with_dht(local_peer_id, false).await
+    }
+
+    /// Perform the BitTorrent handshake while explicitly selecting whether
+    /// BEP 5 DHT support is advertised.
+    pub async fn perform_handshake_with_dht(
+        &mut self,
+        local_peer_id: &[u8; 20],
+        dht_enabled: bool,
+    ) -> Result<()> {
         use aria2_protocol::bittorrent::message::handshake::Handshake;
 
-        let handshake =
-            Handshake::new(&self.info_hash, local_peer_id).with_bep52(self.info_hash_v2.is_some());
+        let handshake = Handshake::new(&self.info_hash, local_peer_id)
+            .with_dht(dht_enabled)
+            .with_bep52(self.info_hash_v2.is_some());
         let handshake_bytes = handshake.to_bytes();
 
         {
@@ -339,6 +439,7 @@ impl UtpPeerConnection {
         }
 
         self.remote_peer_id = Some(response.peer_id);
+        self.remote_supports_dht = response.supports_dht();
         self.handshake_complete = true;
         Ok(())
     }

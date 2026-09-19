@@ -113,6 +113,8 @@ impl BtDownloadCommand {
             let group = self.group.recover();
             let mut options =
                 BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
+            options.dht_enabled = group.options().enable_dht && !self.is_private;
+            options.listen_port = (self.listen_port != 0).then_some(self.listen_port);
             options.hybrid_info_hash_v2 = info_hash_v2;
             options
         };

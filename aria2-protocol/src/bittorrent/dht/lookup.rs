@@ -473,11 +473,6 @@ pub async fn announce_to_token_nodes(
     let mut sends = FuturesUnordered::new();
 
     for (addr, node_id, token) in token_nodes.iter().take(K) {
-        let token_str = match std::str::from_utf8(token) {
-            Ok(s) => s.to_string(),
-            Err(_) => hex::encode(token),
-        };
-
         let (transaction_id, response_wait) = tracker.allocate_wait(
             QueryType::AnnouncePeer,
             *addr,
@@ -485,8 +480,13 @@ pub async fn announce_to_token_nodes(
             Some(*info_hash),
             query_timeout,
         );
-        let msg =
-            DhtMessageBuilder::announce_peer(transaction_id, self_id, info_hash, port, &token_str);
+        let msg = DhtMessageBuilder::announce_peer_with_token(
+            transaction_id,
+            self_id,
+            info_hash,
+            port,
+            token,
+        );
         let encoded = match msg.encode() {
             Ok(e) => e,
             Err(e) => {

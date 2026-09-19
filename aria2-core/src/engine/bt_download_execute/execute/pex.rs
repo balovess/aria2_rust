@@ -252,7 +252,11 @@ impl BtDownloadCommand {
         );
         let connection_options = {
             let group = self.group.recover();
-            BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id)
+            let mut options =
+                BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
+            options.dht_enabled = group.options().enable_dht && !self.is_private;
+            options.listen_port = (self.listen_port != 0).then_some(self.listen_port);
+            options
         };
 
         // Attempt connections sequentially. Individual errors are logged without
