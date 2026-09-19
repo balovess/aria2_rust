@@ -27,6 +27,7 @@ struct SharedRoute {
     sender: mpsc::Sender<IncomingPeer>,
     crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
     info_hash_v2: Option<[u8; 32]>,
+    dht_enabled: bool,
 }
 
 struct SharedListenerState {
@@ -46,6 +47,7 @@ pub struct BtPeerRouteConfig {
     pub max_peers: usize,
     pub peer_storage: Arc<Mutex<DefaultPeerStorage>>,
     pub crypto_policy: aria2_protocol::bittorrent::peer::incoming::IncomingCryptoPolicy,
+    pub dht_enabled: bool,
 }
 
 /// Process-level BitTorrent listener and info-hash router.
@@ -150,6 +152,7 @@ impl BtPeerListenerManager {
             peer_storage,
             crypto_policy,
             info_hash_v2,
+            dht_enabled,
             ..
         } = config;
         let (sender, receiver) = mpsc::channel(max_peers.max(1));
@@ -182,6 +185,7 @@ impl BtPeerListenerManager {
                 sender,
                 crypto_policy,
                 info_hash_v2,
+                dht_enabled,
             },
         );
         drop(routes);
@@ -322,6 +326,7 @@ async fn run_shared_listener(
                     sender: route.sender.clone(),
                     crypto_policy: route.crypto_policy,
                     info_hash_v2: route.info_hash_v2,
+                    dht_enabled: route.dht_enabled,
                 })
             };
             let Some(route) = route else {
@@ -329,7 +334,7 @@ async fn run_shared_listener(
                 return;
             };
             let connection = match incoming
-                .complete_with_hybrid(route.local_peer_id, route.info_hash_v2)
+                .complete(route.local_peer_id, route.info_hash_v2, route.dht_enabled)
                 .await
             {
                 Ok(connection) => connection,
@@ -406,6 +411,7 @@ mod tests {
                 max_peers: 4,
                 peer_storage: storage_a,
                 crypto_policy: Default::default(),
+                dht_enabled: false,
             })
             .await
             .unwrap();
@@ -420,6 +426,7 @@ mod tests {
                 max_peers: 4,
                 peer_storage: storage_b,
                 crypto_policy: Default::default(),
+                dht_enabled: false,
             })
             .await
             .unwrap();
@@ -477,6 +484,7 @@ mod tests {
                 max_peers: 1,
                 peer_storage: storage,
                 crypto_policy: Default::default(),
+                dht_enabled: false,
             })
             .await
             .expect("IPv6 listener should be available for this test");
@@ -519,6 +527,7 @@ mod tests {
                 max_peers: 1,
                 peer_storage: storage,
                 crypto_policy: Default::default(),
+                dht_enabled: false,
             })
             .await
             .unwrap();
@@ -546,6 +555,7 @@ mod tests {
                 max_peers: 1,
                 peer_storage: storage,
                 crypto_policy: Default::default(),
+                dht_enabled: false,
             })
             .await
             .unwrap();
@@ -585,6 +595,7 @@ mod tests {
                 max_peers: 1,
                 peer_storage: storage,
                 crypto_policy: Default::default(),
+                dht_enabled: false,
             })
             .await
             .unwrap();

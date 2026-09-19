@@ -3,20 +3,16 @@
 mod fixtures;
 use aria2_core::engine::command::{Command, CommandStatus};
 use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
+use aria2_core::engine::metadata_collector::MetadataCollector;
 use aria2_core::engine::metadata_exchange::{
     MetadataExchangeConfig, MetadataExchangeError, MetadataExchangeSession,
 };
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
-use aria2_protocol::bittorrent::dht::client::{
-    DhtClient, DhtClientConfig, generate_random_node_id,
-};
-use aria2_protocol::bittorrent::extension::ut_metadata::{
-    ExtensionHandshake, MetadataCollector, UtMetadataMsg,
-};
+use aria2_protocol::bittorrent::dht::compact::extract_compact_peers_from_response;
 use aria2_protocol::bittorrent::magnet::MagnetLink;
+use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
 use fixtures::mock_bt_peer::MockBtPeerServer;
-use fixtures::mock_dht_node::MockDhtNode;
 use fixtures::test_torrent_builder::build_test_torrent;
 use std::net::SocketAddr;
 use tracing::info;
@@ -53,48 +49,38 @@ fn test_magnet_parse_invalid() {
 
 #[test]
 fn test_extension_handshake_roundtrip() {
-    let hs = ExtensionHandshake::new(12345);
-    let encoded = hs.to_bencode();
-    let parsed = ExtensionHandshake::parse(&encoded).unwrap();
-    assert_eq!(parsed.metadata_size, Some(12345));
-    assert_eq!(parsed.get_ut_metadata_id(), Some(1));
+    let mut hs = ExtensionHandshake::new();
+    hs.with_metadata_size(12345);
+    let encoded = hs.to_bytes();
+    let parsed = ExtensionHandshake::from_bytes(&encoded).unwrap();
+    assert_eq!(parsed.metadata_size(), Some(12345));
+    assert_eq!(parsed.ut_metadata_id(), Some(1));
 }
 
 #[test]
 fn test_ut_metadata_request_encode_decode() {
-    let msg = UtMetadataMsg::Request(0);
-    let encoded = msg.encode(1);
-    let decoded = UtMetadataMsg::decode(&encoded[5..]).unwrap();
-    match decoded {
-        UtMetadataMsg::Request(p) => assert_eq!(p, 0),
-        _ => panic!("Expected Request"),
-    }
+    let msg = UtMetadataMessage::Request { piece: 0 };
+    let decoded = UtMetadataMessage::from_payload(&msg.to_payload()).unwrap();
+    assert_eq!(decoded, msg);
 }
 
 #[test]
 fn test_ut_metadata_data_encode_decode() {
     let data = b"fake torrent metadata".to_vec();
-    let msg = UtMetadataMsg::Data(0, data.clone());
-    let encoded = msg.encode(2);
-    let decoded = UtMetadataMsg::decode(&encoded[5..]).unwrap();
-    match decoded {
-        UtMetadataMsg::Data(p, d) => {
-            assert_eq!(p, 0);
-            assert_eq!(&d[..], &data[..]);
-        }
-        _ => panic!("Expected Data"),
-    }
+    let msg = UtMetadataMessage::Data {
+        piece: 0,
+        total_size: data.len() as u32,
+        data,
+    };
+    let decoded = UtMetadataMessage::from_payload(&msg.to_payload()).unwrap();
+    assert_eq!(decoded, msg);
 }
 
 #[test]
 fn test_ut_metadata_reject_encode_decode() {
-    let msg = UtMetadataMsg::Reject(0);
-    let encoded = msg.encode(3);
-    let decoded = UtMetadataMsg::decode(&encoded[5..]).unwrap();
-    match decoded {
-        UtMetadataMsg::Reject(p) => assert_eq!(p, 0),
-        _ => panic!("Expected Reject"),
-    }
+    let msg = UtMetadataMessage::Reject { piece: 0 };
+    let decoded = UtMetadataMessage::from_payload(&msg.to_payload()).unwrap();
+    assert_eq!(decoded, msg);
 }
 
 #[test]
@@ -165,40 +151,6 @@ fn test_magnet_url_decode() {
 }
 
 #[tokio::test]
-async fn test_dht_client_discover_peers_via_mock() {
-    let target_hash = [0xABu8; 20];
-    let peer_addr: std::net::SocketAddr = "127.0.0.1:6889".parse().unwrap();
-    let _mock = MockDhtNode::start(vec![peer_addr]).await;
-    let dht_port = _mock.addr().port();
-
-    let bootstrap_addr: std::net::SocketAddr = format!("127.0.0.1:{}", dht_port).parse().unwrap();
-
-    let config = DhtClientConfig {
-        self_id: generate_random_node_id(),
-        bootstrap_nodes: vec![bootstrap_addr],
-        max_concurrent_queries: 4,
-        query_timeout: std::time::Duration::from_secs(5),
-        max_rounds: 2,
-    };
-    let mut client = DhtClient::new(config);
-
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let result = client.discover_peers(&target_hash).await;
-    assert!(
-        result.is_ok(),
-        "discover_peers should complete without error: {:?}",
-        result.err()
-    );
-    let discovered = result.unwrap();
-    // nodes_contacted is u32, always >= 0, so we just log the count
-    tracing::info!(
-        "DHT discovery completed with {} nodes",
-        discovered.nodes_contacted
-    );
-}
-
-#[tokio::test]
 async fn test_metadata_exchange_no_peers_error() {
     let session = MetadataExchangeSession::new(MetadataExchangeConfig {
         connect_timeout: std::time::Duration::from_millis(50),
@@ -217,38 +169,6 @@ async fn test_metadata_exchange_no_peers_error() {
 }
 
 #[tokio::test]
-async fn test_dht_client_no_bootstrap_returns_empty() {
-    let config = DhtClientConfig {
-        self_id: generate_random_node_id(),
-        bootstrap_nodes: vec![],
-        max_concurrent_queries: 1,
-        query_timeout: std::time::Duration::from_millis(50),
-        max_rounds: 1,
-    };
-    let mut client = DhtClient::new(config);
-    let target = [0u8; 20];
-
-    let result = client.discover_peers(&target).await.unwrap();
-    assert!(result.addresses.is_empty());
-}
-
-#[tokio::test]
-async fn test_dht_client_bootstrap_only_contacts_bootstrap_nodes() {
-    let config = DhtClientConfig {
-        self_id: generate_random_node_id(),
-        bootstrap_nodes: vec![
-            "10.255.255.254:6881".parse().unwrap(),
-            "10.255.255.253:6882".parse().unwrap(),
-        ],
-        max_concurrent_queries: 2,
-        query_timeout: std::time::Duration::from_millis(100),
-        max_rounds: 1,
-    };
-    let client = DhtClient::new(config);
-    let _rt = client.routing_table();
-}
-
-#[tokio::test]
 async fn test_metadata_exchange_config_default() {
     let cfg = MetadataExchangeConfig::default();
     assert_eq!(cfg.max_peers_to_try, 5);
@@ -256,15 +176,7 @@ async fn test_metadata_exchange_config_default() {
 }
 
 #[tokio::test]
-async fn test_generate_random_node_id_variety() {
-    let id1 = generate_random_node_id();
-    let id2 = generate_random_node_id();
-    assert_ne!(id1, id2, "Two random IDs should differ");
-    assert!(!id1.iter().all(|&b| b == 0));
-}
-
-#[tokio::test]
-async fn test_dht_client_extract_compact_peers_from_mock_response() {
+async fn test_extract_compact_peers_from_mock_response() {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
     use std::collections::BTreeMap;
 
@@ -280,7 +192,7 @@ async fn test_dht_client_extract_compact_peers_from_mock_response() {
         BencodeValue::Dict(r_dict),
     );
 
-    let peers = aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&msg);
+    let peers = extract_compact_peers_from_response(&msg);
     assert_eq!(peers.len(), 1);
     assert_eq!(peers[0].port(), 8080);
 }
@@ -401,15 +313,15 @@ async fn test_e2e_metadata_exchange_extension_handshake_cycle() {
     let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse torrent");
     let info_hash = meta.info_hash.bytes;
 
-    let hs = ExtensionHandshake::new(torrent_data.len() as u64);
-    let encoded_value = hs.to_bencode();
-    let _encoded_bytes = encoded_value.encode();
+    let mut hs = ExtensionHandshake::new();
+    hs.with_metadata_size(torrent_data.len() as u32);
+    let encoded_bytes = hs.to_bytes();
 
     let parsed =
-        ExtensionHandshake::parse(&encoded_value).expect("Should parse extension handshake");
-    assert_eq!(parsed.metadata_size, Some(torrent_data.len() as u64));
+        ExtensionHandshake::from_bytes(&encoded_bytes).expect("Should parse extension handshake");
+    assert_eq!(parsed.metadata_size(), Some(torrent_data.len() as u32));
     assert!(
-        parsed.get_ut_metadata_id().is_some(),
+        parsed.ut_metadata_id().is_some(),
         "Should have ut_metadata extension ID"
     );
 

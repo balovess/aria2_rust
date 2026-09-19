@@ -84,33 +84,6 @@ impl DhtBootstrap {
         nodes
     }
 
-    /// Synchronous fallback: returns bootstrap nodes with placeholder addresses.
-    ///
-    /// **WARNING**: This method does NOT perform DNS resolution. It should only
-    /// be used when async resolution is not possible (e.g., in synchronous
-    /// contexts). The returned nodes will have `0.0.0.0:0` addresses and will
-    /// NOT be reachable. Prefer [`resolve_bootstrap_nodes`] in all async contexts.
-    pub fn get_bootstrap_nodes_unreachable() -> Vec<DhtNode> {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        BOOTSTRAP_NODES
-            .iter()
-            .map(|(host, port)| {
-                let mut id = [0u8; 20];
-                for byte in id.iter_mut() {
-                    *byte = rng.r#gen();
-                }
-                tracing::warn!(
-                    "Using unreachable placeholder for DHT bootstrap node {}:{} \
-                     (use resolve_bootstrap_nodes() for proper DNS resolution)",
-                    host,
-                    port
-                );
-                DhtNode::new(id, "0.0.0.0:0".parse().unwrap())
-            })
-            .collect()
-    }
-
     /// Resolve bootstrap nodes and add them to the routing table.
     ///
     /// Returns the number of nodes successfully added.
@@ -161,15 +134,6 @@ mod tests {
                 node.addr,
                 "0.0.0.0:0".parse::<std::net::SocketAddr>().unwrap()
             );
-        }
-    }
-
-    #[test]
-    fn test_get_bootstrap_nodes_unreachable() {
-        let nodes = DhtBootstrap::get_bootstrap_nodes_unreachable();
-        assert_eq!(nodes.len(), BOOTSTRAP_NODES.len());
-        for node in &nodes {
-            assert_eq!(node.id.len(), 20);
         }
     }
 

@@ -333,7 +333,7 @@ mod tests {
         assert!(resp.is_response());
 
         let extracted =
-            aria2_protocol::bittorrent::dht::client::extract_compact_peers_from_response(&resp);
+            aria2_protocol::bittorrent::dht::compact::extract_compact_peers_from_response(&resp);
         assert_eq!(extracted.len(), 1);
 
         server.shutdown().await;

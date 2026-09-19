@@ -8,6 +8,7 @@ use super::http_handlers::{
     handle_xmlrpc, http_auth_middleware,
 };
 use super::tls::{TlsConfig, TlsError};
+use crate::backend::RpcBackend;
 use crate::engine::RpcEngine;
 
 /// RPC HTTP server supporting both HTTP and HTTPS.
@@ -81,6 +82,32 @@ impl RpcServer {
     /// on the engine (e.g., when wiring to a running DownloadEngine).
     pub fn new_with_engine(config: ServerConfig, engine: Arc<RpcEngine>) -> Result<Self, TlsError> {
         Self::from_config_and_engine(config, engine)
+    }
+
+    /// Create a new RPC server from an application-owned backend.
+    ///
+    /// This constructor wires the backend into [`RpcEngine`] and mirrors the
+    /// configured token into the engine's library-facing authentication layer.
+    /// It is the compact alternative to constructing an `RpcEngine` manually
+    /// before calling [`Self::new_with_engine`].
+    pub fn new_with_backend(
+        config: ServerConfig,
+        backend: Arc<dyn RpcBackend>,
+    ) -> Result<Self, TlsError> {
+        let engine = RpcEngine::with_backend(backend);
+        let engine = match config.auth.token.as_deref() {
+            Some(token) => engine.with_auth_middleware(super::auth::RpcAuthMiddleware::new(token)),
+            None => engine,
+        };
+        Self::from_config_and_engine(config, Arc::new(engine))
+    }
+
+    /// Get the shared engine used by this server.
+    ///
+    /// Applications can use this handle to install lifecycle bridges or
+    /// otherwise coordinate with the same engine that serves RPC requests.
+    pub fn engine(&self) -> Arc<RpcEngine> {
+        Arc::clone(&self.engine)
     }
 
     /// Create a new HTTP RPC server (no TLS).
@@ -441,7 +468,41 @@ impl std::fmt::Debug for RpcServer {
 
 #[cfg(test)]
 mod tests {
+    use super::super::auth::AuthConfig;
     use super::*;
+    use crate::backend::{
+        BackendError, BackendRequest, BackendResponse, BackendResult, RpcBackend,
+    };
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct RecordingBackend {
+        requests: Arc<Mutex<Vec<BackendRequest>>>,
+    }
+
+    #[async_trait]
+    impl RpcBackend for RecordingBackend {
+        fn metadata(&self) -> crate::backend::BackendMetadata {
+            crate::backend::BackendMetadata::base("test")
+        }
+
+        async fn execute(&self, request: BackendRequest) -> Result<BackendResult, BackendError> {
+            let response = match &request {
+                BackendRequest::AddUri { .. } => BackendResponse::Gid("0123456789abcdef".into()),
+                _ => {
+                    return Err(BackendError::Unsupported(format!(
+                        "unexpected test request: {request:?}"
+                    )));
+                }
+            };
+            self.requests
+                .lock()
+                .expect("test backend lock poisoned")
+                .push(request);
+            Ok(BackendResult::response(response))
+        }
+    }
 
     #[test]
     fn test_rpc_server_new_http() {
@@ -460,6 +521,46 @@ mod tests {
         let server = RpcServer::new(config).expect("Failed to create server");
         assert_eq!(server.addr(), "0.0.0.0:8080");
         assert!(!server.is_secure());
+    }
+
+    #[test]
+    fn test_rpc_server_from_backend_preserves_server_configuration() {
+        let config = ServerConfig::default()
+            .with_host("127.0.0.1")
+            .with_port(6801)
+            .with_auth(AuthConfig::default().with_token("secret"));
+
+        let server =
+            RpcServer::new_with_backend(config, Arc::new(crate::backend::UnsupportedBackend))
+                .expect("backend-backed server should construct");
+
+        assert_eq!(server.addr(), "127.0.0.1:6801");
+        assert!(server.config().auth.has_token());
+    }
+
+    #[tokio::test]
+    async fn test_rpc_server_from_backend_dispatches_to_the_same_engine() {
+        let backend = RecordingBackend::default();
+        let requests = Arc::clone(&backend.requests);
+        let server = RpcServer::new_with_backend(
+            ServerConfig::default().with_auth(AuthConfig::default().with_token("secret")),
+            Arc::new(backend),
+        )
+        .expect("backend-backed server should construct");
+
+        let request = crate::json_rpc::JsonRpcRequest::new(
+            "aria2.addUri",
+            serde_json::json!(["token:secret", ["https://example.test/file"]]),
+        )
+        .with_id(1);
+        let response = server.engine().handle_request(&request).await;
+
+        assert_eq!(response.result, Some(serde_json::json!("0123456789abcdef")));
+        assert!(response.error.is_none());
+        assert!(matches!(
+            requests.lock().expect("test backend lock poisoned").as_slice(),
+            [BackendRequest::AddUri { uris, .. }] if uris == &["https://example.test/file"]
+        ));
     }
 
     #[test]

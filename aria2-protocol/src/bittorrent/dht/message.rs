@@ -195,7 +195,7 @@ impl DhtMessage {
 /// - IPv6: 18 bytes (16 bytes IP + 2 bytes port, big-endian)
 ///
 /// The output is directly consumable by
-/// [`crate::bittorrent::dht::client::extract_compact_peers_from_response`].
+/// [`crate::bittorrent::dht::compact::extract_compact_peers_from_response`].
 pub fn encode_compact_peer(addr: std::net::SocketAddr) -> Vec<u8> {
     match addr {
         std::net::SocketAddr::V4(v4) => {
@@ -497,9 +497,9 @@ mod tests {
             .expect("missing r.nodes");
         assert_eq!(nodes_bytes, &compact_nodes[..]);
 
-        // Cross-check with the existing extractor from client.rs
+        // Cross-check with the standard compact extractor.
         let extracted =
-            crate::bittorrent::dht::client::extract_compact_nodes_from_response(&decoded);
+            crate::bittorrent::dht::compact::extract_compact_nodes_from_response(&decoded);
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0].0.port(), 8080);
         assert_eq!(extracted[1].0.port(), 6881);
@@ -545,9 +545,9 @@ mod tests {
             .expect("missing r.values");
         assert_eq!(values.len(), 2);
 
-        // Cross-check with the existing extractor from client.rs
+        // Cross-check with the standard compact extractor.
         let extracted =
-            crate::bittorrent::dht::client::extract_compact_peers_from_response(&decoded);
+            crate::bittorrent::dht::compact::extract_compact_peers_from_response(&decoded);
         assert_eq!(extracted.len(), 2);
         assert_eq!(extracted[0], peers[0]);
         assert_eq!(extracted[1], peers[1]);
@@ -573,7 +573,7 @@ mod tests {
         assert!(values.is_empty());
 
         let extracted =
-            crate::bittorrent::dht::client::extract_compact_peers_from_response(&decoded);
+            crate::bittorrent::dht::compact::extract_compact_peers_from_response(&decoded);
         assert!(extracted.is_empty());
     }
 
@@ -617,9 +617,9 @@ mod tests {
             .expect("missing r.nodes");
         assert_eq!(nodes_bytes, &compact_nodes[..]);
 
-        // Cross-check with the existing extractor from client.rs
+        // Cross-check with the standard compact extractor.
         let extracted =
-            crate::bittorrent::dht::client::extract_compact_nodes_from_response(&decoded);
+            crate::bittorrent::dht::compact::extract_compact_nodes_from_response(&decoded);
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].0.port(), 8080);
         assert_eq!(extracted[0].1, [0x99u8; 20]);

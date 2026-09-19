@@ -136,37 +136,17 @@ impl DhtTask for PeerLookupTask {
 #[derive(Debug)]
 pub struct ReplaceNodeTask {
     ctx: DhtTaskContext,
-    /// Optional exact node identifying the bucket and replacement target.
-    questionable_node_id: Option<[u8; 20]>,
-    /// Optional legacy bucket-prefix selector.
-    bucket_prefix_length: Option<usize>,
+    /// Node identifying the bucket and replacement target.
+    questionable_node_id: [u8; 20],
     /// New node to potentially insert.
     new_node: DhtNode,
 }
 
 impl ReplaceNodeTask {
-    /// Create a new replace node task.
-    ///
-    /// Create a task using the legacy bucket-prefix selector.
-    pub fn new(ctx: DhtTaskContext, bucket_prefix_length: usize, new_node: DhtNode) -> Self {
+    pub fn new(ctx: DhtTaskContext, questionable_node_id: [u8; 20], new_node: DhtNode) -> Self {
         Self {
             ctx,
-            questionable_node_id: None,
-            bucket_prefix_length: Some(bucket_prefix_length),
-            new_node,
-        }
-    }
-
-    /// Create a task for an exact questionable node.
-    pub fn new_for_node(
-        ctx: DhtTaskContext,
-        questionable_node_id: [u8; 20],
-        new_node: DhtNode,
-    ) -> Self {
-        Self {
-            ctx,
-            questionable_node_id: Some(questionable_node_id),
-            bucket_prefix_length: None,
+            questionable_node_id,
             new_node,
         }
     }
@@ -178,36 +158,19 @@ impl DhtTask for ReplaceNodeTask {
         // Find the bucket and extract the questionable node info.
         let (q_id, q_addr) = {
             let rt = self.ctx.routing_table.read().await;
-            let bucket = if let Some(node_id) = self.questionable_node_id {
-                let Some(bucket) = rt.get_bucket_for(&node_id) else {
-                    trace!(
-                        "ReplaceNodeTask: bucket not found for node {}",
-                        hex::encode(node_id)
-                    );
-                    return;
-                };
-                bucket
-            } else {
-                let Some(prefix_length) = self.bucket_prefix_length else {
-                    return;
-                };
-                let Some(bucket) = rt
-                    .get_all_buckets()
-                    .into_iter()
-                    .find(|bucket| bucket.prefix_length() == prefix_length)
-                else {
-                    trace!("ReplaceNodeTask: bucket not found prefix={}", prefix_length);
-                    return;
-                };
-                bucket
+            let Some(bucket) = rt.get_bucket_for(&self.questionable_node_id) else {
+                trace!(
+                    "ReplaceNodeTask: bucket not found for node {}",
+                    hex::encode(self.questionable_node_id)
+                );
+                return;
             };
 
-            let Some(node) = bucket.nodes().iter().find(|node| {
-                self.questionable_node_id
-                    .map(|id| node.id == id)
-                    .unwrap_or(true)
-                    && node.is_questionable()
-            }) else {
+            let Some(node) = bucket
+                .nodes()
+                .iter()
+                .find(|node| node.id == self.questionable_node_id && node.is_questionable())
+            else {
                 trace!("ReplaceNodeTask: no questionable node available");
                 return;
             };
@@ -436,23 +399,10 @@ impl DhtTaskFactory {
     /// Create a replace node task.
     pub fn create_replace_node_task(
         &self,
-        bucket_prefix_length: usize,
-        new_node: DhtNode,
-    ) -> BoxedDhtTask {
-        Box::new(ReplaceNodeTask::new(
-            self.ctx.clone(),
-            bucket_prefix_length,
-            new_node,
-        ))
-    }
-
-    /// Create a replacement task for an exact questionable node.
-    pub fn create_replace_node_for_node(
-        &self,
         questionable_node_id: [u8; 20],
         new_node: DhtNode,
     ) -> BoxedDhtTask {
-        Box::new(ReplaceNodeTask::new_for_node(
+        Box::new(ReplaceNodeTask::new(
             self.ctx.clone(),
             questionable_node_id,
             new_node,

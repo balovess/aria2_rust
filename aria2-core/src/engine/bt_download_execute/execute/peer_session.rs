@@ -37,7 +37,7 @@ impl BtDownloadCommand {
                     message: "BitTorrent listener manager is not configured".to_string(),
                 })
             })?;
-            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy) = {
+            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy, dht_enabled) = {
                 let group = self.group.recover();
                 let ports = group
                     .options()
@@ -62,6 +62,7 @@ impl BtDownloadCommand {
                             .eq_ignore_ascii_case("arc4")
                             || group.options().bt_force_encrypt,
                     },
+                    group.options().enable_dht && !self.is_private,
                 )
             };
             let register = |bind_ip: std::net::IpAddr| {
@@ -75,6 +76,7 @@ impl BtDownloadCommand {
                     max_peers,
                     peer_storage: std::sync::Arc::clone(&self.peer_storage),
                     crypto_policy,
+                    dht_enabled,
                 })
             };
             let route = if disable_ipv6 {

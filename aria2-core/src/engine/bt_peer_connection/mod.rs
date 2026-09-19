@@ -19,13 +19,16 @@
 //! considered dead after ~3 minutes of inactivity.
 
 mod peer_conn;
+pub use peer_conn::{MseConnectionOptions, UtpConnectionOptions};
 mod session_resource;
 #[cfg(test)]
 mod tests;
 mod types;
 mod utp_connection;
+#[cfg(test)]
+mod utp_connection_tests;
 
-// Public re-exports — preserve the original API surface.
+// Public connection types and their supporting data structures.
 pub use peer_conn::BtPeerConn;
 pub use session_resource::PeerSessionResource;
 pub use types::{ConnectionType, SendBuffer};

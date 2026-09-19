@@ -19,7 +19,7 @@ use fixtures::mock_dht_server::MockDhtServer;
 use aria2_protocol::bittorrent::dht::{
     bootstrap::DhtBootstrap,
     bucket::Bucket,
-    client::{DhtClient, DhtClientConfig},
+    compact::{extract_compact_nodes_from_response, extract_compact_peers_from_response},
     engine::{DhtEngine, DhtEngineConfig},
     message::{DhtMessage, DhtMessageBuilder},
     node::DhtNode,
@@ -230,9 +230,7 @@ fn test_node_state_transitions() {
 /// D6: Verify DhtBootstrap returns valid nodes and integrates with RoutingTable.
 #[tokio::test]
 async fn test_bootstrap_nodes_validity() {
-    // Use the synchronous version (no DNS resolution) for deterministic testing.
-    // The async resolve_bootstrap_nodes() requires network access.
-    let boot_nodes = DhtBootstrap::get_bootstrap_nodes_unreachable();
+    let boot_nodes = DhtBootstrap::bootstrap_node_list();
 
     // Verify we get well-known router node definitions
     assert!(
@@ -241,7 +239,7 @@ async fn test_bootstrap_nodes_validity() {
     );
 
     for node in &boot_nodes {
-        assert_eq!(node.id.len(), 20, "each node ID must be 20 bytes");
+        assert!(node.contains(':'), "bootstrap entry must include a port");
     }
 
     // Add bootstrap nodes to a fresh routing table
@@ -255,64 +253,6 @@ async fn test_bootstrap_nodes_validity() {
 // ---------------------------------------------------------------------------
 // Tier B: Integration Tests with MockDhtServer
 // ---------------------------------------------------------------------------
-
-/// D7: Use MockDhtServer to verify DhtClient::discover_peers returns expected peers.
-#[tokio::test]
-async fn test_dht_client_discover_peers_mocked() {
-    // Start mock DHT server on a random port
-    let server = MockDhtServer::bind(0)
-        .await
-        .expect("mock server bind failed");
-
-    // Register expectation: get_peers will return 2 peer addresses
-    let expected_peers: Vec<SocketAddr> = vec![
-        "10.0.0.1:6881".parse().unwrap(),
-        "10.0.0.2:6882".parse().unwrap(),
-    ];
-    server
-        .expect_get_peers(expected_peers.clone(), vec![])
-        .await;
-
-    // Build DhtClient pointed at the mock server
-    let config = DhtClientConfig {
-        self_id: [0xABu8; 20],
-        bootstrap_nodes: vec![server.addr()],
-        max_concurrent_queries: 1,
-        query_timeout: Duration::from_secs(3),
-        max_rounds: 1,
-    };
-    let mut client = DhtClient::new(config);
-
-    // Discover peers for an arbitrary info hash
-    let info_hash = [0xCDu8; 20];
-    let result = client
-        .discover_peers(&info_hash)
-        .await
-        .expect("discover_peers should succeed against mock");
-
-    // Verify both expected peers are present in the result
-    assert!(
-        result.addresses.len() >= 2,
-        "expected at least 2 peers, got {}",
-        result.addresses.len()
-    );
-    for peer in &expected_peers {
-        assert!(
-            result.addresses.contains(peer),
-            "result should contain expected peer {:?}",
-            peer
-        );
-    }
-
-    // At least one node was contacted during discovery
-    assert!(
-        result.nodes_contacted >= 1,
-        "should have contacted at least 1 node, got {}",
-        result.nodes_contacted
-    );
-
-    server.shutdown().await;
-}
 
 /// D8: Verify DhtEngine can start, call find_peers without panicking, and shut down cleanly
 /// even when backed by a mock server. The mock may receive ping + get_peers queries.
@@ -690,10 +630,6 @@ fn test_engine_uses_token_tracker() {
 // =========================================================================
 // Enhancement Tests: IPv6 Compact (4 tests)
 // =========================================================================
-
-use aria2_protocol::bittorrent::dht::client::{
-    extract_compact_nodes_from_response, extract_compact_peers_from_response,
-};
 
 #[test]
 fn test_extract_ipv6_peers() {

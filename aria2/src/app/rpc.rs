@@ -17,9 +17,7 @@ use aria2_core::engine::download_event_hooks::{
 };
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
-use aria2_rpc::server::{
-    AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig,
-};
+use aria2_rpc::server::{AuthConfig, CorsConfig, RpcServer, ServerConfig, TlsConfig};
 use aria2_rpc::websocket::{DownloadEvent as RpcDownloadEvent, EventType};
 use std::sync::{Arc, Weak};
 use tracing::{debug, error, info};
@@ -298,8 +296,6 @@ impl App {
             backend.set_bt_registry(bt_registry);
         }
         let backend = Arc::new(backend);
-        let rpc_engine =
-            RpcEngine::with_backend(backend).with_auth_middleware(RpcAuthMiddleware::new(&secret));
 
         // Build server config
         let max_request_size = self
@@ -314,10 +310,21 @@ impl App {
             .with_cors(cors)
             .with_max_request_size(max_request_size);
 
-        // Share the engine before the server takes ownership so the core →
-        // RPC event bridge can hold a `Weak` handle to the very same
-        // instance the WebSocket sessions read from.
-        let rpc_engine = Arc::new(rpc_engine);
+        // Configure TLS before constructing the server through the public
+        // backend seam. The server owns the engine, and exposes that same
+        // shared instance for the core → RPC event bridge below.
+        let server_label = if rpc_secure { "HTTPS RPC" } else { "RPC" };
+        if rpc_secure {
+            let cert = cert_path.ok_or("rpc-certificate is required when rpc-secure is enabled")?;
+            let key = key_path.ok_or("rpc-private-key is required when rpc-secure is enabled")?;
+            info!("Starting HTTPS RPC server on {}:{}", host, port);
+            config = config.with_tls(TlsConfig::new(cert, key));
+        } else {
+            info!("Starting HTTP RPC server on {}:{}", host, port);
+        }
+        let server = RpcServer::new_with_backend(config, backend)
+            .map_err(|e| format!("Failed to create {server_label} server: {e}"))?;
+        let rpc_engine = server.engine();
 
         // Install the download lifecycle bridge on the process-wide core
         // event bus. Without this, `aria2.onDownloadComplete` /
@@ -333,20 +340,6 @@ impl App {
             listeners = hooks.listener_count(),
             "Registered core→RPC download event bridge"
         );
-
-        // Create server with the pre-configured shared engine
-        let server = if rpc_secure {
-            let cert = cert_path.ok_or("rpc-certificate is required when rpc-secure is enabled")?;
-            let key = key_path.ok_or("rpc-private-key is required when rpc-secure is enabled")?;
-            info!("Starting HTTPS RPC server on {}:{}", host, port);
-            config = config.with_tls(TlsConfig::new(cert, key));
-            RpcServer::new_with_engine(config, Arc::clone(&rpc_engine))
-                .map_err(|e| format!("Failed to create HTTPS RPC server: {}", e))?
-        } else {
-            info!("Starting HTTP RPC server on {}:{}", host, port);
-            RpcServer::new_with_engine(config, Arc::clone(&rpc_engine))
-                .map_err(|e| format!("Failed to create RPC server: {}", e))?
-        };
 
         // Keep the user-requested one-shot CLI separate from RPC startup, but
         // retain aria2_original's address-family fallback when RPC is wanted.

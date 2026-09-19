@@ -27,7 +27,7 @@ async fn seeding_accepts_a_peer_after_download_has_no_initial_peers() {
     let client_task = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (server_stream, endpoint) = listener.accept().await.unwrap();
     let _client_stream = client_task.await.unwrap();
-    let peer_connection = PeerConnection::from_stream_with_peer(server_stream, [2u8; 20]);
+    let peer_connection = PeerConnection::from_stream_with_peer(server_stream, [2u8; 20], false);
     sender
         .send(crate::engine::bt_peer_listener::IncomingPeer {
             connection: IncomingConnection::Plain(Box::new(peer_connection)),

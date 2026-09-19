@@ -5,12 +5,12 @@ use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
-use aria2_protocol::bittorrent::extension::ut_metadata::{ExtensionHandshake, MetadataCollector};
 use aria2_protocol::bittorrent::extension::ut_metadata_tracker::UTMetadataRequestTracker;
-use aria2_protocol::bittorrent::message::extension::UtMetadataMessage;
+use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
 use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
+
+use super::metadata_collector::MetadataCollector;
 
 const METADATA_MAX_SIZE: u64 = 100 * 1024 * 1024;
 const PIECE_SIZE_MIN: u32 = 1024;
@@ -21,16 +21,46 @@ const MAX_CONCURRENT_PEER_EXCHANGES: usize = 4;
 #[derive(Debug, Clone)]
 pub enum MetadataExchangeError {
     NoPeersAvailable,
-    AllPeersFailed { attempts: usize, last_error: String },
-    PeerConnectFailed { addr: String, reason: String },
-    PeerTimeout { addr: String },
-    UnsupportedPeer { addr: String, reason: String },
-    InvalidMetadataSize { size: u64 },
-    MetadataTooLarge { size: u64, max: u64 },
-    BencodeDecodeFailed { detail: String },
-    PieceRejected { piece: u32 },
-    PieceTimeout { piece: u32 },
-    IncompleteMetadata { expected: u64, received: u64 },
+    AllPeersFailed {
+        attempts: usize,
+        last_error: String,
+    },
+    PeerConnectFailed {
+        addr: String,
+        reason: String,
+    },
+    PeerTimeout {
+        addr: String,
+    },
+    UnsupportedPeer {
+        addr: String,
+        reason: String,
+    },
+    InvalidMetadataSize {
+        size: u64,
+    },
+    MetadataTooLarge {
+        size: u64,
+        max: u64,
+    },
+    InvalidMetadataPiece {
+        piece: u32,
+        size: u64,
+        expected: u64,
+    },
+    BencodeDecodeFailed {
+        detail: String,
+    },
+    PieceRejected {
+        piece: u32,
+    },
+    PieceTimeout {
+        piece: u32,
+    },
+    IncompleteMetadata {
+        expected: u64,
+        received: u64,
+    },
     IoError(String),
 }
 
@@ -80,6 +110,15 @@ impl fmt::Display for MetadataExchangeError {
             MetadataExchangeError::MetadataTooLarge { size, max } => {
                 write!(f, "metadata_size too large: {} (max {})", size, max)
             }
+            MetadataExchangeError::InvalidMetadataPiece {
+                piece,
+                size,
+                expected,
+            } => write!(
+                f,
+                "Invalid metadata piece {} length: {} bytes (expected {})",
+                piece, size, expected
+            ),
             MetadataExchangeError::BencodeDecodeFailed { detail } => {
                 write!(f, "Bencode decode failed: {}", detail)
             }
@@ -240,9 +279,8 @@ impl MetadataExchangeSession {
 
         debug!("Connected to {}, sending extension handshake", peer_addr);
 
-        let mut local_hs = ExtensionHandshake::new(0);
-        local_hs.metadata_size = None;
-        let hs_payload = local_hs.to_bencode().encode();
+        let local_hs = ExtensionHandshake::new();
+        let hs_payload = local_hs.to_bytes();
         let hs_encoded = serialize_extended(0, hs_payload);
 
         conn.stream_write(&hs_encoded)
@@ -262,22 +300,18 @@ impl MetadataExchangeSession {
         .map_err(|_| MetadataExchangeError::PeerTimeout {
             addr: addr_str.clone(),
         })??;
-        let remote_hs = ExtensionHandshake::parse(&remote_hs_data).ok_or_else(|| {
-            MetadataExchangeError::BencodeDecodeFailed {
-                detail: "Failed to parse remote extension handshake".to_string(),
-            }
-        })?;
+        let remote_hs = ExtensionHandshake::from_bytes(&remote_hs_data)
+            .map_err(|detail| MetadataExchangeError::BencodeDecodeFailed { detail })?;
 
         let metadata_ext_id = remote_hs
-            .get_ut_metadata_id()
-            .and_then(|id| u8::try_from(id).ok())
+            .ut_metadata_id()
             .filter(|id| *id != 0)
             .ok_or_else(|| MetadataExchangeError::UnsupportedPeer {
                 addr: addr_str.clone(),
                 reason: "Remote did not advertise a valid ut_metadata extension ID".to_string(),
             })?;
 
-        let metadata_size = match remote_hs.metadata_size {
+        let metadata_size = match remote_hs.metadata_size().map(u64::from) {
             Some(size) => size,
             None => {
                 warn!(
@@ -375,10 +409,32 @@ impl MetadataExchangeSession {
                 Ok(Ok(UtMetadataMessage::Data {
                     piece: recv_piece,
                     data,
-                    ..
+                    total_size,
                 })) => {
+                    if u64::from(total_size) != metadata_size {
+                        return Err(MetadataExchangeError::InvalidMetadataSize {
+                            size: u64::from(total_size),
+                        });
+                    }
+                    if !tracker.tracks(recv_piece) {
+                        debug!(
+                            piece = recv_piece,
+                            "Ignoring unsolicited ut_metadata data piece"
+                        );
+                        continue;
+                    }
                     tracker.remove(recv_piece);
-                    collector.add_piece(recv_piece, &data);
+                    if !collector.add_piece(recv_piece, &data) {
+                        let offset = u64::from(recv_piece) * u64::from(self.config.piece_size);
+                        let expected = metadata_size
+                            .saturating_sub(offset)
+                            .min(u64::from(self.config.piece_size));
+                        return Err(MetadataExchangeError::InvalidMetadataPiece {
+                            piece: recv_piece,
+                            size: data.len() as u64,
+                            expected,
+                        });
+                    }
                     debug!(
                         "Received piece {}/{} ({} bytes)",
                         recv_piece + 1,
@@ -435,7 +491,7 @@ impl MetadataExchangeSession {
     async fn read_extension_message(
         &self,
         conn: &mut PeerConnection,
-    ) -> Result<BencodeValue, MetadataExchangeError> {
+    ) -> Result<Vec<u8>, MetadataExchangeError> {
         loop {
             let payload = self.read_message_frame(conn, "extension").await?;
             if payload.is_empty() || payload[0] != 20 {
@@ -445,11 +501,7 @@ impl MetadataExchangeSession {
                 continue;
             }
 
-            return BencodeValue::decode(&payload[2..])
-                .map(|(v, _)| v)
-                .map_err(|e| MetadataExchangeError::BencodeDecodeFailed {
-                    detail: format!("Decode BEncode failed: {}", e),
-                });
+            return Ok(payload[2..].to_vec());
         }
     }
 
@@ -593,19 +645,16 @@ mod tests {
 
     #[test]
     fn test_extension_handshake_uses_complete_bep10_frame() {
-        let mut handshake = ExtensionHandshake::new(0);
-        handshake.metadata_size = None;
-        let frame = serialize_extended(0, handshake.to_bencode().encode());
+        let handshake = ExtensionHandshake::new();
+        let frame = serialize_extended(0, handshake.to_bytes());
         let frame_len = u32::from_be_bytes(frame[..4].try_into().unwrap()) as usize;
 
         assert_eq!(frame_len, frame.len() - 4);
         assert_eq!(&frame[4..6], &[20, 0]);
 
-        let (payload, consumed) = BencodeValue::decode(&frame[6..]).unwrap();
-        assert_eq!(consumed, frame.len() - 6);
-        let parsed = ExtensionHandshake::parse(&payload).unwrap();
-        assert_eq!(parsed.get_ut_metadata_id(), Some(1));
-        assert_eq!(parsed.metadata_size, None);
+        let parsed = ExtensionHandshake::from_bytes(&frame[6..]).unwrap();
+        assert_eq!(parsed.ut_metadata_id(), Some(1));
+        assert_eq!(parsed.metadata_size(), None);
     }
 
     #[test]

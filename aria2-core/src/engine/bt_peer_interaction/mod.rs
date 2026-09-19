@@ -192,33 +192,19 @@ impl BtPeerInteraction {
                         addr.ip, addr.port
                     )))
                 })?;
-            let utp_result = match connection_options.hybrid_info_hash_v2.as_ref() {
-                Some(info_hash_v2) => {
-                    BtPeerConn::connect_utp_hybrid_with_options_and_dht(
-                        endpoint,
-                        info_hash_raw,
-                        info_hash_v2,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                        connection_options.utp_listen_port,
-                        utp_socket,
-                        connection_options.dht_enabled,
-                    )
-                    .await
-                }
-                None => {
-                    BtPeerConn::connect_utp_with_options_and_dht(
-                        endpoint,
-                        info_hash_raw,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                        connection_options.utp_listen_port,
-                        utp_socket,
-                        connection_options.dht_enabled,
-                    )
-                    .await
-                }
-            };
+            let utp_result = BtPeerConn::connect_utp_with_options(
+                endpoint,
+                info_hash_raw,
+                connection_options.hybrid_info_hash_v2.as_ref(),
+                crate::engine::bt_peer_connection::UtpConnectionOptions {
+                    local_peer_id: connection_options.local_peer_id,
+                    timeout: connection_options.connection_timeout,
+                    listen_port: connection_options.utp_listen_port,
+                    shared_socket: utp_socket,
+                    dht_enabled: connection_options.dht_enabled,
+                },
+            )
+            .await;
             match utp_result {
                 Ok(conn) => {
                     debug!("[BT] Connected to peer {}:{} over uTP", addr.ip, addr.port);
@@ -235,89 +221,47 @@ impl BtPeerInteraction {
 
         if connection_options.crypto.require_mse {
             // Try MSE encrypted connection
-            match connection_options.hybrid_info_hash_v2.as_ref() {
-                Some(info_hash_v2) => {
-                    BtPeerConn::connect_mse_hybrid_with_options_and_dht(
-                        addr,
-                        info_hash_raw,
-                        info_hash_v2,
-                        connection_options.crypto.force_encryption,
-                        connection_options.crypto.prefer_encryption,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                        connection_options.dht_enabled,
-                    )
-                    .await
-                }
-                None => {
-                    BtPeerConn::connect_mse_with_options_and_dht(
-                        addr,
-                        info_hash_raw,
-                        connection_options.crypto.force_encryption,
-                        connection_options.crypto.prefer_encryption,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                        connection_options.dht_enabled,
-                    )
-                    .await
-                }
-            }
+            BtPeerConn::connect_mse_with_options(
+                addr,
+                info_hash_raw,
+                connection_options.hybrid_info_hash_v2.as_ref(),
+                crate::engine::bt_peer_connection::MseConnectionOptions {
+                    force_encryption: connection_options.crypto.force_encryption,
+                    prefer_encryption: connection_options.crypto.prefer_encryption,
+                    local_peer_id: connection_options.local_peer_id,
+                    timeout: connection_options.connection_timeout,
+                    dht_enabled: connection_options.dht_enabled,
+                },
+            )
+            .await
         } else {
             // Try MSE first, fall back to plain
-            let mse_result = match connection_options.hybrid_info_hash_v2.as_ref() {
-                Some(info_hash_v2) => {
-                    BtPeerConn::connect_mse_hybrid_with_options_and_dht(
-                        addr,
-                        info_hash_raw,
-                        info_hash_v2,
-                        connection_options.crypto.force_encryption,
-                        connection_options.crypto.prefer_encryption,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                        connection_options.dht_enabled,
-                    )
-                    .await
-                }
-                None => {
-                    BtPeerConn::connect_mse_with_options_and_dht(
-                        addr,
-                        info_hash_raw,
-                        connection_options.crypto.force_encryption,
-                        connection_options.crypto.prefer_encryption,
-                        &connection_options.local_peer_id,
-                        connection_options.connection_timeout,
-                        connection_options.dht_enabled,
-                    )
-                    .await
-                }
-            };
+            let mse_result = BtPeerConn::connect_mse_with_options(
+                addr,
+                info_hash_raw,
+                connection_options.hybrid_info_hash_v2.as_ref(),
+                crate::engine::bt_peer_connection::MseConnectionOptions {
+                    force_encryption: connection_options.crypto.force_encryption,
+                    prefer_encryption: connection_options.crypto.prefer_encryption,
+                    local_peer_id: connection_options.local_peer_id,
+                    timeout: connection_options.connection_timeout,
+                    dht_enabled: connection_options.dht_enabled,
+                },
+            )
+            .await;
             match mse_result {
                 Ok(conn) => Ok(conn),
                 Err(_) => {
                     debug!("[BT] MSE failed, trying plain connection");
-                    match connection_options.hybrid_info_hash_v2.as_ref() {
-                        Some(info_hash_v2) => {
-                            BtPeerConn::connect_plain_hybrid_with_options_and_dht(
-                                addr,
-                                info_hash_raw,
-                                info_hash_v2,
-                                &connection_options.local_peer_id,
-                                connection_options.connection_timeout,
-                                connection_options.dht_enabled,
-                            )
-                            .await
-                        }
-                        None => {
-                            BtPeerConn::connect_plain_with_options_and_dht(
-                                addr,
-                                info_hash_raw,
-                                &connection_options.local_peer_id,
-                                connection_options.connection_timeout,
-                                connection_options.dht_enabled,
-                            )
-                            .await
-                        }
-                    }
+                    BtPeerConn::connect_plain_with_options(
+                        addr,
+                        info_hash_raw,
+                        connection_options.hybrid_info_hash_v2.as_ref(),
+                        &connection_options.local_peer_id,
+                        connection_options.connection_timeout,
+                        connection_options.dht_enabled,
+                    )
+                    .await
                 }
             }
         }

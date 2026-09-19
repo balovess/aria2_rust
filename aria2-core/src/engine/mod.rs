@@ -118,6 +118,8 @@ pub mod lpd_receive_loop;
 #[cfg(feature = "bittorrent")]
 pub mod magnet_download_command;
 #[cfg(feature = "bittorrent")]
+pub mod metadata_collector;
+#[cfg(feature = "bittorrent")]
 pub mod metadata_exchange;
 #[cfg(feature = "bittorrent")]
 pub mod udp_tracker_client;

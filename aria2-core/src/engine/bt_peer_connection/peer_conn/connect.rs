@@ -13,6 +13,24 @@ use super::super::types::{ConnectionType, SendBuffer};
 use super::super::utp_connection::UtpPeerConnection;
 use super::{BtPeerConn, InnerConnection, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
 
+#[derive(Clone, Copy)]
+pub struct MseConnectionOptions {
+    pub force_encryption: bool,
+    pub prefer_encryption: bool,
+    pub local_peer_id: [u8; 20],
+    pub timeout: std::time::Duration,
+    pub dht_enabled: bool,
+}
+
+#[derive(Clone)]
+pub struct UtpConnectionOptions {
+    pub local_peer_id: [u8; 20],
+    pub timeout: std::time::Duration,
+    pub listen_port: Option<u16>,
+    pub shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    pub dht_enabled: bool,
+}
+
 impl BtPeerConn {
     // -----------------------------------------------------------------------
     // Connection constructors
@@ -29,10 +47,14 @@ impl BtPeerConn {
         Self::connect_mse_with_options(
             addr,
             info_hash,
-            force_encryption,
-            prefer_encryption,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
+            None,
+            MseConnectionOptions {
+                force_encryption,
+                prefer_encryption,
+                local_peer_id,
+                timeout: std::time::Duration::from_secs(15),
+                dht_enabled: false,
+            },
         )
         .await
     }
@@ -40,129 +62,33 @@ impl BtPeerConn {
     /// Connect via MSE using the task's peer identity and connection timeout.
     pub async fn connect_mse_with_options(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        Self::connect_mse_with_options_and_dht(
-            addr,
-            info_hash,
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            false,
-        )
-        .await
-    }
-
-    /// Connect via MSE and explicitly select whether BEP 5 DHT support is
-    /// advertised in the encrypted BitTorrent handshake.
-    pub async fn connect_mse_with_options_and_dht(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_mse_with_hashes(
-            addr,
-            info_hash,
-            None,
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            dht_enabled,
-        )
-        .await
-    }
-
-    /// Connect via MSE using the BEP 52 hybrid upgrade path.
-    pub async fn connect_mse_hybrid_with_options(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
+        info_hash_v2: Option<&[u8; 32]>,
+        options: MseConnectionOptions,
     ) -> Result<Self> {
-        Self::connect_mse_hybrid_with_options_and_dht(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            false,
-        )
-        .await
-    }
-
-    /// Connect a hybrid torrent via MSE and explicitly select whether BEP 5
-    /// DHT support is advertised.
-    pub async fn connect_mse_hybrid_with_options_and_dht(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_mse_with_hashes(
-            addr,
-            info_hash_v1,
-            Some(info_hash_v2),
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            dht_enabled,
-        )
-        .await
+        Self::connect_mse_with_hashes(addr, info_hash_v1, info_hash_v2, options).await
     }
 
     async fn connect_mse_with_hashes(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
+        options: MseConnectionOptions,
     ) -> Result<Self> {
-        let connection = match info_hash_v2 {
-            Some(info_hash_v2) => aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_hybrid_with_options_and_dht(
+        let connection =
+            aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
                 addr,
                 info_hash_v1,
                 info_hash_v2,
-                force_encryption,
-                prefer_encryption,
-                local_peer_id,
-                timeout,
-                dht_enabled,
+                aria2_protocol::bittorrent::peer::encrypted_connection::MseConnectionOptions {
+                    force_encryption: options.force_encryption,
+                    prefer_encryption: options.prefer_encryption,
+                    local_peer_id: options.local_peer_id,
+                    timeout: options.timeout,
+                    dht_enabled: options.dht_enabled,
+                },
             )
-            .await,
-            None => aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options_and_dht(
-                addr,
-                info_hash_v1,
-                force_encryption,
-                prefer_encryption,
-                local_peer_id,
-                timeout,
-                dht_enabled,
-            )
-            .await,
-        };
+            .await;
         match connection {
             Ok(conn) => {
                 let now = Instant::now();
@@ -214,8 +140,10 @@ impl BtPeerConn {
         Self::connect_plain_with_options(
             addr,
             info_hash,
+            None,
             &local_peer_id,
             std::time::Duration::from_secs(15),
+            false,
         )
         .await
     }
@@ -223,52 +151,8 @@ impl BtPeerConn {
     /// Connect via plain TCP using the task's peer identity and timeout.
     pub async fn connect_plain_with_options(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        Self::connect_plain_with_options_and_dht(addr, info_hash, local_peer_id, timeout, false)
-            .await
-    }
-
-    /// Connect via plain TCP and explicitly select whether BEP 5 DHT support
-    /// is advertised in the BitTorrent handshake.
-    pub async fn connect_plain_with_options_and_dht(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_plain_with_hashes(addr, info_hash, None, local_peer_id, timeout, dht_enabled)
-            .await
-    }
-
-    /// Connect via plain TCP, optionally using the BEP 52 hybrid upgrade.
-    pub async fn connect_plain_hybrid_with_options(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        Self::connect_plain_hybrid_with_options_and_dht(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            local_peer_id,
-            timeout,
-            false,
-        )
-        .await
-    }
-
-    /// Connect a hybrid torrent via plain TCP and explicitly select whether
-    /// BEP 5 DHT support is advertised.
-    pub async fn connect_plain_hybrid_with_options_and_dht(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
+        info_hash_v2: Option<&[u8; 32]>,
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
         dht_enabled: bool,
@@ -276,7 +160,7 @@ impl BtPeerConn {
         Self::connect_plain_with_hashes(
             addr,
             info_hash_v1,
-            Some(info_hash_v2),
+            info_hash_v2,
             local_peer_id,
             timeout,
             dht_enabled,
@@ -292,16 +176,16 @@ impl BtPeerConn {
         timeout: std::time::Duration,
         dht_enabled: bool,
     ) -> Result<Self> {
-        let result = match info_hash_v2 {
-            Some(info_hash_v2) => aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_hybrid_with_timeout_and_dht(
-                addr, info_hash_v1, info_hash_v2, local_peer_id, timeout, dht_enabled,
+        let result =
+            aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout(
+                addr,
+                info_hash_v1,
+                info_hash_v2,
+                local_peer_id,
+                timeout,
+                dht_enabled,
             )
-            .await,
-            None => aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout_and_dht(
-                addr, info_hash_v1, local_peer_id, timeout, dht_enabled,
-            )
-            .await,
-        };
+            .await;
         match result {
             Ok(conn) => {
                 let now = Instant::now();
@@ -436,7 +320,7 @@ impl BtPeerConn {
 
         let peer_conn =
             aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-                stream, [0u8; 20],
+                stream, [0u8; 20], false,
             );
 
         Self {
@@ -476,10 +360,14 @@ impl BtPeerConn {
         Self::connect_utp_with_options(
             addr,
             info_hash,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
             None,
-            None,
+            UtpConnectionOptions {
+                local_peer_id,
+                timeout: std::time::Duration::from_secs(15),
+                listen_port: None,
+                shared_socket: None,
+                dht_enabled: false,
+            },
         )
         .await
     }
@@ -488,144 +376,44 @@ impl BtPeerConn {
     /// socket when one is available.
     pub async fn connect_utp_with_options(
         addr: std::net::SocketAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
-    ) -> Result<Self> {
-        Self::connect_utp_with_options_and_dht(
-            addr,
-            info_hash,
-            local_peer_id,
-            timeout,
-            listen_port,
-            shared_socket,
-            false,
-        )
-        .await
-    }
-
-    /// Connect via uTP and explicitly select whether BEP 5 DHT support is
-    /// advertised in the BitTorrent handshake.
-    pub async fn connect_utp_with_options_and_dht(
-        addr: std::net::SocketAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_utp_with_hashes(
-            addr,
-            info_hash,
-            None,
-            local_peer_id,
-            timeout,
-            listen_port,
-            shared_socket,
-            dht_enabled,
-        )
-        .await
-    }
-
-    /// Connect via uTP using the BEP 52 hybrid upgrade path.
-    pub async fn connect_utp_hybrid_with_options(
-        addr: std::net::SocketAddr,
         info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        info_hash_v2: Option<&[u8; 32]>,
+        options: UtpConnectionOptions,
     ) -> Result<Self> {
-        Self::connect_utp_hybrid_with_options_and_dht(
-            addr,
-            info_hash_v1,
-            info_hash_v2,
-            local_peer_id,
-            timeout,
-            listen_port,
-            shared_socket,
-            false,
-        )
-        .await
-    }
-
-    /// Connect a hybrid torrent via uTP and explicitly select whether BEP 5
-    /// DHT support is advertised.
-    pub async fn connect_utp_hybrid_with_options_and_dht(
-        addr: std::net::SocketAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
-        dht_enabled: bool,
-    ) -> Result<Self> {
-        Self::connect_utp_with_hashes(
-            addr,
-            info_hash_v1,
-            Some(info_hash_v2),
-            local_peer_id,
-            timeout,
-            listen_port,
-            shared_socket,
-            dht_enabled,
-        )
-        .await
+        Self::connect_utp_with_hashes(addr, info_hash_v1, info_hash_v2, options).await
     }
 
     async fn connect_utp_with_hashes(
         addr: std::net::SocketAddr,
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        listen_port: Option<u16>,
-        shared_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
-        dht_enabled: bool,
+        options: UtpConnectionOptions,
     ) -> Result<Self> {
-        let utp_conn = match shared_socket {
+        let utp_conn = match options.shared_socket {
             Some(socket) => {
-                UtpPeerConnection::connect_with_shared_socket_hybrid_and_dht(
+                UtpPeerConnection::connect_with_shared_socket_hybrid(
                     socket,
                     addr,
                     info_hash_v1,
                     info_hash_v2,
-                    local_peer_id,
-                    timeout,
-                    dht_enabled,
+                    &options.local_peer_id,
+                    options.timeout,
+                    options.dht_enabled,
                 )
                 .await?
             }
-            None => match info_hash_v2 {
-                Some(info_hash_v2) => {
-                    UtpPeerConnection::connect_with_hybrid_options_and_dht(
-                        addr,
-                        info_hash_v1,
-                        info_hash_v2,
-                        local_peer_id,
-                        timeout,
-                        listen_port,
-                        dht_enabled,
-                    )
-                    .await?
-                }
-                None => {
-                    UtpPeerConnection::connect_with_options_and_dht(
-                        addr,
-                        info_hash_v1,
-                        local_peer_id,
-                        timeout,
-                        listen_port,
-                        dht_enabled,
-                    )
-                    .await?
-                }
-            },
+            None => {
+                UtpPeerConnection::connect_with_options(
+                    addr,
+                    info_hash_v1,
+                    info_hash_v2,
+                    &options.local_peer_id,
+                    options.timeout,
+                    options.listen_port,
+                    options.dht_enabled,
+                )
+                .await?
+            }
         };
         let now = Instant::now();
 

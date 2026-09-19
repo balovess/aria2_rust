@@ -1,7 +1,7 @@
 pub mod bootstrap;
 pub mod bucket;
 pub mod bucket_tree;
-pub mod client;
+pub mod compact;
 pub mod engine;
 pub(super) mod engine_inner;
 pub mod handler;

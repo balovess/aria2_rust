@@ -30,7 +30,6 @@ fn persistence_file_lock(path: &Path) -> Arc<Mutex<()>> {
 const DHT_MAGIC: &[u8] = &[0xA1, 0xA2];
 const DHT_FORMAT_ID: u8 = 0x02;
 const DHT_VERSION_3: u8 = 0x03;
-const DHT_VERSION_2: u8 = 0x02;
 const NODE_ENTRY_SIZE: usize = 48;
 
 #[derive(Debug, Clone)]
@@ -151,59 +150,29 @@ impl DhtPersistence {
             0,
             DHT_VERSION_3,
         ];
-        let header_v2: [u8; 8] = [
-            DHT_MAGIC[0],
-            DHT_MAGIC[1],
-            DHT_FORMAT_ID,
-            0,
-            0,
-            0,
-            0,
-            DHT_VERSION_2,
-        ];
-
-        let version = if data[..8] == header_v3[..] {
-            3
-        } else if data[..8] == header_v2[..] {
-            2
-        } else {
+        if data[..8] != header_v3[..] {
             return Err(format!(
                 "dht.dat invalid magic/version: {:02x?}",
                 &data[..8]
             ));
-        };
+        }
 
         let mut offset = 8;
 
-        let saved_at_secs = if version >= 3 {
-            if offset + 8 > data.len() {
-                return Err("dht.dat timestamp truncated".into());
-            }
-            let ts = u64::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-                data[offset + 4],
-                data[offset + 5],
-                data[offset + 6],
-                data[offset + 7],
-            ]);
-            offset += 8;
-            ts
-        } else {
-            if offset + 8 > data.len() {
-                return Err("dht.dat timestamp truncated (v2)".into());
-            }
-            let ts32 = u32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as u64;
-            offset += 8;
-            ts32
-        };
+        if offset + 8 > data.len() {
+            return Err("dht.dat timestamp truncated".into());
+        }
+        let saved_at_secs = u64::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+            data[offset + 5],
+            data[offset + 6],
+            data[offset + 7],
+        ]);
+        offset += 8;
 
         if offset + 32 > data.len() {
             return Err("dht.dat localnode truncated".into());
@@ -505,24 +474,6 @@ mod tests {
         assert_eq!(restored.nodes.len(), 2);
         assert!(restored.nodes.iter().any(|node| node.id == [0x01; 20]));
         assert!(restored.nodes.iter().any(|node| node.id == [0x02; 20]));
-    }
-
-    #[test]
-    fn test_deserialize_v2_compat() {
-        let mut data = vec![0u8; 56];
-        data[0] = 0xA1;
-        data[1] = 0xA2;
-        data[2] = 0x02;
-        data[7] = 0x02;
-        data[8..12].copy_from_slice(&(1000u32).to_be_bytes());
-
-        let id = [0xCCu8; 20];
-        data[24..44].copy_from_slice(&id);
-
-        let result = DhtPersistence::deserialize(&data).unwrap();
-        assert_eq!(result.self_id, id);
-        assert_eq!(result.saved_at_secs, 1000);
-        assert!(result.nodes.is_empty());
     }
 
     #[test]

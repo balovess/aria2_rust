@@ -599,6 +599,102 @@ async fn application_rpc_does_not_enable_cors_by_default() {
 }
 
 #[tokio::test]
+async fn application_rpc_routes_add_uri_and_tell_status_end_to_end() {
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let port = probe
+        .local_addr()
+        .expect("test listener should expose an address")
+        .port();
+    drop(probe);
+
+    let app = App::new();
+    {
+        let mut config = app.config.write().await;
+        config
+            .set_global_option("enable-rpc", OptionValue::Bool(true))
+            .await
+            .expect("enable-rpc should be valid");
+        config
+            .set_global_option("rpc-listen-port", OptionValue::Int(port as i64))
+            .await
+            .expect("rpc-listen-port should be valid");
+        config
+            .set_global_option(
+                "rpc-listen-address",
+                OptionValue::Str("127.0.0.1".to_string()),
+            )
+            .await
+            .expect("rpc-listen-address should be valid");
+        config
+            .set_global_option("disable-ipv6", OptionValue::Bool(true))
+            .await
+            .expect("disable-ipv6 should be valid");
+        config
+            .set_global_option("rpc-secret", OptionValue::Str("secret".to_string()))
+            .await
+            .expect("rpc-secret should be valid");
+    }
+
+    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let server = app
+        .start_rpc_server(
+            super::startup::StartupPlan::resolve(super::startup::StartupInputs {
+                has_initial_downloads: false,
+                has_input_file: false,
+                restored_tasks: 0,
+                tui: false,
+                configured_rpc: true,
+                explicit_rpc: None,
+            })
+            .unwrap(),
+            app.request_man.clone(),
+            cmd_tx,
+        )
+        .await
+        .expect("RPC server should start");
+
+    let add_body = r#"{"jsonrpc":"2.0","id":1,"method":"aria2.addUri","params":["token:secret",["http://127.0.0.1:1/library-api-test"]]}"#;
+    let add_request = format!(
+        "POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{add_body}",
+        add_body.len()
+    );
+    let add_response = read_http_response(port, &add_request).await;
+    let add_json: serde_json::Value = serde_json::from_str(
+        add_response
+            .split_once("\r\n\r\n")
+            .expect("RPC response should contain an HTTP body")
+            .1,
+    )
+    .expect("addUri response should be valid JSON");
+    let gid = add_json["result"]
+        .as_str()
+        .expect("addUri should return a GID")
+        .to_string();
+
+    let status_body = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"aria2.tellStatus","params":["token:secret","{gid}"]}}"#
+    );
+    let status_request = format!(
+        "POST /jsonrpc HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{status_body}",
+        status_body.len()
+    );
+    let status_response = read_http_response(port, &status_request).await;
+    let status_json: serde_json::Value = serde_json::from_str(
+        status_response
+            .split_once("\r\n\r\n")
+            .expect("RPC response should contain an HTTP body")
+            .1,
+    )
+    .expect("tellStatus response should be valid JSON");
+
+    server.abort();
+    assert!(status_json["error"].is_null(), "tellStatus should succeed");
+    assert_eq!(status_json["result"]["gid"].as_str(), Some(gid.as_str()));
+}
+
+#[tokio::test]
 async fn application_run_fails_when_rpc_bind_fails() {
     let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

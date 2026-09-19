@@ -304,7 +304,7 @@ async fn test_bt_peer_conn_sends_configured_peer_agent_on_wire() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let (server, endpoint) = listener.accept().await.unwrap();
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-        server, [0u8; 20],
+        server, [0u8; 20], false,
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
 
@@ -351,7 +351,7 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let (server, endpoint) = listener.accept().await.unwrap();
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-        server, [0u8; 20],
+        server, [0u8; 20], false,
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
     connection.allocate_session_resource(16 * 1024, 16 * 1024);

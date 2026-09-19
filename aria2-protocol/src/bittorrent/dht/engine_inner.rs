@@ -466,7 +466,7 @@ impl DhtEngineContext {
                 let task_factory = task_factory.clone();
                 async move {
                     task_factory
-                        .create_replace_node_for_node(questionable_node_id, new_node)
+                        .create_replace_node_task(questionable_node_id, new_node)
                         .run()
                         .await;
                 }

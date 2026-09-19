@@ -16,8 +16,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use tracing::{debug, warn};
 
-use super::client::extract_compact_nodes_from_response;
-use super::client::extract_compact_peers_from_response;
+use super::compact::{extract_compact_nodes_from_response, extract_compact_peers_from_response};
 use super::message::{DhtMessage, DhtMessageBuilder};
 use super::modern::{
     MutableValue, SampleInfoHashesResponse, StoredItem, get_query, sample_infohashes_query,

@@ -449,6 +449,19 @@ impl DownloadEngine {
         let task = tokio::spawn(async move { self.run().await });
         Ok(DownloadEngineHandle { manager, task })
     }
+
+    /// Attach a request-group manager, start the engine, and return its owning
+    /// lifecycle handle in one step.
+    ///
+    /// This is the compact entry point for embedders that do not need to
+    /// configure the engine between wiring the manager and starting it.
+    pub fn start_with_request_group_man(
+        mut self,
+        group_man: Arc<RequestGroupMan>,
+    ) -> Result<DownloadEngineHandle> {
+        self.set_request_group_man(group_man);
+        self.start()
+    }
 }
 
 #[cfg(test)]
@@ -516,6 +529,24 @@ mod tests {
             .expect("wait task must not panic");
         assert!(matches!(result, Err(DownloadManagerError::WaitCancelled)));
         assert!(handle.status_snapshot().is_some());
+    }
+
+    #[tokio::test]
+    async fn starts_with_request_group_manager_in_one_step() {
+        let mut engine = DownloadEngine::new();
+        engine.set_keep_alive(true);
+        let handle = engine
+            .start_with_request_group_man(Arc::new(RequestGroupMan::new()))
+            .expect("engine should start with a request-group manager");
+
+        assert!(handle.downloads().handles().is_empty());
+        handle
+            .shutdown()
+            .expect("shutdown command should be accepted");
+        tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .expect("engine should stop promptly")
+            .expect("engine should stop cleanly");
     }
 
     #[test]

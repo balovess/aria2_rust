@@ -18,6 +18,15 @@ pub struct EncryptedConnection {
     read_buffer: BytesMut,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct MseConnectionOptions {
+    pub force_encryption: bool,
+    pub prefer_encryption: bool,
+    pub local_peer_id: [u8; 20],
+    pub timeout: std::time::Duration,
+    pub dht_enabled: bool,
+}
+
 impl EncryptedConnection {
     /// Wrap a TCP stream after the receiver-side MSE and BitTorrent
     /// handshakes have completed.
@@ -25,9 +34,10 @@ impl EncryptedConnection {
         stream: tokio::net::TcpStream,
         crypto: MseCryptoState,
         peer_id: [u8; 20],
+        remote_supports_dht: bool,
     ) -> Self {
         Self {
-            inner: PeerConnection::from_stream_with_peer(stream, peer_id),
+            inner: PeerConnection::from_stream_with_peer(stream, peer_id, remote_supports_dht),
             crypto,
             mse_negotiated: true,
             read_ahead: Vec::new(),
@@ -45,10 +55,14 @@ impl EncryptedConnection {
         Self::connect_with_mse_with_options(
             addr,
             info_hash,
-            force_encryption,
-            prefer_encryption,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
+            None,
+            MseConnectionOptions {
+                force_encryption,
+                prefer_encryption,
+                local_peer_id,
+                timeout: std::time::Duration::from_secs(15),
+                dht_enabled: false,
+            },
         )
         .await
     }
@@ -56,139 +70,33 @@ impl EncryptedConnection {
     pub async fn connect_with_mse_with_options(
         addr: &PeerAddr,
         info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
+        info_hash_v2: Option<&[u8; 32]>,
+        options: MseConnectionOptions,
     ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
+        let socket_addr = addr
+            .to_socket_addr()
+            .map_err(|error| format!("Invalid peer address {}:{}: {error}", addr.ip, addr.port))?;
         debug!("MSE connecting to peer: {}", socket_addr);
 
-        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-            .await
-            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
-            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
-
-        // aria2's MSE path starts with DH. The 68-byte BitTorrent handshake
-        // is exchanged only after MSE has selected the stream cipher.
-        Self::complete_mse_handshake(
-            stream,
-            info_hash,
-            None,
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            false,
+        let stream = tokio::time::timeout(
+            options.timeout,
+            tokio::net::TcpStream::connect(&socket_addr),
         )
         .await
-    }
+        .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
+        .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
-    /// Connect with MSE while explicitly selecting whether the BitTorrent
-    /// handshake advertises BEP 5 DHT support.
-    pub async fn connect_with_mse_with_options_and_dht(
-        addr: &PeerAddr,
-        info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
-        debug!("MSE connecting to peer: {}", socket_addr);
-
-        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-            .await
-            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
-            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
-
-        Self::complete_mse_handshake(
-            stream,
-            info_hash,
-            None,
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            dht_enabled,
-        )
-        .await
-    }
-
-    /// Connect with MSE while advertising and accepting the BEP 52 hybrid
-    /// upgrade response. MSE itself is keyed by the v1 hash; the peer wire
-    /// handshake may then switch to the truncated v2 hash.
-    pub async fn connect_with_mse_hybrid_with_options(
-        addr: &PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
-        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-            .await
-            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
-            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
-        Self::complete_mse_handshake(
-            stream,
-            info_hash_v1,
-            Some(info_hash_v2),
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            false,
-        )
-        .await
-    }
-
-    /// Connect with MSE on a hybrid torrent while explicitly selecting
-    /// whether the BitTorrent handshake advertises BEP 5 DHT support.
-    pub async fn connect_with_mse_hybrid_with_options_and_dht(
-        addr: &PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
-        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-            .await
-            .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
-            .map_err(|e| format!("Failed to connect to peer: {}", e))?;
-
-        Self::complete_mse_handshake(
-            stream,
-            info_hash_v1,
-            Some(info_hash_v2),
-            force_encryption,
-            prefer_encryption,
-            local_peer_id,
-            timeout,
-            dht_enabled,
-        )
-        .await
+        Self::complete_mse_handshake(stream, info_hash, info_hash_v2, options).await
     }
 
     async fn complete_mse_handshake(
         mut stream: tokio::net::TcpStream,
         info_hash: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
-        force_encryption: bool,
-        prefer_encryption: bool,
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
+        options: MseConnectionOptions,
     ) -> Result<Self, String> {
         let mut initiator = MseHandshake::new_initiator(*info_hash);
-        initiator.set_crypto_preferences(force_encryption, prefer_encryption);
+        initiator.set_crypto_preferences(options.force_encryption, options.prefer_encryption);
 
         // Step 1: Exchange DH public keys
         let step1_i = initiator.build_step1();
@@ -204,8 +112,13 @@ impl EncryptedConnection {
         // PadB has no explicit length. The later VC marker synchronizes the
         // response, just as MSEHandshake::findInitiatorVCMarker does upstream.
         let mut step1_r_buf = vec![0u8; MSE_PUBLIC_KEY_LENGTH];
-        Self::read_exact_with_timeout(&mut stream, &mut step1_r_buf, "MSE public key", timeout)
-            .await?;
+        Self::read_exact_with_timeout(
+            &mut stream,
+            &mut step1_r_buf,
+            "MSE public key",
+            options.timeout,
+        )
+        .await?;
 
         initiator.receive_step1(&step1_r_buf)?;
 
@@ -224,7 +137,7 @@ impl EncryptedConnection {
         let mut read_ahead = Vec::new();
         let response_len = loop {
             let mut chunk = [0u8; 64];
-            let read_len = tokio::time::timeout(timeout, stream.read(&mut chunk))
+            let read_len = tokio::time::timeout(options.timeout, stream.read(&mut chunk))
                 .await
                 .map_err(|_| "MSE response read timeout".to_string())?
                 .map_err(|error| format!("MSE response read failed: {error}"))?;
@@ -253,8 +166,8 @@ impl EncryptedConnection {
             crypto.is_encrypted()
         );
 
-        let mut local_handshake = Handshake::new(info_hash, local_peer_id)
-            .with_dht(dht_enabled)
+        let mut local_handshake = Handshake::new(info_hash, &options.local_peer_id)
+            .with_dht(options.dht_enabled)
             .with_bep52(info_hash_v2.is_some())
             .to_bytes();
         crypto.encrypt(&mut local_handshake);
@@ -269,7 +182,7 @@ impl EncryptedConnection {
             &mut read_ahead,
             &mut remote_handshake,
             "MSE handshake",
-            timeout,
+            options.timeout,
         )
         .await?;
         crypto.decrypt(&mut remote_handshake);
@@ -292,7 +205,7 @@ impl EncryptedConnection {
                 );
             }
         }
-        let conn = PeerConnection::from_stream_with_peer_and_dht(
+        let conn = PeerConnection::from_stream_with_peer(
             stream,
             remote_hs.peer_id,
             remote_hs.supports_dht(),
@@ -535,6 +448,7 @@ mod tests {
             server,
             MseCryptoState::new_plain(),
             [0u8; 20],
+            false,
         );
         let frame = crate::bittorrent::message::serializer::serialize(&BtMessage::Choke);
 

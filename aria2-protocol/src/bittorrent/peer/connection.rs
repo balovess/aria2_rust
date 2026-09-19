@@ -50,10 +50,10 @@ impl PeerAddr {
         })
     }
 
-    pub fn to_socket_addr(&self) -> std::net::SocketAddr {
-        format!("{}:{}", self.ip, self.port)
+    pub fn to_socket_addr(&self) -> Result<std::net::SocketAddr, std::net::AddrParseError> {
+        self.ip
             .parse()
-            .unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap())
+            .map(|ip| std::net::SocketAddr::new(ip, self.port))
     }
 
     /// Encode to IPv4 compact format (4-byte IP + 2-byte port = 6 bytes).
@@ -91,31 +91,15 @@ pub struct PeerConnection {
 impl PeerConnection {
     pub async fn connect_with_timeout(
         addr: &PeerAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
-        debug!("Connecting to peer: {}", socket_addr);
-
-        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-            .await
-            .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
-            .map_err(|e| format!("Peer connection failed: {}", e))?;
-
-        Self::from_stream_with_timeout(stream, info_hash, local_peer_id, timeout).await
-    }
-
-    /// Connect using the standard TCP handshake while optionally advertising
-    /// BEP 5 DHT support.
-    pub async fn connect_with_timeout_and_dht(
-        addr: &PeerAddr,
-        info_hash: &[u8; 20],
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
         dht_enabled: bool,
     ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
+        let socket_addr = addr
+            .to_socket_addr()
+            .map_err(|error| format!("Invalid peer address {}:{}: {error}", addr.ip, addr.port))?;
         debug!("Connecting to peer: {}", socket_addr);
 
         let mut stream =
@@ -124,13 +108,20 @@ impl PeerConnection {
                 .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
                 .map_err(|e| format!("Peer connection failed: {}", e))?;
 
-        let handshake = Handshake::new(info_hash, local_peer_id).with_dht(dht_enabled);
+        let mut handshake = Handshake::new(info_hash_v1, local_peer_id).with_dht(dht_enabled);
+        handshake.set_bep52_enabled(info_hash_v2.is_some());
         stream
             .write_all(&handshake.to_bytes())
             .await
             .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
-        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash, timeout).await?;
+        let remote_hs = match info_hash_v2 {
+            Some(info_hash_v2) => {
+                Self::read_remote_handshake_hybrid(&mut stream, info_hash_v1, info_hash_v2, timeout)
+                    .await?
+            }
+            None => Self::read_remote_handshake(&mut stream, info_hash_v1, timeout).await?,
+        };
         Self::finish_handshake(stream, remote_hs)
     }
 
@@ -139,72 +130,12 @@ impl PeerConnection {
         Self::connect_with_timeout(
             addr,
             info_hash,
+            None,
             &local_peer_id,
             std::time::Duration::from_secs(15),
+            false,
         )
         .await
-    }
-
-    /// Connect to a hybrid BEP 52 torrent.
-    ///
-    /// The initial handshake uses the v1 hash, as required by the upgrade
-    /// path. A responder may return either the v1 hash or the truncated v2
-    /// hash; the latter is accepted only when the responder advertises BEP 52.
-    pub async fn connect_hybrid_with_timeout(
-        addr: &PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
-        let mut stream =
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-                .await
-                .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
-                .map_err(|e| format!("Peer connection failed: {}", e))?;
-
-        let mut handshake = Handshake::new(info_hash_v1, local_peer_id);
-        handshake.set_bep52_enabled(true);
-        stream
-            .write_all(&handshake.to_bytes())
-            .await
-            .map_err(|e| format!("Failed to send handshake: {}", e))?;
-
-        let remote_hs =
-            Self::read_remote_handshake_hybrid(&mut stream, info_hash_v1, info_hash_v2, timeout)
-                .await?;
-        Self::finish_handshake(stream, remote_hs)
-    }
-
-    /// Connect to a hybrid torrent while optionally advertising BEP 5 DHT.
-    pub async fn connect_hybrid_with_timeout_and_dht(
-        addr: &PeerAddr,
-        info_hash_v1: &[u8; 20],
-        info_hash_v2: &[u8; 32],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-        dht_enabled: bool,
-    ) -> Result<Self, String> {
-        let socket_addr = addr.to_socket_addr();
-        let mut stream =
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-                .await
-                .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
-                .map_err(|e| format!("Peer connection failed: {}", e))?;
-
-        let mut handshake = Handshake::new(info_hash_v1, local_peer_id);
-        handshake.set_dht_enabled(dht_enabled);
-        handshake.set_bep52_enabled(true);
-        stream
-            .write_all(&handshake.to_bytes())
-            .await
-            .map_err(|e| format!("Failed to send handshake: {}", e))?;
-
-        let remote_hs =
-            Self::read_remote_handshake_hybrid(&mut stream, info_hash_v1, info_hash_v2, timeout)
-                .await?;
-        Self::finish_handshake(stream, remote_hs)
     }
 
     async fn from_stream_with_timeout(
@@ -432,13 +363,9 @@ impl PeerConnection {
         })
     }
 
-    pub fn from_stream_with_peer(stream: tokio::net::TcpStream, peer_id: [u8; 20]) -> Self {
-        Self::from_stream_with_peer_and_dht(stream, peer_id, false)
-    }
-
     /// Wrap a stream after an external handshake has already captured the
     /// remote BEP 5 capability.
-    pub fn from_stream_with_peer_and_dht(
+    pub fn from_stream_with_peer(
         stream: tokio::net::TcpStream,
         peer_id: [u8; 20],
         remote_supports_dht: bool,
@@ -648,6 +575,21 @@ mod tests {
     }
 
     #[test]
+    fn test_peer_addr_socket_conversion_supports_ipv6() {
+        let addr = PeerAddr::new("2001:db8::1", 6881);
+        assert_eq!(
+            addr.to_socket_addr().unwrap().to_string(),
+            "[2001:db8::1]:6881"
+        );
+    }
+
+    #[test]
+    fn test_peer_addr_socket_conversion_rejects_invalid_ip() {
+        let addr = PeerAddr::new("not-an-ip", 6881);
+        assert!(addr.to_socket_addr().is_err());
+    }
+
+    #[test]
     fn test_peer_addr_from_compact() {
         let data: [u8; 6] = [127, 0, 0, 1, 0x1A, 0x0B];
         let addr = PeerAddr::from_compact(&data).unwrap();
@@ -718,7 +660,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
         let (server, _) = listener.accept().await.unwrap();
-        let mut connection = PeerConnection::from_stream_with_peer(server, [0u8; 20]);
+        let mut connection = PeerConnection::from_stream_with_peer(server, [0u8; 20], false);
         let frame = crate::bittorrent::message::serializer::serialize(&BtMessage::Choke);
 
         client.write_all(&frame[..2]).await.unwrap();
@@ -751,8 +693,10 @@ mod tests {
         let result = PeerConnection::connect_with_timeout(
             &addr,
             &[1u8; 20],
+            None,
             &[b'X'; 20],
             std::time::Duration::from_millis(20),
+            false,
         )
         .await;
 
@@ -785,8 +729,10 @@ mod tests {
         let connection = PeerConnection::connect_with_timeout(
             &addr,
             &[1u8; 20],
+            None,
             &[b'X'; 20],
             std::time::Duration::from_secs(1),
+            false,
         )
         .await
         .unwrap();
@@ -811,9 +757,10 @@ mod tests {
             stream.write_all(&response).await.unwrap();
         });
 
-        let connection = PeerConnection::connect_with_timeout_and_dht(
+        let connection = PeerConnection::connect_with_timeout(
             &PeerAddr::new("127.0.0.1", address.port()),
             &[1u8; 20],
+            None,
             &[b'X'; 20],
             std::time::Duration::from_secs(1),
             true,
@@ -844,12 +791,13 @@ mod tests {
             stream.write_all(&response).await.unwrap();
         });
 
-        let connection = PeerConnection::connect_hybrid_with_timeout(
+        let connection = PeerConnection::connect_with_timeout(
             &PeerAddr::new("127.0.0.1", address.port()),
             &v1,
-            &v2,
+            Some(&v2),
             &[b'X'; 20],
             std::time::Duration::from_secs(1),
+            false,
         )
         .await
         .unwrap();
@@ -871,12 +819,13 @@ mod tests {
             stream.write_all(&response.to_bytes()).await.unwrap();
         });
 
-        let result = PeerConnection::connect_hybrid_with_timeout(
+        let result = PeerConnection::connect_with_timeout(
             &PeerAddr::new("127.0.0.1", address.port()),
             &v1,
-            &v2,
+            Some(&v2),
             &[b'X'; 20],
             std::time::Duration::from_secs(1),
+            false,
         )
         .await;
         match result {
