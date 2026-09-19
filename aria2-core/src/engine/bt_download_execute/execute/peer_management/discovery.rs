@@ -54,9 +54,9 @@ pub(super) fn prepare_tracker_tiers(
 }
 
 impl BtDownloadCommand {
-    /// Discover peers via tracker announce (HTTP/UDP), DHT, public trackers, and LPD.
+    /// Discover peers via tracker announce (HTTP/WebSocket/UDP), DHT, public trackers, and LPD.
     ///
-    /// Uses the `TrackerAnnouncer` state machine for proper HTTP/UDP dispatch,
+    /// Uses the `TrackerAnnouncer` state machine for proper HTTP/WebSocket/UDP dispatch,
     /// tier rotation, and event management (Started → Downloading → Completed/Stopped).
     pub(in crate::engine::bt_download_execute::execute) async fn discover_peers(
         &mut self,
@@ -68,7 +68,8 @@ impl BtDownloadCommand {
 
         // Initialize the unified TrackerAnnouncer from the torrent's announce list.
         // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
-        // state machine that properly routes HTTP vs UDP based on URL scheme.
+        // state machine that properly routes HTTP, WebSocket, and UDP based on
+        // URL scheme.
         // C++ first removes excluded torrent trackers and then appends each
         // `--bt-tracker` URL as its own tier.
         let (
@@ -80,6 +81,7 @@ impl BtDownloadCommand {
             tracker_interval,
             external_ip,
             force_encryption,
+            websocket_options,
         ) = {
             let g = self.group.recover();
             (
@@ -91,6 +93,7 @@ impl BtDownloadCommand {
                 g.options().bt_tracker_interval,
                 g.options().bt_external_ip.clone(),
                 g.options().bt_force_encrypt || g.options().bt_require_crypto,
+                g.options().clone(),
             )
         };
         let mut tracker_tiers = prepare_tracker_tiers(
@@ -116,10 +119,6 @@ impl BtDownloadCommand {
                 .collect();
             let public_urls: Vec<String> = public_entries
                 .iter()
-                .filter(|entry| {
-                    entry.protocol
-                        != aria2_protocol::bittorrent::tracker::public_list::TrackerProtocol::Wss
-                })
                 .map(|entry| entry.url.clone())
                 .filter(|url| !existing_urls.contains(url))
                 .take(MAX_PUBLIC_TRACKERS_TO_TRY)
@@ -133,6 +132,7 @@ impl BtDownloadCommand {
         tracker_tiers = super::super::deduplicate_tracker_tiers(tracker_tiers);
         let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
         announcer.set_http_tls_config(tracker_tls);
+        announcer.set_websocket_options(&websocket_options);
         announcer.set_timeouts(
             Duration::from_secs(tracker_timeout),
             Duration::from_secs(tracker_connect_timeout),
@@ -157,7 +157,8 @@ impl BtDownloadCommand {
 
         let mut peer_addrs: Vec<(String, u16)> = Vec::new();
 
-        // Try tracker announces through the state machine (handles both HTTP and UDP)
+        // Try tracker announces through the state machine (handles HTTP,
+        // WebSocket, and UDP).
         let mut announce_attempts = 0;
         const MAX_ANNOUNCE_ATTEMPTS: usize = MAX_PUBLIC_TRACKERS_TO_TRY;
 

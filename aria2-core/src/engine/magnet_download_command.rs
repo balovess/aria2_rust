@@ -320,18 +320,20 @@ impl MagnetDownloadCommand {
                         left: magnet.exact_length.unwrap_or(0),
                         uploaded: 0,
                         numwant: 50,
+                        port: announce_port,
+                        event: crate::engine::bt_tracker_comm::AnnounceEvent::Started,
                         options,
                     },
                 )
                 .await
                 {
-                    Ok(peers) if !peers.is_empty() => {
+                    Ok(response) if !response.peers.is_empty() => {
                         info!(
                             tracker = %tracker_url,
-                            peers = peers.len(),
+                            peers = response.peers.len(),
                             "WebSocket tracker announce returned peers"
                         );
-                        return peers;
+                        return response.peers;
                     }
                     Ok(_) => {
                         warn!(tracker = %tracker_url, "WebSocket tracker returned no TCP peers");

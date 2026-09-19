@@ -1,14 +1,14 @@
 //! BitTorrent tracker communication module.
 //!
 //! Provides tracker announce lifecycle management, multi-tier tracker lists,
-//! and HTTP/HTTPS/UDP tracker announce functionality.
+//! and HTTP/HTTPS/WebSocket/UDP tracker announce functionality.
 //!
 //! # Architecture
 //!
 //! - [`BtAnnounce`] — core announce state machine (timing, events, tier rotation)
-//! - [`TrackerAnnouncer`] — unified dispatcher routing HTTP/UDP through BtAnnounce
+//! - [`TrackerAnnouncer`] — unified dispatcher routing HTTP/WebSocket/UDP through BtAnnounce
 //! - [`AnnounceList`] — multi-tier tracker URL management with failover
-//! - [`AnnounceResult`] — unified result type for HTTP and UDP announce responses
+//! - [`AnnounceResult`] — unified result type for HTTP, WebSocket, and UDP announce responses
 
 mod announce_list;
 mod bt_announce;

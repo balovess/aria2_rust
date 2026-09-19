@@ -17,6 +17,7 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
 use tracing::debug;
 
+use crate::engine::bt_tracker_comm::AnnounceEvent;
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::http::{HttpConnectProxyTunnel, HttpProxyConfig, ProxyType};
 use crate::request::request_group::DownloadOptions;
@@ -34,13 +35,23 @@ pub(crate) struct AnnounceRequest<'a> {
     pub(crate) left: u64,
     pub(crate) uploaded: u64,
     pub(crate) numwant: u32,
+    pub(crate) port: u16,
+    pub(crate) event: AnnounceEvent,
     pub(crate) options: &'a DownloadOptions,
+}
+
+pub(crate) struct AnnounceResponse {
+    pub(crate) peers: Vec<SocketAddr>,
+    pub(crate) interval: Option<u64>,
+    pub(crate) min_interval: Option<u64>,
+    pub(crate) seeders: Option<i64>,
+    pub(crate) leechers: Option<i64>,
 }
 
 pub(crate) async fn announce(
     tracker_url: &str,
     announce: AnnounceRequest<'_>,
-) -> Result<Vec<SocketAddr>, String> {
+) -> Result<AnnounceResponse, String> {
     let url = reqwest::Url::parse(tracker_url)
         .map_err(|error| format!("invalid WebSocket tracker URL: {error}"))?;
     let scheme = url.scheme();
@@ -74,7 +85,7 @@ pub(crate) async fn announce(
     .map_err(|_| "WebSocket tracker handshake timed out".to_string())?
     .map_err(|error| format!("WebSocket tracker handshake failed: {error}"))?;
 
-    let message = serde_json::json!({
+    let mut message = serde_json::json!({
         "action": "announce",
         "info_hash": base64::engine::general_purpose::STANDARD.encode(announce.info_hash),
         "peer_id": base64::engine::general_purpose::STANDARD.encode(announce.peer_id),
@@ -82,9 +93,14 @@ pub(crate) async fn announce(
         "downloaded": announce.downloaded,
         "left": announce.left,
         "numwant": announce.numwant,
+        "port": announce.port,
         "compact": 1,
-        "event": "started",
     });
+    if let Some(event) =
+        (!announce.event.as_event_string().is_empty()).then_some(announce.event.as_event_string())
+    {
+        message["event"] = Value::String(event.to_string());
+    }
     tokio::time::timeout(timeout, websocket.send(Message::Text(message.to_string())))
         .await
         .map_err(|_| "WebSocket tracker announce timed out while sending".to_string())?
@@ -121,7 +137,7 @@ pub(crate) async fn announce(
     .map_err(|_| "WebSocket tracker announce timed out while receiving".to_string())??;
 
     let Some(response) = response else {
-        return Ok(Vec::new());
+        return Err("WebSocket tracker closed without an announce response".to_string());
     };
     let response: Value = serde_json::from_str(&response)
         .map_err(|error| format!("invalid WebSocket tracker response: {error}"))?;
@@ -136,7 +152,13 @@ pub(crate) async fn announce(
     peers.sort_unstable();
     peers.dedup();
     debug!(tracker = %tracker_url, peers = peers.len(), "WebSocket tracker announce completed");
-    Ok(peers)
+    Ok(AnnounceResponse {
+        peers,
+        interval: response.get("interval").and_then(Value::as_u64),
+        min_interval: response.get("min interval").and_then(Value::as_u64),
+        seeders: response.get("complete").and_then(Value::as_i64),
+        leechers: response.get("incomplete").and_then(Value::as_i64),
+    })
 }
 
 async fn connect_socket(
@@ -341,12 +363,14 @@ mod tests {
                 left: 1,
                 uploaded: 0,
                 numwant: 50,
+                port: 0,
+                event: AnnounceEvent::Started,
                 options: &DownloadOptions::default(),
             },
         )
         .await
         .unwrap();
         server.await.unwrap();
-        assert_eq!(peers, vec!["192.0.2.10:6881".parse().unwrap()]);
+        assert_eq!(peers.peers, vec!["192.0.2.10:6881".parse().unwrap()]);
     }
 }

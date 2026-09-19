@@ -1,12 +1,14 @@
 //! Unified tracker announce dispatcher integrating BtAnnounce state machine
-//! with both HTTP and UDP tracker backends.
+//! with HTTP, WebSocket, and UDP tracker backends.
 //!
 //! # C++ Reference
 //!
 //! In C++ aria2, `DefaultBtAnnounce` creates either an `HttpRequestCommand`
 //! or a `UDPTrackerRequest` depending on the tracker URL scheme. The dispatch
 //! happens inside `DefaultBtAnnounce::getAnnounceUrl()` (HTTP) and
-//! `DefaultBtAnnounce::createUDPTrackerRequest()` (UDP).
+//! `DefaultBtAnnounce::createUDPTrackerRequest()` (UDP). WebSocket trackers
+//! use the same announce state machine but a JSON WebTorrent-compatible
+//! transport.
 //!
 //! This module unifies both paths through a single `TrackerAnnouncer` that
 //! uses the `BtAnnounce` state machine to decide *when* and *what* to
@@ -22,10 +24,11 @@ use super::types::AnnounceEvent;
 use crate::engine::udp_tracker_client::SharedUdpClient;
 use crate::engine::udp_tracker_manager::UdpTrackerManager;
 use crate::http::client_identity::ClientTlsConfig;
+use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerFailureKind};
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
 
-/// Result of a tracker announce operation (HTTP or UDP).
+/// Result of a tracker announce operation (HTTP, WebSocket, or UDP).
 #[derive(Debug, Clone)]
 pub struct AnnounceResult {
     /// Peer addresses discovered from the tracker.
@@ -102,13 +105,14 @@ impl TrackerRuntimeSnapshot {
     }
 }
 
-/// Unified tracker announcer that dispatches HTTP and UDP tracker announces
+/// Unified tracker announcer that dispatches HTTP, WebSocket, and UDP tracker announces
 /// through the `BtAnnounce` state machine.
 ///
 /// This replaces the ad-hoc UDP tracker usage in `discover_peers()` with
 /// a proper state-machine-driven approach that:
 /// - Uses `BtAnnounce::adjust_announce_list()` to determine event and timing
 /// - Routes HTTP URLs through the existing HTTP announce path
+/// - Routes `ws://` and `wss://` URLs through the WebSocket tracker path
 /// - Routes UDP URLs through `UdpTrackerManager`
 /// - Processes responses through `BtAnnounce::process_*_response()`
 /// - Tracks announce success/failure for tier rotation
@@ -131,6 +135,9 @@ pub struct TrackerAnnouncer {
     last_failure_kind: Option<TrackerFailureKind>,
     /// Existing download TLS settings used by HTTPS tracker announces.
     http_tls: ClientTlsConfig,
+    /// Download options used by WebSocket tracker announces for proxy and
+    /// timeout selection.
+    websocket_options: DownloadOptions,
     /// Per-download tracker request timeout.
     tracker_timeout_secs: u64,
     /// Per-download tracker connection timeout.
@@ -154,6 +161,7 @@ impl TrackerAnnouncer {
             public_tracker_urls: HashSet::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
+            websocket_options: DownloadOptions::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
@@ -173,6 +181,7 @@ impl TrackerAnnouncer {
             public_tracker_urls: HashSet::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
+            websocket_options: DownloadOptions::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
@@ -212,6 +221,11 @@ impl TrackerAnnouncer {
     /// Apply the existing aria2-compatible TLS options to HTTP tracker calls.
     pub(crate) fn set_http_tls_config(&mut self, config: ClientTlsConfig) {
         self.http_tls = config;
+    }
+
+    /// Apply per-download proxy and timeout options to WebSocket trackers.
+    pub fn set_websocket_options(&mut self, options: &DownloadOptions) {
+        self.websocket_options = options.clone();
     }
 
     /// Set the per-download tracker request and connection timeouts.
@@ -303,14 +317,20 @@ impl TrackerAnnouncer {
         self.last_failure_kind = None;
         self.publish_runtime_snapshot();
         let is_udp = is_udp_tracker(&tracker_url);
+        let is_websocket = reqwest::Url::parse(&tracker_url)
+            .ok()
+            .is_some_and(|url| matches!(url.scheme(), "ws" | "wss"));
         let event = self.announce.announce_list().get_event();
 
-        // Determine if this is a UDP or HTTP tracker
+        // Determine whether this is a UDP, WebSocket, or HTTP tracker.
         let result = if is_udp {
             self.announce_udp(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
                 .await
+        } else if is_websocket {
+            self.announce_websocket(info_hash, peer_id, downloaded, left, uploaded, &tracker_url)
+                .await
         } else {
-            // HTTP announce — build URL and dispatch
+            // HTTP announce — build URL and dispatch.
             self.announce_http(
                 info_hash,
                 peer_id,
@@ -341,6 +361,70 @@ impl TrackerAnnouncer {
             }
         }
         result
+    }
+
+    /// Execute a WebSocket tracker announce using the same lifecycle state
+    /// machine as HTTP and UDP trackers.
+    async fn announce_websocket(
+        &mut self,
+        info_hash: &[u8; 20],
+        peer_id: &[u8; 20],
+        downloaded: u64,
+        left: u64,
+        uploaded: u64,
+        tracker_url: &str,
+    ) -> Option<AnnounceResult> {
+        let event = self.announce.announce_list().get_event();
+        self.announce.announce_start();
+        self.publish_runtime_snapshot();
+
+        let response = crate::engine::websocket_tracker::announce(
+            tracker_url,
+            crate::engine::websocket_tracker::AnnounceRequest {
+                info_hash,
+                peer_id,
+                downloaded,
+                left,
+                uploaded,
+                numwant: self.announce.numwant(),
+                port: self.announce.tcp_port(),
+                event,
+                options: &self.websocket_options,
+            },
+        )
+        .await;
+
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
+                self.last_failure_kind = Some(TrackerFailureKind::Network);
+                self.announce.announce_failure();
+                return None;
+            }
+        };
+
+        self.announce.process_announce_stats(
+            response.interval,
+            response.min_interval,
+            response.seeders,
+            response.leechers,
+        );
+        self.announce.announce_success();
+
+        let peers = response
+            .peers
+            .into_iter()
+            .map(|peer| (peer.ip().to_string(), peer.port()))
+            .collect();
+        Some(AnnounceResult {
+            peers,
+            interval: self.announce.interval(),
+            seeders: self.announce.complete(),
+            leechers: self.announce.incomplete(),
+            event,
+            tracker_url: tracker_url.to_string(),
+        })
     }
 
     /// Execute a UDP tracker announce.
@@ -751,6 +835,8 @@ impl TrackerAnnouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
 
     #[test]
     fn runtime_snapshot_publishes_live_tracker_state() {
@@ -858,6 +944,72 @@ mod tests {
         assert!(result.is_none(), "slow tracker request should time out");
 
         server.await.expect("tracker test server should exit");
+    }
+
+    #[tokio::test]
+    async fn websocket_tracker_announces_started_and_stopped_events() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local WebSocket tracker test listener");
+        let address = listener.local_addr().expect("local tracker address");
+        let server = tokio::spawn(async move {
+            for expected_event in ["started", "stopped"] {
+                let (stream, _) = listener.accept().await.expect("accept tracker request");
+                let mut websocket = tokio_tungstenite::accept_async(stream)
+                    .await
+                    .expect("complete WebSocket tracker handshake");
+                let Some(Ok(Message::Text(request))) = websocket.next().await else {
+                    panic!("tracker did not receive a WebSocket announce")
+                };
+                let request: serde_json::Value =
+                    serde_json::from_str(request.as_ref()).expect("valid announce JSON");
+                assert_eq!(request["action"], "announce");
+                assert_eq!(request["event"], expected_event);
+                assert_eq!(request["port"], 51413);
+
+                websocket
+                    .send(Message::Text(
+                        serde_json::json!({
+                            "interval": 60,
+                            "complete": 2,
+                            "incomplete": 3,
+                            "peers": [{"ip": "192.0.2.20", "port": 6881}]
+                        })
+                        .to_string(),
+                    ))
+                    .await
+                    .expect("send tracker response");
+            }
+        });
+
+        let mut announcer =
+            TrackerAnnouncer::new(&[vec![format!("ws://{address}/announce")]], &None);
+        let options = DownloadOptions {
+            bt_tracker_timeout: 2,
+            bt_tracker_connect_timeout: 2,
+            ..DownloadOptions::default()
+        };
+        announcer.set_websocket_options(&options);
+        announcer.set_tcp_port(51413);
+
+        let result = announcer
+            .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await
+            .expect("started WebSocket announce should succeed");
+        assert_eq!(result.event, AnnounceEvent::Started);
+        assert_eq!(result.peers, vec![("192.0.2.20".to_string(), 6881)]);
+        assert_eq!(result.interval, Duration::from_secs(60));
+        assert_eq!(result.seeders, 2);
+        assert_eq!(result.leechers, 3);
+
+        announcer
+            .announce_stopped(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await;
+        assert!(announcer.stopped_sent);
+
+        server
+            .await
+            .expect("WebSocket tracker test server should exit");
     }
 
     #[test]

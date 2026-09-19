@@ -6,7 +6,8 @@
 //!
 //! # UDP Tracker Integration
 //!
-//! The [`BtAnnounce`] state machine supports both HTTP and UDP tracker URLs.
+//! The [`BtAnnounce`] state machine supplies lifecycle state for HTTP,
+//! WebSocket, and UDP tracker URLs.
 //! When a `udp://` URL is encountered, the announce should be routed through
 //! [`crate::engine::udp_tracker_manager::UdpTrackerManager`] instead of the
 //! HTTP path. The helper [`is_udp_tracker`] can be used to detect UDP URLs.
@@ -348,6 +349,50 @@ impl BtAnnounce {
         self.announce_list.announce_failure();
     }
 
+    /// Apply tracker timing and swarm statistics from a successful response.
+    ///
+    /// This is shared by tracker transports whose response is not represented
+    /// by the bencoded HTTP response type, such as WebSocket trackers. `None`
+    /// leaves a field unchanged; a zero interval is also ignored because it
+    /// is not a usable scheduling value.
+    pub fn process_announce_stats(
+        &mut self,
+        interval: Option<u64>,
+        min_interval: Option<u64>,
+        seeders: Option<i64>,
+        leechers: Option<i64>,
+    ) {
+        if let Some(interval_secs) = interval.filter(|seconds| *seconds > 0) {
+            self.interval = Duration::from_secs(interval_secs);
+            debug!("[BT] Announce interval: {}s", interval_secs);
+        }
+
+        match min_interval {
+            Some(min_secs) if min_secs > 0 => {
+                let min_duration = Duration::from_secs(min_secs);
+                self.min_interval = min_duration.min(self.interval);
+                debug!("[BT] Min interval: {}s", min_secs);
+            }
+            None if interval.is_some() => {
+                // Use interval as minInterval if minInterval is not supplied,
+                // matching the HTTP tracker response path.
+                self.min_interval = self.interval;
+            }
+            Some(_) | None => {}
+        }
+
+        if let Some(seeders) = seeders {
+            self.complete = seeders;
+        }
+        if let Some(leechers) = leechers {
+            self.incomplete = leechers;
+        }
+        debug!(
+            "[BT] Tracker stats: complete={}, incomplete={}",
+            self.complete, self.incomplete
+        );
+    }
+
     /// Returns true if all announce attempts have failed (matching C++ isAllAnnounceFailed).
     pub fn is_all_announce_failed(&self) -> bool {
         self.announce_list.all_tiers_failed()
@@ -389,31 +434,11 @@ impl BtAnnounce {
             self.tracker_id = tid.clone();
         }
 
-        // Update interval
-        let interval_secs = response.interval;
-        if interval_secs > 0 {
-            self.interval = Duration::from_secs(interval_secs as u64);
-            debug!("[BT] Announce interval: {}s", interval_secs);
-        }
-
-        // Update min_interval (capped at interval)
-        if let Some(min_iv) = response.min_interval {
-            if min_iv > 0 {
-                let min_dur = Duration::from_secs(min_iv as u64);
-                self.min_interval = min_dur.min(self.interval);
-                debug!("[BT] Min interval: {}s", min_iv);
-            }
-        } else {
-            // Use interval as minInterval if minInterval is not supplied (matching C++)
-            self.min_interval = self.interval;
-        }
-
-        // Update complete/incomplete counts
-        self.complete = response.seeders as i64;
-        self.incomplete = response.leechers as i64;
-        debug!(
-            "[BT] Tracker stats: complete={}, incomplete={}",
-            self.complete, self.incomplete
+        self.process_announce_stats(
+            Some(response.interval as u64),
+            response.min_interval.map(u64::from),
+            Some(i64::from(response.seeders)),
+            Some(i64::from(response.leechers)),
         );
 
         // Extract peer addresses (both IPv4 and IPv6).
