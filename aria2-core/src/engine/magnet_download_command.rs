@@ -7,10 +7,12 @@ use tracing::{info, warn};
 
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::download_command::{ProxyTarget, add_reqwest_proxy};
 use crate::engine::download_event_hooks::{DownloadEventHooks, MetadataResolvedEvent};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::http::client_identity::ClientTlsConfig;
+use crate::http::socks_connector::ProxyUrl;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -40,7 +42,7 @@ fn metadata_tracker_urls(
                         .ok()
                         .as_ref()
                         .map(reqwest::Url::scheme),
-                    Some("http" | "https" | "udp")
+                    Some("http" | "https" | "udp" | "ws" | "wss")
                 )
                 && !excluded.iter().any(|excluded| excluded == url)
         })
@@ -305,6 +307,40 @@ impl MagnetDownloadCommand {
             .unwrap_or(0);
 
         for tracker_url in tracker_urls.into_iter().take(MAX_MAGNET_TRACKERS_TO_TRY) {
+            let tracker_scheme = reqwest::Url::parse(&tracker_url)
+                .ok()
+                .map(|url| url.scheme().to_owned());
+            if matches!(tracker_scheme.as_deref(), Some("ws" | "wss")) {
+                match crate::engine::websocket_tracker::announce(
+                    &tracker_url,
+                    &magnet.info_hash,
+                    &peer_id,
+                    0,
+                    magnet.exact_length.unwrap_or(0),
+                    0,
+                    50,
+                    options,
+                )
+                .await
+                {
+                    Ok(peers) if !peers.is_empty() => {
+                        info!(
+                            tracker = %tracker_url,
+                            peers = peers.len(),
+                            "WebSocket tracker announce returned peers"
+                        );
+                        return peers;
+                    }
+                    Ok(_) => {
+                        warn!(tracker = %tracker_url, "WebSocket tracker returned no TCP peers");
+                    }
+                    Err(error) => {
+                        warn!(tracker = %tracker_url, %error, "WebSocket tracker announce failed");
+                    }
+                }
+                continue;
+            }
+
             let tracker_tiers = vec![vec![tracker_url.clone()]];
             let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
             announcer.set_http_tls_config(tracker_tls.clone());
@@ -468,9 +504,9 @@ impl MagnetDownloadCommand {
     ///
     /// An exact source is a complete `.torrent` file, so it is a cheaper and
     /// more deterministic metadata path than starting DHT and waiting for a
-    /// metadata-capable peer. Only HTTP(S) sources are handled here; other
-    /// source schemes remain available to callers through the normal peer
-    /// discovery fallbacks.
+    /// metadata-capable peer. HTTP(S) sources use the same proxy, TLS, and
+    /// authentication options as ordinary HTTP downloads. Local `file://`
+    /// sources are also accepted and still go through the info-hash check.
     async fn fetch_magnet_exact_source(
         &self,
         magnet: &aria2_protocol::bittorrent::magnet::MagnetLink,
@@ -478,7 +514,7 @@ impl MagnetDownloadCommand {
     ) -> Option<Vec<u8>> {
         let sources = magnet.exact_sources.iter().filter_map(|source| {
             let url = reqwest::Url::parse(source).ok()?;
-            matches!(url.scheme(), "http" | "https").then_some((source, url))
+            matches!(url.scheme(), "file" | "http" | "https").then_some((source, url))
         });
         let sources: Vec<_> = sources.collect();
         if sources.is_empty() {
@@ -490,42 +526,66 @@ impl MagnetDownloadCommand {
             .connect_timeout
             .unwrap_or(options.bt_tracker_connect_timeout)
             .max(1);
-        let tls = ClientTlsConfig::from_download_options(options);
-        let client =
-            match crate::engine::http_tracker_client::build_tracker_client_with_tls_and_timeouts(
-                request_timeout,
-                connect_timeout,
-                &tls,
-            ) {
-                Ok(client) => client,
+
+        let client = if sources
+            .iter()
+            .any(|(_, url)| matches!(url.scheme(), "http" | "https"))
+        {
+            match Self::build_magnet_exact_source_client(options, request_timeout, connect_timeout)
+            {
+                Ok(client) => Some(client),
                 Err(error) => {
                     warn!(%error, "Magnet exact-source HTTP client creation failed");
-                    return None;
+                    None
                 }
-            };
+            }
+        } else {
+            None
+        };
 
         for (source, url) in sources {
-            let response = match client.get(url).send().await {
-                Ok(response) => response,
-                Err(error) => {
-                    warn!(source = %source, %error, "Magnet exact-source request failed");
+            let body = if url.scheme() == "file" {
+                let path = match url.to_file_path() {
+                    Ok(path) => path,
+                    Err(()) => {
+                        warn!(source = %source, "Magnet exact-source file URL has no local path");
+                        continue;
+                    }
+                };
+                match tokio::fs::read(&path).await {
+                    Ok(body) => body,
+                    Err(error) => {
+                        warn!(source = %source, path = %path.display(), %error, "Magnet exact-source file read failed");
+                        continue;
+                    }
+                }
+            } else {
+                let Some(client) = client.as_ref() else {
+                    continue;
+                };
+                let response = match Self::request_magnet_exact_source(client, &url, options).await
+                {
+                    Ok(response) => response,
+                    Err(error) => {
+                        warn!(source = %source, %error, "Magnet exact-source request failed");
+                        continue;
+                    }
+                };
+                if !response.status().is_success() {
+                    warn!(
+                        source = %source,
+                        status = %response.status(),
+                        "Magnet exact-source request returned an error status"
+                    );
                     continue;
                 }
-            };
-            if !response.status().is_success() {
-                warn!(
-                    source = %source,
-                    status = %response.status(),
-                    "Magnet exact-source request returned an error status"
-                );
-                continue;
-            }
 
-            let body = match response.bytes().await {
-                Ok(body) => body,
-                Err(error) => {
-                    warn!(source = %source, %error, "Magnet exact-source response read failed");
-                    continue;
+                match response.bytes().await {
+                    Ok(body) => body.to_vec(),
+                    Err(error) => {
+                        warn!(source = %source, %error, "Magnet exact-source response read failed");
+                        continue;
+                    }
                 }
             };
             match Self::metadata_matches_magnet(magnet, &body) {
@@ -540,6 +600,142 @@ impl MagnetDownloadCommand {
         }
 
         None
+    }
+
+    fn build_magnet_exact_source_client(
+        options: &DownloadOptions,
+        request_timeout: u64,
+        connect_timeout: u64,
+    ) -> std::result::Result<reqwest::Client, String> {
+        crate::http::client_pool::ensure_rustls_provider();
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(request_timeout))
+            .connect_timeout(Duration::from_secs(connect_timeout))
+            .gzip(false)
+            .user_agent(crate::constants::USER_AGENT)
+            .redirect(reqwest::redirect::Policy::limited(5));
+        let no_proxy = options.no_proxy.as_deref();
+
+        if let Some(proxy) = options
+            .http_proxy
+            .as_deref()
+            .filter(|proxy| !proxy.is_empty())
+        {
+            builder = add_reqwest_proxy(
+                builder,
+                ProxyTarget::Http,
+                proxy,
+                options.proxy_credentials_for_scheme("http"),
+                no_proxy,
+            );
+        }
+        if let Some(proxy) = options
+            .https_proxy
+            .as_deref()
+            .filter(|proxy| !proxy.is_empty())
+        {
+            builder = add_reqwest_proxy(
+                builder,
+                ProxyTarget::Https,
+                proxy,
+                options.proxy_credentials_for_scheme("https"),
+                no_proxy,
+            );
+        }
+        if let Some(proxy) = options
+            .all_proxy
+            .as_deref()
+            .filter(|proxy| !proxy.is_empty())
+            && matches!(
+                ProxyUrl::parse(proxy).map(|parsed| parsed.protocol),
+                Ok(crate::http::socks_connector::ProxyProtocol::Http)
+                    | Ok(crate::http::socks_connector::ProxyProtocol::Https)
+            )
+        {
+            builder = add_reqwest_proxy(
+                builder,
+                ProxyTarget::All,
+                proxy,
+                options.proxy_credentials_for_scheme("all"),
+                no_proxy,
+            );
+        }
+
+        let tls = ClientTlsConfig::from_download_options(options);
+        let builder = crate::http::client_identity::apply(builder, &tls)
+            .map_err(|error| error.to_string())?;
+        builder
+            .build()
+            .map_err(|error| format!("failed to build exact-source HTTP client: {error}"))
+    }
+
+    async fn request_magnet_exact_source(
+        client: &reqwest::Client,
+        url: &reqwest::Url,
+        options: &DownloadOptions,
+    ) -> std::result::Result<reqwest::Response, String> {
+        let mut request = client.get(url.clone());
+        if !options.http_auth_challenge && options.http_user.is_some() {
+            request = request.basic_auth(
+                options.http_user.as_deref().unwrap_or_default(),
+                options.http_passwd.as_deref(),
+            );
+        }
+        let response = request.send().await.map_err(|error| error.to_string())?;
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED || !options.http_auth_challenge {
+            return Ok(response);
+        }
+
+        let Some(challenge_header) = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+        else {
+            return Ok(response);
+        };
+        let Some(scheme) = crate::http::AuthScheme::from_header(challenge_header) else {
+            return Ok(response);
+        };
+        let challenge = crate::http::HttpAuthChallenge {
+            scheme: scheme.clone(),
+            realm: crate::http::HttpSkipResponseHandler::extract_realm(challenge_header),
+            is_proxy: false,
+            digest_challenge: if scheme == crate::http::AuthScheme::Digest {
+                crate::http::digest_auth::DigestAuthChallenge::parse(challenge_header).ok()
+            } else {
+                None
+            },
+        };
+        let auth_options = crate::http::AuthResolveOptions {
+            http_auth_challenge: true,
+            http_user: options.http_user.clone(),
+            http_passwd: options.http_passwd.clone(),
+            ..crate::http::AuthResolveOptions::default()
+        };
+        let mut auth_factory = crate::http::AuthConfigFactory::new();
+        let auth_result = crate::http::handle_auth_challenge(
+            &challenge,
+            &mut auth_factory,
+            url,
+            &auth_options,
+            crate::http::request_response::HttpMethod::Get,
+            false,
+            1,
+        );
+        let crate::http::AuthChallengeResult::RetryWithAuth {
+            authorization_header,
+            is_proxy: false,
+        } = auth_result
+        else {
+            return Ok(response);
+        };
+
+        client
+            .get(url.clone())
+            .header(reqwest::header::AUTHORIZATION, authorization_header)
+            .send()
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// Add web seeds from the magnet URI to the resolved torrent metadata.

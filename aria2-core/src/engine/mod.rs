@@ -123,6 +123,8 @@ pub mod metadata_exchange;
 pub mod udp_tracker_client;
 #[cfg(feature = "bittorrent")]
 pub mod udp_tracker_manager;
+#[cfg(feature = "bittorrent")]
+pub(crate) mod websocket_tracker;
 
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_integration_tests;

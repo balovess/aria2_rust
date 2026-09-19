@@ -104,13 +104,13 @@ fn uri_host(uri: &str) -> Option<String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-enum ProxyTarget {
+pub(crate) enum ProxyTarget {
     Http,
     Https,
     All,
 }
 
-fn build_reqwest_proxy(
+pub(crate) fn build_reqwest_proxy(
     target: ProxyTarget,
     proxy_url: &str,
     username: Option<&str>,
@@ -152,7 +152,7 @@ fn build_reqwest_proxy(
     Ok(proxy)
 }
 
-fn add_reqwest_proxy(
+pub(crate) fn add_reqwest_proxy(
     builder: reqwest::ClientBuilder,
     target: ProxyTarget,
     proxy_url: &str,

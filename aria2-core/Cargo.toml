@@ -55,6 +55,7 @@ aria2-protocol = { workspace = true }
 # The ring crate is explicitly linked via aria2-core's direct dependency, so rustls will
 # automatically use ring as the crypto provider.
 reqwest = { workspace = true, features = ["stream", "rustls-no-provider", "gzip", "http2"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # Fully-async DNS resolver (replaces blocking getaddrinfo via tokio::net::lookup_host).
 # `tokio-runtime` enables the async resolver; `default-features = false` avoids pulling in
 # TLS/system-config features we do not need. Hosts-file support is always available on Windows/Unix.
