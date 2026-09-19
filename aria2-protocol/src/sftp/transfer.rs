@@ -286,6 +286,10 @@ impl<'a> SftpTransfer<'a> {
         options: &TransferOptions,
         cancellation: Option<&CancellationToken>,
     ) -> Result<TransferProgress, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("SFTP download cancelled".to_string());
+        }
+
         info!(
             "[SFTP] Download start: {} -> {}",
             remote_path,
@@ -529,6 +533,10 @@ impl<'a> SftpTransfer<'a> {
         options: &TransferOptions,
         cancellation: Option<&CancellationToken>,
     ) -> Result<TransferProgress, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("SFTP upload cancelled".to_string());
+        }
+
         info!(
             "[SFTP] Upload start: {} -> {}",
             local_path.display(),
