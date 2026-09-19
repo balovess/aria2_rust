@@ -313,13 +313,15 @@ impl MagnetDownloadCommand {
             if matches!(tracker_scheme.as_deref(), Some("ws" | "wss")) {
                 match crate::engine::websocket_tracker::announce(
                     &tracker_url,
-                    &magnet.info_hash,
-                    &peer_id,
-                    0,
-                    magnet.exact_length.unwrap_or(0),
-                    0,
-                    50,
-                    options,
+                    crate::engine::websocket_tracker::AnnounceRequest {
+                        info_hash: &magnet.info_hash,
+                        peer_id: &peer_id,
+                        downloaded: 0,
+                        left: magnet.exact_length.unwrap_or(0),
+                        uploaded: 0,
+                        numwant: 50,
+                        options,
+                    },
                 )
                 .await
                 {
@@ -591,7 +593,7 @@ impl MagnetDownloadCommand {
             match Self::metadata_matches_magnet(magnet, &body) {
                 Ok(()) => {
                     info!(source = %source, bytes = body.len(), "Loaded magnet metadata from exact source");
-                    return Some(body.to_vec());
+                    return Some(body);
                 }
                 Err(error) => {
                     warn!(source = %source, %error, "Ignoring exact-source metadata with mismatched info-hash");
@@ -674,45 +676,40 @@ impl MagnetDownloadCommand {
         url: &reqwest::Url,
         options: &DownloadOptions,
     ) -> std::result::Result<reqwest::Response, String> {
+        let (mut auth_factory, auth_options) = Self::magnet_auth_context(options);
         let mut request = client.get(url.clone());
-        if !options.http_auth_challenge && options.http_user.is_some() {
-            request = request.basic_auth(
-                options.http_user.as_deref().unwrap_or_default(),
-                options.http_passwd.as_deref(),
-            );
+        if let Some(authorization) = auth_factory.resolve_basic_authorization(url, &auth_options) {
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
         }
         let response = request.send().await.map_err(|error| error.to_string())?;
         if response.status() != reqwest::StatusCode::UNAUTHORIZED || !options.http_auth_challenge {
             return Ok(response);
         }
 
-        let Some(challenge_header) = response
+        let challenge_header = response
             .headers()
             .get(reqwest::header::WWW_AUTHENTICATE)
             .and_then(|value| value.to_str().ok())
-        else {
-            return Ok(response);
-        };
-        let Some(scheme) = crate::http::AuthScheme::from_header(challenge_header) else {
-            return Ok(response);
-        };
+            .map(str::to_owned);
+        let scheme = challenge_header
+            .as_deref()
+            .and_then(crate::http::AuthScheme::from_header)
+            .unwrap_or(crate::http::AuthScheme::Basic);
         let challenge = crate::http::HttpAuthChallenge {
             scheme: scheme.clone(),
-            realm: crate::http::HttpSkipResponseHandler::extract_realm(challenge_header),
+            realm: challenge_header
+                .as_deref()
+                .map(crate::http::HttpSkipResponseHandler::extract_realm)
+                .unwrap_or_default(),
             is_proxy: false,
             digest_challenge: if scheme == crate::http::AuthScheme::Digest {
-                crate::http::digest_auth::DigestAuthChallenge::parse(challenge_header).ok()
+                challenge_header.as_deref().and_then(|header| {
+                    crate::http::digest_auth::DigestAuthChallenge::parse(header).ok()
+                })
             } else {
                 None
             },
         };
-        let auth_options = crate::http::AuthResolveOptions {
-            http_auth_challenge: true,
-            http_user: options.http_user.clone(),
-            http_passwd: options.http_passwd.clone(),
-            ..crate::http::AuthResolveOptions::default()
-        };
-        let mut auth_factory = crate::http::AuthConfigFactory::new();
         let auth_result = crate::http::handle_auth_challenge(
             &challenge,
             &mut auth_factory,
@@ -736,6 +733,34 @@ impl MagnetDownloadCommand {
             .send()
             .await
             .map_err(|error| error.to_string())
+    }
+
+    fn magnet_auth_context(
+        options: &DownloadOptions,
+    ) -> (
+        crate::http::AuthConfigFactory,
+        crate::http::AuthResolveOptions,
+    ) {
+        let mut factory = crate::http::AuthConfigFactory::new();
+        if !options.no_netrc {
+            let netrc_path = options
+                .netrc_path
+                .clone()
+                .or_else(crate::http::find_netrc_file);
+            if let Some(netrc_path) = netrc_path
+                && let Err(error) = factory.load_netrc_file(std::path::Path::new(&netrc_path))
+            {
+                tracing::debug!(path = %netrc_path, %error, "Failed to load exact-source netrc file");
+            }
+        }
+        let auth_options = crate::http::AuthResolveOptions {
+            http_auth_challenge: options.http_auth_challenge,
+            no_netrc: options.no_netrc,
+            http_user: options.http_user.clone(),
+            http_passwd: options.http_passwd.clone(),
+            ..crate::http::AuthResolveOptions::default()
+        };
+        (factory, auth_options)
     }
 
     /// Add web seeds from the magnet URI to the resolved torrent metadata.
@@ -1205,7 +1230,7 @@ mod tests {
     #[test]
     fn magnet_metadata_discovery_uses_embedded_and_configured_trackers() {
         let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(
-            "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&tr=udp%3A%2F%2Fembedded.test%3A6969&tr=http%3A%2F%2Fexcluded.test%2Fannounce",
+            "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&tr=udp%3A%2F%2Fembedded.test%3A6969&tr=http%3A%2F%2Fexcluded.test%2Fannounce&tr=wss%3A%2F%2Ftracker.example%2Fannounce",
         )
         .expect("test magnet should parse");
         let options = DownloadOptions {
@@ -1221,6 +1246,7 @@ mod tests {
             metadata_tracker_urls(&magnet, &options),
             vec![
                 "udp://embedded.test:6969".to_string(),
+                "wss://tracker.example/announce".to_string(),
                 "https://configured.test/announce".to_string(),
             ]
         );
@@ -1296,6 +1322,156 @@ mod tests {
 
         assert_eq!(metadata, torrent);
         assert!(command.dht_engine.is_none());
+    }
+
+    #[tokio::test]
+    async fn magnet_exact_source_reads_file_url_without_dht() {
+        let torrent = build_test_torrent();
+        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+            .expect("test torrent should parse")
+            .info_hash
+            .bytes;
+        let temp_dir = tempfile::tempdir().expect("temporary exact-source directory");
+        let path = temp_dir.path().join("metadata.torrent");
+        std::fs::write(&path, &torrent).expect("write exact-source torrent");
+        let source =
+            url::Url::from_file_path(&path).expect("temporary path should convert to a file URL");
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
+            "magnet:?xt=urn:btih:{}&xs={source}",
+            hex::encode(info_hash)
+        ))
+        .expect("file exact-source magnet should parse");
+
+        let command = make_test_command();
+        let metadata = command
+            .fetch_magnet_exact_source(&magnet, &DownloadOptions::default())
+            .await
+            .expect("file exact source should return metadata");
+
+        assert_eq!(metadata, torrent);
+        assert!(command.dht_engine.is_none());
+    }
+
+    #[tokio::test]
+    async fn magnet_exact_source_retries_http_basic_auth_challenge() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let torrent = build_test_torrent();
+        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+            .expect("test torrent should parse")
+            .info_hash
+            .bytes;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind auth exact-source test server");
+        let address = listener.local_addr().expect("read auth server address");
+        let server_torrent = torrent.clone();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut socket, _) = listener.accept().await.expect("accept auth request");
+                let mut request = [0u8; 4096];
+                let length = socket.read(&mut request).await.expect("read auth request");
+                let request = String::from_utf8_lossy(&request[..length]);
+                if attempt == 0 {
+                    assert!(!request.to_ascii_lowercase().contains("authorization:"));
+                    socket
+                        .write_all(
+                            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=exact\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .expect("write auth challenge");
+                } else {
+                    assert!(
+                        request
+                            .to_ascii_lowercase()
+                            .contains("authorization: basic dxnlcjpwyxnz")
+                    );
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        server_torrent.len()
+                    );
+                    socket.write_all(response.as_bytes()).await.unwrap();
+                    socket.write_all(&server_torrent).await.unwrap();
+                }
+            }
+        });
+
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
+            "magnet:?xt=urn:btih:{}&xs=http://{address}/metadata.torrent",
+            hex::encode(info_hash)
+        ))
+        .expect("auth exact-source magnet should parse");
+        let options = DownloadOptions {
+            http_auth_challenge: true,
+            http_user: Some("user".to_string()),
+            http_passwd: Some("pass".to_string()),
+            ..DownloadOptions::default()
+        };
+        let metadata = make_test_command()
+            .fetch_magnet_exact_source(&magnet, &options)
+            .await
+            .expect("authenticated exact source should return metadata");
+        server
+            .await
+            .expect("auth exact-source server should finish");
+        assert_eq!(metadata, torrent);
+    }
+
+    #[tokio::test]
+    async fn magnet_exact_source_uses_authenticated_http_proxy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let torrent = build_test_torrent();
+        let info_hash = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent)
+            .expect("test torrent should parse")
+            .info_hash
+            .bytes;
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy exact-source test server");
+        let address = listener.local_addr().expect("read proxy server address");
+        let server_torrent = torrent.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept proxy request");
+            let mut request = [0u8; 8192];
+            let length = socket.read(&mut request).await.expect("read proxy request");
+            let request = String::from_utf8_lossy(&request[..length]);
+            assert!(request.starts_with("GET http://exact-source.invalid/metadata.torrent"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("proxy-authorization: basic dxnlcjpwyxnz")
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                server_torrent.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.write_all(&server_torrent).await.unwrap();
+        });
+
+        let magnet = aria2_protocol::bittorrent::magnet::MagnetLink::parse(&format!(
+            "magnet:?xt=urn:btih:{}&xs=http://exact-source.invalid/metadata.torrent",
+            hex::encode(info_hash)
+        ))
+        .expect("proxy exact-source magnet should parse");
+        let options = DownloadOptions {
+            http_proxy: Some(format!("http://{address}")),
+            http_proxy_user: Some("user".to_string()),
+            http_proxy_passwd: Some("pass".to_string()),
+            no_proxy: Some(String::new()),
+            ..DownloadOptions::default()
+        };
+        let metadata = make_test_command()
+            .fetch_magnet_exact_source(&magnet, &options)
+            .await
+            .expect("proxied exact source should return metadata");
+        server
+            .await
+            .expect("proxy exact-source server should finish");
+        assert_eq!(metadata, torrent);
     }
 
     #[test]

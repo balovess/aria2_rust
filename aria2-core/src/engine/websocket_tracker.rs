@@ -27,15 +27,19 @@ use crate::request::request_group::DownloadOptions;
 /// socket addresses.  WebTorrent trackers may return WebRTC `offers` instead;
 /// those are intentionally ignored because the BitTorrent peer layer does
 /// not implement WebRTC transport.
+pub(crate) struct AnnounceRequest<'a> {
+    pub(crate) info_hash: &'a [u8; 20],
+    pub(crate) peer_id: &'a [u8; 20],
+    pub(crate) downloaded: u64,
+    pub(crate) left: u64,
+    pub(crate) uploaded: u64,
+    pub(crate) numwant: u32,
+    pub(crate) options: &'a DownloadOptions,
+}
+
 pub(crate) async fn announce(
     tracker_url: &str,
-    info_hash: &[u8; 20],
-    peer_id: &[u8; 20],
-    downloaded: u64,
-    left: u64,
-    uploaded: u64,
-    numwant: u32,
-    options: &DownloadOptions,
+    announce: AnnounceRequest<'_>,
 ) -> Result<Vec<SocketAddr>, String> {
     let url = reqwest::Url::parse(tracker_url)
         .map_err(|error| format!("invalid WebSocket tracker URL: {error}"))?;
@@ -50,20 +54,21 @@ pub(crate) async fn announce(
         .port_or_known_default()
         .ok_or_else(|| "WebSocket tracker URL has no port".to_string())?;
     let timeout = Duration::from_secs(
-        options
+        announce
+            .options
             .bt_tracker_timeout
-            .max(options.bt_tracker_connect_timeout)
+            .max(announce.options.bt_tracker_connect_timeout)
             .max(1),
     );
 
     crate::http::client_pool::ensure_rustls_provider();
-    let stream = connect_socket(&url, host, port, options, timeout).await?;
-    let request = tracker_url
+    let stream = connect_socket(&url, host, port, announce.options, timeout).await?;
+    let ws_request = tracker_url
         .into_client_request()
         .map_err(|error| format!("invalid WebSocket tracker request: {error}"))?;
     let (mut websocket, _) = tokio::time::timeout(
         timeout,
-        tokio_tungstenite::client_async_tls_with_config(request, stream, None, None),
+        tokio_tungstenite::client_async_tls_with_config(ws_request, stream, None, None),
     )
     .await
     .map_err(|_| "WebSocket tracker handshake timed out".to_string())?
@@ -71,22 +76,19 @@ pub(crate) async fn announce(
 
     let message = serde_json::json!({
         "action": "announce",
-        "info_hash": base64::engine::general_purpose::STANDARD.encode(info_hash),
-        "peer_id": base64::engine::general_purpose::STANDARD.encode(peer_id),
-        "uploaded": uploaded,
-        "downloaded": downloaded,
-        "left": left,
-        "numwant": numwant,
+        "info_hash": base64::engine::general_purpose::STANDARD.encode(announce.info_hash),
+        "peer_id": base64::engine::general_purpose::STANDARD.encode(announce.peer_id),
+        "uploaded": announce.uploaded,
+        "downloaded": announce.downloaded,
+        "left": announce.left,
+        "numwant": announce.numwant,
         "compact": 1,
         "event": "started",
     });
-    tokio::time::timeout(
-        timeout,
-        websocket.send(Message::Text(message.to_string().into())),
-    )
-    .await
-    .map_err(|_| "WebSocket tracker announce timed out while sending".to_string())?
-    .map_err(|error| format!("WebSocket tracker announce send failed: {error}"))?;
+    tokio::time::timeout(timeout, websocket.send(Message::Text(message.to_string())))
+        .await
+        .map_err(|_| "WebSocket tracker announce timed out while sending".to_string())?
+        .map_err(|error| format!("WebSocket tracker announce send failed: {error}"))?;
 
     let response = tokio::time::timeout(timeout, async {
         let mut response = None;
@@ -258,13 +260,13 @@ fn parse_compact_peers(encoded: &str) -> Vec<SocketAddr> {
     };
     let mut peers = Vec::new();
     if bytes.len() % 6 == 0 {
-        for chunk in bytes.chunks_exact(6) {
+        for chunk in bytes.as_chunks::<6>().0 {
             let ip = IpAddr::from([chunk[0], chunk[1], chunk[2], chunk[3]]);
             let port = u16::from_be_bytes([chunk[4], chunk[5]]);
             peers.push(SocketAddr::new(ip, port));
         }
     } else if bytes.len() % 18 == 0 {
-        for chunk in bytes.chunks_exact(18) {
+        for chunk in bytes.as_chunks::<18>().0 {
             let mut octets = [0u8; 16];
             octets.copy_from_slice(&chunk[..16]);
             let ip = IpAddr::from(octets);
@@ -324,8 +326,7 @@ mod tests {
                     serde_json::json!({
                         "peers": [{"ip": "192.0.2.10", "port": 6881}]
                     })
-                    .to_string()
-                    .into(),
+                    .to_string(),
                 ))
                 .await
                 .unwrap();
@@ -333,13 +334,15 @@ mod tests {
 
         let peers = announce(
             &format!("ws://{address}/announce"),
-            &[1u8; 20],
-            &[2u8; 20],
-            0,
-            1,
-            0,
-            50,
-            &DownloadOptions::default(),
+            AnnounceRequest {
+                info_hash: &[1u8; 20],
+                peer_id: &[2u8; 20],
+                downloaded: 0,
+                left: 1,
+                uploaded: 0,
+                numwant: 50,
+                options: &DownloadOptions::default(),
+            },
         )
         .await
         .unwrap();
