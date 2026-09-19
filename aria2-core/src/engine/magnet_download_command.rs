@@ -87,11 +87,17 @@ impl MagnetDownloadCommand {
             .or_else(|| options.dir.clone())
             .unwrap_or_else(|| ".".to_string());
 
-        let filename = _ml
-            .display_name
+        let filename = options
+            .out
             .as_deref()
-            .unwrap_or("magnet_download")
-            .to_string();
+            .map(validate_magnet_output_name)
+            .transpose()?
+            .or_else(|| {
+                _ml.display_name
+                    .as_deref()
+                    .and_then(sanitize_magnet_display_name)
+            })
+            .unwrap_or_else(|| "magnet_download".to_string());
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
         info!(
@@ -174,6 +180,59 @@ impl MagnetDownloadCommand {
         {
             registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
         }
+    }
+
+    async fn discover_magnet_peers(
+        &self,
+        engine: &std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+        info_hash: &[u8; 20],
+    ) -> Vec<std::net::SocketAddr> {
+        const MAX_ATTEMPTS: usize = 4;
+        const RETRY_DELAYS: [Duration; 3] = [
+            Duration::from_millis(500),
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+        ];
+
+        if let Err(error) = engine.wait_until_ready(Duration::from_secs(5)).await {
+            warn!("Magnet: DHT did not become ready before lookup: {}", error);
+        }
+
+        for attempt in 0..MAX_ATTEMPTS {
+            match engine.find_peers(info_hash).await {
+                Ok(result) if !result.peers.is_empty() => {
+                    info!(
+                        "Magnet: DHT discovered {} peers (contacted {} nodes, attempt {})",
+                        result.peers.len(),
+                        result.nodes_contacted,
+                        attempt + 1
+                    );
+                    return result.peers;
+                }
+                Ok(result) => {
+                    warn!(
+                        "Magnet: DHT lookup found no peers (contacted {} nodes, attempt {}/{})",
+                        result.nodes_contacted,
+                        attempt + 1,
+                        MAX_ATTEMPTS
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        "Magnet: DHT find_peers failed (attempt {}/{}): {}",
+                        attempt + 1,
+                        MAX_ATTEMPTS,
+                        error
+                    );
+                }
+            }
+
+            if let Some(delay) = RETRY_DELAYS.get(attempt) {
+                tokio::time::sleep(*delay).await;
+            }
+        }
+
+        Vec::new()
     }
 
     async fn shutdown_dht_engine(&mut self) {
@@ -335,20 +394,7 @@ impl MagnetDownloadCommand {
         }
 
         let discovered_peers = if let Some(ref engine) = self.dht_engine {
-            match engine.find_peers(&magnet.info_hash).await {
-                Ok(result) => {
-                    info!(
-                        "Magnet: DHT discovered {} peers (contacted {} nodes)",
-                        result.peers.len(),
-                        result.nodes_contacted
-                    );
-                    result.peers
-                }
-                Err(error) => {
-                    warn!("Magnet: DHT find_peers failed: {}", error);
-                    vec![]
-                }
-            }
+            self.discover_magnet_peers(engine, &magnet.info_hash).await
         } else {
             warn!("Magnet: DHT disabled, no peers available");
             vec![]
@@ -420,6 +466,21 @@ impl MagnetDownloadCommand {
 
         Ok(())
     }
+}
+
+fn validate_magnet_output_name(name: &str) -> Result<String> {
+    let path = std::path::Path::new(name);
+    let is_single_component = path.components().count() == 1;
+    if name.is_empty() || !is_single_component || name == "." || name == ".." {
+        return Err(Aria2Error::Fatal(FatalError::Config(format!(
+            "magnet output name must be a file name, got '{name}'"
+        ))));
+    }
+    Ok(name.to_owned())
+}
+
+fn sanitize_magnet_display_name(name: &str) -> Option<String> {
+    validate_magnet_output_name(name).ok()
 }
 
 #[async_trait]
@@ -638,6 +699,58 @@ mod tests {
             dir.to_str(),
         )
         .expect("Failed to create MagnetDownloadCommand in temporary directory")
+    }
+
+    #[test]
+    fn default_directory_is_valid_for_a_safe_magnet_name() {
+        let command = MagnetDownloadCommand::new(
+            GroupId::new(4),
+            "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&dn=test_file",
+            &DownloadOptions::default(),
+            Some("."),
+        )
+        .expect("a directory is not an output file");
+
+        assert_eq!(
+            command.output_path,
+            std::path::PathBuf::from(".").join("test_file")
+        );
+    }
+
+    #[test]
+    fn directory_output_name_is_rejected_before_io() {
+        let options = DownloadOptions {
+            out: Some(".".to_string()),
+            ..DownloadOptions::default()
+        };
+
+        let error =
+            match MagnetDownloadCommand::new(GroupId::new(5), TEST_MAGNET_URI, &options, None) {
+                Ok(_) => panic!("a directory cannot be a magnet output file name"),
+                Err(error) => error,
+            };
+
+        assert!(
+            error
+                .to_string()
+                .contains("output name must be a file name")
+        );
+    }
+
+    #[test]
+    fn unsafe_display_name_falls_back_to_a_file_name() {
+        let command = MagnetDownloadCommand::new(
+            GroupId::new(6),
+            "magnet:?xt=urn:btih:abc123def45678901234567890abcdef12345678&dn=.",
+            &DownloadOptions::default(),
+            Some("."),
+        )
+        .expect("unsafe display names should use the fallback");
+
+        assert_eq!(
+            command.output_path,
+            std::path::PathBuf::from(".").join("magnet_download")
+        );
     }
 
     #[test]

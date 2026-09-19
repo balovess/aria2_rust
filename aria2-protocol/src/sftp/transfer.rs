@@ -15,6 +15,7 @@
 //! ```
 
 use tokio::io::AsyncSeekExt;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 #[cfg(unix)]
@@ -258,6 +259,33 @@ impl<'a> SftpTransfer<'a> {
         local_path: &std::path::Path,
         options: &TransferOptions,
     ) -> Result<TransferProgress, String> {
+        self.download_controlled(remote_path, local_path, options, None)
+            .await
+    }
+
+    /// Download a remote file while observing a cancellation token.
+    ///
+    /// Cancellation is checked between remote read/write iterations. The
+    /// remote handle is closed on the cancellation path when possible, and a
+    /// stable cancellation error is returned to the caller.
+    pub async fn download_with_cancellation(
+        &self,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        options: &TransferOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<TransferProgress, String> {
+        self.download_controlled(remote_path, local_path, options, Some(cancellation))
+            .await
+    }
+
+    async fn download_controlled(
+        &self,
+        remote_path: &str,
+        local_path: &std::path::Path,
+        options: &TransferOptions,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<TransferProgress, String> {
         info!(
             "[SFTP] Download start: {} -> {}",
             remote_path,
@@ -367,6 +395,11 @@ impl<'a> SftpTransfer<'a> {
         let mut last_report = start_offset;
 
         loop {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                let _ = remote_file.close().await;
+                return Err("SFTP download cancelled".to_string());
+            }
+
             let remaining = total_size.saturating_sub(transferred);
             if remaining == 0 {
                 break; // Transfer complete
@@ -473,6 +506,29 @@ impl<'a> SftpTransfer<'a> {
         remote_path: &str,
         options: &TransferOptions,
     ) -> Result<TransferProgress, String> {
+        self.upload_controlled(local_path, remote_path, options, None)
+            .await
+    }
+
+    /// Upload a local file while observing a cancellation token.
+    pub async fn upload_with_cancellation(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        options: &TransferOptions,
+        cancellation: &CancellationToken,
+    ) -> Result<TransferProgress, String> {
+        self.upload_controlled(local_path, remote_path, options, Some(cancellation))
+            .await
+    }
+
+    async fn upload_controlled(
+        &self,
+        local_path: &std::path::Path,
+        remote_path: &str,
+        options: &TransferOptions,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<TransferProgress, String> {
         info!(
             "[SFTP] Upload start: {} -> {}",
             local_path.display(),
@@ -555,6 +611,11 @@ impl<'a> SftpTransfer<'a> {
         let mut last_report = start_offset;
 
         loop {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                let _ = remote_file.close().await;
+                return Err("SFTP upload cancelled".to_string());
+            }
+
             let remaining = total_size.saturating_sub(transferred);
             if remaining == 0 {
                 break;

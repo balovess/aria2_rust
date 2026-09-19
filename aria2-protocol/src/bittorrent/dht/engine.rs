@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tracing::{debug, info, warn};
 
 mod api;
@@ -168,6 +168,9 @@ pub(super) struct DhtEngineInner {
 /// from forming a reference cycle with the engine's own `JoinHandle` list.
 pub(super) struct DhtEngineContext {
     pub(super) inner: Arc<RwLock<DhtEngineInner>>,
+    /// Publishes lifecycle transitions so callers can await bootstrap without
+    /// polling the state snapshot.
+    pub(super) state_updates: watch::Sender<DhtEngineState>,
     pub(super) routing_table: Arc<RwLock<RoutingTable>>,
     /// Serializes snapshots written to the same persistence file without
     /// blocking an async runtime worker.
@@ -296,6 +299,7 @@ impl DhtEngine {
             state: DhtEngineState::Bootstrapping,
             self_id,
         }));
+        let (state_updates, _state_receiver) = watch::channel(DhtEngineState::Bootstrapping);
 
         let token_tracker = Arc::new(std::sync::Mutex::new(TokenTracker::new()));
         let peer_storage = Arc::new(DhtPeerStorage::new());
@@ -331,6 +335,7 @@ impl DhtEngine {
         ));
         let task_context = Arc::new(DhtEngineContext {
             inner: Arc::clone(&inner),
+            state_updates,
             routing_table,
             routing_table_save_lock,
             config: config.clone(),
@@ -365,6 +370,7 @@ impl DhtEngine {
             engine.spawn_bootstrap();
         } else {
             engine.context.inner.write().await.state = DhtEngineState::Running;
+            let _ = engine.context.state_updates.send(DhtEngineState::Running);
         }
 
         Ok(engine)
@@ -396,6 +402,7 @@ impl DhtEngine {
                         "DHT bootstrap timed out; continuing without entry-point nodes"
                     );
                     context.inner.write().await.state = DhtEngineState::Running;
+                    let _ = context.state_updates.send(DhtEngineState::Running);
                 }
             };
 
@@ -417,6 +424,41 @@ impl DhtEngine {
         }
     }
 
+    /// Wait until bootstrap has reached a usable state without polling.
+    ///
+    /// A running engine may still have an empty routing table when the public
+    /// network is unreachable; this method only waits for the lifecycle
+    /// transition and does not promise that a peer lookup will succeed.
+    pub async fn wait_until_ready(&self, timeout: Duration) -> std::io::Result<()> {
+        let mut updates = self.context.state_updates.subscribe();
+        let wait = async {
+            loop {
+                match self.state().await {
+                    DhtEngineState::Running => return Ok(()),
+                    DhtEngineState::ShuttingDown | DhtEngineState::Stopped => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "DHT engine is not running",
+                        ));
+                    }
+                    DhtEngineState::Bootstrapping => updates.changed().await.map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "DHT engine state updates are closed",
+                        )
+                    })?,
+                }
+            }
+        };
+
+        tokio::time::timeout(timeout, wait).await.map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "DHT bootstrap did not become ready before the timeout",
+            )
+        })?
+    }
+
     /// Synchronous shutdown — sets engine state to `ShuttingDown`.
     pub fn shutdown(&self) {
         let first_shutdown = {
@@ -432,6 +474,10 @@ impl DhtEngine {
 
             if let Ok(mut inner) = self.context.inner.try_write() {
                 inner.state = DhtEngineState::ShuttingDown;
+                let _ = self
+                    .context
+                    .state_updates
+                    .send(DhtEngineState::ShuttingDown);
             }
 
             info!("DHT shutdown signal sent");
@@ -473,6 +519,10 @@ impl DhtEngine {
         }
 
         self.context.inner.write().await.state = DhtEngineState::ShuttingDown;
+        let _ = self
+            .context
+            .state_updates
+            .send(DhtEngineState::ShuttingDown);
 
         // Save routing table to disk
         if let Some(ref path) = self.context.config.dht_file_path {

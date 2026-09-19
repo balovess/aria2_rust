@@ -1,6 +1,7 @@
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, SeekFrom};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use super::connection::{FtpActiveDataListener, FtpConnection, FtpResponseClass};
@@ -150,6 +151,41 @@ impl<'a> FtpDownload<'a> {
         local_path: &str,
         progress_callback: Option<fn(DownloadProgress)>,
     ) -> Result<DownloadResult, String> {
+        self.download_file_controlled(remote_path, local_path, progress_callback, None)
+            .await
+    }
+
+    /// Download a file while observing a cancellation token.
+    ///
+    /// Cancellation is checked between data reads. The data connection is
+    /// closed and FTP `ABOR` is sent before returning the cancellation error.
+    pub async fn download_file_with_cancellation(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: &CancellationToken,
+    ) -> Result<DownloadResult, String> {
+        self.download_file_controlled(
+            remote_path,
+            local_path,
+            progress_callback,
+            Some(cancellation),
+        )
+        .await
+    }
+
+    async fn download_file_controlled(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<DownloadResult, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("FTP download cancelled".to_string());
+        }
+
         // Set transfer mode (binary by default)
         if self.options.binary_mode {
             self.conn.type_image().await?;
@@ -175,7 +211,13 @@ impl<'a> FtpDownload<'a> {
 
         // Connect to data port and receive file content
         let result = self
-            .receive_data_to_file(data_connection, local_path, file_size, progress_callback)
+            .receive_data_to_file(
+                data_connection,
+                local_path,
+                file_size,
+                progress_callback,
+                cancellation,
+            )
             .await?;
 
         Ok(result)
@@ -183,6 +225,28 @@ impl<'a> FtpDownload<'a> {
 
     /// Download a file into memory (for small files or when disk I/O is not needed)
     pub async fn download_to_memory(&mut self, remote_path: &str) -> Result<Vec<u8>, String> {
+        self.download_to_memory_controlled(remote_path, None).await
+    }
+
+    /// Download a file into memory while observing a cancellation token.
+    pub async fn download_to_memory_with_cancellation(
+        &mut self,
+        remote_path: &str,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<u8>, String> {
+        self.download_to_memory_controlled(remote_path, Some(cancellation))
+            .await
+    }
+
+    async fn download_to_memory_controlled(
+        &mut self,
+        remote_path: &str,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<u8>, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("FTP download cancelled".to_string());
+        }
+
         // Set binary mode
         self.conn.type_image().await?;
 
@@ -204,7 +268,7 @@ impl<'a> FtpDownload<'a> {
 
         // Receive data into memory
         let data = self
-            .receive_data_to_memory(data_connection, file_size)
+            .receive_data_to_memory(data_connection, file_size, cancellation)
             .await?;
 
         Ok(data)
@@ -219,6 +283,38 @@ impl<'a> FtpDownload<'a> {
         local_base_dir: &str,
         progress_callback: Option<fn(DownloadProgress)>,
     ) -> Result<Vec<DownloadResult>, String> {
+        self.download_directory_controlled(remote_dir, local_base_dir, progress_callback, None)
+            .await
+    }
+
+    /// Download a directory recursively while observing a cancellation token.
+    pub async fn download_directory_with_cancellation(
+        &mut self,
+        remote_dir: &str,
+        local_base_dir: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<DownloadResult>, String> {
+        self.download_directory_controlled(
+            remote_dir,
+            local_base_dir,
+            progress_callback,
+            Some(cancellation),
+        )
+        .await
+    }
+
+    async fn download_directory_controlled(
+        &mut self,
+        remote_dir: &str,
+        local_base_dir: &str,
+        progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<DownloadResult>, String> {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
+            return Err("FTP download cancelled".to_string());
+        }
+
         if !self.options.recursive_download {
             return Err("Recursive download not enabled in options".to_string());
         }
@@ -239,7 +335,9 @@ impl<'a> FtpDownload<'a> {
         }
 
         // Read directory listing from data connection
-        let listing_data = self.receive_data_to_memory(data_connection, None).await?;
+        let listing_data = self
+            .receive_data_to_memory(data_connection, None, cancellation)
+            .await?;
 
         // Parse listing
         let listing_str = String::from_utf8_lossy(&listing_data);
@@ -251,14 +349,22 @@ impl<'a> FtpDownload<'a> {
 
         let mut results = Vec::new();
         for entry in entries {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err("FTP download cancelled".to_string());
+            }
+
             if entry.is_directory {
                 // Recursively download subdirectory
                 let sub_remote = format!("{}/{}", remote_dir.trim_end_matches('/'), entry.name);
                 let sub_local = format!("{}/{}", local_base_dir.trim_end_matches('/'), entry.name);
 
-                let sub_results =
-                    Box::pin(self.download_directory(&sub_remote, &sub_local, progress_callback))
-                        .await?;
+                let sub_results = Box::pin(self.download_directory_controlled(
+                    &sub_remote,
+                    &sub_local,
+                    progress_callback,
+                    cancellation,
+                ))
+                .await?;
                 results.extend(sub_results);
             } else {
                 // Download individual file
@@ -266,7 +372,12 @@ impl<'a> FtpDownload<'a> {
                 let local_file = format!("{}/{}", local_base_dir.trim_end_matches('/'), entry.name);
 
                 let result = self
-                    .download_file(&remote_file, &local_file, progress_callback)
+                    .download_file_controlled(
+                        &remote_file,
+                        &local_file,
+                        progress_callback,
+                        cancellation,
+                    )
                     .await?;
                 results.push(result);
             }
@@ -313,6 +424,7 @@ impl<'a> FtpDownload<'a> {
         local_path: &str,
         file_size: Option<u64>,
         progress_callback: Option<fn(DownloadProgress)>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<DownloadResult, String> {
         let mut data_stream = data_connection
             .open(self.options.data_connect_timeout)
@@ -349,7 +461,18 @@ impl<'a> FtpDownload<'a> {
         let start_time = std::time::Instant::now();
         let mut read_retry_count = 0u32;
         loop {
-            let read_result = data_stream.read(&mut buffer).await;
+            let read_result = if let Some(token) = cancellation {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        drop(data_stream);
+                        let _ = self.conn.abor().await;
+                        return Err("FTP download cancelled".to_string());
+                    }
+                    result = data_stream.read(&mut buffer) => result,
+                }
+            } else {
+                data_stream.read(&mut buffer).await
+            };
 
             match read_result {
                 Ok(bytes_read) => {
@@ -434,6 +557,7 @@ impl<'a> FtpDownload<'a> {
         &mut self,
         data_connection: FtpDataConnection,
         expected_size: Option<u64>,
+        cancellation: Option<&CancellationToken>,
     ) -> Result<Vec<u8>, String> {
         let mut data_stream = data_connection
             .open(self.options.data_connect_timeout)
@@ -446,7 +570,20 @@ impl<'a> FtpDownload<'a> {
 
         let mut read_retry_count = 0u32;
         loop {
-            match data_stream.read(&mut buffer).await {
+            let read_result = if let Some(token) = cancellation {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        drop(data_stream);
+                        let _ = self.conn.abor().await;
+                        return Err("FTP download cancelled".to_string());
+                    }
+                    result = data_stream.read(&mut buffer) => result,
+                }
+            } else {
+                data_stream.read(&mut buffer).await
+            };
+
+            match read_result {
                 Ok(0) => break,
                 Ok(bytes_read) => {
                     read_retry_count = 0;

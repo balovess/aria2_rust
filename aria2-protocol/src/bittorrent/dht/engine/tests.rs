@@ -38,6 +38,10 @@ async fn test_dht_engine_start_shutdown() {
         .await
         .expect("start should succeed");
     assert_eq!(engine.state().await, DhtEngineState::Running);
+    engine
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .expect("running engine should already be ready");
 
     engine.shutdown_async().await;
     assert_eq!(engine.state().await, DhtEngineState::ShuttingDown);
@@ -49,6 +53,26 @@ async fn test_dht_engine_start_shutdown() {
             .unwrap_or_else(|e| e.into_inner())
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn test_dht_engine_wait_until_ready_observes_bootstrap_transition() {
+    let engine = DhtEngine::start(DhtEngineConfig {
+        port: 0,
+        bootstrap_nodes: vec!["127.0.0.1:9".parse().unwrap()],
+        bootstrap_timeout: Duration::from_secs(1),
+        ..DhtEngineConfig::default()
+    })
+    .await
+    .expect("DHT engine should bind an ephemeral port");
+
+    engine
+        .wait_until_ready(Duration::from_secs(1))
+        .await
+        .expect("bootstrap lifecycle transition should be observable");
+    assert_eq!(engine.state().await, DhtEngineState::Running);
+
+    engine.shutdown_async().await;
 }
 
 #[tokio::test]

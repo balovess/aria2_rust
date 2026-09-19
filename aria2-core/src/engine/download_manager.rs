@@ -145,6 +145,16 @@ impl DownloadHandle {
             .or_else(|| self.manager.group_man.find_stopped_result(&self.gid_hex()))
     }
 
+    /// Return the current file metadata snapshot for this download.
+    ///
+    /// For magnet links, call this after receiving
+    /// [`MetadataResolvedEvent`](crate::MetadataResolvedEvent). Before
+    /// metadata is available the result may contain only the fallback URI
+    /// entry, just like the corresponding `DownloadResult` snapshot.
+    pub fn get_files(&self) -> Option<Vec<crate::request::request_group::FileEntry>> {
+        self.download_result().map(|result| result.files)
+    }
+
     pub fn pause(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::Pause { gid: self.gid })
     }
@@ -306,5 +316,22 @@ mod tests {
 
         assert!(handle.status_snapshot().is_some());
         assert_eq!(group_man.count(), 1);
+    }
+
+    #[test]
+    fn handle_exposes_file_snapshot_without_rpc_polling() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["https://example.test/file.zip".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+
+        let files = handle.get_files().expect("live group snapshot");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "file.zip");
     }
 }

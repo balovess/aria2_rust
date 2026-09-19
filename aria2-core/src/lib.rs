@@ -115,6 +115,53 @@
 //!     engine.wait().await.unwrap();
 //! }
 //! ```
+//!
+//! Magnet downloads use the same handle and event stream. Metadata is a
+//! notification rather than a `DownloadStatus` variant, so callers do not
+//! need to parse messages or poll `getFiles`:
+//!
+//! ```rust,no_run
+//! use std::sync::Arc;
+//!
+//! use aria2_core::request::request_group::DownloadOptions;
+//! use aria2_core::request::request_group_man::RequestGroupMan;
+//! use aria2_core::{DownloadEngine, DownloadNotification};
+//!
+//! #[tokio::main]
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//!     let groups = Arc::new(RequestGroupMan::new());
+//!     let mut engine = DownloadEngine::new();
+//!     engine.set_request_group_man(Arc::clone(&groups));
+//!     let engine = engine.start()?;
+//!
+//!     let mut events = engine.downloads().subscribe();
+//!     let mut options = DownloadOptions::default();
+//!     options.dir = Some("./downloads".into());
+//!     options.out = None;
+//!     options.enable_dht = true;
+//!
+//!     let download = engine.downloads().add_uri(
+//!         vec!["magnet:?xt=urn:btih:YOUR_INFO_HASH".into()],
+//!         options,
+//!     )?;
+//!
+//!     while let Ok(notification) = events.recv().await {
+//!         if let DownloadNotification::MetadataResolved(event) = notification {
+//!             if event.metadata_gid == download.gid() {
+//!                 for file in download.get_files().unwrap_or_default() {
+//!                     println!("{}: {} bytes", file.path, file.length);
+//!                 }
+//!                 break;
+//!             }
+//!         }
+//!     }
+//!
+//!     let _result = download.wait().await?;
+//!     engine.shutdown()?;
+//!     engine.wait().await?;
+//!     Ok(())
+//! }
+//! ```
 
 pub mod auth;
 pub mod c_api;
@@ -167,8 +214,8 @@ pub use engine::download_manager::{
 pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{
     ChangeableKind, DownloadOptions, DownloadResult, DownloadStatus, DownloadStatusSnapshot,
-    GroupId, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
-    is_option_changeable,
+    FileEntry, GroupId, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
+    UriEntry, is_option_changeable,
 };
 pub use request::request_group_man::RequestGroupMan;
 

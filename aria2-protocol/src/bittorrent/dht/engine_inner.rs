@@ -323,14 +323,20 @@ impl DhtEngineContext {
         // Bootstrap is complete once entry points are installed and the first
         // refresh has been scheduled. The refresh itself continues in the
         // background, so an unreachable DHT cannot block engine startup.
-        {
+        let became_ready = {
             let mut inner = self.inner.write().await;
             if !self
                 .shutdown_requested
                 .load(std::sync::atomic::Ordering::Acquire)
             {
                 inner.state = DhtEngineState::Running;
+                true
+            } else {
+                false
             }
+        };
+        if became_ready {
+            let _ = self.state_updates.send(DhtEngineState::Running);
         }
 
         info!("DHT bootstrap completed");
