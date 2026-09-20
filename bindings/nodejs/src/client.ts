@@ -30,11 +30,33 @@ const WS_EVENT_NAMES = [
 
 type WsEventName = (typeof WS_EVENT_NAMES)[number];
 
-function parseObjectResult(result: unknown, method: string): Record<string, unknown> {
+function parseObjectResult<T extends object = Record<string, unknown>>(
+  result: unknown,
+  method: string,
+): T {
   if (result === null || typeof result !== 'object' || Array.isArray(result)) {
     throw new Aria2Error(`Unexpected result type for ${method}`);
   }
-  return result as Record<string, unknown>;
+  return result as T;
+}
+
+function parseObjectListResult<T>(result: unknown, method: string): T[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  for (const [index, item] of result.entries()) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result as T[];
+}
+
+function parseArrayResult(result: unknown, method: string): unknown[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
 }
 
 function parseStringListResult(
@@ -244,53 +266,64 @@ export class Aria2Client {
   async tellStatus(gid: string, keys?: string[]): Promise<StatusInfo> {
     const params: unknown[] = [gid];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellStatus', params)) as StatusInfo;
+    const result = await this.transport.sendRequest('aria2.tellStatus', params);
+    return parseObjectResult<StatusInfo>(result, 'tellStatus');
   }
 
   async getFiles(gid: string): Promise<FileInfo[]> {
-    return (await this.transport.sendRequest('aria2.getFiles', [gid])) as FileInfo[];
+    const result = await this.transport.sendRequest('aria2.getFiles', [gid]);
+    return parseObjectListResult<FileInfo>(result, 'getFiles');
   }
 
   async getUris(gid: string): Promise<UriEntry[]> {
-    return (await this.transport.sendRequest('aria2.getUris', [gid])) as UriEntry[];
+    const result = await this.transport.sendRequest('aria2.getUris', [gid]);
+    return parseObjectListResult<UriEntry>(result, 'getUris');
   }
 
   async getServers(gid: string): Promise<ServerInfoIndex[]> {
-    return (await this.transport.sendRequest('aria2.getServers', [gid])) as ServerInfoIndex[];
+    const result = await this.transport.sendRequest('aria2.getServers', [gid]);
+    return parseObjectListResult<ServerInfoIndex>(result, 'getServers');
   }
 
   async getPeers(gid: string): Promise<PeerInfo[]> {
-    return (await this.transport.sendRequest('aria2.getPeers', [gid])) as PeerInfo[];
+    const result = await this.transport.sendRequest('aria2.getPeers', [gid]);
+    return parseObjectListResult<PeerInfo>(result, 'getPeers');
   }
 
   async getTrackers(gid: string): Promise<TrackerInfo[]> {
-    return (await this.transport.sendRequest('aria2.getTrackers', [gid])) as TrackerInfo[];
+    const result = await this.transport.sendRequest('aria2.getTrackers', [gid]);
+    return parseObjectListResult<TrackerInfo>(result, 'getTrackers');
   }
 
   async getDhtStatus(): Promise<DhtStatus> {
-    return (await this.transport.sendRequest('aria2.getDhtStatus', [])) as DhtStatus;
+    const result = await this.transport.sendRequest('aria2.getDhtStatus', []);
+    return parseObjectResult<DhtStatus>(result, 'getDhtStatus');
   }
 
   async tellActive(keys?: string[]): Promise<StatusInfo[]> {
     const params: unknown[] = [];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellActive', params)) as StatusInfo[];
+    const result = await this.transport.sendRequest('aria2.tellActive', params);
+    return parseObjectListResult<StatusInfo>(result, 'tellActive');
   }
 
   async tellWaiting(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]> {
     const params: unknown[] = [offset, num];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellWaiting', params)) as StatusInfo[];
+    const result = await this.transport.sendRequest('aria2.tellWaiting', params);
+    return parseObjectListResult<StatusInfo>(result, 'tellWaiting');
   }
 
   async tellStopped(offset: number, num: number, keys?: string[]): Promise<StatusInfo[]> {
     const params: unknown[] = [offset, num];
     if (keys) params.push(keys);
-    return (await this.transport.sendRequest('aria2.tellStopped', params)) as StatusInfo[];
+    const result = await this.transport.sendRequest('aria2.tellStopped', params);
+    return parseObjectListResult<StatusInfo>(result, 'tellStopped');
   }
 
   async getGlobalStat(): Promise<GlobalStat> {
-    return (await this.transport.sendRequest('aria2.getGlobalStat', [])) as GlobalStat;
+    const result = await this.transport.sendRequest('aria2.getGlobalStat', []);
+    return parseObjectResult<GlobalStat>(result, 'getGlobalStat');
   }
 
   async purgeDownloadResult(): Promise<string> {
@@ -324,11 +357,13 @@ export class Aria2Client {
   }
 
   async getVersion(): Promise<VersionInfo> {
-    return (await this.transport.sendRequest('aria2.getVersion', [])) as VersionInfo;
+    const result = await this.transport.sendRequest('aria2.getVersion', []);
+    return parseObjectResult<VersionInfo>(result, 'getVersion');
   }
 
   async getSessionInfo(): Promise<SessionInfo> {
-    return (await this.transport.sendRequest('aria2.getSessionInfo', [])) as SessionInfo;
+    const result = await this.transport.sendRequest('aria2.getSessionInfo', []);
+    return parseObjectResult<SessionInfo>(result, 'getSessionInfo');
   }
 
   async shutdown(): Promise<string> {
@@ -359,7 +394,8 @@ export class Aria2Client {
   async systemMulticall(
     calls: Array<{ methodName: string; params?: unknown[] }>,
   ): Promise<unknown[]> {
-    return (await this.transport.sendRequest('system.multicall', [calls])) as unknown[];
+    const result = await this.transport.sendRequest('system.multicall', [calls]);
+    return parseArrayResult(result, 'system.multicall');
   }
 
   async systemListMethods(): Promise<string[]> {

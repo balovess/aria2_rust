@@ -1,5 +1,7 @@
 //! BEP 9 metadata piece collection.
 
+use std::fmt;
+
 /// Collect BEP 9 metadata pieces and assemble them in wire order.
 pub struct MetadataCollector {
     total_size: u64,
@@ -7,14 +9,33 @@ pub struct MetadataCollector {
     piece_size: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataCollectorError {
+    ZeroPieceSize,
+}
+
+impl fmt::Display for MetadataCollectorError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroPieceSize => f.write_str("metadata piece size must be non-zero"),
+        }
+    }
+}
+
+impl std::error::Error for MetadataCollectorError {}
+
 impl MetadataCollector {
-    pub fn new(total_size: u64, piece_size: u32) -> Self {
+    pub fn new(total_size: u64, piece_size: u32) -> Result<Self, MetadataCollectorError> {
+        if piece_size == 0 {
+            return Err(MetadataCollectorError::ZeroPieceSize);
+        }
+
         let num_pieces = total_size.div_ceil(piece_size as u64) as usize;
-        Self {
+        Ok(Self {
             total_size,
             collected: vec![None; num_pieces],
             piece_size,
-        }
+        })
     }
 
     pub fn add_piece(&mut self, piece_idx: u32, data: &[u8]) -> bool {
@@ -36,17 +57,6 @@ impl MetadataCollector {
 
     pub fn is_complete(&self) -> bool {
         self.collected.iter().all(Option::is_some)
-    }
-
-    pub fn assemble(&self) -> Option<Vec<u8>> {
-        if !self.is_complete() {
-            return None;
-        }
-        let mut result = Vec::with_capacity(self.total_size as usize);
-        for piece in &self.collected {
-            result.extend(piece.as_ref().expect("complete metadata has every piece"));
-        }
-        Some(result)
     }
 
     pub fn into_bytes(self) -> Option<Vec<u8>> {
@@ -76,22 +86,30 @@ impl MetadataCollector {
 
 #[cfg(test)]
 mod tests {
-    use super::MetadataCollector;
+    use super::{MetadataCollector, MetadataCollectorError};
 
     #[test]
     fn rejects_wrong_piece_lengths() {
-        let mut collector = MetadataCollector::new(3, 2);
+        let mut collector = MetadataCollector::new(3, 2).unwrap();
         assert!(!collector.add_piece(0, b"x"));
         assert!(collector.add_piece(0, b"ab"));
         assert!(collector.add_piece(1, b"c"));
-        assert_eq!(collector.assemble(), Some(b"abc".to_vec()));
+        assert_eq!(collector.into_bytes(), Some(b"abc".to_vec()));
     }
 
     #[test]
     fn reports_empty_collection_as_complete() {
-        let collector = MetadataCollector::new(0, 16 * 1024);
+        let collector = MetadataCollector::new(0, 16 * 1024).unwrap();
         assert!(collector.is_complete());
         assert_eq!(collector.progress(), 0.0);
         assert_eq!(collector.into_bytes(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn rejects_zero_piece_size() {
+        assert!(matches!(
+            MetadataCollector::new(1, 0),
+            Err(MetadataCollectorError::ZeroPieceSize)
+        ));
     }
 }

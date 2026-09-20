@@ -39,6 +39,9 @@ pub enum MetadataExchangeError {
     InvalidMetadataSize {
         size: u64,
     },
+    InvalidPieceSize {
+        size: u32,
+    },
     MetadataTooLarge {
         size: u64,
         max: u64,
@@ -106,6 +109,9 @@ impl fmt::Display for MetadataExchangeError {
             }
             MetadataExchangeError::InvalidMetadataSize { size } => {
                 write!(f, "Invalid metadata_size: {}", size)
+            }
+            MetadataExchangeError::InvalidPieceSize { size } => {
+                write!(f, "Invalid metadata piece size: {}", size)
             }
             MetadataExchangeError::MetadataTooLarge { size, max } => {
                 write!(f, "metadata_size too large: {} (max {})", size, max)
@@ -200,6 +206,12 @@ impl MetadataExchangeSession {
         info_hash: &[u8; 20],
         peers: &[SocketAddr],
     ) -> Result<Vec<u8>, MetadataExchangeError> {
+        if self.config.piece_size == 0 {
+            return Err(MetadataExchangeError::InvalidPieceSize {
+                size: self.config.piece_size,
+            });
+        }
+
         if peers.is_empty() {
             return Err(MetadataExchangeError::NoPeersAvailable);
         }
@@ -340,7 +352,12 @@ impl MetadataExchangeSession {
         debug!("Remote reports metadata_size={} bytes", metadata_size);
 
         let num_pieces = metadata_size.div_ceil(self.config.piece_size as u64) as u32;
-        let mut collector = MetadataCollector::new(metadata_size, self.config.piece_size);
+        let mut collector =
+            MetadataCollector::new(metadata_size, self.config.piece_size).map_err(|_| {
+                MetadataExchangeError::InvalidPieceSize {
+                    size: self.config.piece_size,
+                }
+            })?;
 
         // Track in-flight metadata requests with timeout (C++ UTMetadataRequestTracker)
         let mut tracker = UTMetadataRequestTracker::with_timeout(self.config.request_timeout);
@@ -581,44 +598,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_read_extension_message_invalid_length_zero() {
-        let session = MetadataExchangeSession::new(MetadataExchangeConfig::default());
-        let _ = session;
-    }
-
-    #[test]
-    fn test_error_enum_variant_count() {
-        let _ = MetadataExchangeError::NoPeersAvailable;
-        let _ = MetadataExchangeError::AllPeersFailed {
-            attempts: 0,
-            last_error: String::new(),
-        };
-        let _ = MetadataExchangeError::PeerConnectFailed {
-            addr: String::new(),
-            reason: String::new(),
-        };
-        let _ = MetadataExchangeError::PeerTimeout {
-            addr: String::new(),
-        };
-        let _ = MetadataExchangeError::UnsupportedPeer {
-            addr: String::new(),
-            reason: String::new(),
-        };
-        let _ = MetadataExchangeError::InvalidMetadataSize { size: 0 };
-        let _ = MetadataExchangeError::MetadataTooLarge { size: 0, max: 0 };
-        let _ = MetadataExchangeError::BencodeDecodeFailed {
-            detail: String::new(),
-        };
-        let _ = MetadataExchangeError::PieceRejected { piece: 0 };
-        let _ = MetadataExchangeError::PieceTimeout { piece: 0 };
-        let _ = MetadataExchangeError::IncompleteMetadata {
-            expected: 0,
-            received: 0,
-        };
-        let _ = MetadataExchangeError::IoError(String::new());
-    }
-
     #[test]
     fn test_fatal_vs_recoverable_errors() {
         let peer_specific_size_error = MetadataExchangeError::MetadataTooLarge {
@@ -703,6 +682,23 @@ mod tests {
 
         let cfg_zero = MetadataExchangeConfig::default().with_max_attempts(0);
         assert_eq!(cfg_zero.max_attempts, 1);
+    }
+
+    #[test]
+    fn test_fetch_metadata_rejects_zero_piece_size() {
+        let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+            piece_size: 0,
+            ..MetadataExchangeConfig::default()
+        });
+        let target_hash = [0u8; 20];
+        let result = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(session.fetch_metadata(&target_hash, &["127.0.0.1:1".parse().unwrap()]));
+
+        assert!(matches!(
+            result,
+            Err(MetadataExchangeError::InvalidPieceSize { size: 0 })
+        ));
     }
 
     #[test]

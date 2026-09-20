@@ -85,7 +85,7 @@ fn test_ut_metadata_reject_encode_decode() {
 
 #[test]
 fn test_metadata_collector_basic() {
-    let mut collector = MetadataCollector::new(2000, 1000);
+    let mut collector = MetadataCollector::new(2000, 1000).unwrap();
     assert!(!collector.is_complete());
 
     collector.add_piece(0, &vec![0xAB; 1000]);
@@ -95,18 +95,18 @@ fn test_metadata_collector_basic() {
     collector.add_piece(1, &vec![0xCD; 1000]);
     assert!(collector.is_complete());
 
-    let assembled = collector.assemble().unwrap();
+    let assembled = collector.into_bytes().unwrap();
     assert_eq!(assembled.len(), 2000);
 }
 
 #[test]
 fn test_metadata_collector_single_piece() {
-    let mut collector = MetadataCollector::new(500, 16384);
+    let mut collector = MetadataCollector::new(500, 16384).unwrap();
 
     collector.add_piece(0, &vec![0x42; 500]);
     assert!(collector.is_complete());
 
-    let assembled = collector.assemble().unwrap();
+    let assembled = collector.into_bytes().unwrap();
     assert_eq!(assembled.len(), 500);
     assert!(assembled.iter().all(|&b| b == 0x42));
 }
@@ -215,7 +215,7 @@ async fn test_e2e_magnet_metadata_exchange_with_mock_seeder() {
     let num_pieces = total_size.div_ceil(piece_length as u64);
     assert!(num_pieces > 1, "Test torrent should have multiple pieces");
 
-    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024).unwrap();
     assert!(!collector.is_complete());
 
     let metadata_piece_size = 16 * 1024;
@@ -233,7 +233,9 @@ async fn test_e2e_magnet_metadata_exchange_with_mock_seeder() {
         collector.is_complete(),
         "MetadataCollector should be complete after all pieces"
     );
-    let assembled = collector.assemble().expect("Should assemble successfully");
+    let assembled = collector
+        .into_bytes()
+        .expect("Should assemble successfully");
 
     assert_eq!(
         assembled.len(),
@@ -275,7 +277,7 @@ async fn test_e2e_magnet_metadata_exchange_produces_valid_torrent_file() {
     let meta = TorrentMeta::parse(&torrent_data).expect("Failed to parse test torrent");
     let info_hash = meta.info_hash.bytes;
 
-    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024).unwrap();
     collector.add_piece(0, &torrent_data);
 
     assert!(
@@ -283,7 +285,7 @@ async fn test_e2e_magnet_metadata_exchange_produces_valid_torrent_file() {
         "Single-piece metadata should be complete"
     );
     let assembled = collector
-        .assemble()
+        .into_bytes()
         .expect("Should assemble single-piece metadata");
 
     let torrent_path = dir.path().join("downloaded.torrent");
@@ -391,7 +393,7 @@ async fn test_e2e_metadata_exchange_multiple_pieces() {
     let expected_num_pieces = large_size.div_ceil(piece_len as u64);
     assert!(expected_num_pieces > 1, "Test should use multiple pieces");
 
-    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024);
+    let mut collector = MetadataCollector::new(torrent_data.len() as u64, 16 * 1024).unwrap();
     assert!(!collector.is_complete());
 
     let metadata_piece_size = 16 * 1024;
@@ -416,7 +418,7 @@ async fn test_e2e_metadata_exchange_multiple_pieces() {
         metadata_num_pieces
     );
     let assembled = collector
-        .assemble()
+        .into_bytes()
         .expect("Should assemble multi-piece metadata");
     assert_eq!(
         assembled.len(),
@@ -468,7 +470,7 @@ async fn test_e2e_metadata_collector_assembles_complete_torrent() {
     let piece_size: u32 = 1024;
     let num_pieces = (total_size / piece_size as u64) as u32;
 
-    let mut collector = MetadataCollector::new(total_size, piece_size);
+    let mut collector = MetadataCollector::new(total_size, piece_size).unwrap();
     assert!(!collector.is_complete());
 
     for i in 0..num_pieces {
@@ -491,7 +493,9 @@ async fn test_e2e_metadata_collector_assembles_complete_torrent() {
         "Should be complete after all pieces added"
     );
 
-    let assembled = collector.assemble().expect("Should assemble successfully");
+    let assembled = collector
+        .into_bytes()
+        .expect("Should assemble successfully");
     assert_eq!(
         assembled.len(),
         total_size as usize,

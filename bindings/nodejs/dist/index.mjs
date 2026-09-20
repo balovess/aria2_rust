@@ -436,6 +436,23 @@ function parseObjectResult(result, method) {
   }
   return result;
 }
+function parseObjectListResult(result, method) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  for (const [index, item] of result.entries()) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result;
+}
+function parseArrayResult(result, method) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
 function parseStringListResult(result, method, expectedLength) {
   if (!Array.isArray(result)) {
     throw new Aria2Error(`Unexpected result type for ${method}`);
@@ -595,43 +612,54 @@ var Aria2Client = class {
   async tellStatus(gid, keys) {
     const params = [gid];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellStatus", params);
+    const result = await this.transport.sendRequest("aria2.tellStatus", params);
+    return parseObjectResult(result, "tellStatus");
   }
   async getFiles(gid) {
-    return await this.transport.sendRequest("aria2.getFiles", [gid]);
+    const result = await this.transport.sendRequest("aria2.getFiles", [gid]);
+    return parseObjectListResult(result, "getFiles");
   }
   async getUris(gid) {
-    return await this.transport.sendRequest("aria2.getUris", [gid]);
+    const result = await this.transport.sendRequest("aria2.getUris", [gid]);
+    return parseObjectListResult(result, "getUris");
   }
   async getServers(gid) {
-    return await this.transport.sendRequest("aria2.getServers", [gid]);
+    const result = await this.transport.sendRequest("aria2.getServers", [gid]);
+    return parseObjectListResult(result, "getServers");
   }
   async getPeers(gid) {
-    return await this.transport.sendRequest("aria2.getPeers", [gid]);
+    const result = await this.transport.sendRequest("aria2.getPeers", [gid]);
+    return parseObjectListResult(result, "getPeers");
   }
   async getTrackers(gid) {
-    return await this.transport.sendRequest("aria2.getTrackers", [gid]);
+    const result = await this.transport.sendRequest("aria2.getTrackers", [gid]);
+    return parseObjectListResult(result, "getTrackers");
   }
   async getDhtStatus() {
-    return await this.transport.sendRequest("aria2.getDhtStatus", []);
+    const result = await this.transport.sendRequest("aria2.getDhtStatus", []);
+    return parseObjectResult(result, "getDhtStatus");
   }
   async tellActive(keys) {
     const params = [];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellActive", params);
+    const result = await this.transport.sendRequest("aria2.tellActive", params);
+    return parseObjectListResult(result, "tellActive");
   }
   async tellWaiting(offset, num, keys) {
     const params = [offset, num];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellWaiting", params);
+    const result = await this.transport.sendRequest("aria2.tellWaiting", params);
+    return parseObjectListResult(result, "tellWaiting");
   }
   async tellStopped(offset, num, keys) {
     const params = [offset, num];
     if (keys) params.push(keys);
-    return await this.transport.sendRequest("aria2.tellStopped", params);
+    const result = await this.transport.sendRequest("aria2.tellStopped", params);
+    return parseObjectListResult(result, "tellStopped");
   }
   async getGlobalStat() {
-    return await this.transport.sendRequest("aria2.getGlobalStat", []);
+    const result = await this.transport.sendRequest("aria2.getGlobalStat", []);
+    return parseObjectResult(result, "getGlobalStat");
   }
   async purgeDownloadResult() {
     const result = await this.transport.sendRequest("aria2.purgeDownloadResult", []);
@@ -658,10 +686,12 @@ var Aria2Client = class {
     return parseStringResult(result, "changeOption");
   }
   async getVersion() {
-    return await this.transport.sendRequest("aria2.getVersion", []);
+    const result = await this.transport.sendRequest("aria2.getVersion", []);
+    return parseObjectResult(result, "getVersion");
   }
   async getSessionInfo() {
-    return await this.transport.sendRequest("aria2.getSessionInfo", []);
+    const result = await this.transport.sendRequest("aria2.getSessionInfo", []);
+    return parseObjectResult(result, "getSessionInfo");
   }
   async shutdown() {
     const result = await this.transport.sendRequest("aria2.shutdown", []);
@@ -684,7 +714,8 @@ var Aria2Client = class {
     return parseStringResult(result, "clearBrowserContext");
   }
   async systemMulticall(calls) {
-    return await this.transport.sendRequest("system.multicall", [calls]);
+    const result = await this.transport.sendRequest("system.multicall", [calls]);
+    return parseArrayResult(result, "system.multicall");
   }
   async systemListMethods() {
     const result = await this.transport.sendRequest("system.listMethods", []);

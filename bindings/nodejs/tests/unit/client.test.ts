@@ -251,6 +251,13 @@ describe('Aria2Client', () => {
         ['gid', 'status'],
       ]);
     });
+
+    it('rejects a non-object result', async () => {
+      mockTransport.sendRequest.mockResolvedValue([]);
+      await expect(client.tellStatus('gid1')).rejects.toThrow(
+        'Unexpected result type for tellStatus',
+      );
+    });
   });
 
   describe('getFiles', () => {
@@ -271,6 +278,13 @@ describe('Aria2Client', () => {
 
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getFiles', ['gid1']);
       expect(result).toEqual(files);
+    });
+
+    it('rejects a non-object item', async () => {
+      mockTransport.sendRequest.mockResolvedValue([null]);
+      await expect(client.getFiles('gid1')).rejects.toThrow(
+        'Unexpected item type for getFiles',
+      );
     });
   });
 
@@ -354,6 +368,13 @@ describe('Aria2Client', () => {
       const result = await client.tellStopped(0, 10);
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.tellStopped', [0, 10]);
       expect(result).toEqual(items);
+    });
+
+    it('rejects a non-object item', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['invalid']);
+      await expect(client.tellActive()).rejects.toThrow(
+        'Unexpected item type for tellActive',
+      );
     });
   });
 
