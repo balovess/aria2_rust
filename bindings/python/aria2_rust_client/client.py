@@ -49,6 +49,13 @@ def _parse_dict_list(
     return [parser(item) for item in result]
 
 
+def _parse_dict_result(result: Any, method: str) -> Dict[str, Any]:
+    """Decode an RPC object result without treating malformed data as empty."""
+    if not isinstance(result, dict):
+        raise Aria2Error(f"Unexpected result type for {method}: {type(result)}")
+    return result
+
+
 class Aria2Client:
     def __init__(
         self,
@@ -277,7 +284,7 @@ class Aria2Client:
 
     async def get_global_option(self) -> Dict:
         result = await self._call("aria2.getGlobalOption")
-        return result if isinstance(result, dict) else {}
+        return _parse_dict_result(result, "getGlobalOption")
 
     async def change_global_option(self, options: Dict) -> str:
         result = await self._call("aria2.changeGlobalOption", [options])
@@ -285,7 +292,7 @@ class Aria2Client:
 
     async def get_option(self, gid: str) -> Dict:
         result = await self._call("aria2.getOption", [gid])
-        return result if isinstance(result, dict) else {}
+        return _parse_dict_result(result, "getOption")
 
     async def change_option(self, gid: str, options: Dict) -> str:
         result = await self._call("aria2.changeOption", [gid, options])

@@ -384,6 +384,13 @@ describe('Aria2Client', () => {
       expect(result).toEqual(opts);
     });
 
+    it('getGlobalOption rejects a non-object result', async () => {
+      mockTransport.sendRequest.mockResolvedValue([]);
+      await expect(client.getGlobalOption()).rejects.toThrow(
+        'Unexpected result type for getGlobalOption',
+      );
+    });
+
     it('changeGlobalOption sends options', async () => {
       mockTransport.sendRequest.mockResolvedValue('OK');
       await client.changeGlobalOption({ 'max-overall-download-limit': '1M' });
@@ -400,6 +407,13 @@ describe('Aria2Client', () => {
       const result = await client.getOption('gid1');
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.getOption', ['gid1']);
       expect(result).toEqual(opts);
+    });
+
+    it('getOption rejects a non-object result', async () => {
+      mockTransport.sendRequest.mockResolvedValue(null);
+      await expect(client.getOption('gid1')).rejects.toThrow(
+        'Unexpected result type for getOption',
+      );
     });
 
     it('changeOption for task', async () => {

@@ -377,43 +377,4 @@ impl BtPeerConn {
             pex_enabled: true,
         })
     }
-
-    /// Create a uTP connection from an existing socket.
-    ///
-    /// Used when accepting incoming uTP connections.
-    pub fn from_utp_socket(
-        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
-        conn_id: u16,
-        info_hash: &[u8; 20],
-    ) -> Self {
-        let utp_conn = UtpPeerConnection::new(socket, conn_id, *info_hash);
-        let now = Instant::now();
-
-        Self {
-            inner: InnerConnection::Utp(utp_conn),
-            ip_addr: String::new(),
-            port: 0,
-            peer_id: None,
-            incoming: true,
-            source: crate::request::request_group::BtPeerSource::Incoming,
-            local_peer: false,
-            disconnected_gracefully: false,
-            seeder: false,
-            first_contact_time: now,
-            connection_type: ConnectionType::Utp,
-            allowed_fast: HashSet::new(),
-            session_resource: None,
-            send_buffer: SendBuffer::new(),
-            last_keepalive_sent: now,
-            last_message_received: now,
-            keep_alive_interval: std::time::Duration::from_secs(KEEPALIVE_INTERVAL_SECS),
-            peer_timeout: std::time::Duration::from_secs(PEER_TIMEOUT_SECS),
-            stats: PeerStats::new(
-                [0u8; 20],
-                std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), 0),
-            ),
-            pending_pex_peers: Vec::new(),
-            pex_enabled: true,
-        }
-    }
 }

@@ -30,6 +30,13 @@ const WS_EVENT_NAMES = [
 
 type WsEventName = (typeof WS_EVENT_NAMES)[number];
 
+function parseObjectResult(result: unknown, method: string): Record<string, unknown> {
+  if (result === null || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result as Record<string, unknown>;
+}
+
 function httpToWs(url: string): string {
   if (url.startsWith('https://')) {
     return url.replace('https://', 'wss://');
@@ -237,7 +244,8 @@ export class Aria2Client {
   }
 
   async getGlobalOption(): Promise<Record<string, unknown>> {
-    return (await this.transport.sendRequest('aria2.getGlobalOption', [])) as Record<string, unknown>;
+    const result = await this.transport.sendRequest('aria2.getGlobalOption', []);
+    return parseObjectResult(result, 'getGlobalOption');
   }
 
   async changeGlobalOption(options: Record<string, unknown>): Promise<string> {
@@ -245,7 +253,8 @@ export class Aria2Client {
   }
 
   async getOption(gid: string): Promise<Record<string, unknown>> {
-    return (await this.transport.sendRequest('aria2.getOption', [gid])) as Record<string, unknown>;
+    const result = await this.transport.sendRequest('aria2.getOption', [gid]);
+    return parseObjectResult(result, 'getOption');
   }
 
   async changeOption(gid: string, options: Record<string, unknown>): Promise<string> {

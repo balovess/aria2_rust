@@ -475,6 +475,12 @@ var Aria2EventEmitter = class extends import_events.EventEmitter {
 
 // src/client.ts
 var DEFAULT_URL = "http://localhost:6800/jsonrpc";
+function parseObjectResult(result, method) {
+  if (result === null || typeof result !== "object" || Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
 function httpToWs(url) {
   if (url.startsWith("https://")) {
     return url.replace("https://", "wss://");
@@ -628,13 +634,15 @@ var Aria2Client = class {
     return await this.transport.sendRequest("aria2.removeDownloadResult", [gid]);
   }
   async getGlobalOption() {
-    return await this.transport.sendRequest("aria2.getGlobalOption", []);
+    const result = await this.transport.sendRequest("aria2.getGlobalOption", []);
+    return parseObjectResult(result, "getGlobalOption");
   }
   async changeGlobalOption(options) {
     return await this.transport.sendRequest("aria2.changeGlobalOption", [options]);
   }
   async getOption(gid) {
-    return await this.transport.sendRequest("aria2.getOption", [gid]);
+    const result = await this.transport.sendRequest("aria2.getOption", [gid]);
+    return parseObjectResult(result, "getOption");
   }
   async changeOption(gid, options) {
     return await this.transport.sendRequest("aria2.changeOption", [gid, options]);

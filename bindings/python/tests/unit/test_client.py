@@ -474,6 +474,25 @@ class TestOptions:
         assert result == {"dir": "/downloads"}
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("method_name", "rpc_method"),
+        [
+            ("get_global_option", "getGlobalOption"),
+            ("get_option", "getOption"),
+        ],
+    )
+    async def test_option_reads_reject_non_object_results(
+        self, client, mock_transport, method_name, rpc_method
+    ):
+        mock_transport.send_request.return_value = []
+
+        with pytest.raises(Aria2Error, match=f"Unexpected result type for {rpc_method}"):
+            if method_name == "get_option":
+                await client.get_option("gid1")
+            else:
+                await client.get_global_option()
+
+    @pytest.mark.asyncio
     async def test_change_option(self, client, mock_transport):
         mock_transport.send_request.return_value = "OK"
         result = await client.change_option("gid1", {"dir": "/tmp"})
