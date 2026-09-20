@@ -143,6 +143,33 @@ impl DownloadEventStream {
         self.receiver.recv().await
     }
 
+    /// Wait for a terminal lifecycle event for `gid`.
+    ///
+    /// This consumes unrelated notifications from this receiver while
+    /// waiting. `Stop` is included because aria2 uses it for a download that
+    /// was stopped without completing or failing. The helper is deliberately
+    /// event-driven; callers that need the final snapshot can use the matching
+    /// [`DownloadHandle`](super::download_manager::DownloadHandle) after it
+    /// returns.
+    pub async fn recv_terminal_for(
+        &mut self,
+        gid: GroupId,
+    ) -> Result<DownloadEvent, broadcast::error::RecvError> {
+        let gid = gid.to_hex_string();
+        loop {
+            match self.recv().await? {
+                DownloadNotification::Lifecycle {
+                    event,
+                    gid: event_gid,
+                } if event_gid == gid && event.is_terminal() => {
+                    return Ok(event);
+                }
+                DownloadNotification::Lifecycle { .. }
+                | DownloadNotification::MetadataResolved(_) => {}
+            }
+        }
+    }
+
     /// Wait for metadata resolution involving `gid`.
     ///
     /// A metadata task may resolve into the same GID (for a magnet download)
@@ -204,6 +231,19 @@ impl DownloadEvent {
     /// de-duplicated.
     pub fn is_once_per_download(&self) -> bool {
         matches!(self, Self::Complete | Self::Error | Self::BtComplete)
+    }
+
+    /// Whether this notification marks the task as stopped for lifecycle
+    /// observers.
+    ///
+    /// `Stop` is terminal for the current task run even though aria2 may emit
+    /// it again when a caller explicitly removes the task. It is therefore
+    /// terminal for waiters but not a one-shot event for de-duplication.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Stop | Self::Complete | Self::Error | Self::BtComplete
+        )
     }
 }
 
@@ -1096,6 +1136,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn terminal_stream_helper_filters_by_gid_and_event_kind() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+        let requested_gid = crate::request::request_group::GroupId::new(11);
+
+        hooks.notify_listeners(DownloadEvent::Start, "000000000000000b");
+        hooks.notify_listeners(DownloadEvent::Complete, "000000000000000a");
+        hooks.notify_listeners(DownloadEvent::Stop, "000000000000000b");
+
+        assert_eq!(
+            stream
+                .recv_terminal_for(requested_gid)
+                .await
+                .expect("matching terminal event"),
+            DownloadEvent::Stop
+        );
+    }
+
     /// Regression test for the P0 defect: observers were only reached when a
     /// `--on-download-*` shell command happened to be configured, so RPC
     /// clients never saw `aria2.onDownloadComplete` in a default deployment.
@@ -1189,6 +1248,16 @@ mod tests {
         assert!(!DownloadEvent::Start.is_once_per_download());
         assert!(!DownloadEvent::Pause.is_once_per_download());
         assert!(!DownloadEvent::Stop.is_once_per_download());
+    }
+
+    #[test]
+    fn test_terminal_event_classification() {
+        assert!(DownloadEvent::Stop.is_terminal());
+        assert!(DownloadEvent::Complete.is_terminal());
+        assert!(DownloadEvent::Error.is_terminal());
+        assert!(DownloadEvent::BtComplete.is_terminal());
+        assert!(!DownloadEvent::Start.is_terminal());
+        assert!(!DownloadEvent::Pause.is_terminal());
     }
 
     #[test]

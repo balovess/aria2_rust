@@ -436,7 +436,7 @@ impl PieceDataProvider for InMemoryPieceProvider {
     }
 
     fn piece_length(&self) -> u32 {
-        16 * 1024
+        self.piece_length
     }
 }
 
@@ -456,6 +456,7 @@ mod tests {
     fn test_in_memory_provider_creation() {
         let provider = InMemoryPieceProvider::new(16384, 10);
         assert_eq!(provider.num_pieces(), 10);
+        assert_eq!(provider.piece_length(), 16384);
         assert!(!provider.has_piece(0));
         assert!(provider.get_piece_data(0, 0, 100).is_none());
     }
@@ -463,6 +464,7 @@ mod tests {
     #[test]
     fn test_in_memory_provider_set_and_get() {
         let mut provider = InMemoryPieceProvider::new(256, 4);
+        assert_eq!(provider.piece_length(), 256);
         provider.set_piece_data(0, vec![0xAB; 256]);
         provider.set_piece_data(2, vec![0xCD; 128]);
 
