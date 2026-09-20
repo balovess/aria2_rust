@@ -60,7 +60,6 @@ pub const BT_ENDGAME_THRESHOLD: usize = 20;
 pub const DEFAULT_BT_ENDGAME_THRESHOLD: usize = BT_ENDGAME_THRESHOLD;
 pub const DEFAULT_PIECE_STRATEGY: &str = "rarest-first";
 pub const BT_PEER_CONNECTION_DELAY_MS: u64 = 100;
-pub const BT_MAX_UNCHOKE_WAIT_ATTEMPTS: usize = 50;
 pub const BT_PEER_MESSAGE_TIMEOUT_SECS: u64 = 5;
 /// Total budget for best-effort stopped announces during task shutdown.
 pub const BT_TRACKER_STOPPED_TIMEOUT_SECS: u64 = 5;

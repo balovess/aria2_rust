@@ -8,8 +8,6 @@ use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use tokio::sync::Mutex;
-
 use crate::bittorrent::utp::connection::{ConnectionError, ConnectionState, UtpConnection};
 use crate::bittorrent::utp::packet::{PacketType, UtpPacket, UtpPacketError};
 use crate::bittorrent::utp::timer::{TimerManager, TimerType};
@@ -64,25 +62,6 @@ pub enum UtpSocketError {
 
     #[error("Timeout: {0}")]
     Timeout(String),
-}
-
-/// Connection identifier (combination of connection_id and remote address)
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct ConnectionId {
-    /// Connection ID from uTP packet
-    pub conn_id: u16,
-    /// Remote socket address
-    pub remote_addr: SocketAddr,
-}
-
-impl ConnectionId {
-    /// Create a new connection identifier
-    pub fn new(conn_id: u16, remote_addr: SocketAddr) -> Self {
-        Self {
-            conn_id,
-            remote_addr,
-        }
-    }
 }
 
 /// uTP socket that manages multiple connections over UDP
@@ -689,86 +668,6 @@ pub struct ConnectionStats {
     pub idle_time: Duration,
 }
 
-/// Async wrapper for UtpSocket
-pub struct AsyncUtpSocket {
-    inner: Arc<Mutex<UtpSocket>>,
-}
-
-impl AsyncUtpSocket {
-    /// Create a new async uTP socket
-    pub fn bind(addr: &str) -> Result<Self, UtpSocketError> {
-        let socket = UtpSocket::bind(addr)?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(socket)),
-        })
-    }
-
-    /// Bind to any available port
-    pub fn bind_any() -> Result<Self, UtpSocketError> {
-        Self::bind("0.0.0.0:0")
-    }
-
-    /// Get local address
-    pub async fn local_addr(&self) -> SocketAddr {
-        let socket = self.inner.lock().await;
-        socket.local_addr()
-    }
-
-    /// Connect to a remote peer
-    pub async fn connect(&self, remote_addr: SocketAddr) -> Result<u16, UtpSocketError> {
-        let mut socket = self.inner.lock().await;
-        socket.connect(remote_addr)
-    }
-
-    /// Send data on a connection
-    pub async fn send(&self, conn_id: u16, data: &[u8]) -> Result<usize, UtpSocketError> {
-        let mut socket = self.inner.lock().await;
-        socket.send(conn_id, data)
-    }
-
-    /// Receive data from a connection
-    pub async fn recv(&self, conn_id: u16, buf: &mut [u8]) -> Result<usize, UtpSocketError> {
-        let mut socket = self.inner.lock().await;
-        socket.recv(conn_id, buf)
-    }
-
-    /// Close a connection
-    pub async fn close_connection(&self, conn_id: u16) -> Result<(), UtpSocketError> {
-        let mut socket = self.inner.lock().await;
-        socket.close_connection(conn_id)
-    }
-
-    /// Close the socket
-    pub async fn close(&self) {
-        let mut socket = self.inner.lock().await;
-        socket.close();
-    }
-
-    /// Get connection state
-    pub async fn connection_state(&self, conn_id: u16) -> Result<ConnectionState, UtpSocketError> {
-        let socket = self.inner.lock().await;
-        socket.connection_state(conn_id)
-    }
-
-    /// Get connection stats
-    pub async fn connection_stats(&self, conn_id: u16) -> Result<ConnectionStats, UtpSocketError> {
-        let socket = self.inner.lock().await;
-        socket.connection_stats(conn_id)
-    }
-
-    /// Process timers
-    pub async fn process_timers(&self) -> Result<(), UtpSocketError> {
-        let mut socket = self.inner.lock().await;
-        socket.process_timers()
-    }
-
-    /// Poll for incoming data
-    pub async fn poll_recv(&self) -> Result<Vec<(u16, Vec<u8>)>, UtpSocketError> {
-        let mut socket = self.inner.lock().await;
-        socket.poll_recv()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,19 +722,6 @@ mod tests {
             result,
             Err(UtpSocketError::ConnectionNotFound(60000))
         ));
-    }
-
-    #[test]
-    fn test_connection_id_creation() {
-        let conn_id = ConnectionId::new(12345, test_addr());
-        assert_eq!(conn_id.conn_id, 12345);
-        assert_eq!(conn_id.remote_addr, test_addr());
-    }
-
-    #[test]
-    fn test_async_socket_bind() {
-        let socket = AsyncUtpSocket::bind_any();
-        assert!(socket.is_ok());
     }
 
     #[test]

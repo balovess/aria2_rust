@@ -226,6 +226,12 @@ import { EventEmitter } from "events";
 import WebSocket2 from "ws";
 
 // src/types.ts
+var PositionMode = /* @__PURE__ */ ((PositionMode2) => {
+  PositionMode2["SetFromStart"] = "POS_SET";
+  PositionMode2["MoveFromStart"] = "POS_CUR";
+  PositionMode2["SetFromEnd"] = "POS_END";
+  return PositionMode2;
+})(PositionMode || {});
 var EventType = /* @__PURE__ */ ((EventType2) => {
   EventType2["DownloadStart"] = "aria2.onDownloadStart";
   EventType2["DownloadPause"] = "aria2.onDownloadPause";
@@ -502,7 +508,15 @@ var Aria2Client = class {
     return await this.transport.sendRequest("aria2.unpauseAll", []);
   }
   async changePosition(gid, position, mode) {
-    return await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
+    const result = await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
+    if (typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
+      return result;
+    }
+    if (typeof result === "string" && /^(0|[1-9]\d*)$/.test(result)) {
+      const parsed = Number(result);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+    throw new Aria2Error(`Unexpected result type for changePosition: ${typeof result}`);
   }
   async changeUri(gid, fileIndex, deleteUris, addUris, position) {
     const params = [gid, fileIndex, deleteUris, addUris];
@@ -630,6 +644,7 @@ export {
   ConnectionError,
   DownloadStatus,
   EventType,
+  PositionMode,
   RpcError,
   TimeoutError
 };

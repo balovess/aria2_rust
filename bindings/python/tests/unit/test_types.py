@@ -6,6 +6,7 @@ from aria2_rust_client.types import (
     EventType,
     FileInfo,
     GlobalStat,
+    PositionMode,
     SessionInfo,
     StatusInfo,
     TrackerInfo,
@@ -42,6 +43,13 @@ class TestDownloadStatus:
     def test_string_enum(self):
         assert isinstance(DownloadStatus.ACTIVE, str)
         assert DownloadStatus.ACTIVE == "active"
+
+
+class TestPositionMode:
+    def test_wire_values(self):
+        assert PositionMode.SET_FROM_START == "POS_SET"
+        assert PositionMode.MOVE_FROM_START == "POS_CUR"
+        assert PositionMode.SET_FROM_END == "POS_END"
 
 
 class TestUriEntry:

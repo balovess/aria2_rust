@@ -195,7 +195,7 @@ impl BtMessageHandler {
                             // for the download loop to drain later.
                             if ext_id == 0 {
                                 // Extension handshake — log only; the full
-                                // handshake is handled by BtPeerInteractive.
+                                // handshake is handled by BtPeerInteraction.
                                 trace!(
                                     "[BT] Received Extension Handshake during block read (payload_len={})",
                                     payload.len()

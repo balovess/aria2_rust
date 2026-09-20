@@ -16,9 +16,6 @@ use crate::util::rwlock_ext::RwLockRecover;
 pub use crate::engine::bt_message_handler::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_BLOCK_READ_MESSAGES, MAX_RETRIES,
 };
-pub use crate::engine::bt_peer_interaction::{
-    MAX_UNCHOKE_WAIT_ATTEMPTS, PEER_CONNECTION_DELAY_MS, PEER_MESSAGE_TIMEOUT_SECS,
-};
 pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
 
 // Re-export sub-module public items

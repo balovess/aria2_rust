@@ -59,6 +59,13 @@ export interface UriEntry {
   status: 'used' | 'waiting';
 }
 
+/** Queue-position operation accepted by aria2.changePosition. */
+export const enum PositionMode {
+  SetFromStart = 'POS_SET',
+  MoveFromStart = 'POS_CUR',
+  SetFromEnd = 'POS_END',
+}
+
 export interface ServerInfo {
   uri: string;
   currentUri: string;

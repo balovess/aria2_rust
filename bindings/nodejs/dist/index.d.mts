@@ -55,6 +55,12 @@ interface UriEntry {
     uri: string;
     status: 'used' | 'waiting';
 }
+/** Queue-position operation accepted by aria2.changePosition. */
+declare const enum PositionMode {
+    SetFromStart = "POS_SET",
+    MoveFromStart = "POS_CUR",
+    SetFromEnd = "POS_END"
+}
 interface ServerInfo {
     uri: string;
     currentUri: string;
@@ -166,7 +172,7 @@ declare class Aria2Client {
     pauseAll(): Promise<string>;
     forcePauseAll(): Promise<string>;
     unpauseAll(): Promise<string>;
-    changePosition(gid: string, position: number, mode: string): Promise<number>;
+    changePosition(gid: string, position: number, mode: PositionMode): Promise<number>;
     changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>;
     tellStatus(gid: string, keys?: string[]): Promise<StatusInfo>;
     getFiles(gid: string): Promise<FileInfo[]>;
@@ -220,4 +226,4 @@ declare class TimeoutError extends Aria2Error {
     constructor(message: string);
 }
 
-export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerInfo, type UriEntry, type VersionInfo };
+export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, PositionMode, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerInfo, type UriEntry, type VersionInfo };

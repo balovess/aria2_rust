@@ -113,7 +113,7 @@ not listed here can still be called through the transport layer.
 - `force_pause(gid)` - Force pause
 - `force_remove(gid)` - Force remove
 - `pause_all()` / `force_pause_all()` / `unpause_all()` - Batch task control
-- `change_position(gid, position, mode)` - Change queue position
+- `change_position(gid, position, mode)` - Change queue position (`PositionMode.SET_FROM_START`, `PositionMode.MOVE_FROM_START`, or `PositionMode.SET_FROM_END`)
 - `change_uri(gid, file_index, delete_uris, add_uris, position=None)` - Replace task URIs
 
 **Status Queries:**

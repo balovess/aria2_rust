@@ -145,7 +145,7 @@ listed here can be called with `call(method, params)`.
 - `forcePause(gid: string): Promise<string>`
 - `forceRemove(gid: string): Promise<string>`
 - `pauseAll(): Promise<string>` / `forcePauseAll(): Promise<string>` / `unpauseAll(): Promise<string>`
-- `changePosition(gid: string, position: number, mode: string): Promise<number>`
+- `changePosition(gid: string, position: number, mode: PositionMode): Promise<number>`
 - `changeUri(gid: string, fileIndex: number, deleteUris: string[], addUris: string[], position?: number): Promise<string[]>`
 
 **Status Queries:**

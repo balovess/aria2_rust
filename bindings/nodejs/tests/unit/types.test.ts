@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { EventType, DownloadStatus } from '../../src/types.js';
+import { EventType, DownloadStatus, PositionMode } from '../../src/types.js';
 import type {
   StatusInfo,
   GlobalStat,
@@ -180,6 +180,14 @@ describe('DownloadEvent', () => {
     };
     expect(event.type).toBe('aria2.onDownloadStart');
     expect(event.gid).toBe('2089b05ecca3d829');
+  });
+});
+
+describe('PositionMode', () => {
+  it('matches the aria2 wire values', () => {
+    expect(PositionMode.SetFromStart).toBe('POS_SET');
+    expect(PositionMode.MoveFromStart).toBe('POS_CUR');
+    expect(PositionMode.SetFromEnd).toBe('POS_END');
   });
 });
 

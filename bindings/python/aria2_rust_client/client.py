@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from typing_extensions import Self
 
@@ -14,6 +14,7 @@ from .types import (
     FileInfo,
     GlobalStat,
     PeerInfo,
+    PositionMode,
     ServerInfoIndex,
     SessionInfo,
     StatusInfo,
@@ -146,10 +147,14 @@ class Aria2Client:
         result = await self._call("aria2.unpauseAll")
         return str(result)
 
-    async def change_position(self, gid: str, position: int, mode: str) -> int:
+    async def change_position(
+        self, gid: str, position: int, mode: Union[PositionMode, str]
+    ) -> int:
         result = await self._call("aria2.changePosition", [gid, position, mode])
-        if isinstance(result, int):
+        if isinstance(result, int) and not isinstance(result, bool):
             return result
+        if isinstance(result, str) and result.isascii() and result.isdecimal():
+            return int(result)
         raise Aria2Error(f"Unexpected result type for changePosition: {type(result)}")
 
     async def change_uri(

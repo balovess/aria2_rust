@@ -33,6 +33,14 @@ class DownloadStatus(str, Enum):
     REMOVED = "removed"
 
 
+class PositionMode(str, Enum):
+    """Queue-position operation accepted by ``aria2.changePosition``."""
+
+    SET_FROM_START = "POS_SET"
+    MOVE_FROM_START = "POS_CUR"
+    SET_FROM_END = "POS_END"
+
+
 _EVENT_METHOD_MAP: Dict[str, EventType] = {
     "aria2.onDownloadStart": EventType.DOWNLOAD_START,
     "aria2.onDownloadPause": EventType.DOWNLOAD_PAUSE,

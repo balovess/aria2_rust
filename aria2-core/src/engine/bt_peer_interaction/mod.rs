@@ -1,38 +1,21 @@
-//! BT Peer Interaction Manager - Peer connection, initialization, and per-peer
-//! interaction loop
+//! BT peer connection manager and initialization path.
 //!
 //! This module manages the interaction with BitTorrent peers, including:
 //! - Connection establishment (plain and encrypted)
 //! - Initial handshake and bitfield exchange
 //! - Waiting for unchoke messages
-//! - Per-peer interaction loop (`BtPeerInteractive`)
-//! - Peer connection lifecycle state machine (`PeerConnectionState`)
+//! - Peer connection lifecycle and readiness
 //!
 //! # Architecture Reference
 //!
 //! Based on original aria2 C++ structure:
-//! - `src/DefaultBtInteractive.h/.cc` — Per-peer interaction loop
 //! - `src/PeerInteractionCommand.h/.cc` — Peer connection lifecycle command
 //! - `src/PeerConnection.cc/h` — Peer connection management
 //! - `src/BtSetup.cc/h` — BT setup and initialization
 
-pub mod interactive;
-pub mod piece_provider;
 pub mod types;
 
-// Re-export all public items from sub-modules so that
-// `use crate::engine::bt_peer_interaction::X` still works for external code.
-pub use interactive::BtPeerInteractive;
-pub use piece_provider::PieceProvider;
-pub use types::{
-    BtPeerConnectionOptions, BtPeerCryptoPolicy, CheckHaveResult, ChokingDecision,
-    DEFAULT_ALLOWED_FAST_SET_SIZE, DEFAULT_KEEP_ALIVE_INTERVAL_SECS,
-    DEFAULT_MAX_OUTSTANDING_REQUEST, DispatchUpdate, FLOODING_CHECK_INTERVAL_SECS,
-    INACTIVITY_TIMEOUT_SECS, InteractionResult, InterestDecision, MAX_UNCHOKE_WAIT_ATTEMPTS,
-    MUTUAL_UNINTERESTED_TIMEOUT_SECS, PEER_CONNECTION_DELAY_MS, PEER_MESSAGE_TIMEOUT_SECS,
-    PER_SEC_INTERVAL_SECS, PEX_INTERVAL_SECS, PeerConnectionResult, PeerConnectionState,
-    PeerIdCheckResult, PostHandshakeActions, UB_MAX_OUTSTANDING_REQUEST,
-};
+pub use types::{BtPeerConnectionOptions, BtPeerCryptoPolicy, PeerConnectionResult};
 
 // ======================================================================
 // BtPeerInteraction — peer connection lifecycle manager
@@ -56,6 +39,8 @@ use tracing::{debug, error, info, warn};
 pub struct BtPeerInteraction;
 
 const HAVE_BROADCAST_CONCURRENCY: usize = 64;
+const PEER_CONNECTION_DELAY_MS: u64 = crate::constants::BT_PEER_CONNECTION_DELAY_MS;
+const PEER_MESSAGE_TIMEOUT_SECS: u64 = crate::constants::BT_PEER_MESSAGE_TIMEOUT_SECS;
 
 impl BtPeerInteraction {
     /// Connect to multiple peers with automatic fallback strategies
@@ -491,6 +476,3 @@ impl BtPeerInteraction {
         debug!("[BT] Cleaned up {} connections", connections.len());
     }
 }
-
-#[cfg(test)]
-mod tests;

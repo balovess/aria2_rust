@@ -213,11 +213,17 @@ class TestSimpleMethods:
 
     @pytest.mark.asyncio
     async def test_change_position(self, client, mock_transport):
-        mock_transport.send_request.return_value = 2
+        mock_transport.send_request.return_value = "2"
         assert await client.change_position("gid1", 2, "POS_SET") == 2
         mock_transport.send_request.assert_called_once_with(
             "aria2.changePosition", ["gid1", 2, "POS_SET"]
         )
+
+    @pytest.mark.asyncio
+    async def test_change_position_rejects_malformed_result(self, client, mock_transport):
+        mock_transport.send_request.return_value = "not-a-position"
+        with pytest.raises(Aria2Error, match="Unexpected result type for changePosition"):
+            await client.change_position("gid1", 2, "POS_SET")
 
     @pytest.mark.asyncio
     async def test_change_uri(self, client, mock_transport):

@@ -14,6 +14,8 @@ import type {
   DhtStatus,
   ClientOptions,
 } from './types.js';
+import { Aria2Error } from './errors.js';
+import type { PositionMode } from './types.js';
 
 const DEFAULT_URL = 'http://localhost:6800/jsonrpc';
 const WS_EVENT_NAMES = [
@@ -150,8 +152,16 @@ export class Aria2Client {
     return (await this.transport.sendRequest('aria2.unpauseAll', [])) as string;
   }
 
-  async changePosition(gid: string, position: number, mode: string): Promise<number> {
-    return (await this.transport.sendRequest('aria2.changePosition', [gid, position, mode])) as number;
+  async changePosition(gid: string, position: number, mode: PositionMode): Promise<number> {
+    const result = await this.transport.sendRequest('aria2.changePosition', [gid, position, mode]);
+    if (typeof result === 'number' && Number.isSafeInteger(result) && result >= 0) {
+      return result;
+    }
+    if (typeof result === 'string' && /^(0|[1-9]\d*)$/.test(result)) {
+      const parsed = Number(result);
+      if (Number.isSafeInteger(parsed)) return parsed;
+    }
+    throw new Aria2Error(`Unexpected result type for changePosition: ${typeof result}`);
   }
 
   async changeUri(

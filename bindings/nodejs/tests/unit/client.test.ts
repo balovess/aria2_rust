@@ -178,7 +178,7 @@ describe('Aria2Client', () => {
     });
 
     it('changePosition sends correct method', async () => {
-      mockTransport.sendRequest.mockResolvedValue(2);
+      mockTransport.sendRequest.mockResolvedValue('2');
       const result = await client.changePosition('gid1', 2, 'POS_SET');
       expect(result).toBe(2);
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('aria2.changePosition', [
@@ -186,6 +186,14 @@ describe('Aria2Client', () => {
         2,
         'POS_SET',
       ]);
+    });
+
+    it('rejects a malformed changePosition result', async () => {
+      mockTransport.sendRequest.mockResolvedValue('not-a-position');
+
+      await expect(client.changePosition('gid1', 2, 'POS_SET')).rejects.toThrow(
+        'Unexpected result type for changePosition',
+      );
     });
 
     it('changeUri sends correct method', async () => {
