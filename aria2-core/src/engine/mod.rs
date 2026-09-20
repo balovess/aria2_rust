@@ -98,7 +98,6 @@ pub mod bt_upload_session;
 #[cfg(feature = "bittorrent")]
 pub mod bt_web_seed;
 #[cfg(feature = "bittorrent")]
-pub mod extension_registry;
 #[cfg(feature = "bittorrent")]
 pub mod hook_manager;
 #[cfg(feature = "bittorrent")]

@@ -2,34 +2,112 @@
 //!
 //! Tests the system discovery methods from aria2 RPC specification.
 
-use aria2_rpc::engine::RpcEngine;
+mod common;
+
 use aria2_rpc::json_rpc::JsonRpcRequest;
+use common::test_engine;
+
+#[allow(unused_mut)]
+fn expected_methods() -> Vec<String> {
+    let mut methods = vec![
+        "aria2.addUri",
+        "aria2.remove",
+        "aria2.pause",
+        "aria2.forcePause",
+        "aria2.pauseAll",
+        "aria2.forcePauseAll",
+        "aria2.unpause",
+        "aria2.unpauseAll",
+        "aria2.forceRemove",
+        "aria2.changePosition",
+        "aria2.tellStatus",
+        "aria2.getUris",
+        "aria2.getFiles",
+        "aria2.getServers",
+        "aria2.tellActive",
+        "aria2.tellWaiting",
+        "aria2.tellStopped",
+        "aria2.getOption",
+        "aria2.changeUri",
+        "aria2.changeOption",
+        "aria2.getGlobalOption",
+        "aria2.changeGlobalOption",
+        "aria2.purgeDownloadResult",
+        "aria2.removeDownloadResult",
+        "aria2.getVersion",
+        "aria2.getSessionInfo",
+        "aria2.shutdown",
+        "aria2.forceShutdown",
+        "aria2.getGlobalStat",
+        "aria2.saveSession",
+        "aria2.updateBrowserContext",
+        "aria2.clearBrowserContext",
+        "system.multicall",
+        "system.listMethods",
+        "system.listNotifications",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    #[cfg(feature = "bittorrent")]
+    methods.splice(
+        1..1,
+        [
+            "aria2.addTorrent",
+            "aria2.getPeers",
+            "aria2.getTrackers",
+            "aria2.getDhtStatus",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+
+    #[cfg(feature = "metalink")]
+    {
+        let index = methods
+            .iter()
+            .position(|method| method == "aria2.remove")
+            .expect("base method catalog must contain aria2.remove");
+        methods.insert(index, "aria2.addMetalink".to_string());
+    }
+
+    methods
+}
+
+#[allow(unused_mut)]
+fn expected_notifications() -> Vec<String> {
+    let mut notifications = vec![
+        "aria2.onDownloadStart",
+        "aria2.onDownloadPause",
+        "aria2.onDownloadStop",
+        "aria2.onDownloadComplete",
+        "aria2.onDownloadError",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+
+    #[cfg(feature = "bittorrent")]
+    notifications.push("aria2.onBtDownloadComplete".to_string());
+
+    notifications
+}
 
 #[tokio::test]
 async fn test_list_methods_returns_all_methods() {
-    let engine = RpcEngine::new();
+    let engine = test_engine();
     let req = JsonRpcRequest::new("system.listMethods", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
 
     let methods: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    let expected_count = 35
-        + [
-            "aria2.addTorrent",
-            "aria2.getPeers",
-            "aria2.getTrackers",
-            "aria2.getDhtStatus",
-            "aria2.addMetalink",
-        ]
-        .into_iter()
-        .filter(|method| methods.iter().any(|actual| actual == method))
-        .count();
-    assert_eq!(methods.len(), expected_count);
+    assert_eq!(methods, expected_methods());
 }
 
 #[tokio::test]
 async fn test_list_methods_contains_core_methods() {
-    let engine = RpcEngine::new();
+    let engine = test_engine();
     let req = JsonRpcRequest::new("system.listMethods", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
 
@@ -45,7 +123,7 @@ async fn test_list_methods_contains_core_methods() {
 
 #[tokio::test]
 async fn test_list_methods_contains_shutdown_methods() {
-    let engine = RpcEngine::new();
+    let engine = test_engine();
     let req = JsonRpcRequest::new("system.listMethods", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
 
@@ -58,7 +136,7 @@ async fn test_list_methods_contains_shutdown_methods() {
 
 #[tokio::test]
 async fn test_list_methods_contains_system_methods() {
-    let engine = RpcEngine::new();
+    let engine = test_engine();
     let req = JsonRpcRequest::new("system.listMethods", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
 
@@ -72,23 +150,18 @@ async fn test_list_methods_contains_system_methods() {
 
 #[tokio::test]
 async fn test_list_notifications_returns_all_events() {
-    let engine = RpcEngine::new();
+    let engine = test_engine();
     let req = JsonRpcRequest::new("system.listNotifications", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
     assert!(resp.is_success());
 
     let notifications: Vec<String> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    let expected_count = 5 + usize::from(
-        notifications
-            .iter()
-            .any(|event| event == "aria2.onBtDownloadComplete"),
-    );
-    assert_eq!(notifications.len(), expected_count);
+    assert_eq!(notifications, expected_notifications());
 }
 
 #[tokio::test]
 async fn test_list_notifications_contains_core_events() {
-    let engine = RpcEngine::new();
+    let engine = test_engine();
     let req = JsonRpcRequest::new("system.listNotifications", serde_json::json!([])).with_id(1);
     let resp = engine.handle_request(&req).await;
 
@@ -105,7 +178,7 @@ async fn test_list_notifications_contains_core_events() {
 #[tokio::test]
 async fn test_rpc_coverage_100_percent() {
     // Verify that all methods listed by listMethods are actually callable
-    let engine = RpcEngine::new();
+    let engine = test_engine();
 
     let list_req = JsonRpcRequest::new("system.listMethods", serde_json::json!([])).with_id(1);
     let list_resp = engine.handle_request(&list_req).await;

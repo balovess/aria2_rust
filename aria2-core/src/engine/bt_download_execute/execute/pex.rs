@@ -3,8 +3,9 @@
 //! Implements the full send/receive cycle for ut_pex extension messages:
 //! - **Outbound**: Periodically build and queue PEX Extended messages on
 //!   connections that support ut_pex (after BEP 10 handshake).
-//! - **Inbound**: Process `ExtensionUpdate::PeerExchange` from the dispatch
-//!   layer, add discovered peers to the known list, and attempt connections.
+//! - **Inbound**: Consume negotiated `ut_pex` messages in the peer message
+//!   handler, add discovered peers to the connection pool, and attempt
+//!   connections.
 //!
 //! Wire format (BEP 10/11):
 //! ```text
@@ -27,8 +28,7 @@ use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
-use crate::engine::extension_registry::ExtensionUpdate;
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::error::Result;
 use crate::request::request_group::BtPeerSource;
 use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::extension::pex::PexHandler;
@@ -87,121 +87,6 @@ impl BtDownloadCommand {
         );
 
         Some(wire_bytes)
-    }
-
-    /// Process an incoming PEX message and extract discovered/dropped peers.
-    pub fn handle_incoming_pex(
-        &mut self,
-        pex_data: &[u8],
-        local_addr: &PeerAddr,
-    ) -> Result<(Vec<PeerAddr>, Vec<PeerAddr>)> {
-        // BEP 0027 and the user-facing switch both prohibit PEX.
-        if !self.peer_exchange_enabled() {
-            debug!("[PEX] Ignoring incoming PEX because peer exchange is disabled");
-            return Ok((Vec::new(), Vec::new()));
-        }
-
-        match PexHandler::process_received_pex(pex_data, local_addr) {
-            Ok((added, dropped)) => {
-                if !added.is_empty() {
-                    info!(count = added.len(), "[PEX] Discovered new peers from PEX");
-                    for peer in &added {
-                        self.add_pex_peer(peer.clone());
-                    }
-                }
-                if !dropped.is_empty() {
-                    debug!(count = dropped.len(), "[PEX] Peers to drop from PEX");
-                }
-                Ok((added, dropped))
-            }
-            Err(e) => {
-                warn!(error = %e, "[PEX] Failed to process incoming PEX message");
-                Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!("PEX processing failed: {}", e),
-                    },
-                ))
-            }
-        }
-    }
-
-    /// Process an `ExtensionUpdate::PeerExchange` received from the dispatch
-    /// layer, converting compact peer representations to `PeerAddr` and
-    /// feeding them into the known-peers list.
-    ///
-    /// Returns the list of newly added peer addresses (for connecting).
-    pub fn process_pex_extension_update(
-        &mut self,
-        update: &ExtensionUpdate,
-        _local_addr: &PeerAddr,
-    ) -> Vec<PeerAddr> {
-        // BEP 0027 and the user-facing switch both prohibit PEX.
-        if !self.peer_exchange_enabled() {
-            return Vec::new();
-        }
-
-        let (added_v4, added_v6, dropped_v4, dropped_v6) = match update {
-            ExtensionUpdate::PeerExchange {
-                added_v4,
-                added_v6,
-                dropped_v4,
-                dropped_v6,
-            } => (added_v4, added_v6, dropped_v4, dropped_v6),
-            _ => return Vec::new(),
-        };
-
-        let mut new_peers = Vec::new();
-
-        // Convert compact IPv4 peers → PeerAddr
-        for compact in added_v4 {
-            let ip = std::net::Ipv4Addr::from(*compact.ip());
-            let addr = PeerAddr::new(&ip.to_string(), compact.port());
-            if !self.pex_known_peers.contains(&addr) {
-                self.add_pex_peer(addr.clone());
-                new_peers.push(addr);
-            }
-        }
-
-        // Convert compact IPv6 peers → PeerAddr
-        for compact in added_v6 {
-            let ip = std::net::Ipv6Addr::from(*compact.ip());
-            let addr = PeerAddr::new(&ip.to_string(), compact.port());
-            if !self.pex_known_peers.contains(&addr) {
-                self.add_pex_peer(addr.clone());
-                new_peers.push(addr);
-            }
-        }
-
-        // Remove dropped peers from the known-peers list
-        let mut dropped_addrs = Vec::new();
-        for compact in dropped_v4 {
-            let ip = std::net::Ipv4Addr::from(*compact.ip());
-            let addr = PeerAddr::new(&ip.to_string(), compact.port());
-            dropped_addrs.push(addr);
-        }
-        for compact in dropped_v6 {
-            let ip = std::net::Ipv6Addr::from(*compact.ip());
-            let addr = PeerAddr::new(&ip.to_string(), compact.port());
-            dropped_addrs.push(addr);
-        }
-        if !dropped_addrs.is_empty() {
-            self.pex_known_peers.retain(|p| !dropped_addrs.contains(p));
-            debug!(
-                dropped = dropped_addrs.len(),
-                remaining = self.pex_known_peers.len(),
-                "[PEX] Removed dropped peers from known list"
-            );
-        }
-
-        if !new_peers.is_empty() {
-            info!(
-                new = new_peers.len(),
-                total = self.pex_known_peers.len(),
-                "[PEX] Added new peers from extension update"
-            );
-        }
-
-        new_peers
     }
 
     /// Connect to peers discovered via PEX.
@@ -425,69 +310,5 @@ pub(super) async fn send_periodic_pex(
             pex_enabled_peers.len(),
             pex_peers_count
         );
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::bt_download_command_tests::build_test_torrent;
-    use crate::request::request_group::GroupId;
-    use crate::util::rwlock_ext::RwLockRecover;
-    use aria2_protocol::bittorrent::message::extension::CompactPeerV4;
-
-    fn pex_update() -> ExtensionUpdate {
-        ExtensionUpdate::PeerExchange {
-            added_v4: vec![CompactPeerV4([127, 0, 0, 1, 0x1a, 0xe1])],
-            added_v6: Vec::new(),
-            dropped_v4: Vec::new(),
-            dropped_v6: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn disabling_peer_exchange_blocks_receive_cache_and_send() {
-        let mut command = BtDownloadCommand::new(
-            GroupId::new(7),
-            &build_test_torrent(),
-            &crate::request::request_group::DownloadOptions::default(),
-            None,
-        )
-        .expect("test command should be constructible");
-        command
-            .group_handle()
-            .recover_mut()
-            .set_option_snapshot(std::collections::HashMap::from([(
-                "enable-peer-exchange".to_string(),
-                serde_json::Value::Bool(false),
-            )]));
-
-        let local = PeerAddr::new("127.0.0.2", 6882);
-        assert!(
-            command
-                .process_pex_extension_update(&pex_update(), &local)
-                .is_empty()
-        );
-        assert!(command.pex_known_peers.is_empty());
-
-        command.set_pex_known_peers(vec![PeerAddr::new("127.0.0.1", 6881)]);
-        assert!(command.build_pex_extended_message(&local, 1).is_none());
-    }
-
-    #[test]
-    fn enabled_peer_exchange_accepts_and_advertises_discovered_peers() {
-        let mut command = BtDownloadCommand::new(
-            GroupId::new(8),
-            &build_test_torrent(),
-            &crate::request::request_group::DownloadOptions::default(),
-            None,
-        )
-        .expect("test command should be constructible");
-        let local = PeerAddr::new("127.0.0.2", 6882);
-
-        let discovered = command.process_pex_extension_update(&pex_update(), &local);
-        assert_eq!(discovered, vec![PeerAddr::new("127.0.0.1", 6881)]);
-        assert_eq!(command.pex_known_peers, discovered.as_slice());
-        assert!(command.build_pex_extended_message(&local, 1).is_some());
     }
 }

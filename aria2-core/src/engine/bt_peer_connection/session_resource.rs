@@ -33,8 +33,8 @@ pub struct PeerSessionResource {
     fast_extension_enabled: bool,
 
     // Extension Protocol (BEP 10)
-    /// Extension message registry: key -> message ID.
-    extension_registry: HashMap<Box<str>, u8>,
+    /// Extension IDs negotiated with this peer: name -> message ID.
+    peer_extensions: HashMap<Box<str>, u8>,
 }
 
 impl PeerSessionResource {
@@ -56,7 +56,7 @@ impl PeerSessionResource {
             num_pieces,
             message_validator: BtMessageValidator::new(num_pieces, piece_length),
             fast_extension_enabled: false,
-            extension_registry: HashMap::new(),
+            peer_extensions: HashMap::new(),
         }
     }
 
@@ -208,11 +208,11 @@ impl PeerSessionResource {
 
     /// Register an extension with the given key and message ID.
     pub fn add_extension(&mut self, key: &str, id: u8) {
-        self.extension_registry.insert(key.into(), id);
+        self.peer_extensions.insert(key.into(), id);
     }
 
     /// Look up the message ID for a given extension key.
     pub fn get_extension_message_id(&self, key: &str) -> Option<u8> {
-        self.extension_registry.get(key).copied()
+        self.peer_extensions.get(key).copied()
     }
 }

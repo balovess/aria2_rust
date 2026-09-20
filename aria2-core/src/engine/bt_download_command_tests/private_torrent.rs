@@ -93,30 +93,6 @@ fn test_private_torrent_build_pex_extended_message_returns_none() {
 }
 
 #[test]
-fn test_private_torrent_handle_incoming_pex_ignored() {
-    use aria2_protocol::bittorrent::peer::connection::PeerAddr;
-
-    let mut cmd = create_private_test_command();
-
-    // Construct a minimal valid PEX message (empty added/dropped lists).
-    // The bencode for an empty PEX dict is "de".
-    let pex_data = b"de";
-    let local_addr = PeerAddr::new("127.0.0.1", 6881);
-
-    let result = cmd.handle_incoming_pex(pex_data, &local_addr);
-    assert!(
-        result.is_ok(),
-        "handle_incoming_pex should return Ok (with empty lists) for private torrents, \
-         not an error"
-    );
-    let (added, dropped) = result.unwrap();
-    assert!(
-        added.is_empty() && dropped.is_empty(),
-        "handle_incoming_pex must return empty lists for private torrents (BEP 0027)"
-    );
-}
-
-#[test]
 fn test_non_private_torrent_build_pex_extended_message_can_proceed() {
     use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 
