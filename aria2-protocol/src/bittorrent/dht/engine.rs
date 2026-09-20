@@ -323,13 +323,13 @@ impl DhtEngine {
 
         let shutdown_requested = Arc::new(AtomicBool::new(false));
         let routing_table_save_lock = Arc::new(tokio::sync::Mutex::new(()));
-        let task_context = DhtTaskContext {
+        let task_context = DhtTaskContext::new(
             self_id,
-            routing_table: Arc::clone(&routing_table),
-            socket: socket.clone(),
-            tracker: Arc::clone(&tracker),
-            query_timeout: config.query_timeout,
-        };
+            Arc::clone(&routing_table),
+            socket.clone(),
+            Arc::clone(&tracker),
+            config.query_timeout,
+        );
         let task_queue = Arc::new(DhtTaskQueue::with_concurrency(
             config.max_concurrent_lookups,
         ));
