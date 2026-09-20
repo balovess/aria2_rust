@@ -46,18 +46,6 @@ fn test_send_buffer_empty_check() {
 }
 
 #[test]
-fn test_send_buffer_encryption_flag() {
-    let mut buf = SendBuffer::new();
-    assert!(!buf.is_encryption_enabled());
-
-    buf.set_encryption_enabled(true);
-    assert!(buf.is_encryption_enabled());
-
-    buf.set_encryption_enabled(false);
-    assert!(!buf.is_encryption_enabled());
-}
-
-#[test]
 fn test_send_buffer_default() {
     let buf = SendBuffer::default();
     assert!(buf.is_empty());

@@ -320,43 +320,6 @@ fn test_on_have_none_received_clears_bitfield() {
     assert!(matches!(&updates[0], PeerStateUpdate::ClearBitfield));
 }
 
-// ── on_suggest_received tests ──────────────────────────────────────
-
-#[test]
-fn test_on_suggest_received_noop() {
-    let mut h = BtPeerMessageHandler::new(16384);
-    let interested_before = h.peer_interested;
-    let choking_before = h.am_choking;
-    h.on_suggest_received(42);
-    assert_eq!(h.peer_interested, interested_before);
-    assert_eq!(h.am_choking, choking_before);
-}
-
-// ── on_port_received tests ─────────────────────────────────────────
-
-#[test]
-fn test_on_port_received_nonzero() {
-    let mut h = BtPeerMessageHandler::new(16384);
-    h.on_port_received(6881);
-    // No state change expected, just logs
-}
-
-#[test]
-fn test_on_port_received_zero() {
-    let mut h = BtPeerMessageHandler::new(16384);
-    h.on_port_received(0);
-    // No state change expected, just logs
-}
-
-// ── on_extended_received tests ─────────────────────────────────────
-
-#[test]
-fn test_on_extended_received_logs() {
-    let mut h = BtPeerMessageHandler::new(16384);
-    h.on_extended_received(0, &[1, 2, 3]);
-    // No state change expected, just logs
-}
-
 // ── Fast extension and choking state accessor tests ────────────────
 
 #[test]

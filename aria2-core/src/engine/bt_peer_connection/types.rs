@@ -29,8 +29,6 @@ pub enum ConnectionType {
 pub struct SendBuffer {
     /// Queued message bytes, waiting to be written to the socket.
     pending: Vec<u8>,
-    /// Whether encryption is enabled for this buffer.
-    encryption_enabled: bool,
 }
 
 impl SendBuffer {
@@ -38,17 +36,11 @@ impl SendBuffer {
     pub fn new() -> Self {
         Self {
             pending: Vec::new(),
-            encryption_enabled: false,
         }
     }
 
     /// Add data to the pending buffer.
-    ///
-    /// In a future iteration, when `encryption_enabled` is `true`, the data
-    /// will be encrypted before being queued. For now the flag is stored but
-    /// does not affect the data.
     pub fn push_bytes(&mut self, data: Vec<u8>) {
-        // TODO: encrypt data if encryption_enabled
         self.pending.extend_from_slice(&data);
     }
 
@@ -71,16 +63,6 @@ impl SendBuffer {
     /// the socket.
     pub fn take_pending(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
-    }
-
-    /// Set whether encryption is enabled for this buffer.
-    pub fn set_encryption_enabled(&mut self, enabled: bool) {
-        self.encryption_enabled = enabled;
-    }
-
-    /// Check whether encryption is enabled.
-    pub fn is_encryption_enabled(&self) -> bool {
-        self.encryption_enabled
     }
 }
 

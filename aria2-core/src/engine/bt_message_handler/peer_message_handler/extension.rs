@@ -69,56 +69,6 @@ impl BtPeerMessageHandler {
         Ok(())
     }
 
-    /// Handle receiving a SuggestPiece message (ID=12).
-    ///
-    /// Currently a no-op — the C++ implementation also ignores this message
-    /// (TODO in original code). May be used in the future for piece priority
-    /// boosting.
-    ///
-    /// Mirrors C++ `BtSuggestPieceMessage::doReceivedAction()`.
-    pub fn on_suggest_received(&mut self, index: u32) {
-        trace!(
-            "PeerHandler: SuggestPiece received for piece {} (currently ignored)",
-            index
-        );
-    }
-
-    /// Handle receiving a Port message (ID=9).
-    ///
-    /// If DHT is enabled and the port is non-zero, the caller should create
-    /// a DHT node and ping it. If bootstrap is needed, the caller should
-    /// initiate a node_lookup task.
-    ///
-    /// This handler only logs the event; actual DHT operations are delegated
-    /// to the caller.
-    ///
-    /// Mirrors C++ `BtPortMessage::doReceivedAction()`.
-    pub fn on_port_received(&mut self, port: u16) {
-        if port != 0 {
-            trace!(
-                "PeerHandler: Port received (port={}), DHT action delegated to caller",
-                port
-            );
-        } else {
-            trace!("PeerHandler: Port received (port=0), ignoring");
-        }
-    }
-
-    /// Handle receiving an Extended message (ID=20).
-    ///
-    /// Delegates to the extension message handler. This handler only logs
-    /// the event; actual processing is delegated to the caller.
-    ///
-    /// Mirrors C++ `BtExtendedMessage::doReceivedAction()` which calls
-    /// `extensionMessage->doReceivedAction()`.
-    pub fn on_extended_received(&mut self, ext_id: u8, payload: &[u8]) {
-        trace!(
-            "PeerHandler: Extended message received (ext_id={}, payload_len={})",
-            ext_id,
-            payload.len()
-        );
-    }
-
     // ── Fast Extension & Metadata State Accessors ───────────────────────
 
     /// Check if fast extension is enabled for this peer.

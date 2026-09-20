@@ -534,9 +534,10 @@ impl DownloadHandle {
         let mut observed = signal.generation();
 
         loop {
-            if let Some(result) = self.download_result()
-                && result.status.as_str() == expected.as_str()
-            {
+            let result = self
+                .download_result()
+                .ok_or_else(|| self.not_found_error())?;
+            if result.status.as_str() == expected.as_str() {
                 return Ok(result);
             }
 
@@ -607,9 +608,10 @@ impl DownloadHandle {
         let mut observed = signal.generation();
 
         loop {
-            if let Some(result) = self.download_result()
-                && result.status.is_terminal()
-            {
+            let result = self
+                .download_result()
+                .ok_or_else(|| self.not_found_error())?;
+            if result.status.is_terminal() {
                 return Ok(result);
             }
 
@@ -628,6 +630,13 @@ impl DownloadHandle {
     ) -> std::result::Result<(), DownloadManagerError> {
         self.manager.command_sender.send(command)?;
         Ok(())
+    }
+
+    fn not_found_error(&self) -> DownloadManagerError {
+        DownloadManagerError::State(Aria2Error::InvalidArgument(format!(
+            "GID#{} not found",
+            self.gid_hex()
+        )))
     }
 }
 
@@ -883,6 +892,33 @@ mod tests {
             .expect("wait task must not panic");
         assert!(matches!(result, Err(DownloadManagerError::WaitCancelled)));
         assert!(handle.status_snapshot().is_some());
+    }
+
+    #[tokio::test]
+    async fn unknown_handle_waits_fail_without_waiting_for_an_event() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager.handle(GroupId::new(0xdead_beef));
+
+        let status_result = tokio::time::timeout(
+            Duration::from_secs(1),
+            handle.wait_for_status(DownloadStatus::Waiting),
+        )
+        .await
+        .expect("unknown status wait must return promptly");
+        assert!(matches!(
+            status_result,
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+
+        let terminal_result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
+            .await
+            .expect("unknown terminal wait must return promptly");
+        assert!(matches!(
+            terminal_result,
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
     }
 
     #[tokio::test]
