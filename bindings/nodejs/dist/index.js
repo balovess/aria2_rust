@@ -106,12 +106,17 @@ var HttpTransport = class {
   token;
   timeout;
   nextId = 1;
+  closed = false;
+  pending = /* @__PURE__ */ new Map();
   constructor(url, options) {
     this.url = url;
     this.token = options?.token ?? options?.secret;
     this.timeout = options?.timeout ?? 3e4;
   }
   async sendRequest(method, params) {
+    if (this.closed) {
+      throw new ConnectionError("Transport closed");
+    }
     const id = this.nextId++;
     const request = {
       jsonrpc: "2.0",
@@ -121,6 +126,8 @@ var HttpTransport = class {
     };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
+    const pendingRequest = { controller, closed: false };
+    this.pending.set(id, pendingRequest);
     try {
       const response = await fetch(this.url, {
         method: "POST",
@@ -151,6 +158,9 @@ var HttpTransport = class {
       if (err instanceof RpcError || err instanceof AuthError || err instanceof ConnectionError) {
         throw err;
       }
+      if (pendingRequest.closed) {
+        throw new ConnectionError("Transport closed");
+      }
       if (err instanceof DOMException && err.name === "AbortError") {
         throw new TimeoutError(`Request timed out after ${this.timeout}ms`);
       }
@@ -160,9 +170,16 @@ var HttpTransport = class {
       throw new ConnectionError(err instanceof Error ? err.message : String(err));
     } finally {
       clearTimeout(timer);
+      this.pending.delete(id);
     }
   }
   async close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pendingRequest of this.pending.values()) {
+      pendingRequest.closed = true;
+      pendingRequest.controller.abort();
+    }
   }
 };
 var WebSocketTransport = class {
@@ -176,6 +193,7 @@ var WebSocketTransport = class {
   connectPromise = null;
   pendingWs = null;
   pendingConnectReject = null;
+  closed = false;
   constructor(url, options, onEvent) {
     this.url = url;
     this.token = options?.token ?? options?.secret;
@@ -186,6 +204,9 @@ var WebSocketTransport = class {
     this.onEvent = handler;
   }
   async ensureConnection() {
+    if (this.closed) {
+      throw new ConnectionError("Transport closed");
+    }
     if (this.ws && this.ws.readyState === import_ws.default.OPEN) {
       return;
     }
@@ -311,6 +332,8 @@ var WebSocketTransport = class {
     });
   }
   async close() {
+    if (this.closed) return;
+    this.closed = true;
     const pendingReject = this.pendingConnectReject;
     this.pendingConnectReject = null;
     if (this.pendingWs) {

@@ -2,11 +2,10 @@ use std::time::Instant;
 
 #[derive(Debug, Clone)]
 pub struct DhtNode {
-    pub id: [u8; 20],
-    pub addr: std::net::SocketAddr,
-    pub last_seen: Instant,
-    pub failed_count: u8,
-    pub token: Option<String>,
+    pub(crate) id: [u8; 20],
+    pub(crate) addr: std::net::SocketAddr,
+    pub(crate) last_seen: Instant,
+    pub(crate) failed_count: u8,
 }
 
 impl DhtNode {
@@ -16,8 +15,23 @@ impl DhtNode {
             addr,
             last_seen: Instant::now(),
             failed_count: 0,
-            token: None,
         }
+    }
+
+    pub fn id(&self) -> &[u8; 20] {
+        &self.id
+    }
+
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+
+    pub fn last_seen(&self) -> Instant {
+        self.last_seen
+    }
+
+    pub fn failed_count(&self) -> u8 {
+        self.failed_count
     }
 
     pub fn is_good(&self) -> bool {

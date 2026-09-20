@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, Set, runtime_checkable
 
 import httpx
 
@@ -48,6 +48,8 @@ class HttpTransport:
         self._token = token
         self._timeout = timeout
         self._id_counter = 0
+        self._closed = False
+        self._pending_tasks: Set[asyncio.Task] = set()
         self._client = httpx.AsyncClient(timeout=timeout)
 
     def _next_id(self) -> int:
@@ -67,13 +69,26 @@ class HttpTransport:
         }
 
     async def send_request(self, method: str, params: list) -> Any:
+        if self._closed:
+            raise ConnectionError("Transport closed")
+
         payload = self._build_request(method, params)
+        task = asyncio.current_task()
+        if task is not None:
+            self._pending_tasks.add(task)
         try:
             response = await self._client.post(self._url, json=payload)
+        except asyncio.CancelledError as exc:
+            if self._closed:
+                raise ConnectionError("Transport closed") from exc
+            raise
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             raise ConnectionError(f"Connection error: {exc}") from exc
         except httpx.TimeoutException as exc:
             raise TimeoutError(f"Request timed out: {exc}") from exc
+        finally:
+            if task is not None:
+                self._pending_tasks.discard(task)
 
         # aria2 returns a JSON-RPC error body with HTTP 400 for execution
         # failures. Decode the body before treating the HTTP status as a
@@ -111,6 +126,17 @@ class HttpTransport:
         return data.get("result")
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        current_task = asyncio.current_task()
+        pending_tasks = [
+            task for task in self._pending_tasks if task is not current_task
+        ]
+        for task in pending_tasks:
+            task.cancel()
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
         await self._client.aclose()
 
 
@@ -130,6 +156,7 @@ class WebSocketTransport:
         self._listener_task: Optional[asyncio.Task] = None
         self._connect_task: Optional[asyncio.Task] = None
         self._connection_generation = 0
+        self._closed = False
         self._event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._connected = False
 
@@ -143,6 +170,9 @@ class WebSocketTransport:
         self._event_callback = callback
 
     async def _ensure_connected(self) -> None:
+        if self._closed:
+            raise ConnectionError("Transport closed")
+
         if self._connected and self._ws is not None:
             return
 
@@ -261,6 +291,9 @@ class WebSocketTransport:
             raise TimeoutError(f"Request timed out after {self._timeout}s")
 
     async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self._connection_generation += 1
 
         connect_task = self._connect_task

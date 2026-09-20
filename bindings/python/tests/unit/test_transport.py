@@ -232,6 +232,25 @@ class TestSendRequest:
     async def test_close(self, transport):
         await transport.close()
 
+    @pytest.mark.asyncio
+    async def test_close_cancels_in_flight_request(self, transport, monkeypatch):
+        started = asyncio.Event()
+
+        async def blocked_post(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(transport._client, "post", blocked_post)
+        request = asyncio.create_task(transport.send_request("aria2.getVersion", []))
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await transport.close()
+
+        with pytest.raises(ConnectionError, match="Transport closed"):
+            await asyncio.wait_for(request, timeout=1)
+        with pytest.raises(ConnectionError, match="Transport closed"):
+            await transport.send_request("aria2.getVersion", [])
+
 
 class TestWebSocketTransport:
     @staticmethod
@@ -299,3 +318,12 @@ class TestWebSocketTransport:
         assert transport._pending == {}
 
         await transport.close()
+
+    @pytest.mark.asyncio
+    async def test_close_prevents_reuse(self):
+        transport = WebSocketTransport("ws://localhost:6800/jsonrpc")
+
+        await transport.close()
+
+        with pytest.raises(ConnectionError, match="Transport closed"):
+            await transport.send_request("aria2.getVersion", [])

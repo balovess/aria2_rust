@@ -206,6 +206,25 @@ describe('HttpTransport', () => {
   it('close resolves without error', async () => {
     await expect(transport.close()).resolves.toBeUndefined();
   });
+
+  it('close aborts an in-flight request and prevents reuse', async () => {
+    mockFetch.mockImplementation((_input: RequestInfo, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const request = transport.sendRequest('aria2.getVersion', []);
+    await vi.waitFor(() => expect(mockFetch).toHaveBeenCalledOnce());
+    await transport.close();
+
+    await expect(request).rejects.toThrow('Transport closed');
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'Transport closed',
+    );
+  });
 });
 
 describe('WebSocketTransport', () => {
@@ -226,6 +245,9 @@ describe('WebSocketTransport', () => {
       }),
     ]);
     await expect(boundedRequest).rejects.toThrow('Transport closed');
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'Transport closed',
+    );
     if (timeout) clearTimeout(timeout);
     await new Promise<void>((resolve, reject) => server.close((error) => {
       if (error) reject(error);

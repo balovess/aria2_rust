@@ -35,6 +35,11 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingHttpRequest {
+  controller: AbortController;
+  closed: boolean;
+}
+
 function isAuthRpcError(code: unknown, message: string): boolean {
   if (code === -32001) return true;
 
@@ -63,6 +68,8 @@ export class HttpTransport implements Transport {
   private token: string | undefined;
   private timeout: number;
   private nextId = 1;
+  private closed = false;
+  private pending = new Map<number, PendingHttpRequest>();
 
   constructor(url: string, options?: ClientOptions) {
     this.url = url;
@@ -71,6 +78,10 @@ export class HttpTransport implements Transport {
   }
 
   async sendRequest(method: string, params: unknown[]): Promise<unknown> {
+    if (this.closed) {
+      throw new ConnectionError('Transport closed');
+    }
+
     const id = this.nextId++;
     const request: JsonRpcRequest = {
       jsonrpc: '2.0',
@@ -81,6 +92,8 @@ export class HttpTransport implements Transport {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeout);
+    const pendingRequest: PendingHttpRequest = { controller, closed: false };
+    this.pending.set(id, pendingRequest);
 
     try {
       const response = await fetch(this.url, {
@@ -119,6 +132,9 @@ export class HttpTransport implements Transport {
       if (err instanceof RpcError || err instanceof AuthError || err instanceof ConnectionError) {
         throw err;
       }
+      if (pendingRequest.closed) {
+        throw new ConnectionError('Transport closed');
+      }
       if (err instanceof DOMException && err.name === 'AbortError') {
         throw new TimeoutError(`Request timed out after ${this.timeout}ms`);
       }
@@ -128,10 +144,18 @@ export class HttpTransport implements Transport {
       throw new ConnectionError(err instanceof Error ? err.message : String(err));
     } finally {
       clearTimeout(timer);
+      this.pending.delete(id);
     }
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pendingRequest of this.pending.values()) {
+      pendingRequest.closed = true;
+      pendingRequest.controller.abort();
+    }
+  }
 }
 
 export class WebSocketTransport implements Transport {
@@ -145,6 +169,7 @@ export class WebSocketTransport implements Transport {
   private connectPromise: Promise<void> | null = null;
   private pendingWs: WebSocket | null = null;
   private pendingConnectReject: ((reason: Error) => void) | null = null;
+  private closed = false;
 
   constructor(url: string, options?: ClientOptions, onEvent?: EventCallback) {
     this.url = url;
@@ -158,6 +183,10 @@ export class WebSocketTransport implements Transport {
   }
 
   private async ensureConnection(): Promise<void> {
+    if (this.closed) {
+      throw new ConnectionError('Transport closed');
+    }
+
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
     }
@@ -305,6 +334,9 @@ export class WebSocketTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+
     const pendingReject = this.pendingConnectReject;
     this.pendingConnectReject = null;
     if (this.pendingWs) {
