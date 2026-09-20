@@ -21,6 +21,15 @@ _EVENT_METHOD_MAP: dict[str, EventType] = {
     "aria2.onBtDownloadComplete": EventType.BT_DOWNLOAD_COMPLETE,
 }
 
+_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        EventType.DOWNLOAD_STOP,
+        EventType.DOWNLOAD_COMPLETE,
+        EventType.DOWNLOAD_ERROR,
+        EventType.BT_DOWNLOAD_COMPLETE,
+    }
+)
+
 
 class EventSubscriber:
     def __init__(
@@ -176,6 +185,50 @@ class EventSubscriber:
         if event is None:
             raise StopAsyncIteration
         return event
+
+    async def wait_for_terminal(
+        self, gid: str, timeout: Optional[float] = None
+    ) -> DownloadEvent:
+        """Wait for a terminal event for one GID without polling status.
+
+        The subscriber is started automatically when needed. Events for other
+        GIDs and non-terminal transitions are consumed and ignored. Callers
+        should create the subscriber before submitting a task when they must
+        not miss a fast completion event.
+
+        ``timeout`` is optional because a download may legitimately take an
+        unbounded amount of time. When supplied, it must be positive and a
+        timeout is reported through the SDK's :class:`TimeoutError`.
+        """
+        if not isinstance(gid, str) or not gid:
+            raise TypeError("gid must be a non-empty string")
+        if timeout is not None and (
+            isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+        ):
+            raise TypeError("timeout must be a positive number or None")
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive")
+
+        await self.start()
+
+        async def receive_terminal() -> DownloadEvent:
+            while True:
+                event = await self.__anext__()
+                if event.gid == gid and event.event_type in _TERMINAL_EVENT_TYPES:
+                    return event
+
+        try:
+            if timeout is None:
+                return await receive_terminal()
+            return await asyncio.wait_for(receive_terminal(), timeout=timeout)
+        except StopAsyncIteration as exc:
+            raise ConnectionError(
+                "Subscriber closed before a terminal event was received"
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Timed out waiting for terminal event for GID {gid}"
+            ) from exc
 
     async def close(self) -> None:
         self._closed = True

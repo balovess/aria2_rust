@@ -357,6 +357,12 @@ var EVENT_MAP = {
   ["aria2.onDownloadError" /* DownloadError */]: "downloadError",
   ["aria2.onBtDownloadComplete" /* BtDownloadComplete */]: "btDownloadComplete"
 };
+var TERMINAL_EVENT_NAMES = [
+  "downloadStop",
+  "downloadComplete",
+  "downloadError",
+  "btDownloadComplete"
+];
 var MAX_RECONNECT_RETRIES = 5;
 var BASE_RECONNECT_DELAY = 1e3;
 var Aria2EventEmitter = class extends EventEmitter {
@@ -368,6 +374,7 @@ var Aria2EventEmitter = class extends EventEmitter {
   closed = false;
   connectPromise = null;
   pendingConnectReject = null;
+  terminalWaiters = /* @__PURE__ */ new Set();
   constructor(wsUrl, _options) {
     super();
     this.wsUrl = wsUrl;
@@ -388,6 +395,75 @@ var Aria2EventEmitter = class extends EventEmitter {
       await this.connectPromise;
     } finally {
       this.connectPromise = null;
+    }
+  }
+  /**
+   * Wait for a terminal event for one GID without polling status.
+   *
+   * Events for other GIDs and non-terminal transitions are ignored. Register
+   * the wait before submitting a task when a fast completion must not be
+   * missed. The timeout covers waiting for the event after the WebSocket is
+   * connected; omit it for an unbounded download.
+   */
+  async waitForTerminal(gid, timeoutMs) {
+    if (typeof gid !== "string" || gid.length === 0) {
+      throw new TypeError("gid must be a non-empty string");
+    }
+    if (timeoutMs !== void 0 && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      throw new TypeError("timeoutMs must be a positive number or undefined");
+    }
+    let timer = null;
+    let settled = false;
+    let cleanup = () => {
+    };
+    let startTimer = () => {
+    };
+    let rejectClosed = () => {
+    };
+    const result = new Promise((resolve, reject) => {
+      const onEvent = (event) => {
+        if (event.gid !== gid) return;
+        settled = true;
+        cleanup();
+        resolve(event);
+      };
+      cleanup = () => {
+        for (const eventName of TERMINAL_EVENT_NAMES) {
+          this.off(eventName, onEvent);
+        }
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        this.terminalWaiters.delete(rejectClosed);
+      };
+      for (const eventName of TERMINAL_EVENT_NAMES) {
+        this.on(eventName, onEvent);
+      }
+      startTimer = () => {
+        if (timeoutMs === void 0 || settled) return;
+        timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(new TimeoutError(`Timed out waiting for terminal event for GID ${gid}`));
+        }, timeoutMs);
+      };
+      rejectClosed = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      this.terminalWaiters.add(rejectClosed);
+    });
+    try {
+      await this.connect();
+      startTimer();
+      return await result;
+    } catch (error) {
+      cleanup();
+      throw error;
     }
   }
   async doConnect() {
@@ -516,6 +592,10 @@ var Aria2EventEmitter = class extends EventEmitter {
   }
   async close() {
     this.closed = true;
+    for (const reject of this.terminalWaiters) {
+      reject(new ConnectionError("Emitter has been closed"));
+    }
+    this.terminalWaiters.clear();
     const pendingWs = this.pendingWs;
     const pendingReject = this.pendingConnectReject;
     this.pendingConnectReject = null;

@@ -1,6 +1,7 @@
 use crate::engine::bt_upload_session::PieceDataProvider;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
+use async_trait::async_trait;
 
 /// Provides piece data from local files, used during seeding phase.
 ///
@@ -65,37 +66,30 @@ impl FileBackedPieceProvider {
     }
 }
 
-impl PieceDataProvider for FileBackedPieceProvider {
-    fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
+impl FileBackedPieceProvider {
+    async fn read_file_range(
+        file_path: &std::path::Path,
+        seek_pos: u64,
+        len: u32,
+    ) -> Option<Vec<u8>> {
         use std::io::SeekFrom;
         use tokio::fs::File;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-        let read_op =
-            move |file_path: std::path::PathBuf, seek_pos: u64, len: u32| -> Option<Vec<u8>> {
-                let rt = match tokio::runtime::Handle::try_current() {
-                    Ok(handle) => handle,
-                    Err(_) => {
-                        let rt = tokio::runtime::Runtime::new().ok()?;
-                        return rt.block_on(async {
-                            let mut f = File::open(&file_path).await.ok()?;
-                            f.seek(SeekFrom::Start(seek_pos)).await.ok()?;
-                            let mut buf = vec![0u8; len as usize];
-                            f.read_exact(&mut buf).await.ok()?;
-                            Some(buf)
-                        });
-                    }
-                };
-                tokio::task::block_in_place(|| {
-                    rt.block_on(async {
-                        let mut f = File::open(&file_path).await.ok()?;
-                        f.seek(SeekFrom::Start(seek_pos)).await.ok()?;
-                        let mut buf = vec![0u8; len as usize];
-                        f.read_exact(&mut buf).await.ok()?;
-                        Some(buf)
-                    })
-                })
-            };
+        let mut file = File::open(file_path).await.ok()?;
+        file.seek(SeekFrom::Start(seek_pos)).await.ok()?;
+        let mut buffer = vec![0u8; len as usize];
+        file.read_exact(&mut buffer).await.ok()?;
+        Some(buffer)
+    }
+}
+
+#[async_trait]
+impl PieceDataProvider for FileBackedPieceProvider {
+    async fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
+        if !self.has_piece(piece_index) {
+            return None;
+        }
 
         if let Some(ref layout) = self.multi_file_layout {
             let global_start = piece_index as u64 * layout.piece_length() as u64 + offset as u64;
@@ -136,7 +130,7 @@ impl PieceDataProvider for FileBackedPieceProvider {
                 let bytes_available_in_file = file_end - current_global;
                 let bytes_to_read = remaining.min(bytes_available_in_file) as u32;
 
-                let data = read_op(file_path.clone(), file_offset, bytes_to_read)?;
+                let data = Self::read_file_range(&file_path, file_offset, bytes_to_read).await?;
                 result.extend_from_slice(&data);
                 current_global += data.len() as u64;
                 remaining -= data.len() as u64;
@@ -145,7 +139,7 @@ impl PieceDataProvider for FileBackedPieceProvider {
             Some(result)
         } else {
             let file_pos = piece_index as u64 * self.piece_length as u64 + offset as u64;
-            read_op(self.file_path.clone(), file_pos, length)
+            Self::read_file_range(&self.file_path, file_pos, length).await
         }
     }
 

@@ -166,6 +166,9 @@ metadata can be queried even when the task is created with `pause=true`.
 
 **Event Subscription:**
 - `subscribe_events(filter=None)` - Subscribe to download events
+- `EventSubscriber.wait_for_terminal(gid, timeout=None)` - Wait for
+  `stop`, `complete`, `error`, or BitTorrent completion for one GID without
+  polling; create the subscription before submitting fast tasks
 - `async with subscriber` - Close the event WebSocket automatically
 
 **Lifecycle:**

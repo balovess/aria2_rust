@@ -139,8 +139,18 @@ declare class Aria2EventEmitter extends EventEmitter {
     private closed;
     private connectPromise;
     private pendingConnectReject;
+    private terminalWaiters;
     constructor(wsUrl: string, _options?: ClientOptions);
     connect(): Promise<void>;
+    /**
+     * Wait for a terminal event for one GID without polling status.
+     *
+     * Events for other GIDs and non-terminal transitions are ignored. Register
+     * the wait before submitting a task when a fast completion must not be
+     * missed. The timeout covers waiting for the event after the WebSocket is
+     * connected; omit it for an unbounded download.
+     */
+    waitForTerminal(gid: string, timeoutMs?: number): Promise<DownloadEvent>;
     private doConnect;
     private setupMessageHandler;
     private setupCloseHandler;

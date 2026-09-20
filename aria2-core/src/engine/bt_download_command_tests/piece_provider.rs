@@ -2,8 +2,8 @@ use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_upload_session::PieceDataProvider;
 use crate::engine::multi_file_layout::MultiFileLayout;
 
-#[test]
-fn test_multi_file_piece_provider_reads_correct_file() {
+#[tokio::test]
+async fn test_multi_file_piece_provider_reads_correct_file() {
     use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
 
     let info = InfoDict {
@@ -44,7 +44,7 @@ fn test_multi_file_piece_provider_reads_correct_file() {
 
     let provider = FileBackedPieceProvider::new(base_dir.clone(), 128, 2, Some(layout));
 
-    let result = provider.get_piece_data(0, 0, 10);
+    let result = provider.get_piece_data(0, 0, 10).await;
     assert!(result.is_some(), "Should read from file a at offset 0");
     assert_eq!(
         result.unwrap(),
@@ -52,7 +52,7 @@ fn test_multi_file_piece_provider_reads_correct_file() {
         "First 10 bytes should match file a"
     );
 
-    let result_mid = provider.get_piece_data(0, 50, 50);
+    let result_mid = provider.get_piece_data(0, 50, 50).await;
     assert!(result_mid.is_some());
     assert_eq!(
         result_mid.unwrap(),
@@ -60,7 +60,7 @@ fn test_multi_file_piece_provider_reads_correct_file() {
         "Bytes 50-99 from file a"
     );
 
-    let result_cross = provider.get_piece_data(0, 95, 5);
+    let result_cross = provider.get_piece_data(0, 95, 5).await;
     assert!(result_cross.is_some());
     assert_eq!(
         result_cross.unwrap(),
@@ -68,7 +68,7 @@ fn test_multi_file_piece_provider_reads_correct_file() {
         "Last 5 bytes of file a"
     );
 
-    let result_b = provider.get_piece_data(1, 28, 50);
+    let result_b = provider.get_piece_data(1, 28, 50).await;
     assert!(result_b.is_some());
     assert_eq!(
         result_b.unwrap(),
@@ -79,8 +79,8 @@ fn test_multi_file_piece_provider_reads_correct_file() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-#[test]
-fn test_v2_multi_file_piece_provider_preserves_alignment_gap() {
+#[tokio::test]
+async fn test_v2_multi_file_piece_provider_preserves_alignment_gap() {
     use aria2_protocol::bittorrent::torrent::parser::{InfoDict, V2FileEntry};
 
     let info = InfoDict {
@@ -113,19 +113,19 @@ fn test_v2_multi_file_piece_provider_preserves_alignment_gap() {
     std::fs::write(layout.file_absolute_path(1).unwrap(), vec![0x22u8; 100]).unwrap();
 
     let provider = FileBackedPieceProvider::new(base_dir.clone(), 256, 2, Some(layout));
-    let first_piece = provider.get_piece_data(0, 0, 256).unwrap();
+    let first_piece = provider.get_piece_data(0, 0, 256).await.unwrap();
     assert_eq!(&first_piece[..100], vec![0x11u8; 100].as_slice());
     assert!(first_piece[100..].iter().all(|byte| *byte == 0));
     assert_eq!(
-        provider.get_piece_data(1, 0, 100).unwrap(),
+        provider.get_piece_data(1, 0, 100).await.unwrap(),
         vec![0x22u8; 100]
     );
 
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-#[test]
-fn test_single_file_piece_provider_unchanged() {
+#[tokio::test]
+async fn test_single_file_piece_provider_unchanged() {
     let tmp = std::env::temp_dir().join(format!("sfp_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -136,7 +136,7 @@ fn test_single_file_piece_provider_unchanged() {
 
     let provider = FileBackedPieceProvider::new(file_path.clone(), 128, 2, None);
 
-    let result = provider.get_piece_data(0, 0, 16);
+    let result = provider.get_piece_data(0, 0, 16).await;
     assert!(
         result.is_some(),
         "Single-file provider should read successfully"
@@ -147,7 +147,7 @@ fn test_single_file_piece_provider_unchanged() {
         "First 16 bytes should match"
     );
 
-    let result_mid = provider.get_piece_data(0, 64, 32);
+    let result_mid = provider.get_piece_data(0, 64, 32).await;
     assert!(result_mid.is_some());
     assert_eq!(
         result_mid.unwrap(),
@@ -155,7 +155,7 @@ fn test_single_file_piece_provider_unchanged() {
         "Mid-piece read should match"
     );
 
-    let result_p1 = provider.get_piece_data(1, 0, 32);
+    let result_p1 = provider.get_piece_data(1, 0, 32).await;
     assert!(result_p1.is_some());
     assert_eq!(
         result_p1.unwrap(),
@@ -163,7 +163,7 @@ fn test_single_file_piece_provider_unchanged() {
         "Piece 1 offset 0 = byte 128"
     );
 
-    let result_end = provider.get_piece_data(1, 127, 1);
+    let result_end = provider.get_piece_data(1, 127, 1).await;
     assert!(result_end.is_some());
     assert_eq!(result_end.unwrap(), vec![255u8], "Last byte should be 255");
 
@@ -174,8 +174,8 @@ fn test_single_file_piece_provider_unchanged() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test]
-fn test_multi_file_cross_boundary_read() {
+#[tokio::test]
+async fn test_multi_file_cross_boundary_read() {
     use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
 
     let info = InfoDict {
@@ -224,7 +224,7 @@ fn test_multi_file_cross_boundary_read() {
 
     let provider = FileBackedPieceProvider::new(base_dir.clone(), 256, 3, Some(layout));
 
-    let result = provider.get_piece_data(0, 140, 10);
+    let result = provider.get_piece_data(0, 140, 10).await;
     assert!(result.is_some(), "Read within file1 should succeed");
     let data = result.unwrap();
     assert_eq!(data.len(), 10, "Should read exactly 10 bytes");
@@ -234,7 +234,7 @@ fn test_multi_file_cross_boundary_read() {
         "Bytes 140-149 from file1"
     );
 
-    let result_p1 = provider.get_piece_data(1, 0, 100);
+    let result_p1 = provider.get_piece_data(1, 0, 100).await;
     assert!(result_p1.is_some(), "Read from piece 1 should work");
     let data_p1 = result_p1.unwrap();
     assert_eq!(data_p1.len(), 100);
@@ -242,8 +242,8 @@ fn test_multi_file_cross_boundary_read() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-#[test]
-fn test_large_offset_and_edge_cases() {
+#[tokio::test]
+async fn test_large_offset_and_edge_cases() {
     use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
 
     let info = InfoDict {
@@ -285,11 +285,11 @@ fn test_large_offset_and_edge_cases() {
 
     let provider = FileBackedPieceProvider::new(base_dir.clone(), 1024, 1, Some(layout));
 
-    let result_start = provider.get_piece_data(0, 0, 1);
+    let result_start = provider.get_piece_data(0, 0, 1).await;
     assert!(result_start.is_some());
     assert_eq!(result_start.unwrap(), vec![0u8], "First byte should be 0");
 
-    let result_near_end = provider.get_piece_data(0, 1023, 1);
+    let result_near_end = provider.get_piece_data(0, 1023, 1).await;
     assert!(result_near_end.is_some());
     assert_eq!(
         result_near_end.unwrap(),
@@ -297,7 +297,7 @@ fn test_large_offset_and_edge_cases() {
         "Last byte should be 255"
     );
 
-    let result_zero_len = provider.get_piece_data(0, 500, 0);
+    let result_zero_len = provider.get_piece_data(0, 500, 0).await;
     assert!(
         result_zero_len.is_some(),
         "Zero-length read should return empty"
@@ -308,7 +308,7 @@ fn test_large_offset_and_edge_cases() {
         "Zero-length read should return empty vec"
     );
 
-    let result_full_piece = provider.get_piece_data(0, 0, 512);
+    let result_full_piece = provider.get_piece_data(0, 0, 512).await;
     assert!(result_full_piece.is_some());
     assert_eq!(
         result_full_piece.unwrap().len(),
@@ -319,8 +319,8 @@ fn test_large_offset_and_edge_cases() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-#[test]
-fn test_provider_error_handling() {
+#[tokio::test]
+async fn test_provider_error_handling() {
     use aria2_protocol::bittorrent::torrent::parser::{FileEntry, InfoDict};
 
     let info = InfoDict {
@@ -357,19 +357,19 @@ fn test_provider_error_handling() {
 
     let provider = FileBackedPieceProvider::new(base_dir.clone(), 128, 1, Some(layout));
 
-    let result_valid = provider.get_piece_data(0, 0, 50);
+    let result_valid = provider.get_piece_data(0, 0, 50).await;
     assert!(
         result_valid.is_some(),
         "Read from existing file should succeed"
     );
 
-    let result_oob_piece = provider.get_piece_data(5, 0, 10);
+    let result_oob_piece = provider.get_piece_data(5, 0, 10).await;
     assert!(
         result_oob_piece.is_none(),
         "Out-of-bounds piece index should return None"
     );
 
-    let result_oob_offset = provider.get_piece_data(0, 200, 10);
+    let result_oob_offset = provider.get_piece_data(0, 200, 10).await;
     assert!(
         result_oob_offset.is_none() || result_oob_offset.as_ref().is_none_or(|d| d.is_empty()),
         "Out-of-bounds offset should return None or empty"
@@ -378,7 +378,7 @@ fn test_provider_error_handling() {
     assert_eq!(provider.num_pieces(), 1);
     assert!(provider.has_piece(0));
 
-    let result_oob_piece2 = provider.get_piece_data(99, 0, 10);
+    let result_oob_piece2 = provider.get_piece_data(99, 0, 10).await;
     assert!(
         result_oob_piece2.is_none(),
         "Out-of-bounds piece index should return None"
@@ -387,8 +387,8 @@ fn test_provider_error_handling() {
     let _ = std::fs::remove_dir_all(&base_dir);
 }
 
-#[test]
-fn test_single_file_provider_with_varying_piece_sizes() {
+#[tokio::test]
+async fn test_single_file_provider_with_varying_piece_sizes() {
     let tmp = std::env::temp_dir().join(format!("vary_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
@@ -400,22 +400,41 @@ fn test_single_file_provider_with_varying_piece_sizes() {
     let provider_small = FileBackedPieceProvider::new(file_path.clone(), 256, 4, None);
     assert_eq!(provider_small.num_pieces(), 4);
 
-    let r1 = provider_small.get_piece_data(0, 0, 256);
+    let r1 = provider_small.get_piece_data(0, 0, 256).await;
     assert!(r1.is_some());
     assert_eq!(r1.unwrap().len(), 256);
 
-    let r_last = provider_small.get_piece_data(3, 0, 16);
+    let r_last = provider_small.get_piece_data(3, 0, 16).await;
     assert!(r_last.is_some());
     assert_eq!(r_last.unwrap().len(), 16);
 
     let provider_large = FileBackedPieceProvider::new(file_path.clone(), 2048, 1, None);
     assert_eq!(provider_large.num_pieces(), 1);
 
-    let r_overflow = provider_large.get_piece_data(0, 900, 200);
+    let r_overflow = provider_large.get_piece_data(0, 900, 200).await;
     assert!(
         r_overflow.is_none(),
         "Read beyond file size should return None"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[tokio::test]
+async fn test_partial_file_provider_does_not_read_unavailable_piece() {
+    let tmp = std::env::temp_dir().join(format!("partial_provider_test_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    let file_path = tmp.join("partial.bin");
+    std::fs::write(&file_path, vec![0x5Au8; 256]).unwrap();
+
+    let provider = FileBackedPieceProvider::with_pieces(file_path, 128, 2, None, vec![true, false]);
+
+    assert!(provider.has_piece(0));
+    assert!(!provider.has_piece(1));
+    assert!(provider.get_piece_data(0, 0, 16).await.is_some());
+    assert!(provider.get_piece_data(1, 0, 16).await.is_none());
 
     let _ = std::fs::remove_dir_all(&tmp);
 }

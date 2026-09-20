@@ -19,8 +19,8 @@ fn test_bt_upload_session_creation() {
     assert_eq!(config.max_peers_to_unchoke, 4);
 }
 
-#[test]
-fn test_piece_data_provider_from_memory() {
+#[tokio::test]
+async fn test_piece_data_provider_from_memory() {
     let mut provider = InMemoryPieceProvider::new(1024, 5);
     provider.set_all_from_pattern(|piece_idx, byte_idx| ((piece_idx * 7 + byte_idx) % 256) as u8);
 
@@ -29,7 +29,7 @@ fn test_piece_data_provider_from_memory() {
     assert!(!provider.has_piece(5));
     assert_eq!(provider.num_pieces(), 5);
 
-    let data = provider.get_piece_data(0, 100, 50).unwrap();
+    let data = provider.get_piece_data(0, 100, 50).await.unwrap();
     assert_eq!(data.len(), 50);
 }
 
@@ -125,8 +125,8 @@ fn test_exit_condition_combined_logic() {
     );
 }
 
-#[test]
-fn test_inmemory_provider_all_pieces_complete() {
+#[tokio::test]
+async fn test_inmemory_provider_all_pieces_complete() {
     let mut provider = InMemoryPieceProvider::new(512, 3);
     provider.set_all_from_pattern(|_, _| 0xAA);
 
@@ -134,6 +134,7 @@ fn test_inmemory_provider_all_pieces_complete() {
         assert!(provider.has_piece(i), "piece {} should be set", i);
         let data = provider
             .get_piece_data(i, 0, 512.min(provider.num_pieces() * 512 - i * 512))
+            .await
             .unwrap();
         assert!(!data.is_empty());
         assert!(data.iter().all(|&b| b == 0xAA));

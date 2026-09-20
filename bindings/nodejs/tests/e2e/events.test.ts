@@ -182,4 +182,66 @@ describe('Events E2E', () => {
       else resolve();
     }));
   });
+
+  it('waitForTerminal filters unrelated events and resolves the matching GID', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const emitter = new Aria2EventEmitter(`ws://127.0.0.1:${address.port}/jsonrpc`);
+    const wait = emitter.waitForTerminal('target');
+    await vi.waitFor(() => expect(server.clients.size).toBe(1));
+    const socket = [...server.clients][0];
+
+    socket.send(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'aria2.onDownloadStart',
+      params: [{ gid: 'target' }],
+    }));
+    socket.send(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'aria2.onDownloadComplete',
+      params: [{ gid: 'other' }],
+    }));
+    socket.send(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'aria2.onDownloadError',
+      params: [{ gid: 'target', errorCode: '3' }],
+    }));
+
+    await expect(wait).resolves.toEqual({
+      type: EventType.DownloadError,
+      gid: 'target',
+      errorCode: 3,
+    });
+
+    await emitter.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
+
+  it('waitForTerminal validates the GID and timeout', async () => {
+    const emitter = new Aria2EventEmitter('ws://localhost:6800/jsonrpc');
+
+    await expect(emitter.waitForTerminal('')).rejects.toThrow(TypeError);
+    await expect(emitter.waitForTerminal('target', 0)).rejects.toThrow(TypeError);
+  });
+
+  it('waitForTerminal rejects when the emitter closes', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const emitter = new Aria2EventEmitter(`ws://127.0.0.1:${address.port}/jsonrpc`);
+    const wait = emitter.waitForTerminal('target');
+    await vi.waitFor(() => expect(server.clients.size).toBe(1));
+
+    await emitter.close();
+
+    await expect(wait).rejects.toThrow('Emitter has been closed');
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
 });

@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use tracing::{debug, warn};
 
 use crate::error::Result;
@@ -62,8 +63,9 @@ impl BtUploadConnection {
     }
 }
 
+#[async_trait]
 pub trait PieceDataProvider: Send + Sync {
-    fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>>;
+    async fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>>;
     fn has_piece(&self, piece_index: u32) -> bool;
     fn num_pieces(&self) -> u32;
     fn piece_length(&self) -> u32;
@@ -193,11 +195,13 @@ impl BtUploadSession {
                                 request.index, request.begin, request.length
                             );
 
-                            let data = provider.get_piece_data(
-                                request.index,
-                                request.begin,
-                                request.length,
-                            );
+                            let data = if provider.has_piece(request.index) {
+                                provider
+                                    .get_piece_data(request.index, request.begin, request.length)
+                                    .await
+                            } else {
+                                None
+                            };
                             if let Some(piece_data) = data {
                                 let data_len = piece_data.len() as u64;
                                 if let Some(ref lim) = self.upload_limiter {
@@ -414,8 +418,9 @@ impl InMemoryPieceProvider {
     }
 }
 
+#[async_trait]
 impl PieceDataProvider for InMemoryPieceProvider {
-    fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
+    async fn get_piece_data(&self, piece_index: u32, offset: u32, length: u32) -> Option<Vec<u8>> {
         let piece = self.pieces.get(piece_index as usize)?.as_ref()?;
         let start = offset as usize;
         let end = (start + length as usize).min(piece.len());
@@ -452,17 +457,17 @@ mod tests {
         assert_eq!(cfg.optimistic_unchoke_interval_secs, 30);
     }
 
-    #[test]
-    fn test_in_memory_provider_creation() {
+    #[tokio::test]
+    async fn test_in_memory_provider_creation() {
         let provider = InMemoryPieceProvider::new(16384, 10);
         assert_eq!(provider.num_pieces(), 10);
         assert_eq!(provider.piece_length(), 16384);
         assert!(!provider.has_piece(0));
-        assert!(provider.get_piece_data(0, 0, 100).is_none());
+        assert!(provider.get_piece_data(0, 0, 100).await.is_none());
     }
 
-    #[test]
-    fn test_in_memory_provider_set_and_get() {
+    #[tokio::test]
+    async fn test_in_memory_provider_set_and_get() {
         let mut provider = InMemoryPieceProvider::new(256, 4);
         assert_eq!(provider.piece_length(), 256);
         provider.set_piece_data(0, vec![0xAB; 256]);
@@ -472,17 +477,17 @@ mod tests {
         assert!(!provider.has_piece(1));
         assert!(provider.has_piece(2));
 
-        let data = provider.get_piece_data(0, 10, 50).unwrap();
+        let data = provider.get_piece_data(0, 10, 50).await.unwrap();
         assert_eq!(data.len(), 50);
         assert!(data.iter().all(|&b| b == 0xAB));
 
-        let partial = provider.get_piece_data(2, 100, 28).unwrap();
+        let partial = provider.get_piece_data(2, 100, 28).await.unwrap();
         assert_eq!(partial.len(), 28);
         assert!(partial.iter().all(|&b| b == 0xCD));
     }
 
-    #[test]
-    fn test_in_memory_provider_set_all_from_pattern() {
+    #[tokio::test]
+    async fn test_in_memory_provider_set_all_from_pattern() {
         let mut provider = InMemoryPieceProvider::new(100, 5);
         provider.set_all_from_pattern(|piece_idx, byte_idx| {
             ((piece_idx * 37 + byte_idx * 13) % 256) as u8
@@ -490,25 +495,25 @@ mod tests {
 
         for i in 0..5u32 {
             assert!(provider.has_piece(i));
-            let data = provider.get_piece_data(i, 0, 100).unwrap();
+            let data = provider.get_piece_data(i, 0, 100).await.unwrap();
             for (j, &byte) in data.iter().enumerate() {
                 assert_eq!(byte, ((i * 37 + j as u32 * 13) % 256) as u8);
             }
         }
     }
 
-    #[test]
-    fn test_in_memory_provider_offset_beyond_piece() {
+    #[tokio::test]
+    async fn test_in_memory_provider_offset_beyond_piece() {
         let mut provider = InMemoryPieceProvider::new(50, 2);
         provider.set_piece_data(0, vec![0x42; 50]);
 
-        assert!(provider.get_piece_data(0, 40, 20).is_some());
-        assert!(provider.get_piece_data(0, 60, 10).is_none());
-        assert!(provider.get_piece_data(99, 0, 10).is_none());
+        assert!(provider.get_piece_data(0, 40, 20).await.is_some());
+        assert!(provider.get_piece_data(0, 60, 10).await.is_none());
+        assert!(provider.get_piece_data(99, 0, 10).await.is_none());
     }
 
-    #[test]
-    fn test_in_memory_provider_last_piece_smaller() {
+    #[tokio::test]
+    async fn test_in_memory_provider_last_piece_smaller() {
         let total_size = 260u32;
         let piece_len = 100u32;
         let num_pieces = total_size.div_ceil(piece_len);
@@ -520,7 +525,7 @@ mod tests {
         assert!(provider.has_piece(1));
         assert!(provider.has_piece(2));
 
-        let last_piece = provider.get_piece_data(2, 0, 60).unwrap();
+        let last_piece = provider.get_piece_data(2, 0, 60).await.unwrap();
         assert_eq!(last_piece.len(), 60);
     }
 }

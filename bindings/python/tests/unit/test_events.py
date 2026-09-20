@@ -3,8 +3,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from aria2_rust_client.errors import ConnectionError
+from aria2_rust_client.errors import ConnectionError, TimeoutError
 from aria2_rust_client.events import EventSubscriber
+from aria2_rust_client.types import DownloadEvent, EventType
 
 
 @pytest.mark.asyncio
@@ -148,3 +149,52 @@ async def test_subscriber_delivers_events_after_reconnect(monkeypatch):
 
     assert event.gid == "reconnected"
     await subscriber.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_terminal_filters_other_gids_and_non_terminal_events():
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    subscriber.start = AsyncMock()
+    await subscriber._queue.put(
+        DownloadEvent(EventType.DOWNLOAD_START, gid="other")
+    )
+    await subscriber._queue.put(
+        DownloadEvent(EventType.DOWNLOAD_COMPLETE, gid="other")
+    )
+    expected = DownloadEvent(EventType.DOWNLOAD_ERROR, gid="target", error_code=3)
+    await subscriber._queue.put(expected)
+
+    assert await subscriber.wait_for_terminal("target") == expected
+    subscriber.start.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_terminal_timeout_uses_sdk_error():
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    subscriber.start = AsyncMock()
+
+    with pytest.raises(TimeoutError, match="target"):
+        await subscriber.wait_for_terminal("target", timeout=0.01)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_terminal_rejects_invalid_arguments():
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+
+    with pytest.raises(TypeError):
+        await subscriber.wait_for_terminal("")
+    with pytest.raises(ValueError):
+        await subscriber.wait_for_terminal("target", timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_terminal_reports_subscriber_close():
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    subscriber.start = AsyncMock()
+    waiter = asyncio.create_task(subscriber.wait_for_terminal("target"))
+    await asyncio.sleep(0)
+
+    await subscriber.close()
+
+    with pytest.raises(ConnectionError, match="closed"):
+        await asyncio.wait_for(waiter, timeout=1)

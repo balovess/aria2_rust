@@ -198,6 +198,10 @@ metadata can be queried even when the task is created with `pause: true`.
 - `removeDownloadResult(gid: string): Promise<string>`
 
 **Event Subscription:**
+- `connectEvents(): Promise<Aria2EventEmitter>` - Connect to the event WebSocket
+- `Aria2EventEmitter.waitForTerminal(gid, timeoutMs?)` - Wait for `stop`,
+  `complete`, `error`, or BitTorrent completion for one GID without polling;
+  connect before submitting fast tasks
 - `on(event: string, handler: Function): this`
 - `off(event: string, handler: Function): this`
 - `once(event: string, handler: Function): this`
