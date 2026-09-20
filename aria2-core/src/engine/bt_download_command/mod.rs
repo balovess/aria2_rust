@@ -174,7 +174,7 @@ pub struct BtDownloadCommand {
     /// check seam.
     pub(crate) bt_complete_event_emitted: bool,
 
-    // P1/P2 integration fields (all use Option for backward compatibility)
+    // Optional integrations owned by the download lifecycle.
     /// BT progress persistence manager
     pub(crate) progress_manager: Option<crate::engine::bt_progress_info_file::BtProgressManager>,
     /// Progress save interval (default 60 seconds)

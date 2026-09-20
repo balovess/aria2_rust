@@ -70,7 +70,7 @@ struct SeederPeerEntry {
     /// Stable peer identity.
     #[allow(dead_code)]
     identity: crate::engine::choking_algorithm::PeerIdentity,
-    /// Legacy index back into the caller's peer list.
+    /// Index back into the caller's active peer list.
     index: usize,
     /// Whether this peer has outstanding (in-flight) upload requests
     outstanding_upload: bool,
@@ -173,7 +173,7 @@ struct LeecherPeerEntry {
     /// Stable peer identity.
     #[allow(dead_code)]
     identity: crate::engine::choking_algorithm::PeerIdentity,
-    /// Legacy index back into the caller's peer list.
+    /// Index back into the caller's active peer list.
     index: usize,
     /// Peer's download speed (bytes/sec), primary ranking criterion
     download_speed: i64,
