@@ -596,6 +596,29 @@ function parseStringResult(result, method) {
   }
   return result;
 }
+function requireNonNegativeInteger(value, name) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative safe integer`);
+  }
+}
+function requireStringList(value, name, allowEmpty = true) {
+  if (!Array.isArray(value) || !allowEmpty && value.length === 0) {
+    throw new TypeError(`${name} must be a non-empty string array`);
+  }
+  if (value.some((item) => typeof item !== "string")) {
+    throw new TypeError(`${name} must contain only strings`);
+  }
+}
+function requirePositionMode(value) {
+  if (value !== "POS_SET" && value !== "POS_CUR" && value !== "POS_END") {
+    throw new TypeError("mode must be POS_SET, POS_CUR, or POS_END");
+  }
+}
+function requireBuffer(value, name) {
+  if (!Buffer.isBuffer(value)) {
+    throw new TypeError(`${name} must be a Buffer`);
+  }
+}
 function httpToWs(url) {
   if (url.startsWith("https://")) {
     return url.replace("https://", "wss://");
@@ -640,6 +663,8 @@ var Aria2Client = class {
     return await this.transport.sendRequest(method, params);
   }
   async addUri(uris, options, position) {
+    requireStringList(uris, "uris", false);
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [uris];
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
     if (position !== void 0) params.push(position);
@@ -647,6 +672,9 @@ var Aria2Client = class {
     return parseStringResult(result, "addUri");
   }
   async addTorrent(torrent, options, webSeedUris, position) {
+    requireBuffer(torrent, "torrent");
+    if (webSeedUris !== void 0) requireStringList(webSeedUris, "webSeedUris");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [torrent.toString("base64")];
     if (webSeedUris !== void 0 || options !== void 0 || position !== void 0) {
       params.push(webSeedUris ?? []);
@@ -657,6 +685,8 @@ var Aria2Client = class {
     return parseStringResult(result, "addTorrent");
   }
   async addMetalink(metalink, options, position) {
+    requireBuffer(metalink, "metalink");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [metalink.toString("base64")];
     if (options !== void 0) params.push(options);
     else if (position !== void 0) params.push({});
@@ -697,6 +727,8 @@ var Aria2Client = class {
     return parseStringResult(result, "unpauseAll");
   }
   async changePosition(gid, position, mode) {
+    requireNonNegativeInteger(position, "position");
+    requirePositionMode(mode);
     const result = await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
     if (typeof result === "number" && Number.isSafeInteger(result) && result >= 0) {
       return result;
@@ -708,12 +740,17 @@ var Aria2Client = class {
     throw new Aria2Error(`Unexpected result type for changePosition: ${typeof result}`);
   }
   async changeUri(gid, fileIndex, deleteUris, addUris, position) {
+    requireNonNegativeInteger(fileIndex, "fileIndex");
+    requireStringList(deleteUris, "deleteUris");
+    requireStringList(addUris, "addUris");
+    if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [gid, fileIndex, deleteUris, addUris];
     if (position !== void 0) params.push(position);
     const result = await this.transport.sendRequest("aria2.changeUri", params);
     return parseChangeUriCounts(result);
   }
   async tellStatus(gid, keys) {
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [gid];
     if (keys) params.push(keys);
     const result = await this.transport.sendRequest("aria2.tellStatus", params);
@@ -744,18 +781,25 @@ var Aria2Client = class {
     return parseObjectResult(result, "getDhtStatus");
   }
   async tellActive(keys) {
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [];
     if (keys) params.push(keys);
     const result = await this.transport.sendRequest("aria2.tellActive", params);
     return parseObjectListResult(result, "tellActive");
   }
   async tellWaiting(offset, num, keys) {
+    requireNonNegativeInteger(offset, "offset");
+    requireNonNegativeInteger(num, "num");
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [offset, num];
     if (keys) params.push(keys);
     const result = await this.transport.sendRequest("aria2.tellWaiting", params);
     return parseObjectListResult(result, "tellWaiting");
   }
   async tellStopped(offset, num, keys) {
+    requireNonNegativeInteger(offset, "offset");
+    requireNonNegativeInteger(num, "num");
+    if (keys !== void 0) requireStringList(keys, "keys");
     const params = [offset, num];
     if (keys) params.push(keys);
     const result = await this.transport.sendRequest("aria2.tellStopped", params);
@@ -818,6 +862,12 @@ var Aria2Client = class {
     return parseStringResult(result, "clearBrowserContext");
   }
   async systemMulticall(calls) {
+    if (!Array.isArray(calls)) throw new TypeError("calls must be an array");
+    for (const [index, call] of calls.entries()) {
+      if (call === null || typeof call !== "object" || typeof call.methodName !== "string" || call.methodName.length === 0 || call.params !== void 0 && !Array.isArray(call.params)) {
+        throw new TypeError(`calls[${index}] must contain a methodName and optional params array`);
+      }
+    }
     const result = await this.transport.sendRequest("system.multicall", [calls]);
     return parseArrayResult(result, "system.multicall");
   }

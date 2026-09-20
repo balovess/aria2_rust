@@ -33,15 +33,53 @@ const BUCKET_REFRESH_CONCURRENCY: usize = 3;
 #[derive(Clone)]
 pub struct DhtTaskContext {
     /// Local node ID.
-    pub self_id: [u8; 20],
+    pub(crate) self_id: [u8; 20],
     /// Routing table (shared with the DHT engine).
-    pub routing_table: Arc<RwLock<RoutingTable>>,
+    pub(crate) routing_table: Arc<RwLock<RoutingTable>>,
     /// UDP socket for sending messages.
-    pub socket: DhtSocket,
+    pub(crate) socket: DhtSocket,
     /// Transaction tracker for matching queries to responses.
-    pub tracker: Arc<TransactionTracker>,
+    pub(crate) tracker: Arc<TransactionTracker>,
     /// Per-query timeout (C++ `DHT_MESSAGE_TIMEOUT = 10s`).
-    pub query_timeout: Duration,
+    pub(crate) query_timeout: Duration,
+}
+
+impl DhtTaskContext {
+    pub fn new(
+        self_id: [u8; 20],
+        routing_table: Arc<RwLock<RoutingTable>>,
+        socket: DhtSocket,
+        tracker: Arc<TransactionTracker>,
+        query_timeout: Duration,
+    ) -> Self {
+        Self {
+            self_id,
+            routing_table,
+            socket,
+            tracker,
+            query_timeout,
+        }
+    }
+
+    pub fn self_id(&self) -> &[u8; 20] {
+        &self.self_id
+    }
+
+    pub fn routing_table(&self) -> &Arc<RwLock<RoutingTable>> {
+        &self.routing_table
+    }
+
+    pub fn socket(&self) -> &DhtSocket {
+        &self.socket
+    }
+
+    pub fn tracker(&self) -> &Arc<TransactionTracker> {
+        &self.tracker
+    }
+
+    pub fn query_timeout(&self) -> Duration {
+        self.query_timeout
+    }
 }
 
 impl std::fmt::Debug for DhtTaskContext {

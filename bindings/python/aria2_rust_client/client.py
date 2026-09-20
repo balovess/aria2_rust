@@ -107,6 +107,28 @@ def _parse_string_result(result: Any, method: str) -> str:
     return result
 
 
+def _require_non_negative_int(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TypeError(f"{name} must be a non-negative integer")
+
+
+def _require_string_list(value: Any, name: str, allow_empty: bool = True) -> None:
+    if not isinstance(value, list) or (not allow_empty and not value):
+        raise TypeError(f"{name} must be a non-empty string list")
+    if any(not isinstance(item, str) for item in value):
+        raise TypeError(f"{name} must contain only strings")
+
+
+def _require_position_mode(value: Any) -> None:
+    if value not in (PositionMode.SET_FROM_START, PositionMode.MOVE_FROM_START, PositionMode.SET_FROM_END):
+        raise TypeError("mode must be POS_SET, POS_CUR, or POS_END")
+
+
+def _require_bytes(value: Any, name: str) -> None:
+    if not isinstance(value, (bytes, bytearray)):
+        raise TypeError(f"{name} must be bytes or bytearray")
+
+
 class Aria2Client:
     def __init__(
         self,
@@ -145,6 +167,9 @@ class Aria2Client:
         options: Optional[Dict] = None,
         position: Optional[int] = None,
     ) -> str:
+        _require_string_list(uris, "uris", allow_empty=False)
+        if position is not None:
+            _require_non_negative_int(position, "position")
         params: list = [uris]
         if options is not None or position is not None:
             params.append(options or {})
@@ -160,6 +185,11 @@ class Aria2Client:
         web_seed_uris: Optional[List[str]] = None,
         position: Optional[int] = None,
     ) -> str:
+        _require_bytes(torrent, "torrent")
+        if web_seed_uris is not None:
+            _require_string_list(web_seed_uris, "web_seed_uris")
+        if position is not None:
+            _require_non_negative_int(position, "position")
         encoded = base64.b64encode(torrent).decode("ascii")
         params: list = [encoded]
         if web_seed_uris is not None or options is not None or position is not None:
@@ -177,6 +207,9 @@ class Aria2Client:
         options: Optional[Dict] = None,
         position: Optional[int] = None,
     ) -> List[str]:
+        _require_bytes(metalink, "metalink")
+        if position is not None:
+            _require_non_negative_int(position, "position")
         encoded = base64.b64encode(metalink).decode("ascii")
         params: list = [encoded]
         if options is not None:
@@ -223,6 +256,8 @@ class Aria2Client:
     async def change_position(
         self, gid: str, position: int, mode: Union[PositionMode, str]
     ) -> int:
+        _require_non_negative_int(position, "position")
+        _require_position_mode(mode)
         result = await self._call("aria2.changePosition", [gid, position, mode])
         if isinstance(result, int) and not isinstance(result, bool):
             return result
@@ -238,6 +273,11 @@ class Aria2Client:
         add_uris: List[str],
         position: Optional[int] = None,
     ) -> List[str]:
+        _require_non_negative_int(file_index, "file_index")
+        _require_string_list(delete_uris, "delete_uris")
+        _require_string_list(add_uris, "add_uris")
+        if position is not None:
+            _require_non_negative_int(position, "position")
         params: list = [gid, file_index, delete_uris, add_uris]
         if position is not None:
             params.append(position)
@@ -247,6 +287,8 @@ class Aria2Client:
     async def tell_status(
         self, gid: str, keys: Optional[List[str]] = None
     ) -> StatusInfo:
+        if keys is not None:
+            _require_string_list(keys, "keys")
         params: list = [gid]
         if keys is not None:
             params.append(keys)
@@ -291,6 +333,8 @@ class Aria2Client:
     async def tell_active(
         self, keys: Optional[List[str]] = None
     ) -> List[StatusInfo]:
+        if keys is not None:
+            _require_string_list(keys, "keys")
         params: list = []
         if keys is not None:
             params.append(keys)
@@ -300,6 +344,10 @@ class Aria2Client:
     async def tell_waiting(
         self, offset: int, num: int, keys: Optional[List[str]] = None
     ) -> List[StatusInfo]:
+        _require_non_negative_int(offset, "offset")
+        _require_non_negative_int(num, "num")
+        if keys is not None:
+            _require_string_list(keys, "keys")
         params: list = [offset, num]
         if keys is not None:
             params.append(keys)
@@ -309,6 +357,10 @@ class Aria2Client:
     async def tell_stopped(
         self, offset: int, num: int, keys: Optional[List[str]] = None
     ) -> List[StatusInfo]:
+        _require_non_negative_int(offset, "offset")
+        _require_non_negative_int(num, "num")
+        if keys is not None:
+            _require_string_list(keys, "keys")
         params: list = [offset, num]
         if keys is not None:
             params.append(keys)
@@ -378,6 +430,18 @@ class Aria2Client:
         return _parse_string_result(result, "clearBrowserContext")
 
     async def system_multicall(self, calls: List[Dict[str, Any]]) -> List[Any]:
+        if not isinstance(calls, list):
+            raise TypeError("calls must be a list")
+        for index, call in enumerate(calls):
+            if (
+                not isinstance(call, dict)
+                or not isinstance(call.get("methodName"), str)
+                or not call["methodName"]
+                or ("params" in call and not isinstance(call["params"], list))
+            ):
+                raise TypeError(
+                    f"calls[{index}] must contain a methodName and optional params list"
+                )
         result = await self._call("system.multicall", [calls])
         if isinstance(result, list):
             return result

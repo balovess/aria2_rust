@@ -613,3 +613,29 @@ class TestContextManager:
     async def test_close(self, client, mock_transport):
         await client.close()
         mock_transport.close.assert_called_once()
+
+
+class TestArgumentValidation:
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_pagination_before_sending(self, client, mock_transport):
+        with pytest.raises(TypeError, match="offset must be a non-negative integer"):
+            await client.tell_waiting(-1, 10)
+        mock_transport.send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_invalid_queue_position_before_sending(
+        self, client, mock_transport
+    ):
+        with pytest.raises(TypeError, match="mode must be POS_SET"):
+            await client.change_position("gid1", 1, "INVALID")
+        mock_transport.send_request.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_uri_and_multicall_before_sending(
+        self, client, mock_transport
+    ):
+        with pytest.raises(TypeError, match="uris must be a non-empty string list"):
+            await client.add_uri([])
+        with pytest.raises(TypeError, match=r"calls\[0\]"):
+            await client.system_multicall([{"methodName": ""}])
+        mock_transport.send_request.assert_not_called()

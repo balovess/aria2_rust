@@ -551,3 +551,34 @@ describe('Aria2Client', () => {
     });
   });
 });
+
+describe('Aria2Client argument validation', () => {
+  let client: Aria2Client;
+  let mockTransport: ReturnType<typeof createMockTransport>;
+
+  beforeEach(() => {
+    mockTransport = createMockTransport();
+    client = new Aria2Client('http://localhost:6800/jsonrpc');
+    (client as unknown as { transport: Transport }).transport = mockTransport;
+  });
+
+  it('rejects invalid pagination before sending an RPC request', async () => {
+    await expect(client.tellWaiting(-1, 10)).rejects.toThrow(TypeError);
+    expect(mockTransport.sendRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid queue position arguments before sending', async () => {
+    await expect(client.changePosition('gid1', 1, 'INVALID' as never)).rejects.toThrow(
+      TypeError,
+    );
+    expect(mockTransport.sendRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed URI and multicall arguments before sending', async () => {
+    await expect(client.addUri([])).rejects.toThrow(TypeError);
+    await expect(client.systemMulticall([{ methodName: '', params: [] }])).rejects.toThrow(
+      TypeError,
+    );
+    expect(mockTransport.sendRequest).not.toHaveBeenCalled();
+  });
+});
