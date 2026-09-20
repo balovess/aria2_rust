@@ -107,6 +107,7 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
     ) -> Vec<BtPeerConn> {
+        let peer_wire_total_size = self.peer_wire_total_size(total_size);
         // This is the shared connection path for PEX, tracker, DHT, and
         // incoming peers. PEX-specific gating happens before this function
         // is called; tracker and DHT peers must remain connectable when PEX is
@@ -158,7 +159,7 @@ impl BtDownloadCommand {
                     &connection_options,
                     num_pieces,
                     piece_length,
-                    total_size,
+                    peer_wire_total_size,
                 )
                 .await
             else {

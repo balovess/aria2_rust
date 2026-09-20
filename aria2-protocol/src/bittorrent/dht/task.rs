@@ -114,6 +114,16 @@ impl DhtTaskExecutor {
         }
     }
 
+    /// Return the maximum number of tasks this executor runs concurrently.
+    pub fn concurrency_limit(&self) -> usize {
+        self.num_concurrent
+    }
+
+    /// Return whether this executor has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        self.shutdown.is_cancelled()
+    }
+
     /// Enqueue a task for execution.
     ///
     /// If there is capacity, the task is dispatched immediately.
@@ -524,6 +534,9 @@ mod tests {
         let executor = DhtTaskExecutor::new(2);
         let counter = Arc::new(AtomicUsize::new(0));
 
+        assert_eq!(executor.concurrency_limit(), 2);
+        assert!(!executor.is_cancelled());
+
         // Enqueue 5 tasks — only 2 should execute concurrently.
         for _ in 0..5 {
             executor
@@ -539,6 +552,17 @@ mod tests {
 
         assert_eq!(counter.load(Ordering::SeqCst), 5);
         assert_eq!(executor.executing_count().await, 0);
+
+        executor.cancel();
+        assert!(executor.is_cancelled());
+        assert!(
+            !executor
+                .add_task(Box::new(CountTask {
+                    counter,
+                    name: "cancelled",
+                }))
+                .await
+        );
     }
 
     #[tokio::test]

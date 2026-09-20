@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from aria2_rust_client.client import Aria2Client
@@ -36,10 +38,19 @@ class TestHttpDownload:
         url = f"http://127.0.0.1:{server.port}/small.txt"
         async with Aria2Client(url=aria2_server.rpc_url, token="e2e-test-token") as client:
             gid = await client.add_uri([url])
-            import asyncio
+
             for _ in range(20):
                 status = await client.tell_status(gid)
                 if status.status in (DownloadStatus.COMPLETE.value, DownloadStatus.ERROR.value):
                     break
                 await asyncio.sleep(0.5)
             assert status.status == DownloadStatus.COMPLETE.value
+
+    async def test_file_server_stop_closes_active_clients(self, test_file_server):
+        server, _ = test_file_server
+        _, writer = await asyncio.open_connection("127.0.0.1", server.port)
+        try:
+            await asyncio.wait_for(server.stop(), timeout=1)
+        finally:
+            writer.close()
+            await writer.wait_closed()

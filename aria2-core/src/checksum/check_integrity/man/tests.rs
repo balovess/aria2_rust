@@ -514,3 +514,74 @@ async fn test_shared_instance_is_process_wide() {
     let b = shared();
     assert!(Arc::ptr_eq(&a, &b));
 }
+
+#[test]
+fn test_worker_survives_caller_runtime_shutdown() {
+    let (manager_tx, manager_rx) = std::sync::mpsc::channel();
+
+    let caller_thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async move {
+            let manager = shared_with_concurrency(1);
+            let manager_for_validation = Arc::clone(&manager);
+            let _validation = tokio::spawn(async move {
+                enqueue(
+                    &manager_for_validation,
+                    500,
+                    Box::new(SlowIntegrityTask {
+                        remaining_chunks: 2,
+                        current_length: 0,
+                    }),
+                )
+                .await
+            });
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if manager.read().await.is_picked() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("integrity validation should become active");
+
+            manager_tx.send(manager).unwrap();
+        });
+    });
+
+    let manager = manager_rx
+        .recv()
+        .expect("caller runtime should publish the integrity manager");
+    caller_thread.join().unwrap();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            enqueue(
+                &manager,
+                501,
+                Box::new(SlowIntegrityTask {
+                    remaining_chunks: 1,
+                    current_length: 0,
+                }),
+            ),
+        )
+        .await
+    });
+
+    assert!(
+        result
+            .expect("integrity worker must survive caller runtime shutdown")
+            .is_ok()
+    );
+}

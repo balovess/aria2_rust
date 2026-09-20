@@ -68,7 +68,7 @@ impl BtDownloadCommand {
             );
             return;
         }
-        conn.allocate_session_resource(piece_length, total_size);
+        conn.allocate_session_resource(piece_length, self.peer_wire_total_size(total_size));
         active_connections.push(conn);
         self.bt_runtime.set_connections(active_connections.len());
         self.group

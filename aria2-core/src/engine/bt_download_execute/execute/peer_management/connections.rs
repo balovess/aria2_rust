@@ -109,6 +109,7 @@ impl BtDownloadCommand {
         piece_length: u32,
         total_size: u64,
     ) -> Result<Vec<BtPeerConn>> {
+        let peer_wire_total_size = self.peer_wire_total_size(total_size);
         let connection_options = {
             let group = self.group.recover();
             let mut options =
@@ -198,7 +199,7 @@ impl BtDownloadCommand {
             info_hash_raw,
             num_pieces,
             piece_length,
-            total_size,
+            peer_wire_total_size,
             &connection_options,
             self.utp_socket.clone(),
         ));
