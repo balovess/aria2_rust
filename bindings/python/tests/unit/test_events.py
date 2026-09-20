@@ -72,3 +72,79 @@ async def test_subscriber_close_cancels_in_flight_connection(monkeypatch):
 
     with pytest.raises(ConnectionError, match="Subscriber has been closed"):
         await asyncio.wait_for(start, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_subscriber_start_is_idempotent(monkeypatch):
+    import websockets
+
+    started = asyncio.Event()
+
+    class BlockingWebSocket:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Future()
+
+        async def close(self):
+            pass
+
+    websocket = BlockingWebSocket()
+
+    async def connect(*args, **kwargs):
+        started.set()
+        return websocket
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    await subscriber.start()
+    await asyncio.wait_for(started.wait(), timeout=1)
+    listener = subscriber._listener_task
+
+    await subscriber.start()
+
+    assert subscriber._listener_task is listener
+    await subscriber.close()
+
+
+@pytest.mark.asyncio
+async def test_subscriber_delivers_events_after_reconnect(monkeypatch):
+    import websockets
+
+    class FakeWebSocket:
+        def __init__(self, messages):
+            self._messages = iter(messages)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def close(self):
+            pass
+
+    first = FakeWebSocket([])
+    second = FakeWebSocket(
+        [
+            '{"method":"aria2.onDownloadComplete",'
+            '"params":[{"gid":"reconnected"}]}'
+        ]
+    )
+    connections = iter([first, second])
+
+    async def connect(*args, **kwargs):
+        return next(connections)
+
+    monkeypatch.setattr(websockets, "connect", connect)
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    await subscriber.start()
+
+    event = await asyncio.wait_for(subscriber.__anext__(), timeout=3)
+
+    assert event.gid == "reconnected"
+    await subscriber.close()

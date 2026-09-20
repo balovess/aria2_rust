@@ -79,7 +79,7 @@ impl PeerAddr {
 pub struct PeerConnection {
     stream: TcpStream,
     remote_addr: Option<std::net::SocketAddr>,
-    pub state: PeerState,
+    state: PeerState,
     pub remote_peer_id: Option<[u8; 20]>,
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
     remote_supports_dht: bool,
@@ -399,9 +399,14 @@ impl PeerConnection {
                 if self.read_buffer.len() >= frame_len {
                     let frame = self.read_buffer.split_to(frame_len).freeze();
                     if msg_len == 0 {
+                        self.state.mark_message_received();
                         return Ok(Some(BtMessage::KeepAlive));
                     }
-                    return crate::bittorrent::message::factory::parse_message_bytes(frame);
+                    let message = crate::bittorrent::message::factory::parse_message_bytes(frame)?;
+                    if message.is_some() {
+                        self.state.mark_message_received();
+                    }
+                    return Ok(message);
                 }
             }
 
@@ -423,22 +428,22 @@ impl PeerConnection {
     }
 
     pub async fn send_choke(&mut self) -> Result<(), String> {
-        self.state.am_choking = true;
+        self.state.set_am_choking(true);
         self.send_message(&BtMessage::Choke).await
     }
 
     pub async fn send_unchoke(&mut self) -> Result<(), String> {
-        self.state.am_choking = false;
+        self.state.set_am_choking(false);
         self.send_message(&BtMessage::Unchoke).await
     }
 
     pub async fn send_interested(&mut self) -> Result<(), String> {
-        self.state.am_interested = true;
+        self.state.set_am_interested(true);
         self.send_message(&BtMessage::Interested).await
     }
 
     pub async fn send_not_interested(&mut self) -> Result<(), String> {
-        self.state.am_interested = false;
+        self.state.set_am_interested(false);
         self.send_message(&BtMessage::NotInterested).await
     }
 
@@ -468,6 +473,14 @@ impl PeerConnection {
 
     pub fn is_connected(&self) -> bool {
         self.remote_peer_id.is_some()
+    }
+
+    pub fn state(&self) -> &PeerState {
+        &self.state
+    }
+
+    pub(crate) fn state_mut(&mut self) -> &mut PeerState {
+        &mut self.state
     }
 
     pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {

@@ -278,9 +278,14 @@ impl EncryptedConnection {
                 if self.read_buffer.len() >= frame_len {
                     let frame = self.read_buffer.split_to(frame_len).freeze();
                     if msg_len == 0 {
+                        self.inner.state_mut().mark_message_received();
                         return Ok(Some(BtMessage::KeepAlive));
                     }
-                    return crate::bittorrent::message::factory::parse_message_bytes(frame);
+                    let message = crate::bittorrent::message::factory::parse_message_bytes(frame)?;
+                    if message.is_some() {
+                        self.inner.state_mut().mark_message_received();
+                    }
+                    return Ok(message);
                 }
             }
 
@@ -311,22 +316,22 @@ impl EncryptedConnection {
     }
 
     pub async fn send_choke(&mut self) -> Result<(), String> {
-        self.inner.state.am_choking = true;
+        self.inner.state_mut().set_am_choking(true);
         self.send_message(&BtMessage::Choke).await
     }
 
     pub async fn send_unchoke(&mut self) -> Result<(), String> {
-        self.inner.state.am_choking = false;
+        self.inner.state_mut().set_am_choking(false);
         self.send_message(&BtMessage::Unchoke).await
     }
 
     pub async fn send_interested(&mut self) -> Result<(), String> {
-        self.inner.state.am_interested = true;
+        self.inner.state_mut().set_am_interested(true);
         self.send_message(&BtMessage::Interested).await
     }
 
     pub async fn send_not_interested(&mut self) -> Result<(), String> {
-        self.inner.state.am_interested = false;
+        self.inner.state_mut().set_am_interested(false);
         self.send_message(&BtMessage::NotInterested).await
     }
 
@@ -335,13 +340,13 @@ impl EncryptedConnection {
     }
 
     pub async fn send_request(&mut self, req: PieceBlockRequest) -> Result<(), String> {
-        self.inner.state.add_request(req.clone());
+        self.inner.state_mut().add_request(req.clone());
         self.send_message(&BtMessage::Request { request: req })
             .await
     }
 
     pub async fn send_cancel(&mut self, req: &PieceBlockRequest) -> Result<(), String> {
-        self.inner.state.remove_request(req);
+        self.inner.state_mut().remove_request(req);
         self.send_message(&BtMessage::Cancel {
             request: req.clone(),
         })
@@ -355,7 +360,7 @@ impl EncryptedConnection {
     }
 
     pub fn state(&self) -> &PeerState {
-        &self.inner.state
+        self.inner.state()
     }
 
     pub fn remote_peer_id(&self) -> Option<&[u8; 20]> {

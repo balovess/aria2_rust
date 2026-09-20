@@ -66,6 +66,71 @@ describe('Events E2E', () => {
     }));
   });
 
+  it('connect is idempotent and close is safe to repeat', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const emitter = new Aria2EventEmitter(`ws://127.0.0.1:${address.port}/jsonrpc`);
+
+    await Promise.all([emitter.connect(), emitter.connect()]);
+    expect(server.clients.size).toBe(1);
+
+    await emitter.close();
+    await emitter.close();
+    await expect(emitter.connect()).rejects.toThrow('Emitter has been closed');
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
+
+  it('reconnects and continues delivering events after disconnect', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const emitter = new Aria2EventEmitter(`ws://127.0.0.1:${address.port}/jsonrpc`);
+    const handler = vi.fn();
+
+    emitter.on('downloadStart', handler);
+    await emitter.connect();
+    const firstSocket = [...server.clients][0];
+    const reconnecting = new Promise<void>((resolve, reject) => {
+      emitter.once('reconnecting', (willRetry: boolean, attempt: number) => {
+        try {
+          expect(willRetry).toBe(true);
+          expect(attempt).toBe(1);
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+
+    firstSocket.close();
+    await expect(reconnecting).resolves.toBeUndefined();
+    await vi.waitFor(() => expect(server.clients.size).toBe(1), {
+      timeout: 3000,
+      interval: 25,
+    });
+
+    const reconnectedSocket = [...server.clients][0];
+    reconnectedSocket.send(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'aria2.onDownloadStart',
+      params: [{ gid: 'reconnected' }],
+    }));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledWith({
+      type: EventType.DownloadStart,
+      gid: 'reconnected',
+    }));
+
+    await emitter.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
+
   it('preserves optional error and file metadata and supports client listeners', async () => {
     const server = new WebSocketServer({ port: 0 });
     await new Promise<void>((resolve) => server.once('listening', resolve));

@@ -145,9 +145,16 @@ class EventSubscriber:
             return await self._try_reconnect()
 
     async def start(self) -> None:
+        if self._closed:
+            raise ConnectionError("Subscriber has been closed")
+        if self._listener_task is not None and not self._listener_task.done():
+            return
+
         await self._connect()
         if self._closed:
             raise ConnectionError("Subscriber has been closed")
+        if self._listener_task is not None and not self._listener_task.done():
+            return
         self._listener_task = asyncio.create_task(self._listen())
 
     async def __aenter__(self) -> Self:
