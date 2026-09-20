@@ -151,8 +151,8 @@ impl BtDownloadCommand {
             announcer.set_udp_client(shared);
         }
 
-        // The listener is created before discovery, matching BtSetup's order in
-        // the original engine. Advertise its actual port in every announce.
+        // The listener is created before discovery so incoming peers can join
+        // as soon as discovery starts. Advertise its actual port in every announce.
         announcer.set_tcp_port(self.listen_port);
 
         let mut peer_addrs: Vec<(String, u16)> = Vec::new();

@@ -42,9 +42,8 @@ impl BtDownloadCommand {
         num_pieces: u32,
         network_info_hash: [u8; 20],
     ) -> crate::error::Result<PeerSession> {
-        // BtSetup/PeerListenCommand counterpart: register this torrent on the
-        // engine-owned listener before discovery so one socket can serve all
-        // active torrents and route by info-hash.
+        // Register this torrent on the engine-owned listener before discovery
+        // so one socket can serve all active torrents and route by info-hash.
         if self.incoming_peers.is_none() {
             let listener_manager = self.bt_listener.clone().ok_or_else(|| {
                 Aria2Error::Recoverable(crate::error::RecoverableError::TemporaryNetworkFailure {

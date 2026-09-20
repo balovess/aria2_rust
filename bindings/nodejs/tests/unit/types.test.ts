@@ -181,6 +181,17 @@ describe('DownloadEvent', () => {
     expect(event.type).toBe('aria2.onDownloadStart');
     expect(event.gid).toBe('2089b05ecca3d829');
   });
+
+  it('supports error metadata and file metadata', () => {
+    const event: DownloadEvent = {
+      type: EventType.DownloadError,
+      gid: 'gid1',
+      errorCode: 3,
+      files: [],
+    };
+    expect(event.errorCode).toBe(3);
+    expect(event.files).toEqual([]);
+  });
 });
 
 describe('PositionMode', () => {

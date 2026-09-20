@@ -37,8 +37,7 @@ impl BtPeerMessageHandler {
         // Add request slot first so the slot is tracked even if queue add fails
         self.dispatcher.add_request_slot(index, begin, length);
         // Queue the serialized request message
-        self.dispatcher
-            .add_request_message(serialized_msg, index, begin, length);
+        self.dispatcher.add_request_message(serialized_msg);
 
         debug!(
             "PeerHandler: queued request for piece={} begin={} len={} (outstanding={})",

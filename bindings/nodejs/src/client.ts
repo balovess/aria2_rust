@@ -294,13 +294,31 @@ export class Aria2Client {
     return (await this.transport.sendRequest('system.listNotifications', [])) as string[];
   }
 
-  on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
+  private registerEventListener(
+    event: WsEventName | 'reconnecting' | 'close',
+    handler: (...args: unknown[]) => void,
+    once: boolean,
+  ): this {
     const emitter = this.getOrCreateEventEmitter();
-    emitter.on(event, handler);
+    if (once) emitter.once(event, handler);
+    else emitter.on(event, handler);
     void this.ensureEventEmitter().catch(() => {
-      // `on` is intentionally fire-and-forget for compatibility. Callers
+      // Listener registration is intentionally fire-and-forget for compatibility. Callers
       // that need connection errors can await `connectEvents()` instead.
     });
+    return this;
+  }
+
+  on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
+    return this.registerEventListener(event, handler, false);
+  }
+
+  once(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
+    return this.registerEventListener(event, handler, true);
+  }
+
+  off(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
+    this.eventEmitter?.off(event, handler);
     return this;
   }
 

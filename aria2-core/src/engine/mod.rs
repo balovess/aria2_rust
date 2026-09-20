@@ -62,10 +62,6 @@ pub mod bt_message_handler;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_message_handler_tests;
 #[cfg(feature = "bittorrent")]
-pub mod bt_message_receiver;
-#[cfg(all(test, feature = "bittorrent"))]
-pub mod bt_message_receiver_tests;
-#[cfg(feature = "bittorrent")]
 pub mod bt_message_validation;
 #[cfg(feature = "bittorrent")]
 pub mod bt_peer_blocklist;
@@ -92,10 +88,7 @@ pub mod bt_progress_info_file_tests;
 #[cfg(feature = "bittorrent")]
 pub mod bt_registry;
 #[cfg(feature = "bittorrent")]
-pub mod bt_request_factory;
-#[cfg(feature = "bittorrent")]
 pub mod bt_seed_manager;
-pub mod bt_setup;
 #[cfg(feature = "bittorrent")]
 pub mod bt_torrent_post_download_handler;
 #[cfg(feature = "bittorrent")]

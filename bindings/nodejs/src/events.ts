@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 import WebSocket from 'ws';
-import type { ClientOptions, DownloadEvent } from './types.js';
+import type { ClientOptions, DownloadEvent, FileInfo } from './types.js';
 import { EventType } from './types.js';
 import { ConnectionError } from './errors.js';
 
@@ -126,13 +126,30 @@ export class Aria2EventEmitter extends EventEmitter {
       const eventName = EVENT_MAP[method];
       if (!eventName) return;
 
-      const params = (obj.params as unknown[]) ?? [];
-      const gid = (params[0] as Record<string, string>)?.gid ?? String(params[0]);
+      const params = Array.isArray(obj.params) ? obj.params : [];
+      const details = params[0];
+      const detailsObject =
+        details !== null && typeof details === 'object'
+          ? (details as Record<string, unknown>)
+          : undefined;
+      const gid = typeof detailsObject?.gid === 'string' ? detailsObject.gid : String(details);
 
       const event: DownloadEvent = {
         type: method as EventType,
         gid,
       };
+
+      const errorCode = detailsObject?.errorCode;
+      if (typeof errorCode === 'number' && Number.isSafeInteger(errorCode)) {
+        event.errorCode = errorCode;
+      } else if (typeof errorCode === 'string' && /^-?\d+$/.test(errorCode)) {
+        const parsed = Number(errorCode);
+        if (Number.isSafeInteger(parsed)) event.errorCode = parsed;
+      }
+
+      if (Array.isArray(detailsObject?.files)) {
+        event.files = detailsObject.files as FileInfo[];
+      }
 
       this.emit(eventName, event);
     });

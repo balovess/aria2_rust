@@ -66,6 +66,43 @@ describe('Events E2E', () => {
     }));
   });
 
+  it('preserves optional error and file metadata and supports client listeners', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const client = new Aria2Client(`http://127.0.0.1:${address.port}/jsonrpc`);
+    const handler = vi.fn();
+
+    client.once('downloadError', handler);
+    const emitter = await client.connectEvents();
+    const socket = [...server.clients][0];
+    socket.send(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'aria2.onDownloadError',
+      params: [{ gid: 'gid1', errorCode: '3', files: [] }],
+    }));
+
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledOnce());
+    expect(handler).toHaveBeenCalledWith({
+      type: EventType.DownloadError,
+      gid: 'gid1',
+      errorCode: 3,
+      files: [],
+    });
+
+    const removed = vi.fn();
+    emitter.on('downloadStart', removed);
+    client.off('downloadStart', removed);
+    emitter.emit('downloadStart', { type: EventType.DownloadStart, gid: 'gid2' });
+    expect(removed).not.toHaveBeenCalled();
+
+    await client.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
+
   it('close settles an in-flight event connection', async () => {
     const server = new WebSocketServer({ port: 0 });
     await new Promise<void>((resolve) => server.once('listening', resolve));

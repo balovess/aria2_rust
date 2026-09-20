@@ -19,10 +19,6 @@
 //! - [`validate_received_peer_id`] — Standalone validation function
 //! - [`filter_duplicate_peer_connections`] — Batch filter for Vec<BtPeerConn>
 //!
-//! The [`HandshakeResult`] enum in `bt_message_receiver` also includes
-//! `SelfConnection` and `DuplicatePeerId` variants for use at the lower level
-//! (per-connection handshake receiver).
-//!
 //! # Self-connection check in C++ vs. Rust
 //!
 //! C++ uses `bittorrent::getStaticPeerId()` which returns a **session-wide**

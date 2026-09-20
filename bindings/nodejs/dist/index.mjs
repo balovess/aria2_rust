@@ -353,12 +353,24 @@ var Aria2EventEmitter = class extends EventEmitter {
       const method = obj.method;
       const eventName = EVENT_MAP[method];
       if (!eventName) return;
-      const params = obj.params ?? [];
-      const gid = params[0]?.gid ?? String(params[0]);
+      const params = Array.isArray(obj.params) ? obj.params : [];
+      const details = params[0];
+      const detailsObject = details !== null && typeof details === "object" ? details : void 0;
+      const gid = typeof detailsObject?.gid === "string" ? detailsObject.gid : String(details);
       const event = {
         type: method,
         gid
       };
+      const errorCode = detailsObject?.errorCode;
+      if (typeof errorCode === "number" && Number.isSafeInteger(errorCode)) {
+        event.errorCode = errorCode;
+      } else if (typeof errorCode === "string" && /^-?\d+$/.test(errorCode)) {
+        const parsed2 = Number(errorCode);
+        if (Number.isSafeInteger(parsed2)) event.errorCode = parsed2;
+      }
+      if (Array.isArray(detailsObject?.files)) {
+        event.files = detailsObject.files;
+      }
       this.emit(eventName, event);
     });
   }
@@ -612,11 +624,22 @@ var Aria2Client = class {
   async systemListNotifications() {
     return await this.transport.sendRequest("system.listNotifications", []);
   }
-  on(event, handler) {
+  registerEventListener(event, handler, once) {
     const emitter = this.getOrCreateEventEmitter();
-    emitter.on(event, handler);
+    if (once) emitter.once(event, handler);
+    else emitter.on(event, handler);
     void this.ensureEventEmitter().catch(() => {
     });
+    return this;
+  }
+  on(event, handler) {
+    return this.registerEventListener(event, handler, false);
+  }
+  once(event, handler) {
+    return this.registerEventListener(event, handler, true);
+  }
+  off(event, handler) {
+    this.eventEmitter?.off(event, handler);
     return this;
   }
   async close() {

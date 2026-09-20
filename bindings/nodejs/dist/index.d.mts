@@ -106,7 +106,7 @@ interface DownloadEvent {
     type: EventType;
     gid: string;
     errorCode?: number;
-    files?: unknown[];
+    files?: FileInfo[];
 }
 declare const enum EventType {
     DownloadStart = "aria2.onDownloadStart",
@@ -204,7 +204,10 @@ declare class Aria2Client {
     }>): Promise<unknown[]>;
     systemListMethods(): Promise<string[]>;
     systemListNotifications(): Promise<string[]>;
+    private registerEventListener;
     on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
+    once(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
+    off(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this;
     close(): Promise<void>;
     destroy(): void;
 }

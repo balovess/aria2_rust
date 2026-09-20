@@ -116,7 +116,7 @@ export interface DownloadEvent {
   type: EventType;
   gid: string;
   errorCode?: number;
-  files?: unknown[];
+  files?: FileInfo[];
 }
 
 export const enum EventType {

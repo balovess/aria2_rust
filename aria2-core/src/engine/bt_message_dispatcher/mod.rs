@@ -9,9 +9,7 @@
 //!   queue and outstanding request slots. Mirrors C++ `DefaultBtMessageDispatcher`.
 //! - [`RequestSlot`] — Tracks a single outstanding piece-block request.
 //!   Mirrors C++ `RequestSlot`.
-//! - [`InactiveReason`] — Reason a peer became inactive and should be dropped.
 //! - [`FloodingStat`] — Anti-flooding counters (choke/unchoke + keepalive).
-//! - [`ActiveInteractionChecker`] — Timer-based inactivity detection.
 //! - [`SlotCheckResult`] — Result of periodic request-slot validation.
 //!
 //! # C++ Equivalence
@@ -20,7 +18,7 @@
 //! |---|---|
 //! | `BtMessageDispatcher` | `DefaultBtMessageDispatcher` |
 //! | `RequestSlot` | `RequestSlot` |
-//! | `FloodingStat` | `FloodingStat` (inline in DefaultBtInteractive) |
+//! | `FloodingStat` | `FloodingStat` |
 
 use std::time::{Duration, Instant};
 
@@ -45,8 +43,6 @@ pub struct RequestSlot {
     pub length: u32,
     /// Block index (= begin / block_length)
     pub block_index: u32,
-    /// Command ID that created this request
-    pub cuid: u64,
     /// When this request was dispatched
     pub dispatched_at: Instant,
 }
@@ -62,16 +58,8 @@ impl RequestSlot {
             begin,
             length,
             block_index,
-            cuid: 0,
             dispatched_at: Instant::now(),
         }
-    }
-
-    /// Create a request slot with a specific command ID.
-    pub fn with_cuid(index: u32, begin: u32, length: u32, block_size: u32, cuid: u64) -> Self {
-        let mut slot = Self::new(index, begin, length, block_size);
-        slot.cuid = cuid;
-        slot
     }
 
     /// Check whether this slot has timed out.
@@ -86,34 +74,6 @@ impl RequestSlot {
 }
 
 // ===========================================================================
-// InactiveReason — why a peer is being dropped
-// ===========================================================================
-
-/// Reason a peer became inactive and should be disconnected.
-///
-/// Used by `checkActiveInteraction()` in the interaction loop to decide
-/// why a peer should be dropped after a timeout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InactiveReason {
-    /// Both sides uninterested for too long (30s in C++)
-    MutualUninterested,
-    /// No data exchanged for too long (60s total inactivity in C++)
-    NoDataExchange,
-    /// Both sides are seeders — no useful exchange possible
-    SeederToSeeder,
-}
-
-impl std::fmt::Display for InactiveReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            InactiveReason::MutualUninterested => write!(f, "mutual_uninterested"),
-            InactiveReason::NoDataExchange => write!(f, "no_data_exchange"),
-            InactiveReason::SeederToSeeder => write!(f, "seeder_to_seeder"),
-        }
-    }
-}
-
-// ===========================================================================
 // FloodingStat — anti-flooding counters
 // ===========================================================================
 
@@ -123,7 +83,7 @@ impl std::fmt::Display for InactiveReason {
 /// within a rolling window to detect misbehaving peers that flood
 /// with control messages.
 ///
-/// Mirrors C++ `FloodingStat` (inline struct in `DefaultBtInteractive`).
+/// Tracks control-message flooding for one peer.
 #[derive(Debug, Clone)]
 pub struct FloodingStat {
     /// Count of choke/unchoke transitions in the current window
@@ -167,7 +127,7 @@ impl FloodingStat {
     /// Check for flooding and reset counters if the interval elapsed.
     ///
     /// Returns `true` if flooding was detected (peer should be disconnected).
-    /// Mirrors C++ `DefaultBtInteractive::detectMessageFlooding()`.
+    /// Checks the peer handler's flooding window.
     ///
     /// Per C++ behavior, flooding is only detected at interval boundaries.
     /// Within an interval, this always returns `false` — we must observe
@@ -204,89 +164,6 @@ impl FloodingStat {
 }
 
 impl Default for FloodingStat {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ===========================================================================
-// ActiveInteractionChecker — inactivity detection
-// ===========================================================================
-
-/// Timer-based checker for detecting inactive peers that should be dropped.
-///
-/// Mirrors C++ `checkActiveInteraction()` logic in `DefaultBtInteractive`:
-/// - 30s mutual-uninterested → drop
-/// - 60s total inactivity → drop
-/// - seeder-to-seeder → drop
-#[derive(Debug, Clone)]
-pub struct ActiveInteractionChecker {
-    /// When the inactive timer started
-    inactive_since: Instant,
-    /// Mutual-uninterested timeout (default 30s)
-    mutual_uninterested_timeout: Duration,
-    /// Total inactivity timeout (default 60s)
-    inactivity_timeout: Duration,
-    /// Timestamp of the last data exchange (piece/unchoke received).
-    /// Reset by `record_data_exchange()`.
-    last_data_exchange: Instant,
-}
-
-impl ActiveInteractionChecker {
-    /// Create a new active interaction checker with default timeouts.
-    pub fn new() -> Self {
-        Self {
-            inactive_since: Instant::now(),
-            mutual_uninterested_timeout: Duration::from_secs(30),
-            inactivity_timeout: Duration::from_secs(60),
-            last_data_exchange: Instant::now(),
-        }
-    }
-
-    /// Check whether the peer should be dropped due to inactivity.
-    ///
-    /// Returns `Some(InactiveReason)` if the peer should be disconnected,
-    /// or `None` if the peer is still considered active.
-    pub fn check(
-        &self,
-        am_interested: bool,
-        peer_interested: bool,
-        is_seeder: bool,
-        peer_is_seeder: bool,
-    ) -> Option<InactiveReason> {
-        let elapsed = self.inactive_since.elapsed();
-
-        // Seeder-to-seeder: no possible data exchange
-        if is_seeder && peer_is_seeder {
-            return Some(InactiveReason::SeederToSeeder);
-        }
-
-        // Mutual uninterested timeout
-        if !am_interested && !peer_interested && elapsed >= self.mutual_uninterested_timeout {
-            return Some(InactiveReason::MutualUninterested);
-        }
-
-        // Total inactivity timeout
-        if elapsed >= self.inactivity_timeout {
-            return Some(InactiveReason::NoDataExchange);
-        }
-
-        None
-    }
-
-    /// Reset the inactive timer (called when data is exchanged).
-    pub fn reset_timer(&mut self) {
-        self.inactive_since = Instant::now();
-    }
-
-    /// Record that a data exchange occurred (piece/unchoke received).
-    /// Resets the inactivity timer.
-    pub fn record_data_exchange(&mut self) {
-        self.last_data_exchange = Instant::now();
-    }
-}
-
-impl Default for ActiveInteractionChecker {
     fn default() -> Self {
         Self::new()
     }
@@ -404,7 +281,7 @@ impl BtMessageDispatcher {
     }
 
     /// Add a serialized Request message to the outgoing queue.
-    pub fn add_request_message(&mut self, data: Vec<u8>, _index: u32, _begin: u32, _length: u32) {
+    pub fn add_request_message(&mut self, data: Vec<u8>) {
         self.message_queue.push(PendingMessage::Control(data));
     }
 

@@ -3,13 +3,9 @@
 //! Manages the process of requesting and receiving individual blocks
 //! from peers during piece download.
 //!
-//! # Deprecation Note
-//!
-//! This struct provides only static methods with no per-peer state.
-//! For new code, prefer [`super::BtPeerMessageHandler`] which integrates with
-//! [`BtMessageDispatcher`](crate::engine::bt_message_dispatcher::BtMessageDispatcher)
-//! for request slot tracking, event-driven actions, flooding detection,
-//! and timeout checking.
+//! This is the block-download path. Per-peer control-message state is owned by
+//! [`super::BtPeerMessageHandler`], while this handler coordinates block
+//! transfers that may span multiple peers.
 
 mod endgame;
 mod normal;
@@ -20,12 +16,7 @@ mod pipelined;
 /// Manages the process of requesting and receiving individual blocks
 /// from peers during piece download.
 ///
-/// # Deprecation Note
-///
-/// This struct provides only static methods with no per-peer state.
-/// For new code, prefer [`super::BtPeerMessageHandler`] which integrates with
-/// [`BtMessageDispatcher`](crate::engine::bt_message_dispatcher::BtMessageDispatcher)
-/// for request slot tracking, event-driven actions, flooding detection,
-/// and timeout checking.
-#[allow(dead_code)]
+/// This type intentionally has no per-peer state. It owns the block-download
+/// operations that are shared by normal, pipelined, and endgame transfers;
+/// per-peer protocol state remains in [`super::BtPeerMessageHandler`].
 pub struct BtMessageHandler;
