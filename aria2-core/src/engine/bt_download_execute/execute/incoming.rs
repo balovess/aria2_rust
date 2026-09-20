@@ -8,13 +8,20 @@ impl BtDownloadCommand {
         &mut self,
         active_connections: &mut Vec<crate::engine::bt_peer_connection::BtPeerConn>,
         piece_length: u32,
+        num_pieces: u32,
         total_size: u64,
     ) {
         let Some(mut receiver) = self.incoming_peers.take() else {
             return;
         };
         while let Ok(incoming) = receiver.try_recv() {
-            self.admit_incoming_peer(active_connections, incoming, piece_length, total_size);
+            self.admit_incoming_peer(
+                active_connections,
+                incoming,
+                piece_length,
+                num_pieces,
+                total_size,
+            );
         }
         self.incoming_peers = Some(receiver);
     }
@@ -24,6 +31,7 @@ impl BtDownloadCommand {
         active_connections: &mut Vec<crate::engine::bt_peer_connection::BtPeerConn>,
         incoming: crate::engine::bt_peer_listener::IncomingPeer,
         piece_length: u32,
+        num_pieces: u32,
         total_size: u64,
     ) {
         let endpoint = incoming.endpoint;
@@ -68,7 +76,7 @@ impl BtDownloadCommand {
             );
             return;
         }
-        conn.allocate_session_resource(piece_length, self.peer_wire_total_size(total_size));
+        conn.allocate_session_resource(piece_length, num_pieces, total_size);
         active_connections.push(conn);
         self.bt_runtime.set_connections(active_connections.len());
         self.group

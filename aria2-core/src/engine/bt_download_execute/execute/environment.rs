@@ -16,18 +16,6 @@ pub(super) fn parse_listen_ports(value: &str) -> std::result::Result<Vec<u16>, S
 }
 
 impl BtDownloadCommand {
-    /// Return the byte space used by BitTorrent peer piece indices.
-    ///
-    /// BEP 52 keeps each v2 file on a piece boundary, so the wire piece
-    /// space can be larger than the sum of file contents. Request-group
-    /// accounting must continue to use the content length; peer-session
-    /// validation must use this aligned space instead.
-    pub(super) fn peer_wire_total_size(&self, content_total_size: u64) -> u64 {
-        self.multi_file_layout
-            .as_ref()
-            .map_or(content_total_size, |layout| layout.piece_space_size())
-    }
-
     /// Prepare the download environment: create output directories, parse torrent metadata, and set total length on the request group.
     pub(super) async fn prepare_environment(
         &mut self,

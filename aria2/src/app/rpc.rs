@@ -282,7 +282,7 @@ impl App {
         #[allow(unused_mut)]
         let mut backend = super::rpc_backend::CoreRpcBackend::new(
             group_man,
-            engine_cmd_tx.into(),
+            engine_cmd_tx,
             Arc::clone(&self.config),
             save_session_path,
             crate::identity::PRODUCT_VERSION,

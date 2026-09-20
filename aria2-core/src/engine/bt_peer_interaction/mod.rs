@@ -145,7 +145,7 @@ impl BtPeerInteraction {
             connection_options.peer_timeout,
         );
         conn.sync_peer_identity();
-        conn.allocate_session_resource(piece_length, total_length);
+        conn.allocate_session_resource(piece_length, num_pieces, total_length);
         info!(
             "[BT] Connected to peer {}:{} (encrypted={}, piece_length={}, total_length={})",
             addr.ip,

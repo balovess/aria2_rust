@@ -114,7 +114,7 @@ fn bench_peer_have_transition(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         (
-                            PeerSessionResource::new(1, piece_count as u64),
+                            PeerSessionResource::new(1, piece_count as u32, piece_count as u64),
                             PieceStatMan::new(piece_count, false),
                         )
                     },
@@ -138,7 +138,7 @@ fn bench_peer_have_transition(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         (
-                            PeerSessionResource::new(1, piece_count as u64),
+                            PeerSessionResource::new(1, piece_count as u32, piece_count as u64),
                             PieceStatMan::new(piece_count, false),
                         )
                     },

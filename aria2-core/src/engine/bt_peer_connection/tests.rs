@@ -58,7 +58,7 @@ fn test_send_buffer_default() {
 #[test]
 fn test_peer_session_resource_bitfield() {
     // 4 pieces of 256 KiB each = 1 MiB total
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert_eq!(res.num_pieces(), 4);
     assert_eq!(res.bitfield_length(), 1);
 
@@ -90,7 +90,7 @@ fn test_peer_session_resource_bitfield() {
 
 #[test]
 fn test_peer_session_resource_seeder() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert!(!res.is_seeder());
 
     res.mark_seeder();
@@ -102,7 +102,7 @@ fn test_peer_session_resource_seeder() {
 
 #[test]
 fn test_peer_session_resource_set_all_bitfield() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     res.set_all_bitfield();
     // 4 pieces in 1 byte = 0xF0 (upper 4 bits)
     assert_eq!(res.bitfield(), &[0xF0]);
@@ -111,23 +111,23 @@ fn test_peer_session_resource_set_all_bitfield() {
 
 #[test]
 fn test_peer_session_resource_reconfigure() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert_eq!(res.num_pieces(), 4);
 
-    res.reconfigure(512 * 1024, 4 * 1024 * 1024);
+    res.reconfigure(512 * 1024, 8, 4 * 1024 * 1024);
     assert_eq!(res.num_pieces(), 8);
     assert_eq!(res.bitfield_length(), 1);
 }
 
 #[test]
 fn test_peer_session_resource_out_of_range() {
-    let res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert!(!res.has_piece(100)); // out of range
 }
 
 #[test]
 fn test_peer_session_resource_update_bitfield_out_of_range() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     // Should not panic on out-of-range index
     res.update_bitfield(100, 1);
     assert!(!res.has_piece(100));
@@ -139,7 +139,7 @@ fn test_peer_session_resource_update_bitfield_out_of_range() {
 
 #[test]
 fn test_peer_session_resource_fast_extension() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert!(!res.is_fast_extension_enabled());
 
     res.set_fast_extension_enabled(true);
@@ -152,7 +152,7 @@ fn test_peer_session_resource_fast_extension() {
 
 #[test]
 fn test_peer_session_resource_extensions() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     // Register extensions
     res.add_extension("ut_pex", 1);
     res.add_extension("ut_metadata", 2);
@@ -170,7 +170,7 @@ fn test_peer_session_resource_extensions() {
 fn test_bt_peer_conn_session_resource_lifecycle() {
     // We cannot easily construct a BtPeerConn without a real connection,
     // so test the resource management pattern directly.
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert_eq!(res.num_pieces(), 4);
     assert!(!res.is_seeder());
 
@@ -280,7 +280,7 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
         server, [0u8; 20], false, false,
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
-    connection.allocate_session_resource(16 * 1024, 16 * 1024);
+    connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
 
     let mut handshake = aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new();
     handshake.with_ut_metadata(7).with_ut_pex(9);
@@ -310,7 +310,7 @@ async fn test_bt_peer_conn_initializes_fast_extension_from_handshake() {
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
 
-    connection.allocate_session_resource(16 * 1024, 16 * 1024);
+    connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
 
     assert!(connection.is_fast_extension_enabled());
 }
@@ -389,7 +389,7 @@ fn test_allowed_fast_multiple_indices() {
 #[test]
 fn test_peer_session_resource_large_bitfield() {
     // 100 pieces of 1 MiB each = 100 MiB total
-    let mut res = PeerSessionResource::new(1024 * 1024, 100 * 1024 * 1024);
+    let mut res = PeerSessionResource::new(1024 * 1024, 100, 100 * 1024 * 1024);
     assert_eq!(res.num_pieces(), 100);
     assert_eq!(res.bitfield_length(), 13); // ceil(100/8) = 13
 
@@ -412,15 +412,24 @@ fn test_peer_session_resource_large_bitfield() {
 
 #[test]
 fn test_peer_session_resource_zero_length() {
-    let res = PeerSessionResource::new(0, 0);
+    let res = PeerSessionResource::new(0, 0, 0);
     assert_eq!(res.num_pieces(), 0);
     // Vacuously a seeder
     assert!(res.is_seeder());
 }
 
 #[test]
+fn test_peer_session_resource_uses_explicit_piece_count() {
+    // v2 multi-file content can be two bytes while occupying two aligned
+    // protocol pieces.
+    let res = PeerSessionResource::new(16 * 1024, 2, 2);
+    assert_eq!(res.num_pieces(), 2);
+    assert_eq!(res.bitfield_length(), 1);
+}
+
+#[test]
 fn test_peer_session_resource_accessors() {
-    let res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
+    let res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert_eq!(res.piece_length(), 256 * 1024);
     assert_eq!(res.total_length(), 1024 * 1024);
 }

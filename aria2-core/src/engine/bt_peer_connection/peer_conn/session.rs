@@ -70,9 +70,14 @@ impl BtPeerConn {
     ///
     /// Called when the peer becomes active (after successful handshake).
     /// Does nothing if a session resource is already allocated.
-    pub fn allocate_session_resource(&mut self, piece_length: u32, total_length: u64) {
+    pub fn allocate_session_resource(
+        &mut self,
+        piece_length: u32,
+        num_pieces: u32,
+        total_length: u64,
+    ) {
         if self.session_resource.is_none() {
-            let mut resource = PeerSessionResource::new(piece_length, total_length);
+            let mut resource = PeerSessionResource::new(piece_length, num_pieces, total_length);
             resource.set_fast_extension_enabled(self.remote_supports_fast_extension());
             self.session_resource = Some(resource);
         }
@@ -86,9 +91,14 @@ impl BtPeerConn {
     /// Reconfigure the session resource for new torrent parameters.
     ///
     /// No-op if no session resource is allocated.
-    pub fn reconfigure_session_resource(&mut self, piece_length: u32, total_length: u64) {
+    pub fn reconfigure_session_resource(
+        &mut self,
+        piece_length: u32,
+        num_pieces: u32,
+        total_length: u64,
+    ) {
         if let Some(ref mut res) = self.session_resource {
-            res.reconfigure(piece_length, total_length);
+            res.reconfigure(piece_length, num_pieces, total_length);
         }
     }
 

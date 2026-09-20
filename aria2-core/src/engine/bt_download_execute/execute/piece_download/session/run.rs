@@ -17,6 +17,7 @@ impl PieceDownloadSession<'_> {
             self.command.drain_incoming_peers(
                 self.active_connections,
                 self.piece_length,
+                self.num_pieces,
                 self.total_size,
             );
             self.command
@@ -283,6 +284,7 @@ impl PieceDownloadSession<'_> {
                         self.active_connections,
                         incoming,
                         self.piece_length,
+                        self.num_pieces,
                         self.total_size,
                     );
                 }
@@ -324,6 +326,7 @@ impl PieceDownloadSession<'_> {
                             self.active_connections,
                             incoming,
                             self.piece_length,
+                            self.num_pieces,
                             self.total_size,
                         );
                     }

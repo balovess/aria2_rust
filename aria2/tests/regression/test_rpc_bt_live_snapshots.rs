@@ -132,10 +132,11 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         )
         .await
         .expect("the seeder should complete the real leecher handshake");
-    assert_eq!(peer_connection.remote_peer_id, Some(leecher_peer_id));
+    assert_eq!(peer_connection.remote_peer_id(), Some(&leecher_peer_id));
     assert_eq!(peer_connection.remote_addr(), Some(leecher_addr));
     let peer_id = peer_connection
-        .remote_peer_id
+        .remote_peer_id()
+        .copied()
         .expect("handshake should provide the leecher peer-id");
     let peer_addr = peer_connection
         .remote_addr()

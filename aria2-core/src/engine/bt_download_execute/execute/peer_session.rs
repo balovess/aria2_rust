@@ -262,7 +262,12 @@ impl BtDownloadCommand {
         // Admit handshaken incoming peers before the first piece cycle. Later
         // cycles drain the receiver below, preserving PeerListenCommand's
         // long-lived listener semantics.
-        self.drain_incoming_peers(&mut active_connections, piece_length, total_size);
+        self.drain_incoming_peers(
+            &mut active_connections,
+            piece_length,
+            num_pieces,
+            total_size,
+        );
 
         // Download pieces from the connected peers, using web seeds and PEX as configured.
         Ok(PeerSession {

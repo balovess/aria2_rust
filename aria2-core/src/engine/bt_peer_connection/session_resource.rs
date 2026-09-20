@@ -38,14 +38,11 @@ pub struct PeerSessionResource {
 }
 
 impl PeerSessionResource {
-    /// Create a new `PeerSessionResource` for a torrent with the given
-    /// piece length and total length.
-    pub fn new(piece_length: u32, total_length: u64) -> Self {
-        let num_pieces = if piece_length == 0 || total_length == 0 {
-            0
-        } else {
-            total_length.div_ceil(piece_length as u64) as u32
-        };
+    /// Create a new `PeerSessionResource` for the explicit torrent geometry.
+    ///
+    /// `num_pieces` is authoritative because BEP 52 v2 multi-file torrents
+    /// can have aligned piece space larger than their content length.
+    pub fn new(piece_length: u32, num_pieces: u32, total_length: u64) -> Self {
         let bitfield_length = (num_pieces as usize).div_ceil(8);
 
         Self {
@@ -150,16 +147,11 @@ impl PeerSessionResource {
         self.bitfield_length
     }
 
-    /// Reconfigure the session resource for a new piece/total length.
+    /// Reconfigure the session resource for new torrent geometry.
     ///
     /// Called when the torrent metadata is updated (e.g., after magnet
     /// link metadata exchange).
-    pub fn reconfigure(&mut self, piece_length: u32, total_length: u64) {
-        let num_pieces = if piece_length == 0 || total_length == 0 {
-            0
-        } else {
-            total_length.div_ceil(piece_length as u64) as u32
-        };
+    pub fn reconfigure(&mut self, piece_length: u32, num_pieces: u32, total_length: u64) {
         let bitfield_length = (num_pieces as usize).div_ceil(8);
 
         self.bitfield.resize(bitfield_length, 0);
