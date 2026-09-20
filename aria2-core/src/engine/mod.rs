@@ -2,8 +2,6 @@ pub mod active_output_registry;
 pub mod choking_algorithm;
 pub mod command;
 pub mod concurrent_download;
-#[cfg(feature = "metalink")]
-pub mod concurrent_download_command;
 pub mod concurrent_segment_manager;
 #[cfg(feature = "bittorrent")]
 pub(crate) mod dht_config;

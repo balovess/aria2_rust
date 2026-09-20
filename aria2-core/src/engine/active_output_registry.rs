@@ -47,8 +47,8 @@ impl Default for OutputPathPolicy {
 
 /// Process-wide registry of output paths that are currently being written by active downloads.
 ///
-/// All download command types (`DownloadCommand`, `MetalinkDownloadCommand`,
-/// `ConcurrentDownloadCommand`) consult this registry **before** opening their disk writer,
+/// All download command types (`DownloadCommand`, `MetalinkDownloadCommand`)
+/// consult this registry **before** opening their disk writer,
 /// so that concurrent downloads targeting the same filename receive distinct paths.
 pub struct ActiveOutputRegistry {
     inner: Arc<RwLock<HashSet<PathBuf>>>,

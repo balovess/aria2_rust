@@ -190,6 +190,64 @@ impl DownloadCommand {
         Self::new_with_group(group, uri, options, output_dir, output_name)
     }
 
+    /// Create the unified HTTP command from a single-file Metalink document.
+    #[cfg(feature = "metalink")]
+    pub fn new_from_metalink(
+        gid: GroupId,
+        metalink_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+    ) -> Result<Self> {
+        let document =
+            aria2_protocol::metalink::parser::MetalinkDocument::parse(metalink_bytes, None)
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Metalink parse failed: {error}"
+                    )))
+                })?;
+        let file = document.files.first().ok_or_else(|| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(
+                "Metalink contains no files".into(),
+            ))
+        })?;
+        let urls: Vec<String> = file
+            .get_sorted_urls()
+            .iter()
+            .map(|entry| entry.url.clone())
+            .collect();
+        let first_url = urls.first().cloned().ok_or_else(|| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(
+                "No URLs in Metalink".into(),
+            ))
+        })?;
+
+        let mut effective_options = options.clone();
+        if effective_options.checksum.is_none()
+            && let Some(hash) = file.hashes.first()
+        {
+            effective_options.checksum =
+                Some((hash.algo.as_standard_name().to_string(), hash.value.clone()));
+        }
+
+        let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+            gid,
+            urls,
+            effective_options.clone(),
+        )));
+        if let Some(size) = file.size {
+            group.recover().set_total_length(size);
+        }
+        group.recover().set_output_name(file.name.clone());
+
+        Self::new_with_group(
+            group,
+            &first_url,
+            &effective_options,
+            output_dir,
+            Some(&file.name),
+        )
+    }
+
     pub fn new_with_group(
         group: Arc<std::sync::RwLock<RequestGroup>>,
         uri: &str,

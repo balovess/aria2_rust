@@ -2,8 +2,8 @@
 
 mod fixtures;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::concurrent_download_command::ConcurrentDownloadCommand;
 use aria2_core::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};
+use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use fixtures::test_metalink_builder::{SMALL_CONTENT, build_metalink_v3, compute_sha256};
 use fixtures::test_server::TestServer;
@@ -25,13 +25,13 @@ async fn test_e2e_concurrent_two_mirrors() {
 
     let metalink_xml = build_metalink_v3("concurrent_small.bin", 4, &[(url1, 1), (url2, 1)], &sha);
 
-    let mut cmd = ConcurrentDownloadCommand::new(
+    let mut cmd = DownloadCommand::new_from_metalink(
         GroupId::new(100),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
     )
-    .expect("创建ConcurrentDownloadCommand失败");
+    .expect("创建DownloadCommand失败");
 
     cmd.execute().await.expect("并发下载失败");
 
@@ -63,13 +63,13 @@ async fn test_e2e_concurrent_three_mirrors() {
 
     let metalink_xml = build_metalink_v3("concurrent_medium.bin", 1024 * 1024, &url_vecs, &sha);
 
-    let mut cmd = ConcurrentDownloadCommand::new(
+    let mut cmd = DownloadCommand::new_from_metalink(
         GroupId::new(101),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
     )
-    .expect("创建ConcurrentDownloadCommand失败");
+    .expect("创建DownloadCommand失败");
 
     cmd.execute().await.expect("三镜像并发下载失败");
 
@@ -94,13 +94,13 @@ async fn test_e2e_concurrent_one_mirror_fails() {
     let metalink_xml =
         build_metalink_v3("failover_test.bin", 4, &[(bad_url, 1), (good_url, 2)], &sha);
 
-    let mut cmd = ConcurrentDownloadCommand::new(
+    let mut cmd = DownloadCommand::new_from_metalink(
         GroupId::new(102),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
     )
-    .expect("创建ConcurrentDownloadCommand失败");
+    .expect("创建DownloadCommand失败");
 
     cmd.execute().await.expect("镜像故障回退应成功");
 
@@ -121,13 +121,13 @@ async fn test_e2e_concurrent_hash_verify() {
 
     let metalink_xml = build_metalink_v3("hash_test.bin", 4, &[(url, 1)], &correct_sha);
 
-    let mut cmd = ConcurrentDownloadCommand::new(
+    let mut cmd = DownloadCommand::new_from_metalink(
         GroupId::new(103),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
     )
-    .expect("创建ConcurrentDownloadCommand失败");
+    .expect("创建DownloadCommand失败");
 
     cmd.execute().await.expect("正确hash应通过验证");
 
@@ -148,13 +148,13 @@ async fn test_e2e_concurrent_progress_tracking() {
 
     let metalink_xml = build_metalink_v3("progress_test.bin", 4, &[(url, 1), (url2, 1)], &sha);
 
-    let mut cmd = ConcurrentDownloadCommand::new(
+    let mut cmd = DownloadCommand::new_from_metalink(
         GroupId::new(104),
         &metalink_xml,
         &DownloadOptions::default(),
         dir.path().to_str(),
     )
-    .expect("创建ConcurrentDownloadCommand失败");
+    .expect("创建DownloadCommand失败");
 
     let progress_before = cmd.group().progress();
     assert!((progress_before - 0.0).abs() < 1.0, "下载前进度应为0%");
@@ -174,7 +174,7 @@ async fn test_e2e_concurrent_progress_tracking() {
 #[tokio::test]
 async fn test_e2e_concurrent_invalid_input() {
     let bad_metalink = b"<metalink></metalink>".to_vec();
-    let result = ConcurrentDownloadCommand::new(
+    let result = DownloadCommand::new_from_metalink(
         GroupId::new(105),
         &bad_metalink,
         &DownloadOptions::default(),
