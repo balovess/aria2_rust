@@ -70,10 +70,7 @@ impl ServerStatMan {
         SHARED_STAT_MAN.get_or_init(|| Arc::new(ServerStatMan::new()))
     }
 
-    /// Gets or creates a ServerStat for the given hostname (protocol-agnostic).
-    ///
-    /// This is the backward-compatible method. For protocol-aware lookups,
-    /// use [`ServerStatMan::get_or_create_with_protocol`].
+    #[cfg(test)]
     pub fn get_or_create(&self, host: &str) -> Arc<ServerStat> {
         self.get_or_create_with_protocol(host, "")
     }
@@ -106,10 +103,7 @@ impl ServerStatMan {
         stat
     }
 
-    /// Finds a ServerStat by hostname only (protocol-agnostic).
-    ///
-    /// Returns the entry with an empty protocol if it exists.
-    /// For protocol-aware lookups, use [`ServerStatMan::find_stat_by_protocol`].
+    #[cfg(test)]
     pub fn find_stat(&self, host: &str) -> Option<Arc<ServerStat>> {
         self.find_stat_by_protocol(host, "")
     }
@@ -136,6 +130,7 @@ impl ServerStatMan {
         })
     }
 
+    #[cfg(test)]
     pub fn update(&self, host: &str, dl_speed: u64, is_multi: bool) {
         let stat = self.get_or_create(host);
         stat.update_speed(dl_speed, is_multi);
@@ -207,10 +202,7 @@ impl ServerStatMan {
         hosts
     }
 
-    /// Mark a host as failed (protocol-agnostic), updating error tracking fields.
-    ///
-    /// Looks up the entry with empty protocol. For protocol-aware failure marking,
-    /// use [`ServerStatMan::mark_failure_with_protocol`].
+    #[cfg(test)]
     pub fn mark_failure(&self, host: &str, error_code: u16) {
         self.mark_failure_with_protocol(host, "", error_code);
     }
@@ -255,7 +247,7 @@ impl ServerStatMan {
     /// use std::path::Path;
     ///
     /// let man = ServerStatMan::new();
-    /// man.update("mirror.example.com", 5000, false);
+    /// man.update_with_protocol("mirror.example.com", "http", 5000, false);
     ///
     /// let saved = man.save_to_file(Path::new("server-stat.json")).unwrap();
     /// println!("Saved {} servers", saved);

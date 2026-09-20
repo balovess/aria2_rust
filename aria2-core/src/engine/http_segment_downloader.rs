@@ -17,12 +17,9 @@ pub use downloader::{HttpSegmentDownloader, WriteChunk};
 pub(crate) use progress::{SegmentProgress, SegmentProgressTracker};
 pub use segment_size::calculate_dynamic_segment_size;
 
-// Re-export score_source for convenience (was in the original monolithic file)
-pub use crate::selector::source_scorer::{score_source_raw as score_source, score_source_raw};
-
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::selector::source_scorer::score_source_raw as score_source;
 
     #[test]
     fn test_source_scoring_slow_penalized() {

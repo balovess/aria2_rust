@@ -72,6 +72,12 @@ impl DownloadManager {
         uris: Vec<String>,
         options: DownloadOptions,
     ) -> std::result::Result<DownloadHandle, DownloadManagerError> {
+        if uris.is_empty() || uris.iter().any(|uri| uri.trim().is_empty()) {
+            return Err(DownloadManagerError::Preparation(
+                Aria2Error::InvalidArgument("at least one non-empty URI is required".to_string()),
+            ));
+        }
+
         let gid = self.group_man.next_available_gid();
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid, uris, options,
@@ -583,6 +589,25 @@ mod tests {
 
         assert!(handle.status_snapshot().is_some());
         assert_eq!(group_man.count(), 1);
+    }
+
+    #[test]
+    fn add_uri_rejects_empty_input_before_registration() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+
+        for uris in [Vec::new(), vec![String::new()], vec!["   ".to_string()]] {
+            let result = manager.add_uri(uris, DownloadOptions::default());
+            assert!(matches!(
+                result,
+                Err(DownloadManagerError::Preparation(
+                    Aria2Error::InvalidArgument(_)
+                ))
+            ));
+        }
+
+        assert_eq!(group_man.count(), 0);
     }
 
     #[test]
