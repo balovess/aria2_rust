@@ -60,6 +60,8 @@ pub struct TrackerRuntimeSnapshot {
     pub last_attempt_url: Option<String>,
     pub announce_ready: bool,
     pub all_failed: bool,
+    /// Failure category from the most recent announce attempt, if it failed.
+    pub last_failure_kind: Option<TrackerFailureKind>,
     pub in_flight: u32,
     pub interval_secs: u64,
     pub min_interval_secs: u64,
@@ -92,6 +94,7 @@ impl TrackerRuntimeSnapshot {
             tracker_tiers,
             current_url: announce.announce_list().get_announce().map(str::to_owned),
             last_attempt_url: None,
+            last_failure_kind: None,
             announce_ready: announce.is_announce_ready(),
             all_failed: announce.is_all_announce_failed(),
             in_flight: announce.in_flight_announces(),
@@ -199,6 +202,7 @@ impl TrackerAnnouncer {
     pub fn runtime_snapshot(&self) -> TrackerRuntimeSnapshot {
         let mut snapshot = TrackerRuntimeSnapshot::from_bt_announce(&self.announce);
         snapshot.last_attempt_url = self.last_attempt_tracker_url.clone();
+        snapshot.last_failure_kind = self.last_failure_kind;
         snapshot
     }
 
@@ -849,15 +853,28 @@ mod tests {
         announcer.last_attempt_tracker_url = Some(second.clone());
         announcer.publish_runtime_snapshot();
 
-        let snapshot = shared.read().expect("tracker runtime snapshot lock");
-        assert_eq!(snapshot.tracker_tiers, vec![vec![first, second.clone()]]);
+        {
+            let snapshot = shared.read().expect("tracker runtime snapshot lock");
+            assert_eq!(snapshot.tracker_tiers, vec![vec![first, second.clone()]]);
+            assert_eq!(
+                snapshot.current_url.as_deref(),
+                Some("http://tracker.example.com/one")
+            );
+            assert_eq!(snapshot.last_attempt_url.as_deref(), Some(second.as_str()));
+            assert!(snapshot.announce_ready);
+            assert!(!snapshot.all_failed);
+            assert_eq!(snapshot.last_failure_kind, None);
+        }
+
+        announcer.last_failure_kind = Some(TrackerFailureKind::Timeout);
+        announcer.publish_runtime_snapshot();
         assert_eq!(
-            snapshot.current_url.as_deref(),
-            Some("http://tracker.example.com/one")
+            shared
+                .read()
+                .expect("tracker runtime snapshot lock")
+                .last_failure_kind,
+            Some(TrackerFailureKind::Timeout)
         );
-        assert_eq!(snapshot.last_attempt_url.as_deref(), Some(second.as_str()));
-        assert!(snapshot.announce_ready);
-        assert!(!snapshot.all_failed);
     }
 
     #[test]
