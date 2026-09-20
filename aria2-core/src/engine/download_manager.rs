@@ -422,6 +422,32 @@ impl DownloadHandle {
         self.download_result().map(|result| result.files)
     }
 
+    /// Return the flattened URI snapshot for all requested files.
+    ///
+    /// The returned entries preserve the per-file order from [`Self::get_files`]
+    /// and use aria2-compatible `waiting`/`used`/`spent` status strings.
+    pub fn get_uris(&self) -> Option<Vec<crate::request::request_group::UriEntry>> {
+        self.get_files()
+            .map(|files| files.into_iter().flat_map(|file| file.uris).collect())
+    }
+
+    /// Return task-level options that have already been applied to the live
+    /// request group.
+    pub fn runtime_options(&self) -> Option<HashMap<String, serde_json::Value>> {
+        self.manager
+            .group_man
+            .find_group(self.gid)
+            .map(|group| group.recover().runtime_options())
+    }
+
+    /// Return task-level options queued for the next command generation.
+    pub fn pending_options(&self) -> Option<HashMap<String, serde_json::Value>> {
+        self.manager
+            .group_man
+            .find_group(self.gid)
+            .map(|group| group.recover().pending_options())
+    }
+
     /// Change the URI set for one file entry.
     ///
     /// `file_index` is one-based, matching aria2's `changeUri` contract.
@@ -1183,6 +1209,9 @@ mod tests {
         let files = handle.get_files().expect("live group snapshot");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "file.zip");
+        let uris = handle.get_uris().expect("URI snapshot");
+        assert_eq!(uris.len(), 1);
+        assert_eq!(uris[0].uri, "https://example.test/file.zip");
     }
 
     #[tokio::test]
@@ -1240,6 +1269,19 @@ mod tests {
         assert_eq!(
             runtime_options.get("dir"),
             Some(&serde_json::json!("reserved-dir"))
+        );
+        assert_eq!(
+            handle
+                .runtime_options()
+                .expect("live runtime options")
+                .get("dir"),
+            Some(&serde_json::json!("reserved-dir"))
+        );
+        assert!(
+            handle
+                .pending_options()
+                .expect("live pending options")
+                .is_empty()
         );
     }
 

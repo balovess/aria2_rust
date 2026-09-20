@@ -1,22 +1,5 @@
 use tracing::debug;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TrackerEvent {
-    Started,
-    Completed,
-    Stopped,
-}
-
-impl TrackerEvent {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TrackerEvent::Started => "started",
-            TrackerEvent::Completed => "completed",
-            TrackerEvent::Stopped => "stopped",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct TrackerResponse {
     pub interval: u32,
@@ -271,13 +254,6 @@ mod tests {
         let resp = TrackerResponse::parse(&root.encode()).unwrap();
         assert!(resp.is_failure());
         assert_eq!(resp.failure_reason.as_deref(), Some("tracker offline"));
-    }
-
-    #[test]
-    fn test_event_as_str() {
-        assert_eq!(TrackerEvent::Started.as_str(), "started");
-        assert_eq!(TrackerEvent::Completed.as_str(), "completed");
-        assert_eq!(TrackerEvent::Stopped.as_str(), "stopped");
     }
 
     #[test]

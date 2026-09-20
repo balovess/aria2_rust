@@ -1,9 +1,7 @@
 //! Transaction tracker for matching outbound DHT queries to inbound responses.
 //!
-//! Unlike the simpler `TransactionManager` which uses `FnOnce` callbacks,
-//! this tracker uses `tokio::sync::oneshot` channels so that async lookup
-//! tasks can `.await` their responses directly — eliminating the callback
-//! hierarchy found in the C++ implementation.
+//! The tracker uses `tokio::sync::oneshot` channels so that async lookup tasks
+//! can `.await` their responses directly.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

@@ -423,32 +423,6 @@ impl BtRegistry {
     }
 
     // -----------------------------------------------------------------------
-    // Singleton service references
-    // -----------------------------------------------------------------------
-
-    /// Set the ID-based reference to the LPD message receiver.
-    pub fn set_lpd_message_receiver_id(&mut self, id: u64) {
-        trace!(id, "BtRegistry::set_lpd_message_receiver_id");
-        self.lpd_message_receiver_id = Some(id);
-    }
-
-    /// Get the ID-based reference to the LPD message receiver.
-    pub fn lpd_message_receiver_id(&self) -> Option<u64> {
-        self.lpd_message_receiver_id
-    }
-
-    /// Set the ID-based reference to the UDP tracker client.
-    pub fn set_udp_tracker_client_id(&mut self, id: u64) {
-        trace!(id, "BtRegistry::set_udp_tracker_client_id");
-        self.udp_tracker_client_id = Some(id);
-    }
-
-    /// Get the ID-based reference to the UDP tracker client.
-    pub fn udp_tracker_client_id(&self) -> Option<u64> {
-        self.udp_tracker_client_id
-    }
-
-    // -----------------------------------------------------------------------
     // Peer blocklist
     // -----------------------------------------------------------------------
 

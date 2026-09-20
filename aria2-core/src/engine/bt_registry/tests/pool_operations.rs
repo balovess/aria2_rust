@@ -258,26 +258,6 @@ fn test_default() {
     assert!(registry.is_empty());
     assert_eq!(registry.tcp_port(), 0);
     assert_eq!(registry.udp_port(), 0);
-    assert!(registry.lpd_message_receiver_id().is_none());
-    assert!(registry.udp_tracker_client_id().is_none());
-}
-
-// -----------------------------------------------------------------------
-// 12. Singleton service IDs
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_singleton_service_ids() {
-    let mut registry = BtRegistry::new();
-
-    assert!(registry.lpd_message_receiver_id().is_none());
-    assert!(registry.udp_tracker_client_id().is_none());
-
-    registry.set_lpd_message_receiver_id(100);
-    registry.set_udp_tracker_client_id(200);
-
-    assert_eq!(registry.lpd_message_receiver_id(), Some(100));
-    assert_eq!(registry.udp_tracker_client_id(), Some(200));
 }
 
 // -----------------------------------------------------------------------

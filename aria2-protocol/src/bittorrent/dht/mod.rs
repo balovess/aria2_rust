@@ -11,7 +11,6 @@ pub mod modern;
 pub mod node;
 pub mod peer_storage;
 pub mod persistence;
-pub mod replace_node;
 pub mod routing_table;
 pub mod socket;
 pub mod store;
@@ -20,7 +19,6 @@ pub mod task_impl;
 pub mod task_peer;
 pub mod token_tracker;
 pub mod tracker;
-pub mod transaction;
 
 pub use engine::{DhtEngine, DhtEngineConfig, DhtEngineState, FindPeersResult};
 pub use peer_storage::DhtPeerStorage;
