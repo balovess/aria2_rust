@@ -612,13 +612,11 @@ impl BtDownloadCommand {
             suggest_sent_counts: HashMap::new(),
 
             // Endgame mode default values
-            endgame_state: super::super::bt_download_execute::EndgameState::new(),
 
             // Tracker event state machine default
             tracker_state: TrackerState::new(),
 
             // Web seed manager (initialized lazily when needed)
-            web_seed_manager: None,
 
             // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
             dht_periodic_lookup: super::super::bt_download_execute::execute::DhtPeriodicLookup::new(
@@ -628,7 +626,6 @@ impl BtDownloadCommand {
             download_path_lock,
 
             // Seeding mode
-            seed_manager: None,
 
             // BEP 0027 (Private Torrent) enforcement flag
             is_private,

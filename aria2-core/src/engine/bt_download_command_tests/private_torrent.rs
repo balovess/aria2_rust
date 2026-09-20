@@ -33,7 +33,7 @@ fn test_public_torrent_waits_for_engine_owned_lpd_manager() {
         .expect("public torrent should construct");
 
     assert!(
-        command.get_lpd_manager().is_none(),
+        command.lpd_manager.is_none(),
         "BT construction must not create a second process-level LPD manager"
     );
 }

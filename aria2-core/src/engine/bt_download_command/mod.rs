@@ -1,9 +1,6 @@
 mod choke_api;
 mod constructor;
 mod integration_api;
-mod peer_ban_api;
-mod seed_api;
-mod web_seed_api;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -30,8 +27,6 @@ pub use constructor::prepare_group_metadata;
 pub(crate) use constructor::{
     apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
 };
-pub use seed_api::SeedStats;
-
 pub(crate) const MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 
 #[derive(Debug)]
@@ -194,10 +189,6 @@ pub struct BtDownloadCommand {
     /// Interval between PEX messages (default 60 seconds)
     pub(crate) pex_send_interval: Duration,
 
-    // Endgame mode (Phase 14 - B1/B2): duplicate request tracking for final pieces
-    /// Tracks duplicate block requests during endgame mode
-    pub(crate) endgame_state: super::bt_download_execute::EndgameState,
-
     // BEP 6 (Fast Extension): track AllowedFast messages sent to peers
     /// Track which AllowedFast pieces have been sent to each peer
     /// Key: stable peer identity.
@@ -213,10 +204,6 @@ pub struct BtDownloadCommand {
     #[allow(dead_code)]
     pub(crate) tracker_state: TrackerState,
 
-    // Web-seed (BEP 19 / HTTP fallback) integration
-    /// Web seed manager for HTTP piece downloads (initialized on first use)
-    pub(crate) web_seed_manager: Option<crate::engine::bt_web_seed::WebSeedManager>,
-
     // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
     /// Tracks timing and retry state for periodic DHT get_peers lookups.
     /// C++: DHTGetPeersCommand runs as a per-torrent command that
@@ -230,10 +217,6 @@ pub struct BtDownloadCommand {
     /// Download path lock held for the lifetime of this command.
     /// Prevents other aria2 instances from writing to the same output directory.
     pub download_path_lock: Option<crate::filesystem::file_lock::DownloadPathLock>,
-
-    // Seeding mode (Phase 16 - Complete BitTorrent seeding)
-    /// Seed manager for uploading after download completes
-    pub(crate) seed_manager: Option<super::bt_seed_manager::BtSeedManager>,
 
     // BEP 0027 (Private Torrent): when true, DHT/PEX/LPD and public tracker
     // announcement are disabled to enforce the privacy guarantees of the
@@ -347,10 +330,6 @@ impl BtDownloadCommand {
         self.multi_file_layout
             .as_ref()
             .is_some_and(|l| l.is_multi_file())
-    }
-
-    pub fn get_multi_file_layout(&self) -> Option<&MultiFileLayout> {
-        self.multi_file_layout.as_ref()
     }
 }
 

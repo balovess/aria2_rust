@@ -468,7 +468,7 @@ mod tests {
                 .process_pex_extension_update(&pex_update(), &local)
                 .is_empty()
         );
-        assert!(command.get_pex_known_peers().is_empty());
+        assert!(command.pex_known_peers.is_empty());
 
         command.set_pex_known_peers(vec![PeerAddr::new("127.0.0.1", 6881)]);
         assert!(command.build_pex_extended_message(&local, 1).is_none());
@@ -487,7 +487,7 @@ mod tests {
 
         let discovered = command.process_pex_extension_update(&pex_update(), &local);
         assert_eq!(discovered, vec![PeerAddr::new("127.0.0.1", 6881)]);
-        assert_eq!(command.get_pex_known_peers(), discovered.as_slice());
+        assert_eq!(command.pex_known_peers, discovered.as_slice());
         assert!(command.build_pex_extended_message(&local, 1).is_some());
     }
 }

@@ -44,15 +44,6 @@ pub struct DownloadManager {
 }
 
 impl DownloadManager {
-    /// Build a manager using the process-wide compatibility event bus.
-    pub fn new(group_man: Arc<RequestGroupMan>, command_sender: EngineCommandSender) -> Self {
-        Self::with_event_hooks(
-            group_man,
-            command_sender,
-            Arc::clone(DownloadEventHooks::shared()),
-        )
-    }
-
     /// Build a manager with an explicitly owned event bus.
     ///
     /// Embedders that host more than one engine in a process should use this
@@ -473,11 +464,22 @@ mod tests {
     use crate::request::request_group::DownloadStatus;
     use crate::util::rwlock_ext::RwLockRecover;
 
+    fn manager(
+        group_man: Arc<RequestGroupMan>,
+        command_sender: EngineCommandSender,
+    ) -> DownloadManager {
+        DownloadManager::with_event_hooks(
+            group_man,
+            command_sender,
+            Arc::new(DownloadEventHooks::new()),
+        )
+    }
+
     #[tokio::test]
     async fn handle_waits_for_terminal_state_without_polling() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let gid = group_man
             .add_group(
                 vec!["http://example.test/file".to_string()],
@@ -506,7 +508,7 @@ mod tests {
     async fn handle_wait_can_be_cancelled_without_changing_download_state() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let handle = manager
             .add_uri(
                 vec!["http://example.test/file".to_string()],
@@ -553,7 +555,7 @@ mod tests {
     fn add_uri_registers_before_command_dispatch() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let handle = manager
             .add_uri(
                 vec!["http://example.test/file".to_string()],
@@ -569,7 +571,7 @@ mod tests {
     fn manager_lists_and_finds_live_handles_without_exposing_groups() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let handle = manager
             .add_uri(
                 vec!["http://example.test/file".to_string()],
@@ -588,7 +590,7 @@ mod tests {
     fn handle_exposes_file_snapshot_without_rpc_polling() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let handle = manager
             .add_uri(
                 vec!["https://example.test/file.zip".to_string()],
@@ -606,7 +608,7 @@ mod tests {
     fn add_torrent_prepares_metadata_before_registration() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let mut torrent = b"d8:announce28:http://tracker.test/announce4:infod6:lengthi1e4:name8:file.bin12:piece lengthi1e6:pieces20:".to_vec();
         torrent.extend_from_slice(&[0; 20]);
         torrent.extend_from_slice(b"ee");
@@ -636,7 +638,7 @@ mod tests {
     fn add_torrent_rejects_invalid_data_without_registration() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
 
         let result = manager.add_torrent(vec![1, 2, 3], Vec::new(), DownloadOptions::default());
 
@@ -652,7 +654,7 @@ mod tests {
     fn add_metalink_returns_handles_for_resource_groups() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="file.bin"><url>https://example.test/file.bin</url></file></metalink>"#;
 
         let handles = manager
@@ -669,7 +671,7 @@ mod tests {
     fn add_metalink_returns_metadata_and_payload_handles_for_torrent_metaurl() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
-        let manager = DownloadManager::new(Arc::clone(&group_man), command_sender);
+        let manager = manager(Arc::clone(&group_man), command_sender);
         let data = br#"<metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="file.bin"><metaurl mediatype="torrent">https://example.test/file.torrent</metaurl></file></metalink>"#;
 
         let handles = manager

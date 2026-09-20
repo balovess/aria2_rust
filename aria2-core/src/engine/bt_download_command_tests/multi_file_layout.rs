@@ -384,6 +384,6 @@ fn test_is_multi_file_accessor() {
         "Multi-file torrent should return true"
     );
 
-    assert!(multi_cmd.get_multi_file_layout().is_some());
-    assert!(create_test_command().get_multi_file_layout().is_none());
+    assert!(multi_cmd.multi_file_layout.is_some());
+    assert!(create_test_command().multi_file_layout.is_none());
 }

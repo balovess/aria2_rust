@@ -19,9 +19,6 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-pub use pipeline::execute_with_coordinator;
-pub use segment::execute;
-
 /// Cap the requested concurrent ranges at aria2's minimum split-size policy.
 ///
 /// A task may request more connections than its payload can support without

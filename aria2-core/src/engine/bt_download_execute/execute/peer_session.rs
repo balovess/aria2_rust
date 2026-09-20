@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
+use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_peer_connection::BtPeerConn;
@@ -20,6 +21,19 @@ pub(super) struct PeerSession {
 }
 
 impl BtDownloadCommand {
+    fn configured_web_seed_urls(&self) -> Vec<String> {
+        self.group
+            .recover()
+            .get_download_context()
+            .and_then(|context| {
+                context
+                    .get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|attribute| attribute.downcast_ref::<TorrentAttribute>())
+                    .map(|torrent| torrent.url_list.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) async fn prepare_peer_session(
         &mut self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,

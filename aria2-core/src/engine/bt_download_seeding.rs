@@ -9,6 +9,16 @@ use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
+    pub(crate) fn attach_seed_observers(&self, manager: &mut BtSeedManager) {
+        let (connection_state, peer_snapshot_store) = {
+            let group = self.group.recover();
+            (group.connection_state(), group.bt_peer_snapshot_store())
+        };
+        manager.set_connection_state(connection_state, peer_snapshot_store);
+        manager.set_total_uploaded(self.total_uploaded);
+        manager.set_upload_progress(std::sync::Arc::clone(&self.progress));
+    }
+
     pub async fn run_seeding_phase(
         &mut self,
         connections: Vec<BtPeerConn>,
