@@ -234,8 +234,8 @@ class TestSendRequest:
 
 
 class TestWebSocketTransport:
-    @pytest.mark.asyncio
-    async def test_close_cancels_in_flight_connection(self, monkeypatch):
+    @staticmethod
+    async def _blocked_connect(monkeypatch):
         import websockets
 
         started = asyncio.Event()
@@ -245,6 +245,11 @@ class TestWebSocketTransport:
             await asyncio.Future()
 
         monkeypatch.setattr(websockets, "connect", blocked_connect)
+        return started
+
+    @pytest.mark.asyncio
+    async def test_close_cancels_in_flight_connection(self, monkeypatch):
+        started = await self._blocked_connect(monkeypatch)
         transport = WebSocketTransport("ws://localhost:6800/jsonrpc")
         request = asyncio.create_task(transport.send_request("aria2.getVersion", []))
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -253,3 +258,44 @@ class TestWebSocketTransport:
 
         with pytest.raises(ConnectionError, match="Transport closed"):
             await asyncio.wait_for(request, timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_cancelling_one_waiter_keeps_shared_connection_task(self, monkeypatch):
+        started = await self._blocked_connect(monkeypatch)
+        transport = WebSocketTransport("ws://localhost:6800/jsonrpc")
+        first = asyncio.create_task(transport._ensure_connected())
+        second = asyncio.create_task(transport._ensure_connected())
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not second.done()
+
+        await transport.close()
+        with pytest.raises(ConnectionError, match="Transport closed"):
+            await asyncio.wait_for(second, timeout=1)
+
+    @pytest.mark.asyncio
+    async def test_cancelling_request_removes_pending_future(self):
+        sent = asyncio.Event()
+
+        class FakeWebSocket:
+            async def send(self, message):
+                sent.set()
+
+            async def close(self):
+                pass
+
+        transport = WebSocketTransport("ws://localhost:6800/jsonrpc")
+        transport._connected = True
+        transport._ws = FakeWebSocket()
+        request = asyncio.create_task(transport.send_request("aria2.getVersion", []))
+        await asyncio.wait_for(sent.wait(), timeout=1)
+
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        assert transport._pending == {}
+
+        await transport.close()

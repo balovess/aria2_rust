@@ -259,14 +259,27 @@ export class WebSocketTransport implements Transport {
       }, this.timeout);
 
       this.pending.set(id, { resolve, reject, timer });
+      const ws = this.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new ConnectionError('WebSocket is not connected'));
+        return;
+      }
 
-      this.ws!.send(JSON.stringify(request), (err?: Error) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(new ConnectionError(err.message));
-        }
-      });
+      try {
+        ws.send(JSON.stringify(request), (err?: Error) => {
+          if (err) {
+            clearTimeout(timer);
+            this.pending.delete(id);
+            reject(new ConnectionError(err.message));
+          }
+        });
+      } catch (err: unknown) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new ConnectionError(err instanceof Error ? err.message : String(err)));
+      }
     });
   }
 

@@ -69,43 +69,43 @@ pub struct BtPeerConn {
     // Peer identity
     // -----------------------------------------------------------------------
     /// Remote IP address.
-    pub ip_addr: String,
+    pub(crate) ip_addr: String,
     /// Remote port.
-    pub port: u16,
+    pub(crate) port: u16,
     /// 20-byte peer ID (set after handshake).
-    pub peer_id: Option<[u8; 20]>,
+    pub(crate) peer_id: Option<[u8; 20]>,
     /// Whether this was an incoming (accepted) connection.
-    pub incoming: bool,
+    pub(crate) incoming: bool,
     /// Discovery mechanism that supplied this peer address.
     pub(crate) source: BtPeerSource,
     /// Whether this is a local network peer.
-    pub local_peer: bool,
+    pub(crate) local_peer: bool,
     /// Whether the peer disconnected gracefully.
-    pub disconnected_gracefully: bool,
+    pub(crate) disconnected_gracefully: bool,
     /// Whether this peer is a seeder (has all pieces).
-    pub seeder: bool,
+    pub(crate) seeder: bool,
 
     // -----------------------------------------------------------------------
     // Timing
     // -----------------------------------------------------------------------
     /// First contact time.
-    pub first_contact_time: Instant,
+    pub(crate) first_contact_time: Instant,
 
     // -----------------------------------------------------------------------
     // Connection classification
     // -----------------------------------------------------------------------
     /// Connection type (TCP or uTP).
-    pub connection_type: ConnectionType,
+    pub(crate) connection_type: ConnectionType,
     /// Set of piece indices for which the peer has sent an AllowedFast message.
     /// Pieces in this set can be requested even when the peer is choked.
-    pub allowed_fast: HashSet<u32>,
+    pub(crate) allowed_fast: HashSet<u32>,
 
     // -----------------------------------------------------------------------
     // Session resource (allocated when active)
     // -----------------------------------------------------------------------
     /// Per-session resource. `Some` while the peer is active, `None` when
     /// disconnected or not yet fully initialised.
-    pub session_resource: Option<PeerSessionResource>,
+    pub(crate) session_resource: Option<PeerSessionResource>,
 
     // -----------------------------------------------------------------------
     // Send buffering (C++ SocketBuffer)
@@ -129,7 +129,7 @@ pub struct BtPeerConn {
     // Statistics (integration with choking algorithm)
     // -----------------------------------------------------------------------
     /// Associated peer statistics.
-    pub stats: PeerStats,
+    pub(crate) stats: PeerStats,
 
     // -----------------------------------------------------------------------
     // PEX (BEP 11) — inbound peer accumulation
@@ -138,12 +138,62 @@ pub struct BtPeerConn {
     /// The download loop drains this after each iteration to add new peers
     /// to the connection pool without threading extension-update types
     /// through the block-message handler.
-    pub pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    pub(crate) pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     /// Whether this connection may receive and accumulate BEP 11 peers.
     pub(crate) pex_enabled: bool,
 }
 
 impl BtPeerConn {
+    /// Return the peer address supplied by discovery or the incoming socket.
+    pub fn remote_ip(&self) -> &str {
+        &self.ip_addr
+    }
+
+    /// Return the peer's advertised or discovered port.
+    pub fn remote_port(&self) -> u16 {
+        self.port
+    }
+
+    /// Return the peer ID learned during the BitTorrent handshake, if any.
+    pub fn peer_id(&self) -> Option<[u8; 20]> {
+        self.peer_id
+    }
+
+    /// Whether this connection was accepted by the local peer listener.
+    pub fn is_incoming(&self) -> bool {
+        self.incoming
+    }
+
+    /// Whether this is a local-network peer.
+    pub fn is_local_peer(&self) -> bool {
+        self.local_peer
+    }
+
+    /// Whether the peer sent a graceful disconnect indication.
+    pub fn disconnected_gracefully(&self) -> bool {
+        self.disconnected_gracefully
+    }
+
+    /// Whether the peer has advertised all torrent pieces.
+    pub fn is_seeder(&self) -> bool {
+        self.seeder
+    }
+
+    /// Return the connection's first-contact timestamp.
+    pub fn first_contact_time(&self) -> Instant {
+        self.first_contact_time
+    }
+
+    /// Return read-only transfer and choking statistics for this peer.
+    pub fn stats(&self) -> &PeerStats {
+        &self.stats
+    }
+
+    /// Return the discovery source that supplied this peer.
+    pub fn source(&self) -> BtPeerSource {
+        self.source
+    }
+
     pub(crate) fn set_source(&mut self, source: BtPeerSource) {
         self.source = source;
     }

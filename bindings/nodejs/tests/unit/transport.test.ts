@@ -205,4 +205,32 @@ describe('WebSocketTransport', () => {
       else resolve();
     }));
   });
+
+  it('cleans up when the socket fails before sending', async () => {
+    const transport = new WebSocketTransport('ws://localhost:6800/jsonrpc');
+    const internals = transport as unknown as {
+      ws: {
+        readyState: number;
+        send: () => never;
+        removeAllListeners: () => void;
+        close: () => void;
+      } | null;
+      pending: Map<number, unknown>;
+    };
+    internals.ws = {
+      readyState: 1,
+      send: () => {
+        throw new Error('socket closed');
+      },
+      removeAllListeners: () => {},
+      close: () => {},
+    };
+
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'socket closed',
+    );
+    expect(internals.pending.size).toBe(0);
+
+    await transport.close();
+  });
 });

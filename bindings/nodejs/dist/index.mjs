@@ -225,13 +225,26 @@ var WebSocketTransport = class {
         reject(new TimeoutError(`Request timed out after ${this.timeout}ms`));
       }, this.timeout);
       this.pending.set(id, { resolve, reject, timer });
-      this.ws.send(JSON.stringify(request), (err) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(new ConnectionError(err.message));
-        }
-      });
+      const ws = this.ws;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new ConnectionError("WebSocket is not connected"));
+        return;
+      }
+      try {
+        ws.send(JSON.stringify(request), (err) => {
+          if (err) {
+            clearTimeout(timer);
+            this.pending.delete(id);
+            reject(new ConnectionError(err.message));
+          }
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(new ConnectionError(err instanceof Error ? err.message : String(err)));
+      }
     });
   }
   async close() {

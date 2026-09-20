@@ -253,6 +253,9 @@ class WebSocketTransport:
 
         try:
             return await asyncio.wait_for(future, timeout=self._timeout)
+        except asyncio.CancelledError:
+            self._pending.pop(request_id, None)
+            raise
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             raise TimeoutError(f"Request timed out after {self._timeout}s")
