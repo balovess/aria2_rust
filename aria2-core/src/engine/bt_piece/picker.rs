@@ -273,7 +273,6 @@ impl PiecePicker {
             index: i as u32,
             frequency: self.frequencies[i],
             is_completed: self.completed.test(i),
-            completed: self.completed.test(i),
             in_progress: self.in_progress.test(i),
             priority: self.priorities[i],
         })
@@ -289,7 +288,6 @@ impl PiecePicker {
             index,
             frequency: self.frequencies[i],
             is_completed: self.completed.test(i),
-            completed: self.completed.test(i),
             in_progress: self.in_progress.test(i),
             priority: self.priorities[i],
         })

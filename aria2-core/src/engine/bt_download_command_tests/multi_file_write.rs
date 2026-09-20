@@ -1,4 +1,3 @@
-use super::*;
 use crate::engine::multi_file_layout::MultiFileLayout;
 
 #[tokio::test]
@@ -36,7 +35,7 @@ async fn test_write_piece_to_multi_files_basic() {
     let piece_data: Vec<u8> = (0..=255u8).collect();
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        BtDownloadCommand::write_piece_to_multi_files(
+        crate::engine::bt_piece_downloader::write_piece_to_multi_files(
             &layout,
             0,
             &piece_data,
@@ -195,7 +194,7 @@ async fn test_coalesced_multi_file_write_basic() {
     let piece_bytes = bytes::Bytes::from(piece_data.clone());
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        BtDownloadCommand::write_piece_to_multi_files_coalesced(
+        crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced(
             &layout,
             0,
             &piece_bytes,
@@ -286,7 +285,7 @@ async fn test_coalesced_multi_file_write_three_files() {
     let piece_data: Vec<u8> = (0..512u64).map(|i| (i % 251) as u8).collect();
     let piece_bytes = bytes::Bytes::from(piece_data.clone());
 
-    BtDownloadCommand::write_piece_to_multi_files_coalesced(
+    crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced(
         &layout,
         0,
         &piece_bytes,
@@ -347,7 +346,7 @@ async fn test_coalesced_matches_original_writer() {
     let layout_orig = MultiFileLayout::from_info_dict(&info, &dir_orig).unwrap();
     layout_orig.create_directories().unwrap();
 
-    BtDownloadCommand::write_piece_to_multi_files(
+    crate::engine::bt_piece_downloader::write_piece_to_multi_files(
         &layout_orig,
         0,
         &piece_data,
@@ -363,7 +362,7 @@ async fn test_coalesced_matches_original_writer() {
     let layout_coal = MultiFileLayout::from_info_dict(&info, &dir_coal).unwrap();
     layout_coal.create_directories().unwrap();
 
-    BtDownloadCommand::write_piece_to_multi_files_coalesced(
+    crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced(
         &layout_coal,
         0,
         &piece_bytes,

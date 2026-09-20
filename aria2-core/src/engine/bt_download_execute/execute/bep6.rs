@@ -108,10 +108,8 @@ impl BtDownloadCommand {
         Ok(count)
     }
 
-    /// Compatibility helper for callers that intentionally provide a filtered
-    /// piece set. New torrent setup code should use
-    /// [`Self::send_allowed_fast_for_torrent`].
-    pub async fn send_allowed_fast_to_peer(
+    /// Send a filtered AllowedFast set based on the peer's current bitfield.
+    pub(crate) async fn send_allowed_fast_for_peer(
         peer_conn: &mut BtPeerConn,
         needed_pieces: &[u32],
         peer_bitfield: &[u8],
@@ -171,7 +169,7 @@ impl BtDownloadCommand {
             };
 
             let mut sent_for_peer = HashSet::new();
-            match Self::send_allowed_fast_to_peer(conn, needed_pieces, peer_bf, &mut sent_for_peer)
+            match Self::send_allowed_fast_for_peer(conn, needed_pieces, peer_bf, &mut sent_for_peer)
                 .await
             {
                 Ok(count) => {
@@ -234,7 +232,7 @@ impl BtDownloadCommand {
             .pieces_iter()
             .filter(|p| {
                 piece_picker.is_allowed(p.index)
-                    && !p.completed
+                    && !p.is_completed
                     && !p.in_progress
                     && p.frequency > 0
             })

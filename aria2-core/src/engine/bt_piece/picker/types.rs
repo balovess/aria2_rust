@@ -39,8 +39,6 @@ pub struct PieceInfo {
     pub frequency: u32,
     /// Whether this piece has been fully downloaded and verified
     pub is_completed: bool,
-    /// Whether this piece has been fully downloaded and verified (alias)
-    pub completed: bool,
     /// Whether this piece is currently being downloaded
     pub in_progress: bool,
     /// Priority level (0 = default, higher = more important)

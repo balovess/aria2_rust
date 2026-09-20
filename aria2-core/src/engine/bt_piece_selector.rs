@@ -270,7 +270,7 @@ impl BtPieceSelector {
                 // Check if piece is needed and peer has it
                 if piece_picker.is_allowed(fast_idx)
                     && let Some(info) = piece_picker.get_piece_info(fast_idx)
-                    && !info.completed
+                    && !info.is_completed
                     && !info.in_progress
                     && Self::is_bitfield_set(peer_bitfield, fast_idx)
                 {

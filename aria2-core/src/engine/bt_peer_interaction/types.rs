@@ -348,7 +348,7 @@ pub struct PostHandshakeActions {
 }
 
 // ======================================================================
-// PeerConnectionResult — legacy result type
+// PeerConnectionResult — result of a batch connection attempt
 // ======================================================================
 
 use crate::engine::bt_peer_connection::BtPeerConn;

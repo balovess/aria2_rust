@@ -35,7 +35,7 @@ pub use types::{
 };
 
 // ======================================================================
-// BtPeerInteraction — legacy static helper (preserved for backward compat)
+// BtPeerInteraction — peer connection lifecycle manager
 // ======================================================================
 
 use std::sync::Arc;
