@@ -373,7 +373,6 @@ var EventType = /* @__PURE__ */ ((EventType2) => {
   EventType2["DownloadComplete"] = "aria2.onDownloadComplete";
   EventType2["DownloadError"] = "aria2.onDownloadError";
   EventType2["BtDownloadComplete"] = "aria2.onBtDownloadComplete";
-  EventType2["BtDownloadError"] = "aria2.onBtDownloadError";
   return EventType2;
 })(EventType || {});
 var DownloadStatus = /* @__PURE__ */ ((DownloadStatus2) => {
@@ -393,8 +392,7 @@ var EVENT_MAP = {
   ["aria2.onDownloadStop" /* DownloadStop */]: "downloadStop",
   ["aria2.onDownloadComplete" /* DownloadComplete */]: "downloadComplete",
   ["aria2.onDownloadError" /* DownloadError */]: "downloadError",
-  ["aria2.onBtDownloadComplete" /* BtDownloadComplete */]: "btDownloadComplete",
-  ["aria2.onBtDownloadError" /* BtDownloadError */]: "btDownloadError"
+  ["aria2.onBtDownloadComplete" /* BtDownloadComplete */]: "btDownloadComplete"
 };
 var MAX_RECONNECT_RETRIES = 5;
 var BASE_RECONNECT_DELAY = 1e3;

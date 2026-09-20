@@ -126,7 +126,6 @@ export const enum EventType {
   DownloadComplete = 'aria2.onDownloadComplete',
   DownloadError = 'aria2.onDownloadError',
   BtDownloadComplete = 'aria2.onBtDownloadComplete',
-  BtDownloadError = 'aria2.onBtDownloadError',
 }
 
 export const enum DownloadStatus {

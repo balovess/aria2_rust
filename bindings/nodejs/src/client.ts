@@ -25,7 +25,6 @@ const WS_EVENT_NAMES = [
   'downloadComplete',
   'downloadError',
   'btDownloadComplete',
-  'btDownloadError',
 ] as const;
 
 type WsEventName = (typeof WS_EVENT_NAMES)[number];

@@ -11,7 +11,6 @@ const EVENT_MAP: Record<string, string> = {
   [EventType.DownloadComplete]: 'downloadComplete',
   [EventType.DownloadError]: 'downloadError',
   [EventType.BtDownloadComplete]: 'btDownloadComplete',
-  [EventType.BtDownloadError]: 'btDownloadError',
 };
 
 const MAX_RECONNECT_RETRIES = 5;

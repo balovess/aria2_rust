@@ -114,8 +114,7 @@ declare const enum EventType {
     DownloadStop = "aria2.onDownloadStop",
     DownloadComplete = "aria2.onDownloadComplete",
     DownloadError = "aria2.onDownloadError",
-    BtDownloadComplete = "aria2.onBtDownloadComplete",
-    BtDownloadError = "aria2.onBtDownloadError"
+    BtDownloadComplete = "aria2.onBtDownloadComplete"
 }
 declare const enum DownloadStatus {
     Active = "active",
@@ -149,7 +148,7 @@ declare class Aria2EventEmitter extends EventEmitter {
     close(): Promise<void>;
 }
 
-declare const WS_EVENT_NAMES: readonly ["downloadStart", "downloadPause", "downloadStop", "downloadComplete", "downloadError", "btDownloadComplete", "btDownloadError"];
+declare const WS_EVENT_NAMES: readonly ["downloadStart", "downloadPause", "downloadStop", "downloadComplete", "downloadError", "btDownloadComplete"];
 type WsEventName = (typeof WS_EVENT_NAMES)[number];
 declare class Aria2Client {
     private transport;

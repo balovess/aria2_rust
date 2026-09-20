@@ -38,13 +38,9 @@ describe('EventType', () => {
     expect(EventType.BtDownloadComplete).toBe('aria2.onBtDownloadComplete');
   });
 
-  it('has BtDownloadError', () => {
-    expect(EventType.BtDownloadError).toBe('aria2.onBtDownloadError');
-  });
-
-  it('has exactly 7 values', () => {
+  it('has exactly 6 values', () => {
     const values = Object.values(EventType);
-    expect(values).toHaveLength(7);
+    expect(values).toHaveLength(6);
   });
 });
 

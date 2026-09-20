@@ -24,10 +24,9 @@ describe('Events E2E', () => {
       [EventType.DownloadComplete]: 'downloadComplete',
       [EventType.DownloadError]: 'downloadError',
       [EventType.BtDownloadComplete]: 'btDownloadComplete',
-      [EventType.BtDownloadError]: 'btDownloadError',
     };
 
-    expect(Object.keys(mapping)).toHaveLength(7);
+    expect(Object.keys(mapping)).toHaveLength(6);
     expect(mapping[EventType.DownloadStart]).toBe('downloadStart');
     expect(mapping[EventType.DownloadComplete]).toBe('downloadComplete');
     expect(mapping[EventType.DownloadError]).toBe('downloadError');
