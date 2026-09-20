@@ -200,7 +200,9 @@ class StatusInfo:
     error_message: Optional[str] = None
     status: Optional[str] = None
     dir: Optional[str] = None
-    files: List[FileInfo] = field(default_factory=list)
+    # ``tellStatus`` may omit this field when the caller did not request it.
+    # Keep omission distinct from an explicitly returned empty list.
+    files: Optional[List[FileInfo]] = None
     bittorrent: Optional[Dict[str, Any]] = None
     following: Optional[str] = None
     seeder: Optional[str] = None
@@ -209,7 +211,8 @@ class StatusInfo:
     num_pieces: Optional[str] = None
     completed_pieces: Optional[str] = None
     missing_pieces: Optional[str] = None
-    followed_by: List[str] = field(default_factory=list)
+    # ``followedBy`` is also optional in aria2's status response.
+    followed_by: Optional[List[str]] = None
     belongs_to: Optional[str] = None
     info_hash: Optional[str] = None
     num_seeders: Optional[str] = None
@@ -219,8 +222,17 @@ class StatusInfo:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> StatusInfo:
         converted = _convert_keys(data)
-        files_data = converted.get("files") or []
-        files = [FileInfo.from_dict(f) if isinstance(f, dict) else f for f in files_data]
+        files = None
+        if "files" in converted and converted["files"] is not None:
+            files_data = converted["files"]
+            if isinstance(files_data, list):
+                files = [
+                    FileInfo.from_dict(f) if isinstance(f, dict) else f
+                    for f in files_data
+                ]
+        followed_by = converted.get("followed_by")
+        if not isinstance(followed_by, list):
+            followed_by = None
         return cls(
             gid=converted.get("gid"),
             total_length=converted.get("total_length"),
@@ -242,7 +254,7 @@ class StatusInfo:
             num_pieces=converted.get("num_pieces"),
             completed_pieces=converted.get("completed_pieces"),
             missing_pieces=converted.get("missing_pieces"),
-            followed_by=list(converted.get("followed_by") or []),
+            followed_by=followed_by,
             belongs_to=converted.get("belongs_to"),
             info_hash=converted.get("info_hash"),
             num_seeders=converted.get("num_seeders"),

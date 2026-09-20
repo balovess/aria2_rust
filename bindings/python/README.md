@@ -187,8 +187,12 @@ class StatusInfo:
     error_code: Optional[str]
     status: DownloadStatus
     dir: Optional[str]
-    files: List[FileInfo]
+    files: Optional[List[FileInfo]]
+    followed_by: Optional[List[str]]
 ```
+
+When `tell_status` is called with a restricted `keys` list, omitted fields
+remain `None`; an explicitly returned empty list remains `[]`.
 
 #### GlobalStat
 

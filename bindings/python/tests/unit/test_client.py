@@ -264,6 +264,8 @@ class TestTellStatus:
         assert isinstance(result, StatusInfo)
         assert result.gid == "2089b05ecca3d829"
         assert result.status == "complete"
+        assert result.files is None
+        assert result.followed_by is None
 
 
 class TestGetFiles:

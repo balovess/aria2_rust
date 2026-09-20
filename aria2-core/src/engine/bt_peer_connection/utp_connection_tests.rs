@@ -105,6 +105,7 @@ async fn connect_completes_real_bittorrent_handshake_over_utp() {
         .expect("server task should not panic");
     assert!(connection.is_connected());
     assert_eq!(connection.remote_peer_id(), Some(remote_peer_id));
+    assert!(connection.remote_supports_fast_extension());
 }
 
 #[tokio::test]

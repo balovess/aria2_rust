@@ -83,6 +83,8 @@ pub struct PeerConnection {
     pub remote_peer_id: Option<[u8; 20]>,
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
     remote_supports_dht: bool,
+    /// Whether the remote BitTorrent handshake advertised BEP 6 support.
+    remote_supports_fast_extension: bool,
     pub remote_bitfield: Vec<u8>,
     // Keep partially received frames across cancellation of read_message.
     read_buffer: BytesMut,
@@ -328,6 +330,7 @@ impl PeerConnection {
             state: PeerState::new(),
             remote_peer_id: Some(remote_hs.peer_id),
             remote_supports_dht: remote_hs.supports_dht(),
+            remote_supports_fast_extension: remote_hs.supports_fast_extension(),
             remote_bitfield: vec![],
             read_buffer: BytesMut::new(),
         })
@@ -339,6 +342,7 @@ impl PeerConnection {
         stream: tokio::net::TcpStream,
         peer_id: [u8; 20],
         remote_supports_dht: bool,
+        remote_supports_fast_extension: bool,
     ) -> Self {
         let remote_addr = stream.peer_addr().ok();
         Self {
@@ -347,6 +351,7 @@ impl PeerConnection {
             state: PeerState::new(),
             remote_peer_id: Some(peer_id),
             remote_supports_dht,
+            remote_supports_fast_extension,
             remote_bitfield: vec![],
             read_buffer: BytesMut::new(),
         }
@@ -472,6 +477,11 @@ impl PeerConnection {
     /// Whether the remote handshake advertised BEP 5 DHT support.
     pub fn remote_supports_dht(&self) -> bool {
         self.remote_supports_dht
+    }
+
+    /// Whether the remote BitTorrent handshake advertised BEP 6 support.
+    pub fn remote_supports_fast_extension(&self) -> bool {
+        self.remote_supports_fast_extension
     }
 
     pub async fn stream_write(&mut self, data: &[u8]) -> Result<(), String> {
@@ -630,7 +640,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
         let (server, _) = listener.accept().await.unwrap();
-        let mut connection = PeerConnection::from_stream_with_peer(server, [0u8; 20], false);
+        let mut connection = PeerConnection::from_stream_with_peer(server, [0u8; 20], false, false);
         let frame = crate::bittorrent::message::serializer::serialize(&BtMessage::Choke);
 
         client.write_all(&frame[..2]).await.unwrap();
@@ -739,6 +749,7 @@ mod tests {
         .unwrap();
 
         assert!(connection.remote_supports_dht());
+        assert!(connection.remote_supports_fast_extension());
         server.await.unwrap();
     }
 

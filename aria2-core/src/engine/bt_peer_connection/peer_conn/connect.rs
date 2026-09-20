@@ -280,7 +280,7 @@ impl BtPeerConn {
 
         let peer_conn =
             aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-                stream, [0u8; 20], false,
+                stream, [0u8; 20], false, false,
             );
 
         Self {

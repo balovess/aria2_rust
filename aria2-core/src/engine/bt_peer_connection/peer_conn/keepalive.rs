@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use crate::error::Result;
 
-use super::super::types::SendBuffer;
 use super::BtPeerConn;
 
 impl BtPeerConn {
@@ -62,16 +61,6 @@ impl BtPeerConn {
         self.write_raw(&data).await?;
         self.last_keepalive_sent = std::time::Instant::now();
         Ok(())
-    }
-
-    /// Get a reference to the send buffer (for inspection).
-    pub fn send_buffer(&self) -> &SendBuffer {
-        &self.send_buffer
-    }
-
-    /// Get a mutable reference to the send buffer.
-    pub fn send_buffer_mut(&mut self) -> &mut SendBuffer {
-        &mut self.send_buffer
     }
 
     // -----------------------------------------------------------------------

@@ -94,6 +94,7 @@ impl IncomingHandshake {
                         stream,
                         handshake.peer_id,
                         handshake.supports_dht(),
+                        handshake.supports_fast_extension(),
                     ),
                 )))
             }
@@ -121,6 +122,7 @@ impl IncomingHandshake {
                         *crypto,
                         handshake.peer_id,
                         handshake.supports_dht(),
+                        handshake.supports_fast_extension(),
                     )),
                 ))
             }
@@ -363,7 +365,10 @@ mod tests {
 
         let connection = server.await.unwrap();
         match connection {
-            IncomingConnection::Plain(connection) => assert!(connection.remote_supports_dht()),
+            IncomingConnection::Plain(connection) => {
+                assert!(connection.remote_supports_dht());
+                assert!(connection.remote_supports_fast_extension());
+            }
             IncomingConnection::Encrypted(_) => panic!("expected plain connection"),
         }
     }

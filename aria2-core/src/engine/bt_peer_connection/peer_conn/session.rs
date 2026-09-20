@@ -17,11 +17,6 @@ impl BtPeerConn {
         self.connection_type
     }
 
-    /// Check if this is a uTP connection.
-    pub fn is_utp(&self) -> bool {
-        self.connection_type == ConnectionType::Utp
-    }
-
     // -----------------------------------------------------------------------
     // AllowedFast (BEP 6)
     // -----------------------------------------------------------------------
@@ -33,14 +28,6 @@ impl BtPeerConn {
     /// is choked (BEP 6 / Fast Extension).
     pub fn add_allowed_fast(&mut self, index: u32) {
         self.allowed_fast.insert(index);
-    }
-
-    /// Check whether a piece index is in the AllowedFast set.
-    ///
-    /// Returns true if the peer has granted fast access to this piece,
-    /// meaning a Request can be sent even while the peer is choked.
-    pub fn is_allowed_fast(&self, index: u32) -> bool {
-        self.allowed_fast.contains(&index)
     }
 
     /// Get a reference to the full AllowedFast set.
@@ -85,7 +72,9 @@ impl BtPeerConn {
     /// Does nothing if a session resource is already allocated.
     pub fn allocate_session_resource(&mut self, piece_length: u32, total_length: u64) {
         if self.session_resource.is_none() {
-            self.session_resource = Some(PeerSessionResource::new(piece_length, total_length));
+            let mut resource = PeerSessionResource::new(piece_length, total_length);
+            resource.set_fast_extension_enabled(self.remote_supports_fast_extension());
+            self.session_resource = Some(resource);
         }
     }
 
@@ -101,11 +90,6 @@ impl BtPeerConn {
         if let Some(ref mut res) = self.session_resource {
             res.reconfigure(piece_length, total_length);
         }
-    }
-
-    /// Check whether this connection has an active session resource.
-    pub fn is_active(&self) -> bool {
-        self.session_resource.is_some()
     }
 
     // -----------------------------------------------------------------------

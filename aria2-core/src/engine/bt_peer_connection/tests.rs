@@ -230,7 +230,7 @@ async fn test_bt_peer_conn_sends_configured_peer_agent_on_wire() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let (server, endpoint) = listener.accept().await.unwrap();
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-        server, [0u8; 20], false,
+        server, [0u8; 20], false, false,
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
 
@@ -277,7 +277,7 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
     let (server, endpoint) = listener.accept().await.unwrap();
     let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
-        server, [0u8; 20], false,
+        server, [0u8; 20], false, false,
     );
     let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
     connection.allocate_session_resource(16 * 1024, 16 * 1024);
@@ -297,6 +297,22 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     assert!(connection.read_message().await.unwrap().is_some());
     assert_eq!(connection.peer_extension_id("ut_metadata"), Some(7));
     assert_eq!(connection.peer_extension_id("ut_pex"), Some(9));
+}
+
+#[tokio::test]
+async fn test_bt_peer_conn_initializes_fast_extension_from_handshake() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let _client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let (server, endpoint) = listener.accept().await.unwrap();
+    let peer = aria2_protocol::bittorrent::peer::connection::PeerConnection::from_stream_with_peer(
+        server, [0u8; 20], false, true,
+    );
+    let mut connection = BtPeerConn::from_incoming_plain(peer, endpoint);
+
+    connection.allocate_session_resource(16 * 1024, 16 * 1024);
+
+    assert!(connection.is_fast_extension_enabled());
 }
 
 // -----------------------------------------------------------------------

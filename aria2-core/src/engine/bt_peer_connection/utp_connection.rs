@@ -30,6 +30,8 @@ pub struct UtpPeerConnection {
     remote_peer_id: Option<[u8; 20]>,
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
     remote_supports_dht: bool,
+    /// Whether the remote BitTorrent handshake advertised BEP 6 support.
+    remote_supports_fast_extension: bool,
     remote_endpoint: Option<std::net::SocketAddr>,
     /// Receive buffer for partial messages
     recv_buffer: BytesMut,
@@ -50,6 +52,7 @@ impl UtpPeerConnection {
             handshake_complete: false,
             remote_peer_id: None,
             remote_supports_dht: false,
+            remote_supports_fast_extension: false,
             remote_endpoint: None,
             recv_buffer: BytesMut::new(),
         }
@@ -107,6 +110,7 @@ impl UtpPeerConnection {
             handshake_complete: false,
             remote_peer_id: None,
             remote_supports_dht: false,
+            remote_supports_fast_extension: false,
             remote_endpoint: Some(addr),
             recv_buffer: BytesMut::new(),
         };
@@ -133,6 +137,11 @@ impl UtpPeerConnection {
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
     pub fn remote_supports_dht(&self) -> bool {
         self.remote_supports_dht
+    }
+
+    /// Whether the remote BitTorrent handshake advertised BEP 6 support.
+    pub fn remote_supports_fast_extension(&self) -> bool {
+        self.remote_supports_fast_extension
     }
 
     pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
@@ -310,6 +319,7 @@ impl UtpPeerConnection {
 
         self.remote_peer_id = Some(response.peer_id);
         self.remote_supports_dht = response.supports_dht();
+        self.remote_supports_fast_extension = response.supports_fast_extension();
         self.handshake_complete = true;
         Ok(())
     }

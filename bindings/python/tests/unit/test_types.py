@@ -167,13 +167,20 @@ class TestStatusInfo:
         assert info.gid == "abc"
         assert info.total_length is None
         assert info.completed_length is None
-        assert info.files == []
+        assert info.files is None
+        assert info.followed_by is None
 
     def test_from_dict_empty(self):
         info = StatusInfo.from_dict({})
         assert info.gid is None
         assert info.status is None
+        assert info.files is None
+        assert info.followed_by is None
+
+    def test_from_dict_preserves_explicit_empty_collections(self):
+        info = StatusInfo.from_dict({"files": [], "followedBy": []})
         assert info.files == []
+        assert info.followed_by == []
 
     def test_from_dict_none_values(self):
         info = StatusInfo.from_dict({"gid": None, "status": None})

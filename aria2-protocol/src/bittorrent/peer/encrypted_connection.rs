@@ -35,9 +35,15 @@ impl EncryptedConnection {
         crypto: MseCryptoState,
         peer_id: [u8; 20],
         remote_supports_dht: bool,
+        remote_supports_fast_extension: bool,
     ) -> Self {
         Self {
-            inner: PeerConnection::from_stream_with_peer(stream, peer_id, remote_supports_dht),
+            inner: PeerConnection::from_stream_with_peer(
+                stream,
+                peer_id,
+                remote_supports_dht,
+                remote_supports_fast_extension,
+            ),
             crypto,
             mse_negotiated: true,
             read_ahead: Vec::new(),
@@ -187,6 +193,7 @@ impl EncryptedConnection {
             stream,
             remote_hs.peer_id,
             remote_hs.supports_dht(),
+            remote_hs.supports_fast_extension(),
         );
 
         Ok(Self {
@@ -360,6 +367,11 @@ impl EncryptedConnection {
         self.inner.remote_supports_dht()
     }
 
+    /// Whether the remote BitTorrent handshake advertised BEP 6 support.
+    pub fn remote_supports_fast_extension(&self) -> bool {
+        self.inner.remote_supports_fast_extension()
+    }
+
     pub fn remote_addr(&self) -> Option<std::net::SocketAddr> {
         self.inner.remote_addr()
     }
@@ -432,6 +444,7 @@ mod tests {
             server,
             MseCryptoState::new_plain(),
             [0u8; 20],
+            false,
             false,
         );
         let frame = crate::bittorrent::message::serializer::serialize(&BtMessage::Choke);
