@@ -147,8 +147,6 @@ fn test_inactive_reason_variants() {
 fn test_dispatch_update_default() {
     let update = DispatchUpdate::default();
     assert!(update.cancelled_slots.is_empty());
-    assert!(update.have_index.is_none());
-    assert!(update.bitfield_data.is_none());
     assert!(!update.peer_choking_changed);
     assert!(!update.peer_choking);
     assert!(update.extension_update.is_none());

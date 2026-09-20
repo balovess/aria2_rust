@@ -239,7 +239,11 @@ fn failed_completion_dependency_does_not_leave_reserved_group_stuck() {
         man.add_restored_group(prerequisite).unwrap();
         man.add_restored_group(dependent).unwrap();
 
-        man.resolve_dependencies_for_status(prerequisite_gid, prerequisite_status);
+        man.resolve_dependencies_for_status_with_events(
+            prerequisite_gid,
+            prerequisite_status,
+            None,
+        );
 
         assert!(
             man.find_group(dependent_gid).is_none(),
@@ -271,9 +275,10 @@ fn test_failed_metadata_with_direct_fallback_releases_payload() {
     .unwrap();
     man.add_metalink_graph(graph).unwrap();
 
-    man.resolve_dependencies_for_status(
+    man.resolve_dependencies_for_status_with_events(
         GroupId::new(30),
         DownloadStatus::Error("metadata unavailable".to_string()),
+        None,
     );
 
     let payload = man.find_group(GroupId::new(31)).expect("payload retained");
@@ -349,9 +354,10 @@ fn test_failed_torrent_only_metadata_is_stopped_as_error() {
     .unwrap();
     man.add_metalink_graph(graph).unwrap();
 
-    man.resolve_dependencies_for_status(
+    man.resolve_dependencies_for_status_with_events(
         GroupId::new(40),
         DownloadStatus::Error("metadata unavailable".to_string()),
+        None,
     );
 
     assert!(man.find_group(GroupId::new(41)).is_none());

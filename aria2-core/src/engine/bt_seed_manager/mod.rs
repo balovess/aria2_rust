@@ -49,7 +49,6 @@ use tokio_util::sync::CancellationToken;
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
-use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::engine::peer_stats::PeerStats;
 use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
 
@@ -98,10 +97,6 @@ pub struct BtSeedManager {
     is_active: bool,
     /// Seeder-state choking algorithm
     seeder_choke: BtSeederStateChoke,
-    /// Legacy choking algorithm (used during download phase, kept for
-    /// compatibility with BtDownloadCommand)
-    #[allow(dead_code)]
-    choking_algo: Option<ChokingAlgorithm>,
     /// Cancellation token for graceful shutdown
     cancel_token: CancellationToken,
     /// Shared peer storage used to release seeding sessions on disconnect.

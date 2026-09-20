@@ -17,7 +17,6 @@ async fn seeding_accepts_a_peer_after_download_has_no_initial_peers() {
         SeedExitCondition::infinite(),
         1024,
         None,
-        None,
         [1u8; 20],
         Some(receiver),
     );
@@ -130,7 +129,6 @@ async fn incoming_seed_peer_receives_piece_availability_before_interested() {
         BtSeedingConfig::default(),
         SeedExitCondition::with_ratio(1.0),
         16 * 1024,
-        None,
         None,
         local_peer_id,
         Some(receiver),

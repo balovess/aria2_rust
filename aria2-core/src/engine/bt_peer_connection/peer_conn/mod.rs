@@ -136,8 +136,8 @@ pub struct BtPeerConn {
     // -----------------------------------------------------------------------
     /// Peers discovered via incoming PEX messages while reading blocks.
     /// The download loop drains this after each iteration to add new peers
-    /// to the connection pool. This avoids having to thread extension-update
-    /// types through the legacy `BtMessageHandler` API.
+    /// to the connection pool without threading extension-update types
+    /// through the block-message handler.
     pub pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     /// Whether this connection may receive and accumulate BEP 11 peers.
     pub(crate) pex_enabled: bool,

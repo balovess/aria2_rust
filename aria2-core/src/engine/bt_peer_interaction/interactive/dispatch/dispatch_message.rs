@@ -101,7 +101,6 @@ impl BtPeerInteractive {
                 {
                     conn.seeder = true;
                 }
-                update.have_index = Some(piece_index);
                 trace!("Dispatched Have({}) message", piece_index);
             }
             BtMessage::Bitfield { data } => {
@@ -118,7 +117,6 @@ impl BtPeerInteractive {
                         conn.seeder = true;
                     }
                 }
-                update.bitfield_data = Some(data);
                 trace!("Dispatched Bitfield message");
             }
             BtMessage::Request { request } => {

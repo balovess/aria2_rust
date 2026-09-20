@@ -3,7 +3,7 @@
 use super::peer_message_handler::BtPeerMessageHandler;
 use super::types::*;
 
-// ── Legacy BtMessageHandler tests (preserved) ───────────────────────
+// ── BtMessageHandler tests ─────────────────────────────────────────
 
 #[test]
 fn test_block_size_constant() {

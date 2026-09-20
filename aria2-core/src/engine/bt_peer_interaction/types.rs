@@ -290,10 +290,6 @@ pub struct PieceBitfieldChange {
 pub struct DispatchUpdate {
     /// Request slots removed by a Choke message (caller should send Cancel).
     pub cancelled_slots: Vec<RequestSlot>,
-    /// Piece index received via Have (retained for compatibility).
-    pub have_index: Option<u32>,
-    /// Bitfield data received (retained for compatibility).
-    pub bitfield_data: Option<Vec<u8>>,
     /// Exact old/new peer bitfield transition for one received message.
     pub bitfield_update: Option<BitfieldUpdate>,
     /// Whether the peer choking state changed.

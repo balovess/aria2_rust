@@ -4,12 +4,10 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
-use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{
     BtSeedingConfig, BtUploadConnection, BtUploadSession, PieceDataProvider,
 };
-use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::engine::peer_stats::PeerStats;
 
 use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS, SeedExitCondition};
@@ -35,7 +33,6 @@ impl BtSeedManager {
             config,
             exit_condition,
             total_downloaded,
-            None,
             CancellationToken::new(),
             None,
             None,
@@ -63,37 +60,6 @@ impl BtSeedManager {
             config,
             exit_condition,
             total_downloaded,
-            None,
-            CancellationToken::new(),
-            None,
-            None,
-            [0u8; 20],
-        )
-    }
-
-    /// Create a new seed manager with a choking algorithm.
-    ///
-    /// This is the constructor used by `BtDownloadCommand::run_seeding_phase()`.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_choking_algo(
-        connections: Vec<aria2_protocol::bittorrent::peer::connection::PeerConnection>,
-        piece_provider: Arc<FileBackedPieceProvider>,
-        config: BtSeedingConfig,
-        exit_condition: SeedExitCondition,
-        total_downloaded: u64,
-        choking_algo: Option<ChokingAlgorithm>,
-    ) -> Self {
-        Self::build(
-            [0u8; 20],
-            connections
-                .into_iter()
-                .map(|connection| BtUploadConnection::Plain(Box::new(connection)))
-                .collect(),
-            piece_provider,
-            config,
-            exit_condition,
-            total_downloaded,
-            choking_algo,
             CancellationToken::new(),
             None,
             None,
@@ -112,7 +78,6 @@ impl BtSeedManager {
         config: BtSeedingConfig,
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
-        choking_algo: Option<ChokingAlgorithm>,
         announcer: Option<TrackerAnnouncer>,
         peer_id: [u8; 20],
     ) -> Self {
@@ -126,7 +91,6 @@ impl BtSeedManager {
             config,
             exit_condition,
             total_downloaded,
-            choking_algo,
             CancellationToken::new(),
             None,
             announcer,
@@ -155,7 +119,6 @@ impl BtSeedManager {
             config,
             exit_condition,
             total_downloaded,
-            None,
             cancel_token,
             None,
             None,
@@ -173,7 +136,6 @@ impl BtSeedManager {
         config: BtSeedingConfig,
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
-        choking_algo: Option<ChokingAlgorithm>,
         announcer: Option<TrackerAnnouncer>,
         peer_id: [u8; 20],
         incoming_peers: Option<
@@ -187,7 +149,6 @@ impl BtSeedManager {
             config,
             exit_condition,
             total_downloaded,
-            choking_algo,
             CancellationToken::new(),
             incoming_peers,
             announcer,
@@ -204,7 +165,6 @@ impl BtSeedManager {
         config: BtSeedingConfig,
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
-        choking_algo: Option<ChokingAlgorithm>,
         cancel_token: CancellationToken,
         incoming_peers: Option<
             tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>,
@@ -253,7 +213,6 @@ impl BtSeedManager {
             seeding_start_time: Instant::now(),
             is_active: true,
             seeder_choke,
-            choking_algo,
             cancel_token,
             peer_storage: None,
             halt_requested: false,

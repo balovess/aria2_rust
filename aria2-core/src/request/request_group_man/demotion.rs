@@ -406,29 +406,16 @@ impl super::RequestGroupMan {
     /// inside `fillRequestGroupFromReserver` when it encounters a
     /// dependency whose prerequisite has finished.
     pub fn resolve_dependencies_for(&self, completed_gid: crate::request::request_group::GroupId) {
-        self.resolve_dependencies_for_status(completed_gid, DownloadStatus::Complete);
+        self.resolve_dependencies_for_status_with_events(
+            completed_gid,
+            DownloadStatus::Complete,
+            None,
+        );
     }
 
-    /// Resolve dependencies after a prerequisite reaches any terminal state.
-    ///
-    /// A failed metadata download must wake its payload just as a successful
-    /// one does: payloads with direct mirrors fall back to those mirrors, while
-    /// torrent-only payloads are recorded as a terminal error instead of
-    /// remaining in the reserved queue forever.
-    pub fn resolve_dependencies_for_status(
-        &self,
-        completed_gid: crate::request::request_group::GroupId,
-        prerequisite_status: DownloadStatus,
-    ) {
-        self.resolve_dependencies_for_status_with_events(completed_gid, prerequisite_status, None);
-    }
-
-    /// Resolve dependencies and optionally notify observers when BitTorrent
-    /// metadata has been injected into a payload group.
-    ///
-    /// The event-aware form is used by the engine demotion path. The existing
-    /// two-argument method remains the compatibility entry point for callers
-    /// that do not need event delivery.
+    /// Resolve dependencies after a prerequisite reaches any terminal state
+    /// and optionally notify observers when BitTorrent metadata is injected
+    /// into a payload group.
     pub fn resolve_dependencies_for_status_with_events(
         &self,
         completed_gid: crate::request::request_group::GroupId,

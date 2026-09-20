@@ -331,9 +331,10 @@ mod tests {
         let first = manager.fill_from_reserver();
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].recover().gid(), GroupId::new(30));
-        manager.resolve_dependencies_for_status(
+        manager.resolve_dependencies_for_status_with_events(
             GroupId::new(30),
             crate::request::request_group::DownloadStatus::Complete,
+            None,
         );
         let promoted = manager.fill_from_reserver();
         assert_eq!(promoted.len(), 1);

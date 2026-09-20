@@ -180,9 +180,9 @@ impl BtTorrentPostDownloadHandler {
             uris.push(magnet);
         }
 
-        // Create a new RequestGroup for the torrent download. The engine path
-        // supplies a manager-owned GID; the legacy helper above retains a
-        // deterministic fallback for standalone callers.
+        // Create a new RequestGroup for the torrent download. The default
+        // handler path derives a deterministic child GID; the engine path
+        // supplies its manager-owned allocator through the sibling method.
         let mut child_options = options.clone();
 
         // Prevent infinite loops: child torrent groups don't re-trigger

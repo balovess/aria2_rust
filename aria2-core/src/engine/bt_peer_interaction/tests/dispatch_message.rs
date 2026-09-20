@@ -68,7 +68,6 @@ fn test_dispatch_have_updates_bitfield() {
     let update =
         interactive.dispatch_message(BtMessage::Have { piece_index: 0 }, &mut conn, |_| false);
 
-    assert_eq!(update.have_index, Some(0));
     let transition = update.bitfield_update.expect("Have transition");
     assert!(transition.old.is_empty());
     assert!(transition.new.is_empty());

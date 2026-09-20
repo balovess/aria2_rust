@@ -143,7 +143,7 @@ fn rpc_option_map_uses_aria2_wire_strings() {
         serde_json::json!(["X-One: 1", "X-Two: 2"]),
     );
 
-    let options = DownloadOptions::from_rpc_options(&values);
+    let options = DownloadOptions::try_from_rpc_options(&values).unwrap();
 
     assert_eq!(options.max_download_limit, Some(100 * 1024));
     assert_eq!(options.max_retries, 7);

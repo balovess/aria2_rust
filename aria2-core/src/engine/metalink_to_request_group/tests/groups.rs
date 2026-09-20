@@ -177,9 +177,10 @@ fn grouped_metaurl_fixture_has_metadata_payload_and_independent_groups() {
         .add_metalink_graph(graph)
         .expect("graph should be inserted atomically");
     assert_eq!(manager.fill_from_reserver().len(), 1);
-    manager.resolve_dependencies_for_status(
+    manager.resolve_dependencies_for_status_with_events(
         crate::request::request_group::GroupId::new(2),
         crate::request::request_group::DownloadStatus::Complete,
+        None,
     );
     assert_eq!(manager.fill_from_reserver().len(), 1);
     let context = payload
@@ -256,9 +257,10 @@ fn shared_torrent_graph_maps_torrent_files_to_metalink_paths() {
     let manager = crate::request::request_group_man::RequestGroupMan::new();
     manager.add_metalink_graph(graph).unwrap();
     assert_eq!(manager.fill_from_reserver().len(), 1);
-    manager.resolve_dependencies_for_status(
+    manager.resolve_dependencies_for_status_with_events(
         crate::request::request_group::GroupId::new(100),
         crate::request::request_group::DownloadStatus::Complete,
+        None,
     );
     assert_eq!(manager.fill_from_reserver().len(), 1);
 

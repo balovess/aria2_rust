@@ -64,7 +64,6 @@ impl BtDownloadCommand {
             config,
             exit_cond,
             self.completed_bytes,
-            self.choking_algo.take(),
             announcer,
             peer_id,
             self.incoming_peers.take(),
