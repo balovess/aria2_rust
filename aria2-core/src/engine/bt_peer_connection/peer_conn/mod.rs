@@ -233,7 +233,7 @@ impl BtPeerConn {
     /// Returns the remote peer ID learned during the protocol handshake.
     pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
         match &self.inner {
-            InnerConnection::Plain(conn) => conn.remote_peer_id,
+            InnerConnection::Plain(conn) => conn.remote_peer_id().copied(),
             InnerConnection::Encrypted(conn) => conn.remote_peer_id().copied(),
             InnerConnection::Utp(conn) => conn.remote_peer_id(),
         }

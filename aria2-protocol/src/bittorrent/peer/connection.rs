@@ -80,12 +80,11 @@ pub struct PeerConnection {
     stream: TcpStream,
     remote_addr: Option<std::net::SocketAddr>,
     state: PeerState,
-    pub remote_peer_id: Option<[u8; 20]>,
+    remote_peer_id: Option<[u8; 20]>,
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.
     remote_supports_dht: bool,
     /// Whether the remote BitTorrent handshake advertised BEP 6 support.
     remote_supports_fast_extension: bool,
-    pub remote_bitfield: Vec<u8>,
     // Keep partially received frames across cancellation of read_message.
     read_buffer: BytesMut,
 }
@@ -331,7 +330,6 @@ impl PeerConnection {
             remote_peer_id: Some(remote_hs.peer_id),
             remote_supports_dht: remote_hs.supports_dht(),
             remote_supports_fast_extension: remote_hs.supports_fast_extension(),
-            remote_bitfield: vec![],
             read_buffer: BytesMut::new(),
         })
     }
@@ -352,7 +350,6 @@ impl PeerConnection {
             remote_peer_id: Some(peer_id),
             remote_supports_dht,
             remote_supports_fast_extension,
-            remote_bitfield: vec![],
             read_buffer: BytesMut::new(),
         }
     }
@@ -466,7 +463,6 @@ impl PeerConnection {
     }
 
     pub async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<(), String> {
-        self.remote_bitfield = bitfield.clone();
         self.send_message(&BtMessage::Bitfield { data: bitfield })
             .await
     }
@@ -477,6 +473,10 @@ impl PeerConnection {
 
     pub fn state(&self) -> &PeerState {
         &self.state
+    }
+
+    pub fn remote_peer_id(&self) -> Option<&[u8; 20]> {
+        self.remote_peer_id.as_ref()
     }
 
     pub(crate) fn state_mut(&mut self) -> &mut PeerState {
@@ -730,7 +730,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(connection.remote_peer_id, Some([b'Y'; 20]));
+        assert_eq!(connection.remote_peer_id(), Some(&[b'Y'; 20]));
         server.await.unwrap();
     }
 
@@ -795,7 +795,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(connection.remote_peer_id, Some([b'Y'; 20]));
+        assert_eq!(connection.remote_peer_id(), Some(&[b'Y'; 20]));
         server.await.unwrap();
     }
 

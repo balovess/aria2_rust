@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import type { ClientOptions } from './types.js';
-import { RpcError, ConnectionError, TimeoutError } from './errors.js';
+import { RpcError, ConnectionError, TimeoutError, AuthError } from './errors.js';
 
 export interface Transport {
   sendRequest(method: string, params: unknown[]): Promise<unknown>;
@@ -33,6 +33,20 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+function isAuthRpcError(code: unknown, message: string): boolean {
+  if (code === -32001) return true;
+
+  const normalized = message.toLowerCase();
+  return [
+    'unauthorized',
+    'auth fail',
+    'authentication',
+    'authorization',
+    'invalid token',
+    'token required',
+  ].some((marker) => normalized.includes(marker));
 }
 
 function buildParams(token: string | undefined, params: unknown[]): unknown[] {
@@ -90,12 +104,19 @@ export class HttpTransport implements Transport {
       }
 
       if (data.error) {
+        if (isAuthRpcError(data.error.code, data.error.message)) {
+          throw new AuthError(data.error.message);
+        }
         throw new RpcError(data.error.message, data.error.code);
+      }
+
+      if (!response.ok) {
+        throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       return data.result;
     } catch (err: unknown) {
-      if (err instanceof RpcError || err instanceof ConnectionError) {
+      if (err instanceof RpcError || err instanceof AuthError || err instanceof ConnectionError) {
         throw err;
       }
       if (err instanceof DOMException && err.name === 'AbortError') {

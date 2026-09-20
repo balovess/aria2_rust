@@ -354,7 +354,6 @@ impl EncryptedConnection {
     }
 
     pub async fn send_bitfield(&mut self, bitfield: Vec<u8>) -> Result<(), String> {
-        self.inner.remote_bitfield = bitfield.clone();
         self.send_message(&BtMessage::Bitfield { data: bitfield })
             .await
     }
@@ -364,7 +363,7 @@ impl EncryptedConnection {
     }
 
     pub fn remote_peer_id(&self) -> Option<&[u8; 20]> {
-        self.inner.remote_peer_id.as_ref()
+        self.inner.remote_peer_id()
     }
 
     /// Whether the remote BitTorrent handshake advertised BEP 5 DHT support.

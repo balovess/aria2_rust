@@ -36,6 +36,18 @@ var TimeoutError = class extends Aria2Error {
 };
 
 // src/transport.ts
+function isAuthRpcError(code, message) {
+  if (code === -32001) return true;
+  const normalized = message.toLowerCase();
+  return [
+    "unauthorized",
+    "auth fail",
+    "authentication",
+    "authorization",
+    "invalid token",
+    "token required"
+  ].some((marker) => normalized.includes(marker));
+}
 function buildParams(token, params) {
   const result = [];
   if (token) {
@@ -81,11 +93,17 @@ var HttpTransport = class {
         throw new ConnectionError("Invalid JSON response");
       }
       if (data.error) {
+        if (isAuthRpcError(data.error.code, data.error.message)) {
+          throw new AuthError(data.error.message);
+        }
         throw new RpcError(data.error.message, data.error.code);
+      }
+      if (!response.ok) {
+        throw new ConnectionError(`HTTP ${response.status}: ${response.statusText}`);
       }
       return data.result;
     } catch (err) {
-      if (err instanceof RpcError || err instanceof ConnectionError) {
+      if (err instanceof RpcError || err instanceof AuthError || err instanceof ConnectionError) {
         throw err;
       }
       if (err instanceof DOMException && err.name === "AbortError") {

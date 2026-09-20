@@ -194,7 +194,7 @@ impl BtPeerConn {
         endpoint: std::net::SocketAddr,
     ) -> Self {
         let now = Instant::now();
-        let peer_id = conn.remote_peer_id;
+        let peer_id = conn.remote_peer_id().copied();
         Self {
             inner: InnerConnection::Plain(conn),
             ip_addr: endpoint.ip().to_string(),

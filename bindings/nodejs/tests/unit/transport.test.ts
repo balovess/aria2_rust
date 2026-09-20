@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import net from 'node:net';
 import { HttpTransport, WebSocketTransport } from '../../src/transport.js';
-import { RpcError, ConnectionError, TimeoutError } from '../../src/errors.js';
+import { RpcError, ConnectionError, TimeoutError, AuthError } from '../../src/errors.js';
 
 describe('HttpTransport', () => {
   let transport: HttpTransport;
@@ -103,7 +103,7 @@ describe('HttpTransport', () => {
     expect(result).toEqual({ version: '0.3.2' });
   });
 
-  it('throws RpcError on error response', async () => {
+  it('throws AuthError on authentication error response', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
       json: () =>
@@ -114,8 +114,22 @@ describe('HttpTransport', () => {
         }),
     });
 
-    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(RpcError);
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(AuthError);
     await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow('Unauthorized');
+  });
+
+  it('throws AuthError for invalid-token RPC errors', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          jsonrpc: '2.0',
+          id: 1,
+          error: { code: -32001, message: 'Invalid token' },
+        }),
+    });
+
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(AuthError);
   });
 
   it('throws RpcError with correct code on error response', async () => {
@@ -147,6 +161,19 @@ describe('HttpTransport', () => {
     await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
       ConnectionError,
     );
+    await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
+      'HTTP 500',
+    );
+  });
+
+  it('rejects a non-ok response even when its JSON body has a result', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: () => Promise.resolve({ jsonrpc: '2.0', id: 1, result: 'unexpected' }),
+    });
+
     await expect(transport.sendRequest('aria2.getVersion', [])).rejects.toThrow(
       'HTTP 500',
     );

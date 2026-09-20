@@ -56,7 +56,7 @@ impl BtUploadConnection {
 
     fn remote_peer_id(&self) -> Option<[u8; 20]> {
         match self {
-            Self::Plain(connection) => connection.remote_peer_id,
+            Self::Plain(connection) => connection.remote_peer_id().copied(),
             Self::Encrypted(connection) => connection.remote_peer_id().copied(),
         }
     }
