@@ -871,7 +871,7 @@ async fn engine_bt_download_with_tracker() {
         .add_group(vec![tracker_url.to_string()], opts.clone())
         .expect("group should be created");
     let group = group_man
-        .group_by_id(gid)
+        .find_group(gid)
         .expect("group should be registered");
     let command = EngineCommand::AddDownload { group };
     assert!(matches!(command, EngineCommand::AddDownload { .. }));
@@ -942,7 +942,7 @@ async fn engine_multi_task_parallel() {
         .map(|result| result.expect("group should be created"))
     {
         let group = group_man
-            .group_by_id(gid)
+            .find_group(gid)
             .expect("group should be registered");
         engine_cmd_tx
             .send(EngineCommand::AddDownload { group })

@@ -24,7 +24,7 @@ impl CoreRpcBackend {
             .map_err(|error| Self::execution(format!("Failed to add group: {error}")))?;
         let group = self
             .group_man
-            .group_by_id(gid)
+            .find_group(gid)
             .ok_or_else(|| BackendError::Internal("Group not found after insert".into()))?;
         #[cfg(feature = "bittorrent")]
         if let Some(data) = torrent_data.as_deref() {

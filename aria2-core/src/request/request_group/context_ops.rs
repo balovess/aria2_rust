@@ -305,6 +305,7 @@ impl super::RequestGroup {
                 }
                 None => entry.add_uris(add_uris),
             };
+            self.notify_activity_changed();
             return Ok((deleted, added));
         }
 
@@ -349,6 +350,7 @@ impl super::RequestGroup {
                 })
                 .sum(),
         };
+        self.notify_activity_changed();
         Ok((deleted, added))
     }
 

@@ -80,7 +80,7 @@ pub(super) async fn run_deadline_maintenance(
     if !timed_out.is_empty() {
         let man = &ctx.group_man;
         for gid in timed_out {
-            if let Some(group) = man.get_group(gid) {
+            if let Some(group) = man.find_group(gid) {
                 let request_context = group.recover().latest_connection_context();
                 let uris = group.recover().get_all_uris();
                 if let Some(uri) = uris.first()

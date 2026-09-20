@@ -132,7 +132,7 @@ impl App {
                         info!("Successfully restored task #{}", gid.value());
 
                         // Store BT bitfield if present
-                        if let Some(group_lock) = man.get_group(gid) {
+                        if let Some(group_lock) = man.find_group(gid) {
                             let mut group = group_lock.recover_mut();
                             group.set_option_snapshot(option_snapshot.clone());
                             if entry.bitfield.is_some() {

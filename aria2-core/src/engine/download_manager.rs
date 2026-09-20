@@ -5,6 +5,7 @@
 //! to submit work, observe immutable snapshots, control a task, and await a
 //! terminal result without learning the engine's channel or lock layout.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::task::JoinHandle;
@@ -280,6 +281,28 @@ impl DownloadManager {
     pub fn subscribe(&self) -> DownloadEventStream {
         self.event_hooks.subscribe()
     }
+
+    /// Queue a graceful pause for every active and reserved download.
+    ///
+    /// The command is coalesced with other pending pause-all commands. Success
+    /// means it was accepted by the engine queue; callers that need to
+    /// observe individual state transitions can await each returned handle.
+    pub fn pause_all(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.command_sender.send(EngineCommand::PauseAll)?;
+        Ok(())
+    }
+
+    /// Queue a forced pause for every active and reserved download.
+    pub fn force_pause_all(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.command_sender.send(EngineCommand::ForcePauseAll)?;
+        Ok(())
+    }
+
+    /// Queue a resume for every paused download.
+    pub fn resume_all(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.command_sender.send(EngineCommand::UnpauseAll)?;
+        Ok(())
+    }
 }
 
 /// A stable identity for one submitted download.
@@ -327,6 +350,46 @@ impl DownloadHandle {
     /// entry, just like the corresponding `DownloadResult` snapshot.
     pub fn get_files(&self) -> Option<Vec<crate::request::request_group::FileEntry>> {
         self.download_result().map(|result| result.files)
+    }
+
+    /// Change the URI set for one file entry.
+    ///
+    /// `file_index` is one-based, matching aria2's `changeUri` contract.
+    /// Deletions happen before additions; when `position` is `Some`, added
+    /// URIs are inserted at that zero-based position. The returned pair is
+    /// `(deleted_count, added_count)`.
+    pub fn change_uris(
+        &self,
+        file_index: usize,
+        delete_uris: &[String],
+        add_uris: &[String],
+        position: Option<usize>,
+    ) -> std::result::Result<(usize, usize), DownloadManagerError> {
+        let group = self.manager.group_man.find_group(self.gid).ok_or_else(|| {
+            DownloadManagerError::State(Aria2Error::InvalidArgument(
+                "download is not live".to_string(),
+            ))
+        })?;
+        group
+            .recover_mut()
+            .change_uris(file_index, delete_uris, add_uris, position)
+            .map_err(DownloadManagerError::State)
+    }
+
+    /// Apply aria2-compatible runtime option changes to this download.
+    ///
+    /// The manager validates each option and applies immediate changes in
+    /// place. Changes that require a new command generation are retained as
+    /// pending options and trigger the existing restart semantics when the
+    /// task is active.
+    pub fn change_options(
+        &self,
+        changes: HashMap<String, serde_json::Value>,
+    ) -> std::result::Result<(), DownloadManagerError> {
+        self.manager
+            .group_man
+            .change_group_options(&self.gid_hex(), changes)
+            .map_err(|error| DownloadManagerError::State(Aria2Error::InvalidArgument(error)))
     }
 
     /// Change this download's position in the reserved queue.
@@ -805,6 +868,37 @@ mod tests {
     }
 
     #[test]
+    fn manager_exposes_batch_lifecycle_commands() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, mut command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+
+        manager
+            .pause_all()
+            .expect("pause-all command should be accepted");
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(EngineCommand::PauseAll)
+        ));
+
+        manager
+            .force_pause_all()
+            .expect("force-pause-all command should be accepted");
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(EngineCommand::ForcePauseAll)
+        ));
+
+        manager
+            .resume_all()
+            .expect("resume-all command should be accepted");
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(EngineCommand::UnpauseAll)
+        ));
+    }
+
+    #[test]
     fn handle_exposes_file_snapshot_without_rpc_polling() {
         let group_man = Arc::new(RequestGroupMan::new());
         let (command_sender, _command_receiver) = super::super::engine_command::channel();
@@ -819,6 +913,64 @@ mod tests {
         let files = handle.get_files().expect("live group snapshot");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "file.zip");
+    }
+
+    #[tokio::test]
+    async fn handle_changes_uris_and_wakes_snapshot_observers() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["https://example.test/first".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let signal = group_man.activity_signal();
+        let mut observed = signal.generation();
+        let add_uris = vec!["https://example.test/second".to_string()];
+
+        assert_eq!(
+            handle
+                .change_uris(1, &[], &add_uris, Some(0))
+                .expect("URI change should succeed"),
+            (0, 1)
+        );
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            signal.wait_for_change(&mut observed),
+        )
+        .await
+        .expect("URI changes must wake snapshot observers");
+
+        let files = handle.get_files().expect("live group snapshot");
+        assert_eq!(files[0].uris[0].uri, add_uris[0]);
+    }
+
+    #[test]
+    fn handle_applies_runtime_options_through_manager_policy() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["https://example.test/file".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let mut changes = HashMap::new();
+        changes.insert("dir".to_string(), serde_json::json!("reserved-dir"));
+
+        handle
+            .change_options(changes)
+            .expect("runtime option change should succeed");
+
+        let group = group_man.find_group(handle.gid()).expect("group exists");
+        let runtime_options = group.recover().runtime_options();
+        assert_eq!(
+            runtime_options.get("dir"),
+            Some(&serde_json::json!("reserved-dir"))
+        );
     }
 
     #[test]

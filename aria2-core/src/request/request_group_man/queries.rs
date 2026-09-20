@@ -16,10 +16,6 @@ use crate::util::rwlock_ext::RwLockRecover;
 impl RequestGroupMan {
     // ── Query Methods ───────────────────────────────────────────────────
 
-    pub fn get_group(&self, gid: GroupId) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
-        self.find_group(gid)
-    }
-
     /// Snapshot groups in the order exposed by the scheduling stores.
     ///
     /// `groups` is the canonical identity index, but its `DashMap` iteration

@@ -645,7 +645,7 @@ async fn run_loop(
                         .add_group(vec![value], task_options.clone())
                         .map_err(|error| format!("failed to add task: {error}"))?;
                     let group = request_man
-                        .get_group(gid)
+                        .find_group(gid)
                         .ok_or_else(|| "new task disappeared before submission".to_string())?;
                     command_tx
                         .send(EngineCommand::AddDownload { group })

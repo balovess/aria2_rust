@@ -23,11 +23,6 @@ impl RequestGroupMan {
         self.find_group(gid)
     }
 
-    /// Look up a group by numeric GID.
-    pub fn group_by_id(&self, gid: GroupId) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
-        self.find_group(gid)
-    }
-
     /// Change a reserved group's queue position and return its new index.
     pub fn change_position(&self, gid: GroupId, pos: i32, mode: PositionMode) -> Result<usize> {
         let _lifecycle = self.lifecycle_guard();
