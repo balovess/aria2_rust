@@ -111,8 +111,7 @@
 //!     let result = download.wait().await.unwrap();
 //!     println!("{}: {}", download.gid_hex(), result.status);
 //!
-//!     engine.shutdown().unwrap();
-//!     engine.wait().await.unwrap();
+//!     engine.shutdown_and_wait().await.unwrap();
 //! }
 //! ```
 //!
@@ -151,8 +150,7 @@
 //!     }
 //!
 //!     let _result = download.wait().await?;
-//!     engine.shutdown()?;
-//!     engine.wait().await?;
+//!     engine.shutdown_and_wait().await?;
 //!     Ok(())
 //! }
 //! ```

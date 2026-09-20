@@ -62,11 +62,6 @@ pub enum ConnectionError {
     Aborted,
 }
 
-/// Maximum number of retries for connection establishment
-/// TODO: will be used once connection retry logic is implemented
-#[allow(dead_code)]
-const MAX_CONNECT_RETRIES: u32 = 3;
-
 /// Default initial congestion window
 const INITIAL_CWND: u32 = 2;
 
@@ -108,11 +103,6 @@ pub struct UtpConnection {
     /// Current round-trip time estimate
     srtt: Duration,
 
-    /// Round-trip time variation
-    // TODO: will be used for RTT variance calculation in RTO update (RFC 6298)
-    #[allow(dead_code)]
-    rtt_var: Duration,
-
     /// Retransmission timeout
     rto: Duration,
 
@@ -124,11 +114,6 @@ pub struct UtpConnection {
 
     /// Last activity timestamp
     last_activity: Instant,
-
-    /// Number of connection retries
-    // TODO: will be used once connection retry logic is implemented
-    #[allow(dead_code)]
-    connect_retries: u32,
 
     /// Receive window size
     recv_window: u32,
@@ -150,12 +135,10 @@ impl UtpConnection {
             remote_addr: None,
             congestion_window: INITIAL_CWND,
             srtt: Duration::from_millis(100),
-            rtt_var: Duration::from_millis(50),
             rto: Duration::from_secs(1),
             recv_buffer: Vec::with_capacity(RECV_BUFFER_SIZE),
             send_buffer: Vec::with_capacity(SEND_BUFFER_SIZE),
             last_activity: Instant::now(),
-            connect_retries: 0,
             recv_window: RECV_BUFFER_SIZE as u32,
             bytes_in_flight: 0,
         }

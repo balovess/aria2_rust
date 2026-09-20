@@ -257,22 +257,6 @@ impl TransactionTracker {
         }
     }
 
-    /// Store a token received in a get_peers response for later announce.
-    ///
-    /// This must be called after `handle_response` matches a get_peers reply,
-    /// before the caller sends an announce_peer to the same node.
-    pub fn store_token_for_node(
-        &self,
-        node_addr: &SocketAddr,
-        info_hash: &[u8; 20],
-        token: Vec<u8>,
-    ) {
-        // Tokens are stored externally by the lookup task in a simple HashMap.
-        // This method is a no-op placeholder — the lookup task manages tokens
-        // directly to avoid coupling the tracker to per-info-hash state.
-        let _ = (node_addr, info_hash, token);
-    }
-
     /// Process timed-out transactions.
     ///
     /// Removes all transactions whose timeout has elapsed and closes their

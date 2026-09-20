@@ -343,12 +343,4 @@ impl PeerSessionResource {
     pub fn should_be_choking(&self) -> bool {
         self.choking_required && !self.opt_unchoking
     }
-
-    /// Count outstanding upload operations (placeholder).
-    ///
-    /// In the C++ code this counts pending upload requests. For now it
-    /// returns 0; will be wired up when upload scheduling is implemented.
-    pub fn count_outstanding_upload(&self) -> usize {
-        0
-    }
 }

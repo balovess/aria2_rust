@@ -32,6 +32,8 @@ pub enum DownloadManagerError {
     State(#[source] Aria2Error),
     #[error("download event stream failed: {0}")]
     EventStream(#[source] tokio::sync::broadcast::error::RecvError),
+    #[error("download engine lifecycle failed: {0}")]
+    Engine(#[source] Aria2Error),
     #[error("waiting for the download was cancelled")]
     WaitCancelled,
 }
@@ -640,6 +642,10 @@ impl DownloadEngineHandle {
         &self.manager
     }
 
+    /// Request graceful engine shutdown.
+    ///
+    /// Success means the halt command was accepted by the engine queue. Use
+    /// [`Self::wait`] to await actual engine termination.
     pub fn shutdown(&self) -> std::result::Result<(), DownloadManagerError> {
         self.manager.command_sender.send(EngineCommand::HaltAll {
             reason: crate::request::request_group::HaltReason::ShutdownSignal,
@@ -647,6 +653,9 @@ impl DownloadEngineHandle {
         Ok(())
     }
 
+    /// Request forced engine shutdown.
+    ///
+    /// Success means the force-halt command was accepted by the engine queue.
     pub fn force_shutdown(&self) -> std::result::Result<(), DownloadManagerError> {
         self.manager
             .command_sender
@@ -656,6 +665,19 @@ impl DownloadEngineHandle {
         Ok(())
     }
 
+    /// Request graceful shutdown and wait until the engine task exits.
+    pub async fn shutdown_and_wait(self) -> std::result::Result<(), DownloadManagerError> {
+        self.shutdown()?;
+        self.wait().await.map_err(DownloadManagerError::Engine)
+    }
+
+    /// Request forced shutdown and wait until the engine task exits.
+    pub async fn force_shutdown_and_wait(self) -> std::result::Result<(), DownloadManagerError> {
+        self.force_shutdown()?;
+        self.wait().await.map_err(DownloadManagerError::Engine)
+    }
+
+    /// Consume the handle and wait for the engine task to finish.
     pub async fn wait(self) -> Result<()> {
         self.task.await.map_err(|error| {
             Aria2Error::DownloadFailed(format!("download engine task panicked: {error}"))
@@ -872,13 +894,24 @@ mod tests {
             .expect("engine should start with a request-group manager");
 
         assert!(handle.downloads().handles().is_empty());
-        handle
-            .shutdown()
-            .expect("shutdown command should be accepted");
-        tokio::time::timeout(Duration::from_secs(1), handle.wait())
+        tokio::time::timeout(Duration::from_secs(1), handle.shutdown_and_wait())
             .await
             .expect("engine should stop promptly")
             .expect("engine should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn force_shutdown_and_wait_stops_keep_alive_engine() {
+        let mut engine = DownloadEngine::new();
+        engine.set_keep_alive(true);
+        let handle = engine
+            .start_with_request_group_man(Arc::new(RequestGroupMan::new()))
+            .expect("engine should start with a request-group manager");
+
+        tokio::time::timeout(Duration::from_secs(1), handle.force_shutdown_and_wait())
+            .await
+            .expect("force shutdown should stop promptly")
+            .expect("force shutdown should complete cleanly");
     }
 
     #[test]

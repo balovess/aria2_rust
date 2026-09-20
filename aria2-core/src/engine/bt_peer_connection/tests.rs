@@ -477,12 +477,6 @@ fn test_peer_session_resource_zero_length() {
 }
 
 #[test]
-fn test_peer_session_resource_count_outstanding_upload() {
-    let res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
-    assert_eq!(res.count_outstanding_upload(), 0);
-}
-
-#[test]
 fn test_peer_session_resource_accessors() {
     let res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
     assert_eq!(res.piece_length(), 256 * 1024);
