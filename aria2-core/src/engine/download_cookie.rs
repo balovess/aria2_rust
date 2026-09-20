@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::http::cookie::Cookie;
-use crate::http::cookie_storage::CookieStorage;
+use crate::http::cookie::CookieStorage;
 
 #[derive(Clone)]
 pub struct CookieHelper {

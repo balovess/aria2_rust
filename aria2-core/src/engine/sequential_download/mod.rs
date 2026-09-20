@@ -348,7 +348,7 @@ mod tests {
     use crate::engine::download_cookie::CookieHelper;
     use crate::engine::download_progress::ProgressUpdater;
     use crate::http::HttpRequestPolicy;
-    use crate::http::cookie_storage::CookieStorage;
+    use crate::http::cookie::CookieStorage;
     use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
     use crate::util::perf_monitor::AtomicMetrics;
 

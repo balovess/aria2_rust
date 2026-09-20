@@ -15,6 +15,6 @@ pub use aria2_protocol::bittorrent::piece::bitfield::Bitfield;
 pub use manager::{PieceManager, PieceVerification};
 pub use peer_tracker::{PeerBitfieldEntry, PeerBitfieldTracker, PeerTrackerStats};
 pub use picker::{
-    PickedPiece, PieceInfo, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
+    PickedPiece, PieceInfo, PiecePicker, PiecePickerConfig, PiecePriorityMode,
     PieceSelectionStrategy,
 };

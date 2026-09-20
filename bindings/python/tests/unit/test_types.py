@@ -308,7 +308,7 @@ class TestDownloadEvent:
         event = DownloadEvent.from_rpc_notification(
             "aria2.onUnknown", {"gid": "x"}
         )
-        assert event.event_type == EventType.DOWNLOAD_START
+        assert event is None
 
     def test_from_rpc_notification_with_files(self):
         event = DownloadEvent.from_rpc_notification(

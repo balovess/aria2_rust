@@ -127,7 +127,7 @@ impl HttpSegmentDownloader {
                     factory,
                     &current_url,
                     auth_options,
-                    crate::http::request_response::HttpMethod::Get,
+                    crate::http::request::HttpMethod::Get,
                     authentication_used,
                     1,
                 );

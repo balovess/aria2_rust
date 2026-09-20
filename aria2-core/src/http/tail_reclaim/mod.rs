@@ -39,8 +39,7 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-// Re-export all public items for backward compatibility so that external code
-// can still use `aria2_core::http::tail_reclaim::TailReclaimConfig` etc.
+// Public API for per-connection tail reclaim tracking.
 pub use tracker::ConnectionStallTracker;
 pub use types::{
     DEFAULT_MIN_TAIL_LENGTH, DEFAULT_STALL_TIMEOUT_SECS, DEFAULT_TAIL_RECLAIM_ENABLED,

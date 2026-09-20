@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
 use crate::http::header_processor::HttpHeaderProcessor;
-use crate::http::request_response::basic_auth;
+use crate::http::request::basic_auth;
 
 use super::HttpProxyTunnelConfig;
 use super::auth;

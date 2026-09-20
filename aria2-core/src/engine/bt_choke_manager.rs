@@ -39,15 +39,6 @@ use rand::Rng;
 
 use crate::engine::peer_stats::PeerStats;
 
-// Re-export hooks for backward compatibility (importers use bt_choke_manager::*)
-pub use crate::engine::bt_choke_hooks::{
-    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer,
-    handle_snubbed_peer_by_identity, on_data_received_from_peer,
-    on_data_received_from_peer_by_identity, on_peer_choke, on_peer_unchoke, on_piece_received,
-    optimistically_unchoke_by_identity, rotate_choke_by_identity, select_best_peer_for_request,
-    select_best_peer_for_request_by_identity,
-};
-
 // ---------------------------------------------------------------------------
 // Constants matching C++ aria2
 // ---------------------------------------------------------------------------

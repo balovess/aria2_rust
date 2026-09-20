@@ -14,7 +14,6 @@ import type {
   DhtStatus,
   ClientOptions,
 } from './types.js';
-import { ConnectionError } from './errors.js';
 
 const DEFAULT_URL = 'http://localhost:6800/jsonrpc';
 const WS_EVENT_NAMES = [
@@ -57,14 +56,24 @@ export class Aria2Client {
   }
 
   private async ensureEventEmitter(): Promise<Aria2EventEmitter> {
+    const emitter = this.getOrCreateEventEmitter();
+    await emitter.connect();
+    return emitter;
+  }
+
+  private getOrCreateEventEmitter(): Aria2EventEmitter {
     if (this.eventEmitter) {
       return this.eventEmitter;
     }
 
     const wsUrl = httpToWs(this.url);
     this.eventEmitter = new Aria2EventEmitter(wsUrl, this.options);
-    await this.eventEmitter.connect();
     return this.eventEmitter;
+  }
+
+  /** Connect the notification WebSocket before starting a download. */
+  async connectEvents(): Promise<Aria2EventEmitter> {
+    return this.ensureEventEmitter();
   }
 
   async call<T = unknown>(method: string, params: unknown[] = []): Promise<T> {
@@ -276,13 +285,12 @@ export class Aria2Client {
   }
 
   on(event: WsEventName | 'reconnecting' | 'close', handler: (...args: unknown[]) => void): this {
-    this.ensureEventEmitter()
-      .then((emitter) => {
-        emitter.on(event, handler);
-      })
-      .catch(() => {
-        throw new ConnectionError(`Failed to connect event emitter for event: ${event}`);
-      });
+    const emitter = this.getOrCreateEventEmitter();
+    emitter.on(event, handler);
+    void this.ensureEventEmitter().catch(() => {
+      // `on` is intentionally fire-and-forget for compatibility. Callers
+      // that need connection errors can await `connectEvents()` instead.
+    });
     return this;
   }
 

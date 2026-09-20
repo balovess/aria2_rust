@@ -170,7 +170,7 @@ impl SequentialDownloader {
             auth_factory,
             &url,
             auth_opts,
-            crate::http::request_response::HttpMethod::Get,
+            crate::http::request::HttpMethod::Get,
             authentication_used,
             1, // nc
         );

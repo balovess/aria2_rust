@@ -11,8 +11,7 @@ mod tests;
 mod types;
 
 pub use types::{
-    PickedPiece, PieceInfo, PiecePickStrategy, PiecePickerConfig, PiecePriorityMode,
-    PieceSelectionStrategy,
+    PickedPiece, PieceInfo, PiecePickerConfig, PiecePriorityMode, PieceSelectionStrategy,
 };
 
 /// Default remaining-piece count at or below which end-game tracking

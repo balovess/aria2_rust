@@ -123,16 +123,19 @@ fn test_explicit_priority_pieces_respect_peer_bitfield() {
 #[test]
 fn test_piece_pick_strategy_variants() {
     assert_ne!(
-        PiecePickStrategy::Sequential,
-        PiecePickStrategy::RarestFirst
+        PieceSelectionStrategy::Sequential,
+        PieceSelectionStrategy::RarestFirst
     );
-    assert_ne!(PiecePickStrategy::Random, PiecePickStrategy::Geometric);
+    assert_ne!(
+        PieceSelectionStrategy::Random,
+        PieceSelectionStrategy::Geometric
+    );
 }
 
 #[test]
 fn test_piece_picker_config_default() {
     let config = PiecePickerConfig::default();
-    assert_eq!(config.strategy, PiecePickStrategy::RarestFirst);
+    assert_eq!(config.strategy, PieceSelectionStrategy::RarestFirst);
     assert_eq!(config.request_queue_size, 16);
     assert!(config.end_game_threshold > 0.9);
 }

@@ -1,4 +1,4 @@
-//! BtMessageHandler — legacy stateless block request/receive utilities.
+//! BtMessageHandler — stateless block request/receive utilities.
 //!
 //! Manages the process of requesting and receiving individual blocks
 //! from peers during piece download.
@@ -15,7 +15,7 @@ mod endgame;
 mod normal;
 mod pipelined;
 
-/// BT Message Handler for block-level operations (legacy, stateless).
+/// BT message handler for block-level operations.
 ///
 /// Manages the process of requesting and receiving individual blocks
 /// from peers during piece download.

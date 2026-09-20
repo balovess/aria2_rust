@@ -139,7 +139,7 @@ async fn test_connection_timeout_slow_server() {
     match result {
         Ok(conn) => {
             // Connection succeeded, but read might timeout
-            manager.release(conn).await;
+            manager.put_back(conn).await;
         }
         Err(Aria2Error::Recoverable(RecoverableError::Timeout)) => {
             // Expected: timeout occurred
@@ -504,8 +504,8 @@ async fn test_max_connections_limit_error() {
     }
 
     // Cleanup
-    manager.release(conn1).await;
-    manager.release(conn2).await;
+    manager.put_back(conn1).await;
+    manager.put_back(conn2).await;
     manager.cleanup().await;
     server_handle.abort();
 }
@@ -544,7 +544,7 @@ async fn test_connection_cleanup_on_error() {
         }
         Ok(conn) => {
             // If connection somehow succeeded, release it
-            manager.release(conn).await;
+            manager.put_back(conn).await;
         }
     }
 

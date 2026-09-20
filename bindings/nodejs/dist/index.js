@@ -448,13 +448,21 @@ var Aria2Client = class {
     }
   }
   async ensureEventEmitter() {
+    const emitter = this.getOrCreateEventEmitter();
+    await emitter.connect();
+    return emitter;
+  }
+  getOrCreateEventEmitter() {
     if (this.eventEmitter) {
       return this.eventEmitter;
     }
     const wsUrl = httpToWs(this.url);
     this.eventEmitter = new Aria2EventEmitter(wsUrl, this.options);
-    await this.eventEmitter.connect();
     return this.eventEmitter;
+  }
+  /** Connect the notification WebSocket before starting a download. */
+  async connectEvents() {
+    return this.ensureEventEmitter();
   }
   async call(method, params = []) {
     return await this.transport.sendRequest(method, params);
@@ -603,10 +611,9 @@ var Aria2Client = class {
     return await this.transport.sendRequest("system.listNotifications", []);
   }
   on(event, handler) {
-    this.ensureEventEmitter().then((emitter) => {
-      emitter.on(event, handler);
-    }).catch(() => {
-      throw new ConnectionError(`Failed to connect event emitter for event: ${event}`);
+    const emitter = this.getOrCreateEventEmitter();
+    emitter.on(event, handler);
+    void this.ensureEventEmitter().catch(() => {
     });
     return this;
   }

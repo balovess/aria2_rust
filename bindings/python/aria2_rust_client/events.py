@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import List, Optional
+from typing import Any, List, Optional
 
 try:
     from typing import Self
@@ -80,7 +80,7 @@ class EventSubscriber:
                         event_params = {}
 
                     event = DownloadEvent.from_rpc_notification(method, event_params)
-                    if self._should_include(event):
+                    if event is not None and self._should_include(event):
                         await self._queue.put(event)
             except asyncio.CancelledError:
                 break
@@ -115,6 +115,14 @@ class EventSubscriber:
     async def start(self) -> None:
         await self._connect()
         self._listener_task = asyncio.create_task(self._listen())
+
+    async def __aenter__(self) -> Self:
+        """Return the active subscriber for use with ``async with``."""
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        """Close the WebSocket and listener task when leaving the context."""
+        await self.close()
 
     def __aiter__(self) -> Self:
         return self

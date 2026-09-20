@@ -3,7 +3,7 @@
 use tracing::debug;
 
 use crate::http::digest_auth::DigestAuthChallenge;
-use crate::http::request_response::basic_auth;
+use crate::http::request::basic_auth;
 
 use super::HttpProxyTunnelConfig;
 

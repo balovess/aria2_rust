@@ -5,8 +5,6 @@
 //! against the request host to prevent cross-domain cookie injection.
 //! SameSite attribute support follows RFC 6265bis Section 5.4.7.
 
-pub mod jar;
-pub mod jar_date;
 pub mod netscape;
 pub mod parsing;
 pub mod storage;
@@ -26,9 +24,6 @@ mod tests_storage;
 #[cfg(test)]
 mod tests_storage_eviction;
 
-#[cfg(test)]
-mod tests_jar;
-
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -36,8 +31,6 @@ use tracing::warn;
 
 use parsing::{domain_matches, format_http_date, is_numeric_host, now_secs, parse_http_date};
 
-// Re-export key types from sub-modules for convenient access
-pub use jar::{CookieJar, JarCookie};
 pub use storage::{CookieStorage, DOMAIN_EVICTION_RATE, DOMAIN_EVICTION_TRIGGER};
 
 /// Maximum number of cookies per domain (matches C++ aria2 `MAX_COOKIE_PER_DOMAIN`).

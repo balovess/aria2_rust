@@ -10,7 +10,7 @@
 //!   ├── LpdPeer       - Discovered peer information
 //!   ├── LpdManager    - High-level coordinator for LPD operations
 //!   ├── constants     - MAX_PEERS_PER_HASH
-//!   └── re-exports    - Public API from submodules
+//!   └── public exports - Public API from the focused submodules
 //!
 //! lpd_manager/ (submodules)
 //!   ├── announce.rs   - LpdAnnouncer (UDP multicast sender/receiver)
@@ -34,7 +34,7 @@ mod discovery;
 #[cfg(test)]
 mod tests;
 
-// Re-export public API for backward compatibility
+// Public API for LPD announcement and parsing.
 pub use announce::LpdAnnouncer;
 pub use discovery::{is_private_address, parse_lpd_announcement};
 
@@ -50,7 +50,7 @@ use tracing::{debug, info, warn};
 use crate::constants;
 use crate::engine::lpd_receive_loop::LpdReceiveLoop;
 
-// Re-export LPD constants for backward compatibility with test imports
+// Public LPD constants.
 pub use constants::{
     LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS as DEFAULT_ANNOUNCE_INTERVAL_SECS,
     LPD_MULTICAST_ADDRESS as LPD_MULTICAST_ADDR, LPD_PORT,

@@ -316,10 +316,12 @@ class DownloadEvent:
     files: Optional[List[FileInfo]] = None
 
     @classmethod
-    def from_rpc_notification(cls, method: str, params: Dict[str, Any]) -> DownloadEvent:
+    def from_rpc_notification(
+        cls, method: str, params: Dict[str, Any]
+    ) -> Optional[DownloadEvent]:
         event_type = _EVENT_METHOD_MAP.get(method)
         if event_type is None:
-            event_type = EventType.DOWNLOAD_START
+            return None
         converted = _convert_keys(params)
         files_data = converted.get("files")
         files = None

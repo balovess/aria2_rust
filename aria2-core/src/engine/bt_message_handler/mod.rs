@@ -19,8 +19,8 @@
 //!   [`BtMessageDispatcher`](crate::engine::bt_message_dispatcher::BtMessageDispatcher)
 //!   with event-driven actions, flooding detection, and request slot tracking.
 //!   Mirrors C++ `DefaultBtInteractive`.
-//! - [`BtMessageHandler`] — Legacy stateless block request/receive utilities
-//!   (kept for backward compatibility; prefer `BtPeerMessageHandler`).
+//! - [`BtMessageHandler`] — Stateless block request/receive utilities used by
+//!   the piece download path.
 
 pub mod message_handler;
 pub mod peer_message_handler;

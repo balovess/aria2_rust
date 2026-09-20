@@ -15,7 +15,7 @@ use crate::engine::download_progress::ProgressUpdater;
 use crate::error::{Aria2Error, Result};
 use crate::http::HttpRequestPolicy;
 use crate::http::cookie::Cookie;
-use crate::http::cookie_storage::CookieStorage;
+use crate::http::cookie::CookieStorage;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};

@@ -799,7 +799,7 @@ impl MagnetDownloadCommand {
             &mut auth_factory,
             url,
             &auth_options,
-            crate::http::request_response::HttpMethod::Get,
+            crate::http::request::HttpMethod::Get,
             false,
             1,
         );

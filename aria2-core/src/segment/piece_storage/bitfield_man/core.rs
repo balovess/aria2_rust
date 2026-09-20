@@ -194,11 +194,6 @@ impl BitfieldMan {
         }
     }
 
-    /// Alias for `get_completed_length()` for backward compatibility.
-    pub fn get_total_completed_length(&self) -> u64 {
-        self.get_completed_length()
-    }
-
     /// Returns true if all pieces are completed.
     pub fn is_all_complete(&self) -> bool {
         self.num_pieces == 0 || self.cached_num_piece == self.num_pieces

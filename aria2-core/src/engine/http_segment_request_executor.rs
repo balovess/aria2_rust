@@ -421,7 +421,7 @@ mod tests {
             client: reqwest::Client::new(),
             request_policy: HttpRequestPolicy::default(),
             cookie_helper: CookieHelper::new(
-                Arc::new(crate::http::cookie_storage::CookieStorage::new()),
+                Arc::new(crate::http::cookie::CookieStorage::new()),
                 None,
             ),
             auth_options: AuthResolveOptions::default(),

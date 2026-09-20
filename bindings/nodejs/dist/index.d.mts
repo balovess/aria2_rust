@@ -125,6 +125,22 @@ interface ClientOptions {
     secret?: string;
 }
 
+declare class Aria2EventEmitter extends EventEmitter {
+    private wsUrl;
+    private ws;
+    private reconnectAttempts;
+    private reconnectTimer;
+    private closed;
+    private connectPromise;
+    constructor(wsUrl: string, _options?: ClientOptions);
+    connect(): Promise<void>;
+    private doConnect;
+    private setupMessageHandler;
+    private setupCloseHandler;
+    private attemptReconnect;
+    close(): Promise<void>;
+}
+
 declare const WS_EVENT_NAMES: readonly ["downloadStart", "downloadPause", "downloadStop", "downloadComplete", "downloadError", "btDownloadComplete", "btDownloadError"];
 type WsEventName = (typeof WS_EVENT_NAMES)[number];
 declare class Aria2Client {
@@ -134,6 +150,9 @@ declare class Aria2Client {
     private options;
     constructor(url?: string, options?: ClientOptions);
     private ensureEventEmitter;
+    private getOrCreateEventEmitter;
+    /** Connect the notification WebSocket before starting a download. */
+    connectEvents(): Promise<Aria2EventEmitter>;
     call<T = unknown>(method: string, params?: unknown[]): Promise<T>;
     addUri(uris: string[], options?: Record<string, unknown>, position?: number): Promise<string>;
     addTorrent(torrent: Buffer, options?: Record<string, unknown>, webSeedUris?: string[], position?: number): Promise<string>;
@@ -198,22 +217,6 @@ declare class RpcError extends Aria2Error {
 }
 declare class TimeoutError extends Aria2Error {
     constructor(message: string);
-}
-
-declare class Aria2EventEmitter extends EventEmitter {
-    private wsUrl;
-    private ws;
-    private reconnectAttempts;
-    private reconnectTimer;
-    private closed;
-    private connectPromise;
-    constructor(wsUrl: string, _options?: ClientOptions);
-    connect(): Promise<void>;
-    private doConnect;
-    private setupMessageHandler;
-    private setupCloseHandler;
-    private attemptReconnect;
-    close(): Promise<void>;
 }
 
 export { Aria2Client, Aria2Error, Aria2EventEmitter, AuthError, type ClientOptions, ConnectionError, type DhtStatus, type DownloadEvent, DownloadStatus, EventType, type FileInfo, type GlobalStat, type PeerInfo, RpcError, type ServerInfo, type ServerInfoIndex, type SessionInfo, type StatusInfo, TimeoutError, type TrackerInfo, type UriEntry, type VersionInfo };

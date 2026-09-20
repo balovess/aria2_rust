@@ -199,8 +199,7 @@ pub use engine::bt_message_validation::{
 #[cfg(feature = "bittorrent")]
 pub use engine::bt_piece::{
     Bitfield, PeerBitfieldEntry, PeerBitfieldTracker, PeerTrackerStats, PickedPiece, PieceInfo,
-    PieceManager, PiecePickStrategy, PiecePicker, PiecePickerConfig, PiecePriorityMode,
-    PieceSelectionStrategy,
+    PieceManager, PiecePicker, PiecePickerConfig, PiecePriorityMode, PieceSelectionStrategy,
 };
 pub use engine::download_engine::DownloadEngine;
 pub use engine::download_event_hooks::{

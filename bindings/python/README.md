@@ -69,13 +69,12 @@ from aria2_rust_client import Aria2Client, EventType
 
 async def main():
     async with Aria2Client("ws://localhost:6800/jsonrpc") as client:
-        # Subscribe to all events
-        async for event in client.subscribe_events():
-            print(f"Event: {event.event_type}, GID: {event.gid}")
-            
-        # Or filter specific event types
-        async for event in client.subscribe_events(filter=[EventType.DownloadStart, EventType.DownloadComplete]):
-            print(f"Download event: {event.event_type}")
+        # Use filter=[EventType.DOWNLOAD_START, EventType.DOWNLOAD_COMPLETE]
+        # to subscribe only to selected event types.
+        subscriber = await client.subscribe_events()
+        async with subscriber:
+            async for event in subscriber:
+                print(f"Event: {event.event_type}, GID: {event.gid}")
 
 asyncio.run(main())
 ```
@@ -167,6 +166,7 @@ metadata can be queried even when the task is created with `pause=true`.
 
 **Event Subscription:**
 - `subscribe_events(filter=None)` - Subscribe to download events
+- `async with subscriber` - Close the event WebSocket automatically
 
 **Lifecycle:**
 - `close()` - Close connection

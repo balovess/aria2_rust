@@ -28,23 +28,6 @@ pub enum PiecePriorityMode {
     RarestFirst,
 }
 
-/// Legacy alias kept for backward compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PiecePickStrategy {
-    /// Select pieces sequentially (good for streaming)
-    Sequential,
-    /// Select rarest pieces first (default BitTorrent strategy)
-    RarestFirst,
-    /// Select pieces randomly
-    Random,
-    /// Select pieces to form the longest contiguous sequence
-    LongestSequence,
-    /// Priority-based selection (higher priority pieces first)
-    Priority,
-    /// Geometric distribution (prefer earlier pieces)
-    Geometric,
-}
-
 /// Information about a single piece within the picker.
 ///
 /// Returned by [`PiecePicker::get_piece_info`].
@@ -68,7 +51,7 @@ pub struct PieceInfo {
 #[derive(Debug, Clone)]
 pub struct PiecePickerConfig {
     /// Selection strategy
-    pub strategy: PiecePickStrategy,
+    pub strategy: PieceSelectionStrategy,
     /// Number of pieces to request ahead
     pub request_queue_size: usize,
     /// Whether to prioritize end-game mode
@@ -78,7 +61,7 @@ pub struct PiecePickerConfig {
 impl Default for PiecePickerConfig {
     fn default() -> Self {
         Self {
-            strategy: PiecePickStrategy::RarestFirst,
+            strategy: PieceSelectionStrategy::RarestFirst,
             request_queue_size: 16,
             end_game_threshold: 0.95,
         }
