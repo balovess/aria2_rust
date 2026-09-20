@@ -424,6 +424,15 @@ impl DhtEngine {
         }
     }
 
+    /// Subscribe to lifecycle state transitions without polling [`Self::state`].
+    ///
+    /// The receiver always contains the latest state. Consumers should read
+    /// [`watch::Receiver::borrow`] for the current snapshot and await
+    /// [`watch::Receiver::changed`] for the next transition.
+    pub fn subscribe_state(&self) -> watch::Receiver<DhtEngineState> {
+        self.context.state_updates.subscribe()
+    }
+
     /// Wait until bootstrap has reached a usable state without polling.
     ///
     /// A running engine may still have an empty routing table when the public

@@ -128,6 +128,8 @@ class WebSocketTransport:
         self._ws: Any = None
         self._pending: Dict[int, asyncio.Future] = {}
         self._listener_task: Optional[asyncio.Task] = None
+        self._connect_task: Optional[asyncio.Task] = None
+        self._connection_generation = 0
         self._event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
         self._connected = False
 
@@ -143,16 +145,38 @@ class WebSocketTransport:
     async def _ensure_connected(self) -> None:
         if self._connected and self._ws is not None:
             return
+
+        generation = self._connection_generation
+        task = self._connect_task
+        if task is None:
+            task = asyncio.create_task(self._open_connection(generation))
+            self._connect_task = task
+
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if self._connection_generation != generation:
+                raise ConnectionError("Transport closed") from exc
+            raise
+        finally:
+            if self._connect_task is task:
+                self._connect_task = None
+
+    async def _open_connection(self, generation: int) -> None:
         try:
             import websockets
 
-            self._ws = await websockets.connect(
-                self._url, open_timeout=self._timeout
-            )
+            ws = await websockets.connect(self._url, open_timeout=self._timeout)
+            if generation != self._connection_generation:
+                await ws.close()
+                raise ConnectionError("Transport closed")
+            self._ws = ws
             self._connected = True
             self._listener_task = asyncio.create_task(self._listen())
         except asyncio.TimeoutError as exc:
             raise TimeoutError(f"WebSocket connection timed out: {exc}") from exc
+        except ConnectionError:
+            raise
         except Exception as exc:
             raise ConnectionError(f"WebSocket connection failed: {exc}") from exc
 
@@ -234,6 +258,17 @@ class WebSocketTransport:
             raise TimeoutError(f"Request timed out after {self._timeout}s")
 
     async def close(self) -> None:
+        self._connection_generation += 1
+
+        connect_task = self._connect_task
+        if connect_task is not None:
+            connect_task.cancel()
+            try:
+                await connect_task
+            except asyncio.CancelledError:
+                pass
+            self._connect_task = None
+
         if self._listener_task is not None:
             self._listener_task.cancel()
             try:

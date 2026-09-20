@@ -56,6 +56,25 @@ async fn test_dht_engine_start_shutdown() {
 }
 
 #[tokio::test]
+async fn test_dht_engine_state_subscription_is_event_driven() {
+    let engine = DhtEngine::start(DhtEngineConfig::local())
+        .await
+        .expect("local DHT engine should start");
+    let mut states = engine.subscribe_state();
+
+    assert_eq!(*states.borrow(), DhtEngineState::Running);
+
+    engine.shutdown();
+    states
+        .changed()
+        .await
+        .expect("state subscription should receive shutdown");
+    assert_eq!(*states.borrow(), DhtEngineState::ShuttingDown);
+
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
 async fn test_dht_engine_wait_until_ready_observes_bootstrap_transition() {
     let engine = DhtEngine::start(DhtEngineConfig {
         port: 0,

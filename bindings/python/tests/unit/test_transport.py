@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -7,7 +8,7 @@ import pytest
 import respx
 
 from aria2_rust_client.errors import AuthError, ConnectionError, RpcError, TimeoutError
-from aria2_rust_client.transport import HttpTransport
+from aria2_rust_client.transport import HttpTransport, WebSocketTransport
 
 
 @pytest.fixture
@@ -230,3 +231,25 @@ class TestSendRequest:
     @pytest.mark.asyncio
     async def test_close(self, transport):
         await transport.close()
+
+
+class TestWebSocketTransport:
+    @pytest.mark.asyncio
+    async def test_close_cancels_in_flight_connection(self, monkeypatch):
+        import websockets
+
+        started = asyncio.Event()
+
+        async def blocked_connect(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(websockets, "connect", blocked_connect)
+        transport = WebSocketTransport("ws://localhost:6800/jsonrpc")
+        request = asyncio.create_task(transport.send_request("aria2.getVersion", []))
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await transport.close()
+
+        with pytest.raises(ConnectionError, match="Transport closed"):
+            await asyncio.wait_for(request, timeout=1)
