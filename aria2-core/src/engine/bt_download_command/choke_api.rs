@@ -1,64 +1,110 @@
-use crate::engine::bt_choke_hooks::{
-    add_peer_to_tracking, check_snubbed_peers, handle_snubbed_peer, on_data_received_from_peer,
-    on_peer_choke, on_peer_unchoke, on_piece_received, optimistically_unchoke_by_identity,
-    rotate_choke_by_identity, select_best_peer_for_request,
-    select_best_peer_for_request_by_identity,
-};
-use crate::engine::choking_algorithm::{IdentityChokeAction, PeerIdentity};
-use crate::error::{Aria2Error, FatalError, Result};
+use crate::engine::choking_algorithm::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
+use crate::engine::peer_stats::PeerStats;
 
 use super::BtDownloadCommand;
 
 impl BtDownloadCommand {
     pub fn on_peer_choke(&mut self, peer_idx: usize) {
-        on_peer_choke(&mut self.choking_algo, peer_idx);
+        if let Some(algo) = self.choking_algo.as_mut()
+            && let Some(peer) = algo.get_peer_mut(peer_idx)
+        {
+            peer.peer_choking = true;
+        }
     }
 
     pub fn on_peer_unchoke(&mut self, peer_idx: usize) {
-        on_peer_unchoke(&mut self.choking_algo, peer_idx);
+        if let Some(algo) = self.choking_algo.as_mut()
+            && let Some(peer) = algo.get_peer_mut(peer_idx)
+        {
+            peer.peer_choking = false;
+        }
     }
 
     pub fn on_data_received_from_peer(&mut self, peer_idx: usize, bytes: u64) {
-        on_data_received_from_peer(&mut self.choking_algo, peer_idx, bytes);
+        if let Some(algo) = self.choking_algo.as_mut() {
+            algo.on_data_received(peer_idx, bytes);
+        }
     }
 
     pub fn check_snubbed_peers(&mut self) -> Vec<usize> {
-        check_snubbed_peers(&mut self.choking_algo)
+        self.choking_algo
+            .as_mut()
+            .map(ChokingAlgorithm::check_snubbed_peers)
+            .unwrap_or_default()
     }
 
     pub fn add_peer_to_tracking(&mut self, peer_id: [u8; 8], addr: std::net::SocketAddr) -> usize {
-        add_peer_to_tracking(&mut self.choking_algo, peer_id, addr)
+        let Some(algo) = self.choking_algo.as_mut() else {
+            return 0;
+        };
+
+        let mut full_id = [0u8; 20];
+        full_id[..8].copy_from_slice(&peer_id);
+        let index = algo.len();
+        algo.add_peer(PeerStats::new(full_id, addr));
+        index
     }
 
     pub fn select_best_peer_for_request(&self) -> Option<usize> {
-        select_best_peer_for_request(&self.choking_algo)
+        let algo = self.choking_algo.as_ref()?;
+        let peers = algo.peers();
+        if peers.is_empty() {
+            return None;
+        }
+
+        let best_unchoked = peers
+            .iter()
+            .enumerate()
+            .filter(|(_, peer)| {
+                !peer.peer_choking && !peer.is_snubbed && peer.is_eligible_for_selection()
+            })
+            .max_by(|(_, a), (_, b)| {
+                a.download_speed
+                    .partial_cmp(&b.download_speed)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index);
+
+        best_unchoked.or_else(|| {
+            peers
+                .iter()
+                .enumerate()
+                .filter(|(_, peer)| peer.is_eligible_for_selection())
+                .max_by(|(_, a), (_, b)| {
+                    a.download_speed
+                        .partial_cmp(&b.download_speed)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(index, _)| index)
+        })
     }
 
     pub fn rotate_choke_by_identity(&mut self) -> Vec<IdentityChokeAction> {
-        rotate_choke_by_identity(&mut self.choking_algo)
+        self.choking_algo
+            .as_mut()
+            .map(ChokingAlgorithm::rotate_choke_by_identity)
+            .unwrap_or_default()
     }
 
     pub fn optimistically_unchoke_by_identity(&mut self) -> Option<PeerIdentity> {
-        optimistically_unchoke_by_identity(&mut self.choking_algo)
+        self.choking_algo
+            .as_mut()
+            .and_then(ChokingAlgorithm::optimistically_unchoke_by_identity)
     }
 
     pub fn select_best_peer_for_request_by_identity(&self) -> Option<PeerIdentity> {
-        select_best_peer_for_request_by_identity(&self.choking_algo)
-    }
-
-    pub async fn handle_snubbed_peer(&mut self, peer_idx: usize) -> Result<()> {
-        handle_snubbed_peer(&mut self.choking_algo, peer_idx)
-            .await
-            .map_err(|_| {
-                Aria2Error::Fatal(FatalError::Config(format!(
-                    "Failed to handle snubbed peer {}",
-                    peer_idx
-                )))
-            })
+        self.select_best_peer_for_request().and_then(|index| {
+            self.choking_algo
+                .as_ref()?
+                .get_peer(index)
+                .map(PeerIdentity::from)
+        })
     }
 
     pub fn on_piece_received(&mut self, peer_idx: usize, bytes: u64) {
-        on_piece_received(&mut self.choking_algo, peer_idx, bytes as u32);
+        if let Some(algo) = self.choking_algo.as_mut() {
+            algo.on_data_received(peer_idx, bytes);
+        }
     }
 
     /// Explicitly mark a peer as snubbed (algorithm-level snubbing).

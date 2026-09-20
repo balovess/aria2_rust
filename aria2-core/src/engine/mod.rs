@@ -41,8 +41,6 @@ pub mod timer;
 #[cfg(feature = "bittorrent")]
 pub(crate) mod bt_checkpoint;
 #[cfg(feature = "bittorrent")]
-pub mod bt_choke_hooks;
-#[cfg(feature = "bittorrent")]
 pub mod bt_choke_manager;
 #[cfg(all(test, feature = "bittorrent"))]
 pub mod bt_choke_manager_tests;
