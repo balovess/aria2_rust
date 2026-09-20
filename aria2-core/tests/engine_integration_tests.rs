@@ -936,7 +936,7 @@ async fn engine_multi_task_parallel() {
             man.add_group(vec![url_c], test_download_options(temp_dir.path())),
         ]
     };
-    let engine_cmd_tx = engine.engine_cmd_tx();
+    let engine_cmd_tx = engine.engine_command_sender();
     for gid in gids
         .into_iter()
         .map(|result| result.expect("group should be created"))

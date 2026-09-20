@@ -58,7 +58,7 @@
 //! must not block (the recommended pattern is an `mpsc` send consumed by a
 //! dedicated task).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, OnceLock};
 
 use tokio::sync::broadcast;
@@ -262,6 +262,13 @@ pub trait DownloadEventListener: Send + Sync {
 /// both generations, so recently-seen events are never forgotten prematurely.
 const DEDUP_GENERATION_CAPACITY: usize = 4096;
 
+/// Number of metadata-resolution events retained for late library observers.
+///
+/// Metadata resolution is a one-shot transition, so a bounded replay history
+/// is enough to bridge the small gap between task submission and a caller
+/// starting its await. The event stream remains loss-aware for older entries.
+const METADATA_HISTORY_CAPACITY: usize = 1024;
+
 /// Two-generation bounded de-duplication ledger for one-shot events.
 #[derive(Default)]
 struct OneShotLedger {
@@ -314,6 +321,8 @@ pub struct DownloadEventHooks {
     /// Bounded event stream for library consumers that do not need to
     /// implement the synchronous listener trait.
     notifications: broadcast::Sender<DownloadNotification>,
+    /// Recent structured metadata transitions for late high-level waiters.
+    metadata_history: std::sync::RwLock<VecDeque<MetadataResolvedEvent>>,
 }
 
 /// Type alias for the global hook map.
@@ -331,6 +340,7 @@ impl DownloadEventHooks {
             listeners: std::sync::RwLock::new(Vec::new()),
             one_shot: std::sync::RwLock::new(OneShotLedger::default()),
             notifications,
+            metadata_history: std::sync::RwLock::new(VecDeque::new()),
         }
     }
 
@@ -375,6 +385,19 @@ impl DownloadEventHooks {
         DownloadEventStream {
             receiver: self.notifications.subscribe(),
         }
+    }
+
+    /// Return the most recent metadata transition involving `gid`.
+    ///
+    /// This is used by high-level handles to close the race between creating
+    /// an event receiver and checking whether metadata was already resolved.
+    pub(crate) fn metadata_event_for(&self, gid: GroupId) -> Option<MetadataResolvedEvent> {
+        self.metadata_history
+            .recover()
+            .iter()
+            .rev()
+            .find(|event| event.metadata_gid == gid || event.download_gids.contains(&gid))
+            .cloned()
     }
 
     /// Notify every registered observer of `event` for `gid`.
@@ -436,6 +459,15 @@ impl DownloadEventHooks {
     /// into the request manager. The event is synchronous and follows the
     /// same non-blocking, non-panicking listener contract as lifecycle events.
     pub fn notify_metadata_resolved(&self, event: MetadataResolvedEvent) {
+        {
+            let mut history = self.metadata_history.recover_mut();
+            history.retain(|previous| previous.metadata_gid != event.metadata_gid);
+            history.push_back(event.clone());
+            while history.len() > METADATA_HISTORY_CAPACITY {
+                history.pop_front();
+            }
+        }
+
         let listeners: Vec<Arc<dyn DownloadEventListener>> = {
             let mut guard = self.listeners.recover_mut();
             guard.retain(|listener| listener.is_alive());

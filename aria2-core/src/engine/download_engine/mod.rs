@@ -347,12 +347,6 @@ impl DownloadEngine {
         self.shutdown_tx.take()
     }
 
-    /// Get a clone of the engine command sender for sending commands like
-    /// `ForceHaltAll` from external tasks (e.g., second Ctrl+C handler).
-    pub fn engine_cmd_tx(&self) -> EngineCommandSender {
-        self.engine_cmd_tx.clone()
-    }
-
     /// Access the download lifecycle event bus.
     ///
     /// Layers above `aria2-core` use this to install a

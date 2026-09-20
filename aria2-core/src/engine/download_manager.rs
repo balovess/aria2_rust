@@ -29,6 +29,8 @@ pub enum DownloadManagerError {
     Preparation(#[source] Aria2Error),
     #[error("download state operation failed: {0}")]
     State(#[source] Aria2Error),
+    #[error("download event stream failed: {0}")]
+    EventStream(#[source] tokio::sync::broadcast::error::RecvError),
     #[error("waiting for the download was cancelled")]
     WaitCancelled,
 }
@@ -414,6 +416,42 @@ impl DownloadHandle {
         }
     }
 
+    /// Wait for structured metadata resolution involving this download.
+    ///
+    /// This is intended for magnet and metadata-backed downloads. It returns
+    /// the parent metadata GID and every child download GID created from that
+    /// metadata. The wait is safe even when called after submission: the
+    /// manager retains a bounded history of recent metadata events and the
+    /// receiver is installed before that history is checked.
+    ///
+    /// Ordinary HTTP downloads do not emit this event and should use
+    /// [`Self::wait`] instead.
+    pub async fn wait_for_metadata(
+        &self,
+    ) -> std::result::Result<crate::MetadataResolvedEvent, DownloadManagerError> {
+        self.wait_for_metadata_with_cancellation(&CancellationToken::new())
+            .await
+    }
+
+    /// Wait for metadata resolution while allowing the caller to cancel the
+    /// wait without changing the download.
+    pub async fn wait_for_metadata_with_cancellation(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<crate::MetadataResolvedEvent, DownloadManagerError> {
+        let mut events = self.manager.subscribe();
+        if let Some(event) = self.manager.event_hooks.metadata_event_for(self.gid) {
+            return Ok(event);
+        }
+
+        tokio::select! {
+            result = events.recv_metadata_for(self.gid) => {
+                result.map_err(DownloadManagerError::EventStream)
+            }
+            _ = cancellation.cancelled() => Err(DownloadManagerError::WaitCancelled),
+        }
+    }
+
     /// Wait for a terminal result without polling the RPC status or file list.
     ///
     /// The manager's generation signal is level-sensitive, so a notification
@@ -607,6 +645,62 @@ mod tests {
             .expect("status wait task must not panic")
             .expect("status transition should be observed");
         assert_eq!(result.status, DownloadStatus::Paused);
+    }
+
+    #[tokio::test]
+    async fn handle_waits_for_metadata_and_replays_a_late_subscription() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["magnet:?xt=urn:btih:example".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let event = crate::MetadataResolvedEvent::new(handle.gid(), vec![GroupId::new(0x42)]);
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.wait_for_metadata().await }
+        });
+
+        tokio::task::yield_now().await;
+        manager.event_hooks.notify_metadata_resolved(event.clone());
+
+        let resolved = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("metadata wait must be event-driven")
+            .expect("metadata wait task must not panic")
+            .expect("metadata event should be observed");
+        assert_eq!(resolved, event);
+
+        let replayed = handle
+            .wait_for_metadata()
+            .await
+            .expect("recent metadata event should be replayed");
+        assert_eq!(replayed, event);
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_can_be_cancelled_without_changing_download_state() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["magnet:?xt=urn:btih:example".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let result = handle
+            .wait_for_metadata_with_cancellation(&cancellation)
+            .await;
+
+        assert!(matches!(result, Err(DownloadManagerError::WaitCancelled)));
+        assert!(handle.status_snapshot().is_some());
     }
 
     #[tokio::test]

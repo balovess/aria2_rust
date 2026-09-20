@@ -506,7 +506,7 @@ impl App {
             let tui_command_tx = tui_enabled.then(|| engine.engine_command_sender());
             engine.set_keep_alive(startup_plan.keeps_engine_alive());
             if let Some(tx) = engine.take_shutdown_sender() {
-                let cmd_tx = engine.engine_cmd_tx();
+                let cmd_tx = engine.engine_command_sender();
                 tokio::spawn(async move {
                     run_shutdown_signal_handler(tx, cmd_tx).await;
                 });
@@ -515,7 +515,8 @@ impl App {
             // `--stop=N` / `--stop-with-process=PID` shutdown triggers.
             // Mirrors C++ `DownloadEngineFactory`, which registers a
             // `TimedHaltCommand` / `WatchProcessCommand` as routine commands.
-            self.spawn_halt_watchers(engine.engine_cmd_tx()).await;
+            self.spawn_halt_watchers(engine.engine_command_sender())
+                .await;
 
             drop(engine_lock);
             info!(
