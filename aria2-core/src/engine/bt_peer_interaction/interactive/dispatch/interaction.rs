@@ -30,7 +30,7 @@ impl BtPeerInteractive {
     /// 3. Receive messages and dispatch to handlers
     /// 4. `detect_flooding()` — detect choke/keepalive flooding
     /// 5. `decide_choking()` — send choke/unchoke if needed
-    /// 6. `decide_interest()` — send interested/not-interested if needed
+    /// 6. `decide_interest_with_callback()` — send interested/not-interested if needed
     /// 7. `check_have()` — advertise newly completed pieces
     /// 8. `should_send_keepalive()` — send keepalive if interval elapsed
     /// 9. `remove_completed_piece()` — handled by handler

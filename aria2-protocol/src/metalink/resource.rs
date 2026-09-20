@@ -80,14 +80,6 @@ impl ResourceType {
         }
     }
 
-    /// Alias for [`from_v3_type`] used by the Metalink parser.
-    ///
-    /// The parser calls `ResourceType::from_url_type_str(val)` to match
-    /// the V3 `<url type="...">` attribute.
-    pub fn from_url_type_str(type_attr: &str) -> Self {
-        Self::from_v3_type(type_attr)
-    }
-
     /// Whether this resource type is supported for downloading.
     ///
     /// Mirrors C++ `MetalinkEntry::dropUnsupportedResource()` — only

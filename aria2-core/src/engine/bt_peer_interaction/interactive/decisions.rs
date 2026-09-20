@@ -95,24 +95,6 @@ impl BtPeerInteractive {
         }
     }
 
-    /// Legacy decide_interest using heuristic (for backward compat).
-    ///
-    /// Prefer `decide_interest_with_callback` for proper PieceStorage integration.
-    #[allow(dead_code)]
-    pub(crate) fn decide_interest(&self, conn: &BtPeerConn) -> InterestDecision {
-        // Heuristic: if peer is a seeder or has a session resource,
-        // we are likely interested. This matches the original simplified
-        // behavior before callback integration.
-        let should_be_interested = conn.session_resource.is_some();
-        if should_be_interested && !self.am_interested {
-            InterestDecision::Interested
-        } else if !should_be_interested && self.am_interested {
-            InterestDecision::NotInterested
-        } else {
-            InterestDecision::NoChange
-        }
-    }
-
     /// Check for new Have messages to send.
     ///
     /// Mirrors C++ `checkHave()`: queries `PieceStorage` for piece indexes

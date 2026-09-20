@@ -37,20 +37,20 @@ fn test_piece_data_provider_from_memory() {
 fn test_seed_manager_exit_by_time() {
     let cond = SeedExitCondition::with_time(1);
     let mut mgr = make_empty_mgr(cond);
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 
     mgr.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(2);
-    assert!(mgr.should_exit());
+    assert!(mgr.should_stop_seeding());
 }
 
 #[test]
 fn test_seed_manager_exit_by_ratio() {
     let cond = SeedExitCondition::with_ratio(1.0);
     let mut mgr = make_empty_mgr_with_downloaded(1000, 200, cond);
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 
     mgr.total_uploaded = 1200;
-    assert!(mgr.should_exit());
+    assert!(mgr.should_stop_seeding());
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn test_seed_manager_no_exit_infinite() {
     mgr.seeding_start_time = std::time::Instant::now()
         .checked_sub(std::time::Duration::from_secs(3600))
         .unwrap_or(std::time::Instant::now());
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 }
 
 #[test]
@@ -104,11 +104,11 @@ fn test_exit_condition_combined_logic() {
         seed_ratio: Some(1.5),
     };
     let mut mgr = make_empty_mgr_with_downloaded(1000, 400, cond);
-    assert!(!mgr.should_exit());
+    assert!(!mgr.should_stop_seeding());
 
     mgr.total_uploaded = 1600;
     mgr.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(15);
-    assert!(mgr.should_exit(), "Both time and ratio met");
+    assert!(mgr.should_stop_seeding(), "Both time and ratio met");
 
     let mut mgr2 = make_empty_mgr_with_downloaded(
         1000,
@@ -119,7 +119,10 @@ fn test_exit_condition_combined_logic() {
         },
     );
     mgr2.seeding_start_time = std::time::Instant::now() - std::time::Duration::from_secs(9);
-    assert!(!mgr2.should_exit(), "Neither time nor ratio fully met yet");
+    assert!(
+        !mgr2.should_stop_seeding(),
+        "Neither time nor ratio fully met yet"
+    );
 }
 
 #[test]

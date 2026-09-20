@@ -137,20 +137,6 @@ fn test_decide_interest_no_change() {
     assert_eq!(decision, InterestDecision::NoChange);
 }
 
-#[test]
-fn test_decide_interest_legacy_heuristic() {
-    let info_hash = [0u8; 20];
-    let mut interactive = BtPeerInteractive::new(info_hash, 100);
-    interactive.am_interested = false;
-
-    let mut conn = make_test_conn();
-    conn.allocate_session_resource(256 * 1024, 1024 * 1024);
-
-    // Legacy: session_resource.is_some() → should_be_interested = true
-    let decision = interactive.decide_interest(&conn);
-    assert_eq!(decision, InterestDecision::Interested);
-}
-
 // ── check_have_with_callback tests ──────────────────────────────────
 
 #[test]

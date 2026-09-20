@@ -320,8 +320,7 @@ impl MetalinkDocument {
                                         "type" => {
                                             // V3 <url type="http|https|ftp|bittorrent">
                                             // Maps to MetalinkResource::TYPE.
-                                            entry.resource_type =
-                                                ResourceType::from_url_type_str(val);
+                                            entry.resource_type = ResourceType::from_v3_type(val);
                                         }
                                         _ => {}
                                     }

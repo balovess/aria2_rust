@@ -157,11 +157,6 @@ impl BtSeedManager {
         false
     }
 
-    /// Alias for `should_stop_seeding()`, matching C++ `shouldExit()` naming.
-    pub fn should_exit(&self) -> bool {
-        self.should_stop_seeding()
-    }
-
     /// Whether a seed criterion requested runtime halt.
     pub fn halt_requested(&self) -> bool {
         self.halt_requested

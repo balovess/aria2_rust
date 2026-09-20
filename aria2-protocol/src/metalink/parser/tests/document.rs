@@ -281,20 +281,17 @@ fn test_namespace_detection_v4() {
 // ========================================================================
 
 #[test]
-fn test_resource_type_from_url_type_str() {
-    assert_eq!(ResourceType::from_url_type_str("http"), ResourceType::Http);
+fn test_resource_type_from_v3_type_in_document() {
+    assert_eq!(ResourceType::from_v3_type("http"), ResourceType::Http);
+    assert_eq!(ResourceType::from_v3_type("HTTPS"), ResourceType::Https);
+    assert_eq!(ResourceType::from_v3_type("ftp"), ResourceType::Ftp);
     assert_eq!(
-        ResourceType::from_url_type_str("HTTPS"),
-        ResourceType::Https
-    );
-    assert_eq!(ResourceType::from_url_type_str("ftp"), ResourceType::Ftp);
-    assert_eq!(
-        ResourceType::from_url_type_str("bittorrent"),
+        ResourceType::from_v3_type("bittorrent"),
         ResourceType::BitTorrent
     );
     // Unknown type strings map to NotSupported per C++ MetalinkParserController::setTypeOfResource()
     assert_eq!(
-        ResourceType::from_url_type_str("unknown"),
+        ResourceType::from_v3_type("unknown"),
         ResourceType::NotSupported
     );
 }
