@@ -73,15 +73,15 @@ fn test_add_remove_peers() {
     assert_eq!(algo.len(), 3);
 
     // Remove middle peer
-    algo.remove_peer(1);
+    algo.remove_peers(&[1]);
     assert_eq!(algo.len(), 2);
 
     // Remove first peer
-    algo.remove_peer(0);
+    algo.remove_peers(&[0]);
     assert_eq!(algo.len(), 1);
 
     // Remove last peer
-    algo.remove_peer(0);
+    algo.remove_peers(&[0]);
     assert!(algo.is_empty());
 }
 
@@ -107,12 +107,12 @@ fn test_rotate_choke_selects_top_k() {
     // Peer 5: very low
     algo.add_peer(create_test_peer(10000.0, 100.0, true, true));
 
-    let actions = algo.rotate_choke();
+    let actions = algo.rotate_choke_by_identity();
 
     // Count unchoke actions
     let unchoke_count = actions
         .iter()
-        .filter(|a| matches!(a, ChokeAction::Unchoke(_)))
+        .filter(|a| matches!(a, IdentityChokeAction::Unchoke(_)))
         .count();
 
     // Should have exactly 3 unchoke actions (top 3 by score)
@@ -137,12 +137,12 @@ fn test_rotate_choke_minimizes_changes() {
     algo.add_peer(create_test_peer(40000.0, 400.0, true, true)); // Choked, lower speed
 
     // First rotation: top 2 should stay unchoked (they're already there)
-    let actions = algo.rotate_choke();
+    let actions = algo.rotate_choke_by_identity();
 
     // Count NoChange actions for the already-unchoked peers
     let no_change_count = actions
         .iter()
-        .filter(|a| matches!(a, ChokeAction::NoChange(_)))
+        .filter(|a| matches!(a, IdentityChokeAction::NoChange(_)))
         .count();
 
     // At least the top 2 should have NoChange (they were already unchoked and remain so)
@@ -153,10 +153,10 @@ fn test_rotate_choke_minimizes_changes() {
     );
 
     // Second rotation without changes: should produce mostly NoChange
-    let actions2 = algo.rotate_choke();
+    let actions2 = algo.rotate_choke_by_identity();
     let no_change_count2 = actions2
         .iter()
-        .filter(|a| matches!(a, ChokeAction::NoChange(_)))
+        .filter(|a| matches!(a, IdentityChokeAction::NoChange(_)))
         .count();
 
     // All should be NoChange on second call (idempotent-safe)
@@ -357,20 +357,25 @@ fn test_snubbed_peer_always_remains_choked() {
     assert_eq!(algo.snubbed_count(), 1);
 
     // Run choke rotation - snubbed peer should be choked despite high score
-    let actions = algo.rotate_choke();
+    let peer0_identity = PeerIdentity::from(&algo.peers()[0]);
+    let actions = algo.rotate_choke_by_identity();
 
     // Find action for peer 0 - it should be Choked or NoChange(if already choked)
-    let peer0_action = actions
-        .iter()
-        .find(|a| matches!(a, ChokeAction::NoChange(0) | ChokeAction::Choke(0)));
+    let peer0_action = actions.iter().find(|action| {
+        action.identity() == peer0_identity
+            && matches!(
+                action,
+                IdentityChokeAction::NoChange(_) | IdentityChokeAction::Choke(_)
+            )
+    });
     assert!(
         peer0_action.is_some(),
         "Peer 0 should have an action in results"
     );
     // Peer 0 started as choked (am_choking=true), so with -1000 score it stays choked
     match peer0_action.unwrap() {
-        ChokeAction::Choke(_) | ChokeAction::NoChange(_) => {} // Expected
-        ChokeAction::Unchoke(_) => panic!("Snubbed peer 0 should NEVER be unchoked"),
+        IdentityChokeAction::Choke(_) | IdentityChokeAction::NoChange(_) => {}
+        IdentityChokeAction::Unchoke(_) => panic!("Snubbed peer 0 should NEVER be unchoked"),
     }
 }
 

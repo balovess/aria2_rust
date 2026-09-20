@@ -1,6 +1,6 @@
 //! Unchoke candidate selection logic (tit-for-tat rotation)
 
-use super::{ChokeAction, ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
+use super::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::constants;
 
 /// Core algorithm: performs tit-for-tat choke rotation.
@@ -56,59 +56,6 @@ pub(super) fn rotate_choke_by_identity(algo: &mut ChokingAlgorithm) -> Vec<Ident
             }
         })
         .collect()
-}
-
-pub(super) fn rotate_choke(algo: &mut ChokingAlgorithm) -> Vec<ChokeAction> {
-    // Step 1: Check and mark snubbed peers
-    check_snubbed_peers_internal(algo);
-
-    if algo.peers.is_empty() {
-        return vec![];
-    }
-
-    let max_slots = algo.config.max_upload_slots;
-
-    // Step 2: Calculate scores and sort indices by score descending
-    let mut scored_peers: Vec<(usize, f64)> = algo
-        .peers
-        .iter()
-        .enumerate()
-        .map(|(i, peer)| {
-            let is_snubbed = algo.snubbed_peers.contains(&peer.into());
-            (i, calculate_peer_score(peer, is_snubbed))
-        })
-        .collect();
-
-    // Sort by score descending
-    scored_peers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Step 3 & 4: Determine which peers should be unchoked vs choked
-    let mut actions = Vec::new();
-    let mut _new_unchoked_indices = std::collections::HashSet::new();
-
-    // Top K peers should be unchoked
-    for (rank, &(idx, _)) in scored_peers.iter().enumerate() {
-        if rank < max_slots {
-            // Should be unchoked
-            if algo.peers[idx].am_choking {
-                actions.push(ChokeAction::Unchoke(idx));
-                algo.peers[idx].record_unchoke();
-            } else {
-                actions.push(ChokeAction::NoChange(idx));
-            }
-            _new_unchoked_indices.insert(idx);
-        } else {
-            // Should be choked
-            if !algo.peers[idx].am_choking {
-                actions.push(ChokeAction::Choke(idx));
-                algo.peers[idx].record_choke();
-            } else {
-                actions.push(ChokeAction::NoChange(idx));
-            }
-        }
-    }
-
-    actions
 }
 
 /// Internal implementation of snubbed checking.

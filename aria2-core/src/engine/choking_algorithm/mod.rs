@@ -28,17 +28,6 @@ impl From<&PeerStats> for PeerIdentity {
     }
 }
 
-/// Action to take for a peer during choke rotation
-#[derive(Debug, Clone, PartialEq)]
-pub enum ChokeAction {
-    /// Unchoke peer at the legacy vector index.
-    Unchoke(usize),
-    /// Choke peer at the legacy vector index.
-    Choke(usize),
-    /// No action needed for this peer.
-    NoChange(usize),
-}
-
 /// Identity-based choke decision returned by the modern API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityChokeAction {
@@ -143,8 +132,7 @@ impl ChokingAlgorithm {
         self.optimistic_rotation_counter %= self.peers.len().max(1);
     }
 
-    /// Legacy index removal at the command boundary. The index is resolved to
-    /// the peer's stable identity before removing exactly that vector entry.
+    /// Remove peers by their indexes in the active connection list.
     pub fn remove_peers(&mut self, indices: &[usize]) {
         let mut removed = vec![false; self.peers.len()];
         for &index in indices {
@@ -174,10 +162,6 @@ impl ChokingAlgorithm {
         self.optimistic_rotation_counter %= self.peers.len().max(1);
     }
 
-    pub fn remove_peer(&mut self, idx: usize) {
-        self.remove_peers(&[idx]);
-    }
-
     /// Returns the number of peers being managed
     pub fn len(&self) -> usize {
         self.peers.len()
@@ -186,20 +170,6 @@ impl ChokingAlgorithm {
     /// Returns true if there are no peers
     pub fn is_empty(&self) -> bool {
         self.peers.is_empty()
-    }
-
-    /// Core algorithm: called every ~10 seconds (config.choke_rotation_interval_secs)
-    ///
-    /// This performs the tit-for-tat choke rotation:
-    /// 1. Check and mark snubbed peers (timeout-based)
-    /// 2. Calculate score for each peer
-    /// 3. Sort by score descending
-    /// 4. Top K get Unchoke, rest get Choke
-    ///    BUT: keep currently unchoked peers unchoked if they're still in top K
-    ///    (avoid churn - only change what's necessary)
-    /// 5. Return only the actions that changed state
-    pub fn rotate_choke(&mut self) -> Vec<ChokeAction> {
-        selection::rotate_choke(self)
     }
 
     /// Rotate choke state while returning stable peer identities.
