@@ -127,10 +127,13 @@ export class Aria2EventEmitter extends EventEmitter {
         return;
       }
 
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return;
+      }
       const obj = parsed as Record<string, unknown>;
-      if (!('method' in obj)) return;
+      if (typeof obj.method !== 'string') return;
 
-      const method = obj.method as string;
+      const method = obj.method;
       const eventName = EVENT_MAP[method];
       if (!eventName) return;
 

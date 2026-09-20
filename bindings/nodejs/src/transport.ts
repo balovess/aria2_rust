@@ -257,12 +257,15 @@ export class WebSocketTransport implements Transport {
       return;
     }
 
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return;
+    }
     const obj = parsed as Record<string, unknown>;
 
-    if ('method' in obj && !('id' in obj)) {
+    if (typeof obj.method === 'string' && !('id' in obj)) {
       const notification = obj as unknown as JsonRpcNotification;
       if (this.onEvent) {
-        this.onEvent(notification.method, notification.params);
+        this.onEvent(notification.method, Array.isArray(notification.params) ? notification.params : []);
       }
       return;
     }
@@ -275,8 +278,15 @@ export class WebSocketTransport implements Transport {
       clearTimeout(pending.timer);
       this.pending.delete(response.id);
 
-      if (response.error) {
-        pending.reject(new RpcError(response.error.message, response.error.code));
+      if (response.error && typeof response.error === 'object') {
+        pending.reject(new RpcError(
+          typeof response.error.message === 'string'
+            ? response.error.message
+            : 'Unknown RPC error',
+          typeof response.error.code === 'number' ? response.error.code : -1,
+        ));
+      } else if ('error' in response) {
+        pending.reject(new RpcError('Malformed RPC error response', -1));
       } else {
         pending.resolve(response.result);
       }

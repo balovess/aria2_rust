@@ -182,7 +182,7 @@ fn test_persistence_v3_roundtrip() {
     );
 
     // Verify each node's address survived the roundtrip
-    let expected_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.addr).collect();
+    let expected_addrs: Vec<SocketAddr> = nodes.iter().map(|n| n.addr()).collect();
     let actual_addrs: Vec<SocketAddr> = deserialized.nodes.iter().map(|n| n.addr).collect();
     assert_eq!(
         actual_addrs, expected_addrs,

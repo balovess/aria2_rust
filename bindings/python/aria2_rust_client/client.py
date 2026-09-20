@@ -129,6 +129,16 @@ def _require_bytes(value: Any, name: str) -> None:
         raise TypeError(f"{name} must be bytes or bytearray")
 
 
+def _require_gid(value: Any) -> None:
+    if not isinstance(value, str) or not value:
+        raise TypeError("gid must be a non-empty string")
+
+
+def _require_dict(value: Any, name: str) -> None:
+    if not isinstance(value, dict):
+        raise TypeError(f"{name} must be a dictionary")
+
+
 class Aria2Client:
     def __init__(
         self,
@@ -168,6 +178,8 @@ class Aria2Client:
         position: Optional[int] = None,
     ) -> str:
         _require_string_list(uris, "uris", allow_empty=False)
+        if options is not None:
+            _require_dict(options, "options")
         if position is not None:
             _require_non_negative_int(position, "position")
         params: list = [uris]
@@ -186,6 +198,8 @@ class Aria2Client:
         position: Optional[int] = None,
     ) -> str:
         _require_bytes(torrent, "torrent")
+        if options is not None:
+            _require_dict(options, "options")
         if web_seed_uris is not None:
             _require_string_list(web_seed_uris, "web_seed_uris")
         if position is not None:
@@ -208,6 +222,8 @@ class Aria2Client:
         position: Optional[int] = None,
     ) -> List[str]:
         _require_bytes(metalink, "metalink")
+        if options is not None:
+            _require_dict(options, "options")
         if position is not None:
             _require_non_negative_int(position, "position")
         encoded = base64.b64encode(metalink).decode("ascii")
@@ -222,22 +238,27 @@ class Aria2Client:
         return _parse_string_list(result, "addMetalink")
 
     async def remove(self, gid: str) -> str:
+        _require_gid(gid)
         result = await self._call("aria2.remove", [gid])
         return _parse_string_result(result, "remove")
 
     async def pause(self, gid: str) -> str:
+        _require_gid(gid)
         result = await self._call("aria2.pause", [gid])
         return _parse_string_result(result, "pause")
 
     async def unpause(self, gid: str) -> str:
+        _require_gid(gid)
         result = await self._call("aria2.unpause", [gid])
         return _parse_string_result(result, "unpause")
 
     async def force_pause(self, gid: str) -> str:
+        _require_gid(gid)
         result = await self._call("aria2.forcePause", [gid])
         return _parse_string_result(result, "forcePause")
 
     async def force_remove(self, gid: str) -> str:
+        _require_gid(gid)
         result = await self._call("aria2.forceRemove", [gid])
         return _parse_string_result(result, "forceRemove")
 
@@ -256,6 +277,7 @@ class Aria2Client:
     async def change_position(
         self, gid: str, position: int, mode: Union[PositionMode, str]
     ) -> int:
+        _require_gid(gid)
         _require_non_negative_int(position, "position")
         _require_position_mode(mode)
         result = await self._call("aria2.changePosition", [gid, position, mode])
@@ -273,6 +295,7 @@ class Aria2Client:
         add_uris: List[str],
         position: Optional[int] = None,
     ) -> List[str]:
+        _require_gid(gid)
         _require_non_negative_int(file_index, "file_index")
         _require_string_list(delete_uris, "delete_uris")
         _require_string_list(add_uris, "add_uris")
@@ -287,6 +310,7 @@ class Aria2Client:
     async def tell_status(
         self, gid: str, keys: Optional[List[str]] = None
     ) -> StatusInfo:
+        _require_gid(gid)
         if keys is not None:
             _require_string_list(keys, "keys")
         params: list = [gid]
@@ -305,22 +329,27 @@ class Aria2Client:
         metadata probe has completed.  Magnet downloads likewise require
         metadata exchange before their file list is complete.
         """
+        _require_gid(gid)
         result = await self._call("aria2.getFiles", [gid])
         return _parse_dict_list(result, "getFiles", FileInfo.from_dict)
 
     async def get_uris(self, gid: str) -> List[UriEntry]:
+        _require_gid(gid)
         result = await self._call("aria2.getUris", [gid])
         return _parse_dict_list(result, "getUris", UriEntry.from_dict)
 
     async def get_servers(self, gid: str) -> List[ServerInfoIndex]:
+        _require_gid(gid)
         result = await self._call("aria2.getServers", [gid])
         return _parse_dict_list(result, "getServers", ServerInfoIndex.from_dict)
 
     async def get_peers(self, gid: str) -> List[PeerInfo]:
+        _require_gid(gid)
         result = await self._call("aria2.getPeers", [gid])
         return _parse_dict_list(result, "getPeers", PeerInfo.from_dict)
 
     async def get_trackers(self, gid: str) -> List[TrackerInfo]:
+        _require_gid(gid)
         result = await self._call("aria2.getTrackers", [gid])
         return _parse_dict_list(result, "getTrackers", TrackerInfo.from_dict)
 
@@ -378,6 +407,7 @@ class Aria2Client:
         return _parse_string_result(result, "purgeDownloadResult")
 
     async def remove_download_result(self, gid: str) -> str:
+        _require_gid(gid)
         result = await self._call("aria2.removeDownloadResult", [gid])
         return _parse_string_result(result, "removeDownloadResult")
 
@@ -386,14 +416,18 @@ class Aria2Client:
         return _parse_dict_result(result, "getGlobalOption")
 
     async def change_global_option(self, options: Dict) -> str:
+        _require_dict(options, "options")
         result = await self._call("aria2.changeGlobalOption", [options])
         return _parse_string_result(result, "changeGlobalOption")
 
     async def get_option(self, gid: str) -> Dict:
+        _require_gid(gid)
         result = await self._call("aria2.getOption", [gid])
         return _parse_dict_result(result, "getOption")
 
     async def change_option(self, gid: str, options: Dict) -> str:
+        _require_gid(gid)
+        _require_dict(options, "options")
         result = await self._call("aria2.changeOption", [gid, options])
         return _parse_string_result(result, "changeOption")
 

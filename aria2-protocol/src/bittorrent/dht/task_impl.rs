@@ -401,26 +401,27 @@ mod tests {
 
     #[test]
     fn test_task_context_creation() {
-        let ctx = DhtTaskContext {
-            self_id: [0u8; 20],
-            routing_table: Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
-            socket: DhtSocket::new_test(),
-            tracker: Arc::new(TransactionTracker::new()),
-            query_timeout: Duration::from_secs(10),
-        };
-        assert_eq!(ctx.self_id, [0u8; 20]);
+        let ctx = DhtTaskContext::new(
+            [0u8; 20],
+            Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
+            DhtSocket::new_test(),
+            Arc::new(TransactionTracker::new()),
+            Duration::from_secs(10),
+        );
+        assert_eq!(ctx.self_id(), &[0u8; 20]);
+        assert_eq!(ctx.query_timeout(), Duration::from_secs(10));
     }
 
     #[tokio::test]
     async fn test_node_lookup_does_not_reacquire_shared_table() {
         let routing_table = Arc::new(RwLock::new(RoutingTable::new([0u8; 20])));
-        let ctx = DhtTaskContext {
-            self_id: [0u8; 20],
+        let ctx = DhtTaskContext::new(
+            [0u8; 20],
             routing_table,
-            socket: DhtSocket::bind(0).await.expect("test socket should bind"),
-            tracker: Arc::new(TransactionTracker::new()),
-            query_timeout: Duration::from_millis(20),
-        };
+            DhtSocket::bind(0).await.expect("test socket should bind"),
+            Arc::new(TransactionTracker::new()),
+            Duration::from_millis(20),
+        );
 
         let result = tokio::time::timeout(
             Duration::from_millis(200),

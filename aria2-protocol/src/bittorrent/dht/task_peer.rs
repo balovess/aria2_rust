@@ -431,13 +431,13 @@ mod tests {
 
     #[test]
     fn test_task_factory_creation() {
-        let ctx = DhtTaskContext {
-            self_id: [0u8; 20],
-            routing_table: Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
-            socket: DhtSocket::new_test(),
-            tracker: Arc::new(TransactionTracker::new()),
-            query_timeout: Duration::from_secs(10),
-        };
+        let ctx = DhtTaskContext::new(
+            [0u8; 20],
+            Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
+            DhtSocket::new_test(),
+            Arc::new(TransactionTracker::new()),
+            Duration::from_secs(10),
+        );
         let factory = DhtTaskFactory::new(ctx);
 
         // Verify we can create tasks without panicking.
@@ -462,13 +462,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_lookup_does_not_reacquire_shared_table() {
-        let ctx = DhtTaskContext {
-            self_id: [0u8; 20],
-            routing_table: Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
-            socket: DhtSocket::bind(0).await.expect("test socket should bind"),
-            tracker: Arc::new(TransactionTracker::new()),
-            query_timeout: Duration::from_millis(20),
-        };
+        let ctx = DhtTaskContext::new(
+            [0u8; 20],
+            Arc::new(RwLock::new(RoutingTable::new([0u8; 20]))),
+            DhtSocket::bind(0).await.expect("test socket should bind"),
+            Arc::new(TransactionTracker::new()),
+            Duration::from_millis(20),
+        );
 
         let result = tokio::time::timeout(
             Duration::from_millis(200),

@@ -218,14 +218,18 @@ class WebSocketTransport:
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                if "method" in message and message["method"].startswith("aria2.on"):
+                if not isinstance(message, dict):
+                    continue
+
+                method = message.get("method")
+                if isinstance(method, str) and method.startswith("aria2.on"):
                     if self._event_callback is not None:
                         params = message.get("params", [{}])
                         event_params = params[0] if isinstance(params, list) and params else {}
                         if not isinstance(event_params, dict):
                             event_params = {}
                         try:
-                            self._event_callback(message["method"], event_params)
+                            self._event_callback(method, event_params)
                         except Exception:
                             pass
                     continue
@@ -234,13 +238,16 @@ class WebSocketTransport:
                 if msg_id is not None and msg_id in self._pending:
                     future = self._pending.pop(msg_id)
                     if not future.done():
-                        if "error" in message:
+                        error = message.get("error")
+                        if isinstance(error, dict):
                             future.set_exception(
                                 RpcError(
-                                    message["error"].get("message", "Unknown RPC error"),
-                                    message["error"].get("code", -1),
+                                    error.get("message", "Unknown RPC error"),
+                                    error.get("code", -1),
                                 )
                             )
+                        elif "error" in message:
+                            future.set_exception(RpcError("Malformed RPC error response", -1))
                         else:
                             future.set_result(message.get("result"))
         except asyncio.CancelledError:

@@ -135,6 +135,18 @@ function requireBuffer(value: unknown, name: string): asserts value is Buffer {
   }
 }
 
+function requireGid(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new TypeError('gid must be a non-empty string');
+  }
+}
+
+function requireRecord(value: unknown, name: string): asserts value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+}
+
 function httpToWs(url: string): string {
   if (url.startsWith('https://')) {
     return url.replace('https://', 'wss://');
@@ -193,6 +205,7 @@ export class Aria2Client {
     position?: number,
   ): Promise<string> {
     requireStringList(uris, 'uris', false);
+    if (options !== undefined) requireRecord(options, 'options');
     if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [uris];
     if (options !== undefined || position !== undefined) params.push(options ?? {});
@@ -208,6 +221,7 @@ export class Aria2Client {
     position?: number,
   ): Promise<string> {
     requireBuffer(torrent, 'torrent');
+    if (options !== undefined) requireRecord(options, 'options');
     if (webSeedUris !== undefined) requireStringList(webSeedUris, 'webSeedUris');
     if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [torrent.toString('base64')];
@@ -226,6 +240,7 @@ export class Aria2Client {
     position?: number,
   ): Promise<string[]> {
     requireBuffer(metalink, 'metalink');
+    if (options !== undefined) requireRecord(options, 'options');
     if (position !== undefined) requireNonNegativeInteger(position, 'position');
     const params: unknown[] = [metalink.toString('base64')];
     if (options !== undefined) params.push(options);
@@ -236,26 +251,31 @@ export class Aria2Client {
   }
 
   async remove(gid: string): Promise<string> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.remove', [gid]);
     return parseStringResult(result, 'remove');
   }
 
   async pause(gid: string): Promise<string> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.pause', [gid]);
     return parseStringResult(result, 'pause');
   }
 
   async unpause(gid: string): Promise<string> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.unpause', [gid]);
     return parseStringResult(result, 'unpause');
   }
 
   async forcePause(gid: string): Promise<string> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.forcePause', [gid]);
     return parseStringResult(result, 'forcePause');
   }
 
   async forceRemove(gid: string): Promise<string> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.forceRemove', [gid]);
     return parseStringResult(result, 'forceRemove');
   }
@@ -276,6 +296,7 @@ export class Aria2Client {
   }
 
   async changePosition(gid: string, position: number, mode: PositionMode): Promise<number> {
+    requireGid(gid);
     requireNonNegativeInteger(position, 'position');
     requirePositionMode(mode);
     const result = await this.transport.sendRequest('aria2.changePosition', [gid, position, mode]);
@@ -296,6 +317,7 @@ export class Aria2Client {
     addUris: string[],
     position?: number,
   ): Promise<string[]> {
+    requireGid(gid);
     requireNonNegativeInteger(fileIndex, 'fileIndex');
     requireStringList(deleteUris, 'deleteUris');
     requireStringList(addUris, 'addUris');
@@ -307,6 +329,7 @@ export class Aria2Client {
   }
 
   async tellStatus(gid: string, keys?: string[]): Promise<StatusInfo> {
+    requireGid(gid);
     if (keys !== undefined) requireStringList(keys, 'keys');
     const params: unknown[] = [gid];
     if (keys) params.push(keys);
@@ -315,26 +338,31 @@ export class Aria2Client {
   }
 
   async getFiles(gid: string): Promise<FileInfo[]> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.getFiles', [gid]);
     return parseObjectListResult<FileInfo>(result, 'getFiles');
   }
 
   async getUris(gid: string): Promise<UriEntry[]> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.getUris', [gid]);
     return parseObjectListResult<UriEntry>(result, 'getUris');
   }
 
   async getServers(gid: string): Promise<ServerInfoIndex[]> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.getServers', [gid]);
     return parseObjectListResult<ServerInfoIndex>(result, 'getServers');
   }
 
   async getPeers(gid: string): Promise<PeerInfo[]> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.getPeers', [gid]);
     return parseObjectListResult<PeerInfo>(result, 'getPeers');
   }
 
   async getTrackers(gid: string): Promise<TrackerInfo[]> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.getTrackers', [gid]);
     return parseObjectListResult<TrackerInfo>(result, 'getTrackers');
   }
@@ -383,6 +411,7 @@ export class Aria2Client {
   }
 
   async removeDownloadResult(gid: string): Promise<string> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.removeDownloadResult', [gid]);
     return parseStringResult(result, 'removeDownloadResult');
   }
@@ -393,16 +422,20 @@ export class Aria2Client {
   }
 
   async changeGlobalOption(options: Record<string, unknown>): Promise<string> {
+    requireRecord(options, 'options');
     const result = await this.transport.sendRequest('aria2.changeGlobalOption', [options]);
     return parseStringResult(result, 'changeGlobalOption');
   }
 
   async getOption(gid: string): Promise<Record<string, unknown>> {
+    requireGid(gid);
     const result = await this.transport.sendRequest('aria2.getOption', [gid]);
     return parseObjectResult(result, 'getOption');
   }
 
   async changeOption(gid: string, options: Record<string, unknown>): Promise<string> {
+    requireGid(gid);
+    requireRecord(options, 'options');
     const result = await this.transport.sendRequest('aria2.changeOption', [gid, options]);
     return parseStringResult(result, 'changeOption');
   }

@@ -266,11 +266,14 @@ var WebSocketTransport = class {
     } catch {
       return;
     }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return;
+    }
     const obj = parsed;
-    if ("method" in obj && !("id" in obj)) {
+    if (typeof obj.method === "string" && !("id" in obj)) {
       const notification = obj;
       if (this.onEvent) {
-        this.onEvent(notification.method, notification.params);
+        this.onEvent(notification.method, Array.isArray(notification.params) ? notification.params : []);
       }
       return;
     }
@@ -280,8 +283,13 @@ var WebSocketTransport = class {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(response.id);
-      if (response.error) {
-        pending.reject(new RpcError(response.error.message, response.error.code));
+      if (response.error && typeof response.error === "object") {
+        pending.reject(new RpcError(
+          typeof response.error.message === "string" ? response.error.message : "Unknown RPC error",
+          typeof response.error.code === "number" ? response.error.code : -1
+        ));
+      } else if ("error" in response) {
+        pending.reject(new RpcError("Malformed RPC error response", -1));
       } else {
         pending.resolve(response.result);
       }
@@ -488,8 +496,11 @@ var Aria2EventEmitter = class extends import_events.EventEmitter {
       } catch {
         return;
       }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return;
+      }
       const obj = parsed;
-      if (!("method" in obj)) return;
+      if (typeof obj.method !== "string") return;
       const method = obj.method;
       const eventName = EVENT_MAP[method];
       if (!eventName) return;
@@ -664,6 +675,16 @@ function requireBuffer(value, name) {
     throw new TypeError(`${name} must be a Buffer`);
   }
 }
+function requireGid(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new TypeError("gid must be a non-empty string");
+  }
+}
+function requireRecord(value, name) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${name} must be an object`);
+  }
+}
 function httpToWs(url) {
   if (url.startsWith("https://")) {
     return url.replace("https://", "wss://");
@@ -709,6 +730,7 @@ var Aria2Client = class {
   }
   async addUri(uris, options, position) {
     requireStringList(uris, "uris", false);
+    if (options !== void 0) requireRecord(options, "options");
     if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [uris];
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
@@ -718,6 +740,7 @@ var Aria2Client = class {
   }
   async addTorrent(torrent, options, webSeedUris, position) {
     requireBuffer(torrent, "torrent");
+    if (options !== void 0) requireRecord(options, "options");
     if (webSeedUris !== void 0) requireStringList(webSeedUris, "webSeedUris");
     if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [torrent.toString("base64")];
@@ -731,6 +754,7 @@ var Aria2Client = class {
   }
   async addMetalink(metalink, options, position) {
     requireBuffer(metalink, "metalink");
+    if (options !== void 0) requireRecord(options, "options");
     if (position !== void 0) requireNonNegativeInteger(position, "position");
     const params = [metalink.toString("base64")];
     if (options !== void 0) params.push(options);
@@ -740,22 +764,27 @@ var Aria2Client = class {
     return parseStringListResult(result, "addMetalink");
   }
   async remove(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.remove", [gid]);
     return parseStringResult(result, "remove");
   }
   async pause(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.pause", [gid]);
     return parseStringResult(result, "pause");
   }
   async unpause(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.unpause", [gid]);
     return parseStringResult(result, "unpause");
   }
   async forcePause(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.forcePause", [gid]);
     return parseStringResult(result, "forcePause");
   }
   async forceRemove(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.forceRemove", [gid]);
     return parseStringResult(result, "forceRemove");
   }
@@ -772,6 +801,7 @@ var Aria2Client = class {
     return parseStringResult(result, "unpauseAll");
   }
   async changePosition(gid, position, mode) {
+    requireGid(gid);
     requireNonNegativeInteger(position, "position");
     requirePositionMode(mode);
     const result = await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
@@ -785,6 +815,7 @@ var Aria2Client = class {
     throw new Aria2Error(`Unexpected result type for changePosition: ${typeof result}`);
   }
   async changeUri(gid, fileIndex, deleteUris, addUris, position) {
+    requireGid(gid);
     requireNonNegativeInteger(fileIndex, "fileIndex");
     requireStringList(deleteUris, "deleteUris");
     requireStringList(addUris, "addUris");
@@ -795,6 +826,7 @@ var Aria2Client = class {
     return parseChangeUriCounts(result);
   }
   async tellStatus(gid, keys) {
+    requireGid(gid);
     if (keys !== void 0) requireStringList(keys, "keys");
     const params = [gid];
     if (keys) params.push(keys);
@@ -802,22 +834,27 @@ var Aria2Client = class {
     return parseObjectResult(result, "tellStatus");
   }
   async getFiles(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.getFiles", [gid]);
     return parseObjectListResult(result, "getFiles");
   }
   async getUris(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.getUris", [gid]);
     return parseObjectListResult(result, "getUris");
   }
   async getServers(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.getServers", [gid]);
     return parseObjectListResult(result, "getServers");
   }
   async getPeers(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.getPeers", [gid]);
     return parseObjectListResult(result, "getPeers");
   }
   async getTrackers(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.getTrackers", [gid]);
     return parseObjectListResult(result, "getTrackers");
   }
@@ -859,6 +896,7 @@ var Aria2Client = class {
     return parseStringResult(result, "purgeDownloadResult");
   }
   async removeDownloadResult(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.removeDownloadResult", [gid]);
     return parseStringResult(result, "removeDownloadResult");
   }
@@ -867,14 +905,18 @@ var Aria2Client = class {
     return parseObjectResult(result, "getGlobalOption");
   }
   async changeGlobalOption(options) {
+    requireRecord(options, "options");
     const result = await this.transport.sendRequest("aria2.changeGlobalOption", [options]);
     return parseStringResult(result, "changeGlobalOption");
   }
   async getOption(gid) {
+    requireGid(gid);
     const result = await this.transport.sendRequest("aria2.getOption", [gid]);
     return parseObjectResult(result, "getOption");
   }
   async changeOption(gid, options) {
+    requireGid(gid);
+    requireRecord(options, "options");
     const result = await this.transport.sendRequest("aria2.changeOption", [gid, options]);
     return parseStringResult(result, "changeOption");
   }
