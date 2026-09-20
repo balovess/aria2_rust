@@ -27,7 +27,7 @@ mod ws_session;
 // Re-export data model types from types module
 pub use super::types::{
     DownloadStatus, FileInfo, GlobalOptions, GlobalStat, PeerInfo, ServerInfo, ServerInfoIndex,
-    SessionInfo, StatusInfo, TaskOptions, UriEntry, UriInfo, UriStatus, VersionInfo, create_gid,
+    SessionInfo, StatusInfo, TaskOptions, UriEntry, UriStatus, VersionInfo, create_gid,
 };
 
 pub use auth::*;

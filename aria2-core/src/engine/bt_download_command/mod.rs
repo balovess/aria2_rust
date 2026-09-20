@@ -7,7 +7,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::engine::choking_algorithm::ChokingAlgorithm;
-use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::rate_limiter::RateLimiter;
@@ -198,11 +197,6 @@ pub struct BtDownloadCommand {
 
     /// Track suggest counts per peer to avoid spamming.
     pub(crate) suggest_sent_counts: HashMap<super::bt_download_execute::types::PeerKey, usize>,
-
-    // Tracker event state machine (Phase 15 - H5): manages Started/Completed/Stopped events
-    /// State machine for tracker announce events
-    #[allow(dead_code)]
-    pub(crate) tracker_state: TrackerState,
 
     // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
     /// Tracks timing and retry state for periodic DHT get_peers lookups.

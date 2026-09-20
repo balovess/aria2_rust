@@ -145,15 +145,9 @@
 //!         options,
 //!     )?;
 //!
-//!     while let Ok(notification) = events.recv().await {
-//!         if let DownloadNotification::MetadataResolved(event) = notification {
-//!             if event.metadata_gid == download.gid() {
-//!                 for file in download.get_files().unwrap_or_default() {
-//!                     println!("{}: {} bytes", file.path, file.length);
-//!                 }
-//!                 break;
-//!             }
-//!         }
+//!     let _metadata = events.recv_metadata_for(download.gid()).await?;
+//!     for file in download.get_files().unwrap_or_default() {
+//!         println!("{}: {} bytes", file.path, file.length);
 //!     }
 //!
 //!     let _result = download.wait().await?;
@@ -216,7 +210,7 @@ pub use request::request_group::{
     FileEntry, GroupId, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
     UriEntry, is_option_changeable,
 };
-pub use request::request_group_man::RequestGroupMan;
+pub use request::request_group_man::{ChangePositionMode, RequestGroupMan};
 
 #[cfg(test)]
 mod integration_tests_j2_j5;

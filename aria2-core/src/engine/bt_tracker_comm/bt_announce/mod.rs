@@ -1,8 +1,7 @@
 //! Main tracker announce client and HTTP/UDP tracker communication functions.
 //!
-//! Contains [`BtAnnounce`] (the core announce orchestrator), the public
-//! helper [`urlencode_infohash`], and free functions for HTTP/HTTPS tracker
-//! announce requests.
+//! Contains [`BtAnnounce`] (the core announce orchestrator) and the public
+//! helper [`urlencode_infohash`].
 //!
 //! # UDP Tracker Integration
 //!
@@ -14,16 +13,11 @@
 
 #![allow(clippy::empty_line_after_doc_comments)]
 
-mod announce_logic;
 mod tracker_url;
 
 #[cfg(test)]
 mod tests;
 
-// Re-exports — preserve the original public API surface.
-pub use announce_logic::{
-    announce_to_public_tracker, announce_to_public_tracker_with_event, perform_announce_with_event,
-};
 pub(crate) use tracker_url::urlencode_bytes;
 pub use tracker_url::{is_udp_tracker, urlencode_infohash};
 

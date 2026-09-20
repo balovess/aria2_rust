@@ -6,7 +6,6 @@ use tracing::{info, warn};
 use crate::config::{parse_index_out, parse_integer_segments};
 use crate::constants;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
-use crate::engine::http_tracker_client::TrackerState;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
@@ -612,9 +611,6 @@ impl BtDownloadCommand {
             suggest_sent_counts: HashMap::new(),
 
             // Endgame mode default values
-
-            // Tracker event state machine default
-            tracker_state: TrackerState::new(),
 
             // Web seed manager (initialized lazily when needed)
 

@@ -79,8 +79,8 @@ pub use server::{
 };
 pub use types::{
     BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat, PeerInfo,
-    ServerInfo, ServerInfoIndex, SessionInfo, StatusInfo, TrackerInfo, UriEntry, UriInfo,
-    UriStatus, VersionInfo, create_gid,
+    ServerInfo, ServerInfoIndex, SessionInfo, StatusInfo, TrackerInfo, UriEntry, UriStatus,
+    VersionInfo, create_gid,
 };
 pub use websocket::{
     DownloadEvent, EventPublisher, EventType, NotificationBatcher, WsConfig, WsSession,

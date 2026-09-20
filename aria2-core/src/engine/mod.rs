@@ -18,7 +18,7 @@ pub(crate) mod http_adaptive_concurrency;
 pub mod http_segment_downloader;
 pub(crate) mod http_segment_request_executor;
 pub(crate) mod http_tail_reclaim;
-pub mod http_tracker_client;
+pub(crate) mod http_tracker_client;
 pub mod mirror_coordinator;
 #[cfg(feature = "bittorrent")]
 pub mod multi_file_layout;

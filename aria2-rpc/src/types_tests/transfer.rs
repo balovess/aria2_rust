@@ -85,14 +85,13 @@ fn test_file_info_numeric_fields_are_strings() {
 }
 
 #[test]
-fn test_uri_status_hides_internal_spent_state_on_wire() {
-    assert_eq!(serde_json::to_value(UriStatus::Spent).unwrap(), "used");
-    assert_eq!(
-        serde_json::from_value::<UriStatus>(serde_json::json!("spent")).unwrap(),
-        UriStatus::Spent
-    );
+fn test_uri_status_roundtrips_wire_values() {
     assert_eq!(
         serde_json::from_value::<UriStatus>(serde_json::json!("used")).unwrap(),
         UriStatus::Used
+    );
+    assert_eq!(
+        serde_json::from_value::<UriStatus>(serde_json::json!("waiting")).unwrap(),
+        UriStatus::Waiting
     );
 }

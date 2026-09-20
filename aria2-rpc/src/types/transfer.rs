@@ -35,7 +35,6 @@ impl UriEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UriStatus {
     Used,
-    Spent,
     #[default]
     Waiting,
 }
@@ -43,7 +42,7 @@ pub enum UriStatus {
 impl Serialize for UriStatus {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(match self {
-            Self::Used | Self::Spent => "used",
+            Self::Used => "used",
             Self::Waiting => "waiting",
         })
     }
@@ -55,8 +54,6 @@ impl<'de> Deserialize<'de> for UriStatus {
         match value.as_str() {
             "used" => Ok(Self::Used),
             "waiting" => Ok(Self::Waiting),
-            // Accepted for in-process snapshots; never emitted on the wire.
-            "spent" => Ok(Self::Spent),
             _ => Err(serde::de::Error::unknown_variant(
                 &value,
                 &["used", "waiting"],
@@ -64,11 +61,6 @@ impl<'de> Deserialize<'de> for UriStatus {
         }
     }
 }
-
-/// URI information returned by `aria2.getUris`.
-///
-/// Type alias for [`UriEntry`] for API compatibility.
-pub type UriInfo = UriEntry;
 
 // =========================================================================
 // Server and Peer Types

@@ -17,7 +17,7 @@ use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{
     DownloadOptions, DownloadResult, DownloadStatusSnapshot, GroupId, RequestGroup,
 };
-use crate::request::request_group_man::RequestGroupMan;
+use crate::request::request_group_man::{ChangePositionMode, RequestGroupMan};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Errors returned by the high-level download-management interface.
@@ -27,6 +27,8 @@ pub enum DownloadManagerError {
     Command(#[from] EngineCommandSendError),
     #[error("download preparation failed: {0}")]
     Preparation(#[source] Aria2Error),
+    #[error("download state operation failed: {0}")]
+    State(#[source] Aria2Error),
     #[error("waiting for the download was cancelled")]
     WaitCancelled,
 }
@@ -319,6 +321,22 @@ impl DownloadHandle {
         self.download_result().map(|result| result.files)
     }
 
+    /// Change this download's position in the reserved queue.
+    ///
+    /// The operation is valid only while the group is waiting to be promoted.
+    /// The returned position is zero-based, matching the request-group
+    /// manager and the RPC `aria2.changePosition` contract.
+    pub fn change_position(
+        &self,
+        position: i32,
+        mode: ChangePositionMode,
+    ) -> std::result::Result<usize, DownloadManagerError> {
+        self.manager
+            .group_man
+            .change_position(self.gid, position, mode)
+            .map_err(DownloadManagerError::State)
+    }
+
     pub fn pause(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::Pause { gid: self.gid })
     }
@@ -601,6 +619,36 @@ mod tests {
         let files = handle.get_files().expect("live group snapshot");
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].path, "file.zip");
+    }
+
+    #[test]
+    fn handle_changes_reserved_queue_position() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let first = manager
+            .add_uri(
+                vec!["https://example.test/first".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("first download submission");
+        let second = manager
+            .add_uri(
+                vec!["https://example.test/second".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("second download submission");
+
+        assert_eq!(
+            second
+                .change_position(0, ChangePositionMode::SetFromStart)
+                .expect("reserved position change"),
+            0
+        );
+        assert!(matches!(
+            first.change_position(-1, ChangePositionMode::SetFromStart),
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
     }
 
     #[cfg(feature = "bittorrent")]

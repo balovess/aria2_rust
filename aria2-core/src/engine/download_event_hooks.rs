@@ -142,6 +142,29 @@ impl DownloadEventStream {
     pub async fn recv(&mut self) -> Result<DownloadNotification, broadcast::error::RecvError> {
         self.receiver.recv().await
     }
+
+    /// Wait for metadata resolution involving `gid`.
+    ///
+    /// A metadata task may resolve into the same GID (for a magnet download)
+    /// or into one or more child download GIDs (for a metadata-backed graph).
+    /// This helper filters both forms while preserving the broadcast channel's
+    /// lag error so callers can resubscribe and refresh their snapshots.
+    pub async fn recv_metadata_for(
+        &mut self,
+        gid: GroupId,
+    ) -> Result<MetadataResolvedEvent, broadcast::error::RecvError> {
+        loop {
+            match self.recv().await? {
+                DownloadNotification::MetadataResolved(event)
+                    if event.metadata_gid == gid || event.download_gids.contains(&gid) =>
+                {
+                    return Ok(event);
+                }
+                DownloadNotification::Lifecycle { .. }
+                | DownloadNotification::MetadataResolved(_) => {}
+            }
+        }
+    }
 }
 
 impl MetadataResolvedEvent {
@@ -963,6 +986,32 @@ mod tests {
         assert_eq!(
             stream.recv().await.expect("metadata event"),
             DownloadNotification::MetadataResolved(metadata)
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_stream_helper_filters_by_metadata_or_download_gid() {
+        let hooks = DownloadEventHooks::new();
+        let mut stream = hooks.subscribe();
+        let requested_gid = crate::request::request_group::GroupId::new(11);
+        let unrelated = MetadataResolvedEvent::new(
+            crate::request::request_group::GroupId::new(20),
+            vec![crate::request::request_group::GroupId::new(21)],
+        );
+        let matching = MetadataResolvedEvent::new(
+            crate::request::request_group::GroupId::new(10),
+            vec![requested_gid],
+        );
+
+        hooks.notify_metadata_resolved(unrelated);
+        hooks.notify_metadata_resolved(matching.clone());
+
+        assert_eq!(
+            stream
+                .recv_metadata_for(requested_gid)
+                .await
+                .expect("matching metadata event"),
+            matching
         );
     }
 
