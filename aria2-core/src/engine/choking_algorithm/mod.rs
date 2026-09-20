@@ -232,13 +232,6 @@ impl ChokingAlgorithm {
         }
     }
 
-    /// Check if a peer is in the explicit snubbed set.
-    pub fn is_explicitly_snubbed(&self, peer_id: usize) -> bool {
-        self.peers
-            .get(peer_id)
-            .is_some_and(|peer| self.snubbed_peers.contains(&PeerIdentity::from(peer)))
-    }
-
     /// Get the number of explicitly snubbed peers.
     pub fn snubbed_count(&self) -> usize {
         self.snubbed_peers.len()

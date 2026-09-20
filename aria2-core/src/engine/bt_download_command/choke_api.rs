@@ -116,12 +116,4 @@ impl BtDownloadCommand {
             algo.mark_peer_snubbed(peer_idx);
         }
     }
-
-    /// Check if a peer is explicitly snubbed at the algorithm level.
-    pub fn is_explicitly_snubbed(&self, peer_idx: usize) -> bool {
-        self.choking_algo
-            .as_ref()
-            .map(|a| a.is_explicitly_snubbed(peer_idx))
-            .unwrap_or(false)
-    }
 }

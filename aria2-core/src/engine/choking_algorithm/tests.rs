@@ -53,7 +53,7 @@ fn test_remove_peers_remaps_snubbed_and_optimistic_indices() {
     algo.remove_peers(&[1]);
 
     assert_eq!(algo.len(), 2);
-    assert!(!algo.is_explicitly_snubbed(1));
+    assert_eq!(algo.snubbed_count(), 0);
     assert_eq!(algo.current_optimistic_peer, None);
 }
 
@@ -355,7 +355,6 @@ fn test_snubbed_peer_always_remains_choked() {
 
     // Explicitly snub peer 0 (the highest speed one)
     algo.mark_peer_snubbed(0);
-    assert!(algo.is_explicitly_snubbed(0));
     assert_eq!(algo.snubbed_count(), 1);
 
     // Run choke rotation - snubbed peer should be choked despite high score
@@ -392,15 +391,10 @@ fn test_unsnub_on_data_received() {
 
     // Explicitly snub peer 0
     algo.mark_peer_snubbed(0);
-    assert!(algo.is_explicitly_snubbed(0));
     assert_eq!(algo.snubbed_count(), 1);
 
     // Receive data from peer 0 - should auto-unsnub
     algo.on_data_received(0, 1024);
-    assert!(
-        !algo.is_explicitly_snubbed(0),
-        "Peer should be un-snubbed after data received"
-    );
     assert_eq!(algo.snubbed_count(), 0);
 }
 
@@ -416,9 +410,9 @@ fn test_identity_api_survives_peer_reordering() {
 
     algo.mark_peer_snubbed(0);
     algo.peers.swap(0, 1);
-    assert!(algo.is_explicitly_snubbed(1));
+    assert!(algo.snubbed_peers.contains(&first_identity));
     algo.on_data_received_by_identity(first_identity, 4096);
-    assert!(!algo.is_explicitly_snubbed(1));
+    assert_eq!(algo.snubbed_count(), 0);
 
     algo.remove_peers_by_identity(&[second_identity]);
     assert_eq!(algo.peers().len(), 1);
