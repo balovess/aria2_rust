@@ -32,6 +32,8 @@ pub enum DownloadManagerError {
     State(#[source] Aria2Error),
     #[error("download event stream failed: {0}")]
     EventStream(#[source] tokio::sync::broadcast::error::RecvError),
+    #[error("metadata resolution failed while download was {status}: {message}")]
+    MetadataResolutionFailed { status: String, message: String },
     #[error("download engine lifecycle failed: {0}")]
     Engine(#[source] Aria2Error),
     #[error("waiting for the download was cancelled")]
@@ -610,16 +612,29 @@ impl DownloadHandle {
         &self,
         cancellation: &CancellationToken,
     ) -> std::result::Result<crate::MetadataResolvedEvent, DownloadManagerError> {
+        if self.download_result().is_none() {
+            return Err(self.not_found_error());
+        }
+
         let mut events = self.manager.subscribe();
         if let Some(event) = self.manager.event_hooks.metadata_event_for(self.gid) {
             return Ok(event);
         }
 
-        tokio::select! {
-            result = events.recv_metadata_for(self.gid) => {
-                result.map_err(DownloadManagerError::EventStream)
+        let signal = self.manager.group_man.activity_signal();
+        let mut observed = signal.generation();
+        loop {
+            if let Some(error) = self.metadata_resolution_error() {
+                return Err(error);
             }
-            _ = cancellation.cancelled() => Err(DownloadManagerError::WaitCancelled),
+
+            tokio::select! {
+                result = events.recv_metadata_for(self.gid) => {
+                    return result.map_err(DownloadManagerError::EventStream);
+                }
+                _ = signal.wait_for_change(&mut observed) => {}
+                _ = cancellation.cancelled() => return Err(DownloadManagerError::WaitCancelled),
+            }
         }
     }
 
@@ -706,6 +721,30 @@ impl DownloadHandle {
             "GID#{} not found",
             self.gid_hex()
         )))
+    }
+
+    fn metadata_resolution_error(&self) -> Option<DownloadManagerError> {
+        let result = self.download_result()?;
+        match result.status {
+            DownloadStatus::Error(message) => {
+                Some(DownloadManagerError::MetadataResolutionFailed {
+                    status: "error".to_string(),
+                    message: if message.is_empty() {
+                        "download failed before metadata resolved".to_string()
+                    } else {
+                        message
+                    },
+                })
+            }
+            DownloadStatus::Removed => Some(DownloadManagerError::MetadataResolutionFailed {
+                status: "removed".to_string(),
+                message: "download was removed before metadata resolved".to_string(),
+            }),
+            DownloadStatus::Waiting
+            | DownloadStatus::Active
+            | DownloadStatus::Paused
+            | DownloadStatus::Complete => None,
+        }
     }
 }
 
@@ -932,6 +971,40 @@ mod tests {
 
         assert!(matches!(result, Err(DownloadManagerError::WaitCancelled)));
         assert!(handle.status_snapshot().is_some());
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_returns_when_resolution_fails() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["magnet:?xt=urn:btih:example".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.wait_for_metadata().await }
+        });
+
+        tokio::task::yield_now().await;
+        group_man
+            .find_group(handle.gid())
+            .expect("group exists")
+            .recover()
+            .mark_error("no metadata peers".to_string());
+
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("metadata failure must wake the waiter")
+            .expect("metadata waiter must not panic");
+        assert!(matches!(
+            result,
+            Err(DownloadManagerError::MetadataResolutionFailed { status, message })
+                if status == "error" && message == "no metadata peers"
+        ));
     }
 
     #[tokio::test]

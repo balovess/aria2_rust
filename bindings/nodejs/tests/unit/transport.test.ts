@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { HttpTransport } from '../../src/transport.js';
+import net from 'node:net';
+import { HttpTransport, WebSocketTransport } from '../../src/transport.js';
 import { RpcError, ConnectionError, TimeoutError } from '../../src/errors.js';
 
 describe('HttpTransport', () => {
@@ -177,5 +178,31 @@ describe('HttpTransport', () => {
 
   it('close resolves without error', async () => {
     await expect(transport.close()).resolves.toBeUndefined();
+  });
+});
+
+describe('WebSocketTransport', () => {
+  it('close rejects an in-flight connection attempt', async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as net.AddressInfo;
+    const transport = new WebSocketTransport(`ws://127.0.0.1:${address.port}`);
+    const request = transport.sendRequest('aria2.getVersion', []);
+    await new Promise<void>((resolve) => server.once('connection', () => resolve()));
+
+    await transport.close();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const boundedRequest = Promise.race([
+      request,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('connection close timed out')), 500);
+      }),
+    ]);
+    await expect(boundedRequest).rejects.toThrow('Transport closed');
+    if (timeout) clearTimeout(timeout);
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
   });
 });

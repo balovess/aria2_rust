@@ -111,6 +111,8 @@ var WebSocketTransport = class {
   pending = /* @__PURE__ */ new Map();
   onEvent = null;
   connectPromise = null;
+  pendingWs = null;
+  pendingConnectReject = null;
   constructor(url, options, onEvent) {
     this.url = url;
     this.token = options?.token ?? options?.secret;
@@ -130,21 +132,43 @@ var WebSocketTransport = class {
     }
     this.connectPromise = new Promise((resolve, reject) => {
       const ws = new WebSocket(this.url);
-      ws.once("open", () => {
+      let settled = false;
+      const cleanup = () => {
+        ws.removeListener("open", openHandler);
+        ws.removeListener("error", errorHandler);
+        ws.removeListener("close", closeHandler);
+        if (this.pendingWs === ws) this.pendingWs = null;
+        if (this.pendingConnectReject === rejectConnection) {
+          this.pendingConnectReject = null;
+        }
+      };
+      const rejectConnection = (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.connectPromise = null;
+        reject(error);
+      };
+      const openHandler = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.ws = ws;
         this.connectPromise = null;
         resolve();
-      });
-      ws.once("error", (err) => {
-        this.ws = null;
-        this.connectPromise = null;
-        reject(new ConnectionError(err.message));
-      });
-      ws.once("close", () => {
-        this.ws = null;
-        this.connectPromise = null;
+      };
+      const errorHandler = (err) => {
+        rejectConnection(new ConnectionError(err.message));
+      };
+      const closeHandler = () => {
+        rejectConnection(new ConnectionError("WebSocket connection closed"));
         this.rejectAllPending(new ConnectionError("WebSocket connection closed"));
-      });
+      };
+      this.pendingWs = ws;
+      this.pendingConnectReject = rejectConnection;
+      ws.once("open", openHandler);
+      ws.once("error", errorHandler);
+      ws.once("close", closeHandler);
       ws.on("message", (data) => {
         this.handleMessage(data);
       });
@@ -211,13 +235,24 @@ var WebSocketTransport = class {
     });
   }
   async close() {
+    const pendingReject = this.pendingConnectReject;
+    this.pendingConnectReject = null;
+    if (this.pendingWs) {
+      const pendingWs = this.pendingWs;
+      pendingWs.removeAllListeners();
+      pendingWs.once("error", () => {
+      });
+      pendingWs.terminate();
+      this.pendingWs = null;
+    }
+    this.connectPromise = null;
+    pendingReject?.(new ConnectionError("Transport closed"));
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.close();
       this.ws = null;
     }
     this.rejectAllPending(new ConnectionError("Transport closed"));
-    this.connectPromise = null;
   }
 };
 

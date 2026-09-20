@@ -122,6 +122,8 @@ export class WebSocketTransport implements Transport {
   private pending = new Map<number, PendingRequest>();
   private onEvent: EventCallback | null = null;
   private connectPromise: Promise<void> | null = null;
+  private pendingWs: WebSocket | null = null;
+  private pendingConnectReject: ((reason: Error) => void) | null = null;
 
   constructor(url: string, options?: ClientOptions, onEvent?: EventCallback) {
     this.url = url;
@@ -146,25 +148,49 @@ export class WebSocketTransport implements Transport {
 
     this.connectPromise = new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(this.url);
+      let settled = false;
 
-      ws.once('open', () => {
+      const cleanup = (): void => {
+        ws.removeListener('open', openHandler);
+        ws.removeListener('error', errorHandler);
+        ws.removeListener('close', closeHandler);
+        if (this.pendingWs === ws) this.pendingWs = null;
+        if (this.pendingConnectReject === rejectConnection) {
+          this.pendingConnectReject = null;
+        }
+      };
+
+      const rejectConnection = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.connectPromise = null;
+        reject(error);
+      };
+
+      const openHandler = (): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.ws = ws;
         this.connectPromise = null;
         resolve();
-      });
+      };
 
-      ws.once('error', (err: Error) => {
-        this.ws = null;
-        this.connectPromise = null;
-        reject(new ConnectionError(err.message));
-      });
+      const errorHandler = (err: Error): void => {
+        rejectConnection(new ConnectionError(err.message));
+      };
 
-      ws.once('close', () => {
-        this.ws = null;
-        this.connectPromise = null;
+      const closeHandler = (): void => {
+        rejectConnection(new ConnectionError('WebSocket connection closed'));
         this.rejectAllPending(new ConnectionError('WebSocket connection closed'));
-      });
+      };
 
+      this.pendingWs = ws;
+      this.pendingConnectReject = rejectConnection;
+      ws.once('open', openHandler);
+      ws.once('error', errorHandler);
+      ws.once('close', closeHandler);
       ws.on('message', (data: WebSocket.Data) => {
         this.handleMessage(data);
       });
@@ -245,12 +271,23 @@ export class WebSocketTransport implements Transport {
   }
 
   async close(): Promise<void> {
+    const pendingReject = this.pendingConnectReject;
+    this.pendingConnectReject = null;
+    if (this.pendingWs) {
+      const pendingWs = this.pendingWs;
+      pendingWs.removeAllListeners();
+      pendingWs.once('error', () => {});
+      pendingWs.terminate();
+      this.pendingWs = null;
+    }
+    this.connectPromise = null;
+    pendingReject?.(new ConnectionError('Transport closed'));
+
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.close();
       this.ws = null;
     }
     this.rejectAllPending(new ConnectionError('Transport closed'));
-    this.connectPromise = null;
   }
 }
