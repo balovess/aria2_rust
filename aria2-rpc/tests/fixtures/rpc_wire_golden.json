@@ -1,0 +1,162 @@
+{
+  "json_success_text": {
+    "jsonrpc": "2.0",
+    "id": "golden-success",
+    "result": "OK"
+  },
+  "json_error_unauthorized": {
+    "jsonrpc": "2.0",
+    "id": "golden-error",
+    "error": {
+      "code": 1,
+      "message": "Unauthorized"
+    }
+  },
+  "xml_fault_unauthorized": "<?xml version=\"1.0\"?>\n<methodResponse>\n  <fault>\n    <value>\n      <struct>\n        <member><name>faultCode</name><value><int>1</int></value></member>\n        <member><name>faultString</name><value><string>Unauthorized</string></value></member>\n      </struct>\n    </value>\n  </fault>\n</methodResponse>",
+  "global_stat_zero": {
+    "downloadSpeed": "0",
+    "uploadSpeed": "0",
+    "numActive": "0",
+    "numWaiting": "0",
+    "numStopped": "0",
+    "numStoppedTotal": "0"
+  },
+  "dht_status_stopped": {
+    "state": "stopped",
+    "totalNodes": "0",
+    "goodNodes": "0",
+    "pendingTransactions": "0"
+  },
+  "dht_status_default": {
+    "state": "",
+    "totalNodes": "0",
+    "goodNodes": "0",
+    "pendingTransactions": "0"
+  },
+  "file_info": {
+    "index": "1",
+    "path": "/downloads/file.bin",
+    "length": "1024",
+    "completedLength": "512",
+    "selected": "true",
+    "uris": [
+      {
+        "uri": "https://example.test/file.bin",
+        "status": "waiting"
+      }
+    ]
+  },
+  "uri_entry": {
+    "uri": "https://example.test/file.bin",
+    "status": "waiting"
+  },
+  "uri_entry_mirror": {
+    "uri": "https://mirror.example.test/file.bin",
+    "status": "waiting"
+  },
+  "server_index": {
+    "index": "1",
+    "servers": []
+  },
+  "peer_info": {
+    "peerId": "peer-1",
+    "ip": "192.0.2.10",
+    "port": "6881",
+    "bitfield": "ff",
+    "amChoking": "true",
+    "peerChoking": "false",
+    "downloadSpeed": "12",
+    "uploadSpeed": "3",
+    "seeder": "true"
+  },
+  "tracker_info": {
+    "uri": "https://tracker.example.test/announce",
+    "tier": 1,
+    "current": true,
+    "lastAttempt": false,
+    "announceReady": true,
+    "allFailed": false,
+    "inFlight": 0,
+    "interval": "1800",
+    "minInterval": 0,
+    "seeders": 0,
+    "leechers": 0,
+    "trackerId": "",
+    "secondsSinceLastSuccess": 12
+  },
+  "download_complete_notification": {
+    "jsonrpc": "2.0",
+    "method": "aria2.onDownloadComplete",
+    "params": [
+      {
+        "gid": "0123456789abcdef"
+      }
+    ]
+  },
+  "change_counts": ["1", "1"],
+  "save_session_without_path_error": {
+    "code": 1,
+    "message": "Filename is not given. Set --save-session."
+  },
+  "methods_all": [
+    "aria2.addUri",
+    "aria2.addTorrent",
+    "aria2.getPeers",
+    "aria2.getTrackers",
+    "aria2.getDhtStatus",
+    "aria2.addMetalink",
+    "aria2.remove",
+    "aria2.pause",
+    "aria2.forcePause",
+    "aria2.pauseAll",
+    "aria2.forcePauseAll",
+    "aria2.unpause",
+    "aria2.unpauseAll",
+    "aria2.forceRemove",
+    "aria2.changePosition",
+    "aria2.tellStatus",
+    "aria2.getUris",
+    "aria2.getFiles",
+    "aria2.getServers",
+    "aria2.tellActive",
+    "aria2.tellWaiting",
+    "aria2.tellStopped",
+    "aria2.getOption",
+    "aria2.changeUri",
+    "aria2.changeOption",
+    "aria2.getGlobalOption",
+    "aria2.changeGlobalOption",
+    "aria2.purgeDownloadResult",
+    "aria2.removeDownloadResult",
+    "aria2.getVersion",
+    "aria2.getSessionInfo",
+    "aria2.shutdown",
+    "aria2.forceShutdown",
+    "aria2.getGlobalStat",
+    "aria2.saveSession",
+    "aria2.updateBrowserContext",
+    "aria2.clearBrowserContext",
+    "system.multicall",
+    "system.listMethods",
+    "system.listNotifications"
+  ],
+  "notifications_all": [
+    "aria2.onDownloadStart",
+    "aria2.onDownloadPause",
+    "aria2.onDownloadStop",
+    "aria2.onDownloadComplete",
+    "aria2.onDownloadError",
+    "aria2.onBtDownloadComplete"
+  ],
+  "features_all": [
+    "Async DNS",
+    "BitTorrent",
+    "Firefox3 Cookie",
+    "GZip",
+    "HTTPS",
+    "Message Digest",
+    "Metalink",
+    "XML-RPC",
+    "SFTP"
+  ]
+}

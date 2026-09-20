@@ -63,7 +63,13 @@ impl BackendMetadata {
 
     /// Add Metalink capability while preserving aria2's catalog order.
     pub fn with_metalink(mut self) -> Self {
-        self.enabled_features.insert(5, "Metalink".to_string());
+        let insert_at = self
+            .enabled_features
+            .iter()
+            .position(|feature| feature == "XML-RPC")
+            .unwrap_or(self.enabled_features.len());
+        self.enabled_features
+            .insert(insert_at, "Metalink".to_string());
         let insert_at = self
             .methods
             .iter()
