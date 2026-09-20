@@ -38,7 +38,7 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
 /// that never converges would otherwise hang CI instead of failing.
 async fn run_until_exit(
     ctx: EngineLoopContext,
-    cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
+    cmd_rx: EngineCommandReceiver,
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     budget: Duration,
 ) {

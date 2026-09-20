@@ -33,7 +33,9 @@ impl super::super::RequestGroup {
             .map(|mut pending| std::mem::take(&mut *pending))
             .unwrap_or_default();
         for (key, value) in changes {
-            self.update_option(&key, value);
+            if let Err(error) = self.try_update_option(&key, value) {
+                tracing::warn!(%key, %error, "Deferred runtime option was rejected");
+            }
         }
     }
 
@@ -157,12 +159,5 @@ impl super::super::RequestGroup {
         } else {
             Ok(false)
         }
-    }
-
-    /// Compatibility wrapper for internal callers that only need to know
-    /// whether a key is recognized. RPC-facing code should use
-    /// [`Self::try_update_option`] so invalid values cannot be swallowed.
-    pub fn update_option(&mut self, key: &str, value: serde_json::Value) -> bool {
-        self.try_update_option(key, value).unwrap_or(false)
     }
 }

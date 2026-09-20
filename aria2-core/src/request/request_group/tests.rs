@@ -672,54 +672,102 @@ fn test_bt_info_hash_hex() {
 }
 
 #[test]
-fn test_update_option_new_runtime_changeable() {
+fn test_try_update_option_new_runtime_changeable() {
     let gid = GroupId::new(1);
     let uris = vec!["http://example.com/file".to_string()];
     let mut group = RequestGroup::new(gid, uris, DownloadOptions::default());
 
     // max-connection-per-server
-    assert!(group.update_option("max-connection-per-server", serde_json::json!(4)));
+    assert!(
+        group
+            .try_update_option("max-connection-per-server", serde_json::json!(4))
+            .unwrap()
+    );
     assert_eq!(group.options().max_connection_per_server, Some(4));
 
     // bt-max-upload-slots
-    assert!(group.update_option("bt-max-upload-slots", serde_json::json!(8)));
+    assert!(
+        group
+            .try_update_option("bt-max-upload-slots", serde_json::json!(8))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_max_upload_slots, Some(8));
 
     // bt-snubbed-timeout
-    assert!(group.update_option("bt-snubbed-timeout", serde_json::json!(120)));
+    assert!(
+        group
+            .try_update_option("bt-snubbed-timeout", serde_json::json!(120))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_snubbed_timeout, Some(120));
 
     // bt-optimistic-unchoke-interval
-    assert!(group.update_option("bt-optimistic-unchoke-interval", serde_json::json!(45)));
+    assert!(
+        group
+            .try_update_option("bt-optimistic-unchoke-interval", serde_json::json!(45))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_optimistic_unchoke_interval, Some(45));
 
     // bt-endgame-threshold
-    assert!(group.update_option("bt-endgame-threshold", serde_json::json!(50)));
+    assert!(
+        group
+            .try_update_option("bt-endgame-threshold", serde_json::json!(50))
+            .unwrap()
+    );
     assert_eq!(group.options().bt_endgame_threshold, 50);
 
     // seed-time
-    assert!(group.update_option("seed-time", serde_json::json!(3600)));
+    assert!(
+        group
+            .try_update_option("seed-time", serde_json::json!(3600))
+            .unwrap()
+    );
     assert_eq!(group.options().seed_time, Some(3600.0));
 
     // seed-ratio
-    assert!(group.update_option("seed-ratio", serde_json::json!(2.0)));
+    assert!(
+        group
+            .try_update_option("seed-ratio", serde_json::json!(2.0))
+            .unwrap()
+    );
     assert_eq!(group.options().seed_ratio, Some(2.0));
 
     // RPC clients send option values as strings, including aria2 size suffixes.
-    assert!(group.update_option("max-download-limit", serde_json::json!("100K")));
+    assert!(
+        group
+            .try_update_option("max-download-limit", serde_json::json!("100K"))
+            .unwrap()
+    );
     assert_eq!(group.options().max_download_limit, Some(100 * 1024));
-    assert!(group.update_option("max-tries", serde_json::json!("7")));
+    assert!(
+        group
+            .try_update_option("max-tries", serde_json::json!("7"))
+            .unwrap()
+    );
     assert_eq!(group.options().max_retries, 7);
-    assert!(group.update_option("bt-force-encrypt", serde_json::json!("true")));
+    assert!(
+        group
+            .try_update_option("bt-force-encrypt", serde_json::json!("true"))
+            .unwrap()
+    );
     assert!(group.options().bt_force_encrypt);
 
     // bt-seed-unverified
-    assert!(group.update_option("bt-seed-unverified", serde_json::json!("true")));
+    assert!(
+        group
+            .try_update_option("bt-seed-unverified", serde_json::json!("true"))
+            .unwrap()
+    );
     assert!(group.options().bt_seed_unverified);
 
     // Canonical reserved options without a dedicated execution field still
     // use the shared registry validator and remain visible after applying.
-    assert!(group.update_option("allow-overwrite", serde_json::json!("true")));
+    assert!(
+        group
+            .try_update_option("allow-overwrite", serde_json::json!("true"))
+            .unwrap()
+    );
     assert_eq!(
         group.runtime_options().get("allow-overwrite"),
         Some(&serde_json::json!("true"))
@@ -755,7 +803,11 @@ fn test_update_option_new_runtime_changeable() {
     assert_eq!(group.options().enable_dht, previous_dht);
 
     // Unknown option returns false
-    assert!(!group.update_option("unknown-option", serde_json::json!(1)));
+    assert!(
+        !group
+            .try_update_option("unknown-option", serde_json::json!(1))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -889,25 +941,89 @@ fn test_runtime_option_updates_populate_execution_fields() {
         DownloadOptions::default(),
     );
 
-    assert!(group.update_option("check-integrity", serde_json::json!("true")));
-    assert!(group.update_option("conditional-get", serde_json::json!("true")));
-    assert!(group.update_option("connect-timeout", serde_json::json!("12")));
-    assert!(group.update_option("lowest-speed-limit", serde_json::json!("4K")));
-    assert!(group.update_option("timeout", serde_json::json!("30")));
-    assert!(group.update_option("remote-time", serde_json::json!("true")));
-    assert!(group.update_option("ftp-pasv", serde_json::json!("false")));
-    assert!(group.update_option("ftp-user", serde_json::json!("alice")));
-    assert!(group.update_option("ftp-passwd", serde_json::json!("secret")));
-    assert!(group.update_option("http-auth-challenge", serde_json::json!("true")));
-    assert!(group.update_option("http-user", serde_json::json!("bob")));
-    assert!(group.update_option("http-passwd", serde_json::json!("password")));
-    assert!(group.update_option("metalink-location", serde_json::json!("JP")));
-    assert!(group.update_option("metalink-version", serde_json::json!("4.0")));
-    assert!(group.update_option("follow-metalink", serde_json::json!("mem")));
-    assert!(group.update_option(
-        "bt-tracker",
-        serde_json::json!("https://tracker.test/announce")
-    ));
+    assert!(
+        group
+            .try_update_option("check-integrity", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("conditional-get", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("connect-timeout", serde_json::json!("12"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("lowest-speed-limit", serde_json::json!("4K"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("timeout", serde_json::json!("30"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("remote-time", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("ftp-pasv", serde_json::json!("false"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("ftp-user", serde_json::json!("alice"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("ftp-passwd", serde_json::json!("secret"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("http-auth-challenge", serde_json::json!("true"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("http-user", serde_json::json!("bob"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("http-passwd", serde_json::json!("password"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("metalink-location", serde_json::json!("JP"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("metalink-version", serde_json::json!("4.0"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option("follow-metalink", serde_json::json!("mem"))
+            .unwrap()
+    );
+    assert!(
+        group
+            .try_update_option(
+                "bt-tracker",
+                serde_json::json!("https://tracker.test/announce")
+            )
+            .unwrap()
+    );
 
     let options = group.options();
     assert!(options.check_integrity);

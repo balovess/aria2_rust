@@ -1,6 +1,6 @@
 //! Runtime option updates and rate limiter management.
 //!
-//! Implements `RequestGroup::update_option()` for dynamically changing
+//! Implements `RequestGroup::try_update_option()` for dynamically changing
 //! download options at runtime (e.g. via `aria2.changeOption`), and
 //! the `set_rate_limiter` / `set_download_context` methods.
 

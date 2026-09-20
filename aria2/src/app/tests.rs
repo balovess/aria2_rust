@@ -3,6 +3,7 @@
 use super::cli::CliArgs;
 use super::*;
 use aria2_core::config::{OptionType, OptionValue};
+use aria2_core::engine::engine_command::channel;
 use aria2_core::request::request_group::DownloadOptions;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use clap::CommandFactory;
@@ -563,7 +564,7 @@ async fn application_rpc_does_not_enable_cors_by_default() {
             .expect("rpc-listen-port should be valid");
     }
 
-    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (cmd_tx, _cmd_rx) = channel();
     let server = app
         .start_rpc_server(
             super::startup::StartupPlan::resolve(super::startup::StartupInputs {
@@ -637,7 +638,7 @@ async fn application_rpc_routes_add_uri_and_tell_status_end_to_end() {
             .expect("rpc-secret should be valid");
     }
 
-    let (cmd_tx, _cmd_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (cmd_tx, _cmd_rx) = channel();
     let server = app
         .start_rpc_server(
             super::startup::StartupPlan::resolve(super::startup::StartupInputs {

@@ -198,13 +198,11 @@ impl App {
     /// - `rpc-cors-domain` — CORS allowed origins
     ///
     /// Returns a handle to the server task on success.
-    pub(super) async fn start_rpc_server<
-        T: Into<aria2_core::engine::engine_command::EngineCommandSender>,
-    >(
+    pub(super) async fn start_rpc_server(
         &self,
         startup_plan: StartupPlan,
         group_man: Arc<RequestGroupMan>,
-        engine_cmd_tx: T,
+        engine_cmd_tx: aria2_core::engine::engine_command::EngineCommandSender,
     ) -> std::result::Result<tokio::task::JoinHandle<()>, String> {
         if !startup_plan.starts_rpc() {
             return Err("The startup plan does not include an RPC server".to_string());
@@ -397,7 +395,7 @@ use colored::Colorize;
 #[cfg(test)]
 mod bridge_tests {
     use super::*;
-    use tokio::sync::mpsc;
+    use aria2_core::engine::engine_command::channel;
 
     const GID: &str = "2089b05ecca3d829";
 
@@ -562,7 +560,7 @@ mod bridge_tests {
                 .expect("rpc-listen-address should be valid");
         }
 
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, _cmd_rx) = channel();
         let error = app
             .start_rpc_server(
                 StartupPlan::resolve(crate::app::startup::StartupInputs {

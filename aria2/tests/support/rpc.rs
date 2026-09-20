@@ -7,14 +7,12 @@ use aria2::app::rpc_backend::CoreRpcBackend;
 use aria2_core::config::ConfigManager;
 #[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_registry::BtRegistry;
-use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::engine::engine_command::{EngineCommandReceiver, channel};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;
 use tokio::sync::RwLock;
 
-static RETAINED_COMMAND_RECEIVERS: OnceLock<
-    Mutex<Vec<tokio::sync::mpsc::UnboundedReceiver<EngineCommand>>>,
-> = OnceLock::new();
+static RETAINED_COMMAND_RECEIVERS: OnceLock<Mutex<Vec<EngineCommandReceiver>>> = OnceLock::new();
 
 /// An RPC engine plus the core state it adapts. The receiver is retained so
 /// backend lifecycle commands remain deliverable even when no download loop is
@@ -22,21 +20,20 @@ static RETAINED_COMMAND_RECEIVERS: OnceLock<
 pub struct RpcFixture {
     pub engine: RpcEngine,
     pub group_man: Arc<RequestGroupMan>,
-    _command_receiver: tokio::sync::mpsc::UnboundedReceiver<EngineCommand>,
+    _command_receiver: EngineCommandReceiver,
 }
 
 impl RpcFixture {
     pub fn new(save_session_path: Option<PathBuf>) -> Self {
         let group_man = Arc::new(RequestGroupMan::new());
-        let (command_sender, command_receiver) =
-            tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let (command_sender, command_receiver) = channel();
         let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
             aria2::identity::DEFAULT_USER_AGENT,
             aria2::identity::DEFAULT_PEER_AGENT,
         )));
         let backend = CoreRpcBackend::new(
             Arc::clone(&group_man),
-            command_sender.into(),
+            command_sender,
             config,
             save_session_path,
             aria2::identity::PRODUCT_VERSION,
@@ -55,15 +52,14 @@ impl RpcFixture {
         registry: Arc<std::sync::RwLock<BtRegistry>>,
     ) -> Self {
         let group_man = Arc::new(RequestGroupMan::new());
-        let (command_sender, command_receiver) =
-            tokio::sync::mpsc::unbounded_channel::<EngineCommand>();
+        let (command_sender, command_receiver) = channel();
         let config = Arc::new(RwLock::new(ConfigManager::new_with_identity(
             aria2::identity::DEFAULT_USER_AGENT,
             aria2::identity::DEFAULT_PEER_AGENT,
         )));
         let mut backend = CoreRpcBackend::new(
             Arc::clone(&group_man),
-            command_sender.into(),
+            command_sender,
             config,
             save_session_path,
             aria2::identity::PRODUCT_VERSION,

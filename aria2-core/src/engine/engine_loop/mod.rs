@@ -163,28 +163,7 @@ fn mark_session_dirty(ctx: &EngineLoopContext) {
     }
 }
 
-/// Run the main engine loop.
-///
-/// This function runs until:
-/// - No active/reserved downloads remain AND `keep_alive` is false, OR
-/// - A shutdown signal is received via `shutdown_rx`.
-///
-/// The loop processes `EngineCommand`s from `cmd_rx`, task completion
-/// notifications from `completion_rx`, and runs deadline-driven maintenance.
-pub async fn run_engine_loop(
-    ctx: EngineLoopContext,
-    cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
-    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
-) {
-    run_engine_loop_with_receiver(
-        ctx,
-        EngineCommandReceiver::from_unbounded(cmd_rx),
-        shutdown_rx,
-    )
-    .await;
-}
-
-pub(crate) async fn run_engine_loop_with_receiver(
+pub(crate) async fn run_engine_loop(
     mut ctx: EngineLoopContext,
     mut cmd_rx: EngineCommandReceiver,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
