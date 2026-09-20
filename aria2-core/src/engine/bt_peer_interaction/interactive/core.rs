@@ -54,7 +54,7 @@ impl BtPeerInteractive {
             download_finished: false,
             extension_registry: ExtensionRegistry::new(),
             extension_update_handler: None,
-            request_factory: BtRequestFactory::new(constants::BT_BLOCK_SIZE as u32),
+            request_factory: BtRequestFactory::new(),
             endgame: false,
         }
     }

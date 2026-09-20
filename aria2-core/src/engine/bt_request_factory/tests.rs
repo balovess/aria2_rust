@@ -42,7 +42,7 @@ fn make_piece(index: usize, length: u64) -> Piece {
 
 #[test]
 fn test_new_factory() {
-    let factory = BtRequestFactory::new(16384);
+    let factory = BtRequestFactory::new();
     assert_eq!(factory.count_target_piece(), 0);
     assert_eq!(factory.count_missing_block(), 0);
     assert!(factory.get_target_piece_indexes().is_empty());
@@ -50,7 +50,7 @@ fn test_new_factory() {
 
 #[test]
 fn test_set_cuid() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.set_cuid(42);
     assert_eq!(factory.cuid, 42);
 }
@@ -59,7 +59,7 @@ fn test_set_cuid() {
 
 #[test]
 fn test_add_target_piece() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     factory.add_target_piece(make_piece(1, 65536));
     assert_eq!(factory.count_target_piece(), 2);
@@ -68,7 +68,7 @@ fn test_add_target_piece() {
 
 #[test]
 fn test_remove_target_piece() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     factory.add_target_piece(make_piece(1, 65536));
     factory.add_target_piece(make_piece(2, 65536));
@@ -82,7 +82,7 @@ fn test_remove_target_piece() {
 
 #[test]
 fn test_remove_target_piece_not_found() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     let removed = factory.remove_target_piece(99);
     assert!(removed.is_none());
@@ -91,7 +91,7 @@ fn test_remove_target_piece_not_found() {
 
 #[test]
 fn test_remove_target_piece_cancels_in_storage() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let mock_storage = MockPieceStorage::new();
     factory.set_piece_storage(Box::new(MockPieceStorage {
         cancelled: mock_storage.cancelled.clone(),
@@ -108,7 +108,7 @@ fn test_remove_target_piece_cancels_in_storage() {
 
 #[test]
 fn test_remove_all_target_pieces() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let mock_storage = MockPieceStorage::new();
     factory.set_piece_storage(Box::new(MockPieceStorage {
         cancelled: mock_storage.cancelled.clone(),
@@ -133,7 +133,7 @@ fn test_remove_all_target_pieces() {
 
 #[test]
 fn test_remove_all_target_pieces_empty() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let removed = factory.remove_all_target_pieces();
     assert!(removed.is_empty());
 }
@@ -142,13 +142,13 @@ fn test_remove_all_target_pieces_empty() {
 
 #[test]
 fn test_count_missing_block_empty() {
-    let factory = BtRequestFactory::new(16384);
+    let factory = BtRequestFactory::new();
     assert_eq!(factory.count_missing_block(), 0);
 }
 
 #[test]
 fn test_count_missing_block_aggregation() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     // Two pieces with 4 blocks each = 8 missing blocks
     factory.add_target_piece(make_piece(0, 65536));
     factory.add_target_piece(make_piece(1, 65536));
@@ -157,7 +157,7 @@ fn test_count_missing_block_aggregation() {
 
 #[test]
 fn test_count_missing_block_after_partial_completion() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let mut piece = make_piece(0, 65536);
     piece.complete_block(0); // 1 of 4 blocks complete
     piece.complete_block(1); // 2 of 4 blocks complete
@@ -169,7 +169,7 @@ fn test_count_missing_block_after_partial_completion() {
 
 #[test]
 fn test_remove_completed_piece() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
 
     let mut piece0 = make_piece(0, 65536);
     piece0.complete_block(0);
@@ -190,7 +190,7 @@ fn test_remove_completed_piece() {
 
 #[test]
 fn test_remove_completed_piece_none_complete() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     let removed = factory.remove_completed_piece();
     assert!(removed.is_empty());
@@ -199,7 +199,7 @@ fn test_remove_completed_piece_none_complete() {
 
 #[test]
 fn test_remove_completed_piece_all_complete() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
 
     let mut piece0 = make_piece(0, 65536);
     let mut piece1 = make_piece(1, 65536);
@@ -223,7 +223,7 @@ fn test_remove_completed_piece_all_complete() {
 
 #[test]
 fn test_do_choked_action_removes_non_allowed() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let mock_storage = MockPieceStorage::new();
     factory.set_piece_storage(Box::new(MockPieceStorage {
         cancelled: mock_storage.cancelled.clone(),
@@ -249,7 +249,7 @@ fn test_do_choked_action_removes_non_allowed() {
 
 #[test]
 fn test_do_choked_action_all_allowed() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     factory.add_target_piece(make_piece(1, 65536));
 
@@ -260,7 +260,7 @@ fn test_do_choked_action_all_allowed() {
 
 #[test]
 fn test_do_choked_action_none_allowed() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     factory.add_target_piece(make_piece(1, 65536));
 
@@ -273,7 +273,7 @@ fn test_do_choked_action_none_allowed() {
 
 #[test]
 fn test_create_request_messages_normal() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536)); // 4 blocks
 
     let requests = factory.create_request_messages(2, false, |_, _| false);
@@ -288,7 +288,7 @@ fn test_create_request_messages_normal() {
 
 #[test]
 fn test_create_request_messages_normal_multiple_pieces() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 32768)); // 2 blocks
     factory.add_target_piece(make_piece(1, 32768)); // 2 blocks
 
@@ -303,7 +303,7 @@ fn test_create_request_messages_normal_multiple_pieces() {
 
 #[test]
 fn test_create_request_messages_max_count_zero() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
 
     let requests = factory.create_request_messages(0, false, |_, _| false);
@@ -312,7 +312,7 @@ fn test_create_request_messages_max_count_zero() {
 
 #[test]
 fn test_create_request_messages_marks_blocks_in_use() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536)); // 4 blocks
 
     // First call: request 2 blocks
@@ -332,14 +332,14 @@ fn test_create_request_messages_marks_blocks_in_use() {
 
 #[test]
 fn test_create_request_messages_empty_factory() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let requests = factory.create_request_messages(10, false, |_, _| false);
     assert!(requests.is_empty());
 }
 
 #[test]
 fn test_create_request_messages_all_blocks_in_use() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let mut piece = make_piece(0, 32768); // 2 blocks
     // Mark both blocks as in-use
     piece.set_block_in_use(0);
@@ -354,7 +354,7 @@ fn test_create_request_messages_all_blocks_in_use() {
 
 #[test]
 fn test_create_request_messages_endgame() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let mut piece = make_piece(0, 65536); // 4 blocks
     // Complete block 0, leave blocks 1-3 missing
     piece.complete_block(0);
@@ -373,7 +373,7 @@ fn test_create_request_messages_endgame() {
 
 #[test]
 fn test_create_request_messages_endgame_skips_outstanding() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536)); // 4 blocks
 
     // Block 1 is outstanding (already requested by another peer)
@@ -389,7 +389,7 @@ fn test_create_request_messages_endgame_skips_outstanding() {
 
 #[test]
 fn test_create_request_messages_endgame_max_count() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536)); // 4 blocks
 
     let requests = factory.create_request_messages(2, true, |_, _| false);
@@ -398,7 +398,7 @@ fn test_create_request_messages_endgame_max_count() {
 
 #[test]
 fn test_create_request_messages_endgame_all_outstanding() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536)); // 4 blocks
 
     // All blocks are outstanding
@@ -410,7 +410,7 @@ fn test_create_request_messages_endgame_all_outstanding() {
 fn test_create_request_messages_endgame_does_not_mark_in_use() {
     // In endgame mode, blocks are NOT marked as in-use on the Piece,
     // because multiple peers may request the same block.
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 32768)); // 2 blocks
 
     let _ = factory.create_request_messages(10, true, |_, _| false);
@@ -425,7 +425,7 @@ fn test_create_request_messages_endgame_does_not_mark_in_use() {
 
 #[test]
 fn test_get_target_piece_indexes() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(5, 65536));
     factory.add_target_piece(make_piece(10, 65536));
     factory.add_target_piece(make_piece(3, 65536));
@@ -436,7 +436,7 @@ fn test_get_target_piece_indexes() {
 
 #[test]
 fn test_create_request_messages_piece_with_non_aligned_length() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     // 50000 bytes = 4 blocks (last block is 848 bytes)
     factory.add_target_piece(make_piece(0, 50000));
 
@@ -449,7 +449,7 @@ fn test_create_request_messages_piece_with_non_aligned_length() {
 
 #[test]
 fn test_count_target_piece() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     assert_eq!(factory.count_target_piece(), 0);
     factory.add_target_piece(make_piece(0, 65536));
     assert_eq!(factory.count_target_piece(), 1);
@@ -461,7 +461,7 @@ fn test_count_target_piece() {
 
 #[test]
 fn test_remove_all_then_add() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     factory.add_target_piece(make_piece(0, 65536));
     factory.add_target_piece(make_piece(1, 65536));
     factory.remove_all_target_pieces();
@@ -474,14 +474,14 @@ fn test_remove_all_then_add() {
 
 #[test]
 fn test_do_choked_action_empty_factory() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let removed = factory.do_choked_action(|_| false);
     assert!(removed.is_empty());
 }
 
 #[test]
 fn test_create_request_messages_endgame_empty_factory() {
-    let mut factory = BtRequestFactory::new(16384);
+    let mut factory = BtRequestFactory::new();
     let requests = factory.create_request_messages(10, true, |_, _| false);
     assert!(requests.is_empty());
 }

@@ -89,23 +89,22 @@ pub struct BtRequestFactory {
     pub(crate) pieces: VecDeque<Piece>,
     /// Piece storage provider for cancel_piece operations (C++ `pieceStorage_`).
     pub(crate) piece_storage: Option<Box<dyn PieceStorageProvider>>,
-    /// Block size for calculating byte offsets (C++ uses `Piece::getBlockLength()`).
-    /// Kept for API compatibility; actual block lengths come from Piece.
-    #[allow(dead_code)]
-    pub(crate) block_size: u32,
     /// Command ID for logging and cancellation (C++ `cuid_`).
     pub(crate) cuid: u64,
 }
 
+impl Default for BtRequestFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BtRequestFactory {
-    /// Create a new factory with the given block size.
-    ///
-    /// Typically `block_size` is 16384 (16 KiB), matching `BT_BLOCK_SIZE`.
-    pub fn new(block_size: u32) -> Self {
+    /// Create a new request factory.
+    pub fn new() -> Self {
         Self {
             pieces: VecDeque::new(),
             piece_storage: None,
-            block_size,
             cuid: 0,
         }
     }
