@@ -65,4 +65,20 @@ describe('Events E2E', () => {
       else resolve();
     }));
   });
+
+  it('close settles an in-flight event connection', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const emitter = new Aria2EventEmitter(`ws://127.0.0.1:${address.port}/jsonrpc`);
+
+    const connection = emitter.connect();
+    await emitter.close();
+
+    await expect(connection).rejects.toThrow('Emitter has been closed');
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
 });

@@ -261,6 +261,7 @@ var BASE_RECONNECT_DELAY = 1e3;
 var Aria2EventEmitter = class extends EventEmitter {
   wsUrl;
   ws = null;
+  pendingWs = null;
   reconnectAttempts = 0;
   reconnectTimer = null;
   closed = false;
@@ -290,8 +291,30 @@ var Aria2EventEmitter = class extends EventEmitter {
   async doConnect() {
     return new Promise((resolve, reject) => {
       const ws = new WebSocket2(this.wsUrl);
-      const openHandler = () => {
+      this.pendingWs = ws;
+      let settled = false;
+      const cleanup = () => {
+        ws.removeListener("open", openHandler);
         ws.removeListener("error", errorHandler);
+        ws.removeListener("close", closeHandler);
+        if (this.pendingWs === ws) {
+          this.pendingWs = null;
+        }
+      };
+      const rejectConnection = (message) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new ConnectionError(message));
+      };
+      const openHandler = () => {
+        if (this.closed) {
+          rejectConnection("Emitter has been closed");
+          ws.close();
+          return;
+        }
+        settled = true;
+        cleanup();
         this.ws = ws;
         this.reconnectAttempts = 0;
         this.setupMessageHandler(ws);
@@ -299,11 +322,16 @@ var Aria2EventEmitter = class extends EventEmitter {
         resolve();
       };
       const errorHandler = (err) => {
-        ws.removeListener("open", openHandler);
-        reject(new ConnectionError(err.message));
+        rejectConnection(this.closed ? "Emitter has been closed" : err.message);
+      };
+      const closeHandler = (code) => {
+        rejectConnection(
+          this.closed ? "Emitter has been closed" : `WebSocket closed before connection established (code ${code})`
+        );
       };
       ws.once("open", openHandler);
       ws.once("error", errorHandler);
+      ws.once("close", closeHandler);
     });
   }
   setupMessageHandler(ws) {
@@ -372,6 +400,10 @@ var Aria2EventEmitter = class extends EventEmitter {
       this.ws.removeAllListeners();
       this.ws.close();
       this.ws = null;
+    }
+    if (this.pendingWs) {
+      this.pendingWs.terminate();
+      this.pendingWs = null;
     }
     this.connectPromise = null;
     this.removeAllListeners();

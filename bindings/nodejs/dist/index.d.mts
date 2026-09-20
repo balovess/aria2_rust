@@ -128,6 +128,7 @@ interface ClientOptions {
 declare class Aria2EventEmitter extends EventEmitter {
     private wsUrl;
     private ws;
+    private pendingWs;
     private reconnectAttempts;
     private reconnectTimer;
     private closed;

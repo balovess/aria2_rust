@@ -46,7 +46,7 @@ impl DownloadCommand {
     /// is applicable (e.g. no URI, zero total length).
     ///
     /// Mirrors C++ `DownloadCommand::fillTailReclaimState()`.
-    pub fn fill_tail_reclaim_state(&self) -> Option<HttpTailReclaimState> {
+    pub(crate) fn fill_tail_reclaim_state(&self) -> Option<HttpTailReclaimState> {
         // Read current progress snapshot.  The caller should have called
         // update_tail_reclaim_progress() recently so that
         // last_tail_reclaim_session_download_length and tail_reclaim_last_progress

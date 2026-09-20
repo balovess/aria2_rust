@@ -20,6 +20,7 @@ const BASE_RECONNECT_DELAY = 1000;
 export class Aria2EventEmitter extends EventEmitter {
   private wsUrl: string;
   private ws: WebSocket | null = null;
+  private pendingWs: WebSocket | null = null;
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
@@ -56,9 +57,34 @@ export class Aria2EventEmitter extends EventEmitter {
   private async doConnect(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(this.wsUrl);
+      this.pendingWs = ws;
+
+      let settled = false;
+      const cleanup = (): void => {
+        ws.removeListener('open', openHandler);
+        ws.removeListener('error', errorHandler);
+        ws.removeListener('close', closeHandler);
+        if (this.pendingWs === ws) {
+          this.pendingWs = null;
+        }
+      };
+
+      const rejectConnection = (message: string): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new ConnectionError(message));
+      };
 
       const openHandler = (): void => {
-        ws.removeListener('error', errorHandler);
+        if (this.closed) {
+          rejectConnection('Emitter has been closed');
+          ws.close();
+          return;
+        }
+
+        settled = true;
+        cleanup();
         this.ws = ws;
         this.reconnectAttempts = 0;
         this.setupMessageHandler(ws);
@@ -67,12 +93,20 @@ export class Aria2EventEmitter extends EventEmitter {
       };
 
       const errorHandler = (err: Error): void => {
-        ws.removeListener('open', openHandler);
-        reject(new ConnectionError(err.message));
+        rejectConnection(this.closed ? 'Emitter has been closed' : err.message);
+      };
+
+      const closeHandler = (code: number): void => {
+        rejectConnection(
+          this.closed
+            ? 'Emitter has been closed'
+            : `WebSocket closed before connection established (code ${code})`,
+        );
       };
 
       ws.once('open', openHandler);
       ws.once('error', errorHandler);
+      ws.once('close', closeHandler);
     });
   }
 
@@ -156,6 +190,11 @@ export class Aria2EventEmitter extends EventEmitter {
       this.ws.removeAllListeners();
       this.ws.close();
       this.ws = null;
+    }
+
+    if (this.pendingWs) {
+      this.pendingWs.terminate();
+      this.pendingWs = null;
     }
 
     this.connectPromise = null;

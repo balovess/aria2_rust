@@ -217,7 +217,6 @@ pub async fn execute(
                     active_segs.insert(seg_idx, (offset, 0));
 
                     let submitted = executor.try_submit(HttpSegmentRequest {
-                        mirror_index: 0,
                         segment_index: seg_idx,
                         authority_key: authority_key.clone(),
                         url: uri.to_string(),

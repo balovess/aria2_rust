@@ -333,7 +333,6 @@ pub async fn execute_with_coordinator(
             let progress = progress_tracker.new_segment();
 
             let submitted = executor.try_submit(HttpSegmentRequest {
-                mirror_index: mirror_idx,
                 segment_index: seg_idx,
                 authority_key: key,
                 url: mirror_url.clone(),

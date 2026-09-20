@@ -20,7 +20,6 @@ const MAX_SERVER_CONCURRENCY: usize = 16;
 
 /// One HTTP byte-range request admitted for execution.
 pub struct HttpSegmentRequest {
-    pub mirror_index: usize,
     pub segment_index: u32,
     /// Authority bucket used for per-server request admission.
     pub authority_key: String,
@@ -39,7 +38,6 @@ pub struct HttpSegmentRequestResult {
     /// event is consumed. The result channel is the completion signal, so the
     /// scheduler never needs to probe every handle for readiness.
     pub(crate) task_id: u64,
-    pub mirror_index: usize,
     pub segment_index: u32,
     pub authority_key: String,
     pub result: Result<u64>,
@@ -163,7 +161,6 @@ impl HttpSegmentRequestExecutor {
                 .await;
             let request_result = HttpSegmentRequestResult {
                 task_id,
-                mirror_index: request.mirror_index,
                 segment_index: request.segment_index,
                 authority_key,
                 result,
@@ -183,18 +180,12 @@ impl HttpSegmentRequestExecutor {
         Some(task_id)
     }
 
-    pub fn set_target(&self, authority_key: &str, target: usize) {
+    pub(crate) fn set_target(&self, authority_key: &str, target: usize) {
         if let Some(authority) = self.state.authority(authority_key) {
             authority
                 .target
                 .store(target.clamp(1, authority.hard_limit), Ordering::Release);
         }
-    }
-
-    pub fn target_for(&self, authority_key: &str) -> Option<usize> {
-        self.state
-            .authority(authority_key)
-            .map(|authority| authority.target.load(Ordering::Acquire))
     }
 
     /// Includes completed results waiting to be consumed by the scheduler.

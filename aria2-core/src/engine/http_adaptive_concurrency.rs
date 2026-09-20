@@ -43,11 +43,7 @@ impl HttpAdaptiveConcurrency {
         }
     }
 
-    pub fn target(&self) -> usize {
-        self.target
-    }
-
-    pub fn hard_limit(&self) -> usize {
+    pub(crate) fn hard_limit(&self) -> usize {
         self.hard_limit
     }
 
@@ -119,10 +115,6 @@ impl HttpAdaptiveConcurrency {
             .map(|until| until.saturating_duration_since(Instant::now()))
             .filter(|remaining| !remaining.is_zero())
     }
-
-    pub fn is_settled(&self) -> bool {
-        self.settled
-    }
 }
 
 #[cfg(test)]
@@ -132,8 +124,8 @@ mod tests {
     #[test]
     fn starts_at_hard_limit() {
         let controller = HttpAdaptiveConcurrency::new(16, 0);
-        assert_eq!(controller.target(), 16);
-        assert_eq!(controller.hard_limit(), 16);
+        assert_eq!(controller.target, 16);
+        assert_eq!(controller.hard_limit, 16);
     }
 
     #[test]
@@ -147,7 +139,7 @@ mod tests {
         }
 
         assert_eq!(controller.finish_round(), Some(15));
-        assert_eq!(controller.target(), 15);
+        assert_eq!(controller.target, 15);
         assert!(!controller.can_start(15));
     }
 
@@ -158,13 +150,13 @@ mod tests {
             controller.record(AdaptiveOutcome::CapacityLimited);
         }
         assert_eq!(controller.finish_round(), Some(15));
-        assert_eq!(controller.target(), 15);
+        assert_eq!(controller.target, 15);
 
         for _ in 0..15 {
             controller.record(AdaptiveOutcome::CapacityLimited);
         }
         assert_eq!(controller.finish_round(), Some(14));
-        assert_eq!(controller.target(), 14);
+        assert_eq!(controller.target, 14);
     }
 
     #[test]
@@ -174,7 +166,7 @@ mod tests {
             controller.record(AdaptiveOutcome::Success);
         }
         assert_eq!(controller.finish_round(), None);
-        assert!(controller.is_settled());
+        assert!(controller.settled);
         assert!(controller.can_start(15));
     }
 }
