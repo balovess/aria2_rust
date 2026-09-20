@@ -87,12 +87,14 @@ async fn connect_completes_real_bittorrent_handshake_over_utp() {
         }
     });
 
-    let connection = UtpPeerConnection::connect_with_shared_socket(
+    let connection = UtpPeerConnection::connect_with_shared_socket_hybrid(
         client_socket,
         server_addr,
         &info_hash,
+        None,
         &local_peer_id,
         Duration::from_secs(1),
+        false,
     )
     .await
     .expect("uTP connection should complete the BitTorrent handshake");

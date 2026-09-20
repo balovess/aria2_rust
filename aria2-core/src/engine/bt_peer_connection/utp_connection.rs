@@ -55,21 +55,6 @@ impl UtpPeerConnection {
         }
     }
 
-    /// Connect to a remote peer via uTP using an automatically selected port.
-    pub async fn connect(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_with_options(
-            addr,
-            info_hash,
-            None,
-            &local_peer_id,
-            std::time::Duration::from_secs(20),
-            None,
-            false,
-        )
-        .await
-    }
-
     /// Connect and complete the BitTorrent handshake over uTP.
     pub async fn connect_with_options(
         addr: std::net::SocketAddr,
@@ -94,26 +79,6 @@ impl UtpPeerConnection {
             local_peer_id,
             timeout,
             dht_enabled,
-        )
-        .await
-    }
-
-    /// Connect on a socket shared by all uTP peers in one download task.
-    pub async fn connect_with_shared_socket(
-        socket: Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>,
-        addr: std::net::SocketAddr,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self> {
-        Self::connect_with_shared_socket_hybrid(
-            socket,
-            addr,
-            info_hash,
-            None,
-            local_peer_id,
-            timeout,
-            false,
         )
         .await
     }

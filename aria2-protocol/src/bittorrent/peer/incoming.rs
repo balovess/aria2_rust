@@ -294,14 +294,19 @@ mod tests {
         )
         .await;
 
-        let client_result =
-            crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(
-                &PeerAddr::new("127.0.0.1", address.port()),
-                &info_hash,
-                true,
-                true,
-            )
-            .await;
+        let client_result = crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &info_hash,
+            None,
+            crate::bittorrent::peer::encrypted_connection::MseConnectionOptions {
+                force_encryption: true,
+                prefer_encryption: true,
+                local_peer_id: [0x41; 20],
+                timeout: std::time::Duration::from_secs(2),
+                dht_enabled: false,
+            },
+        )
+        .await;
         let mut client = match client_result {
             Ok(client) => client,
             Err(error) => {
@@ -369,15 +374,20 @@ mod tests {
         let (address, server) =
             run_incoming_server(info_hash, IncomingCryptoPolicy::default()).await;
 
-        let client =
-            crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse(
-                &PeerAddr::new("127.0.0.1", address.port()),
-                &info_hash,
-                false,
-                false,
-            )
-            .await
-            .unwrap();
+        let client = crate::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &info_hash,
+            None,
+            crate::bittorrent::peer::encrypted_connection::MseConnectionOptions {
+                force_encryption: false,
+                prefer_encryption: false,
+                local_peer_id: [0x42; 20],
+                timeout: std::time::Duration::from_secs(2),
+                dht_enabled: false,
+            },
+        )
+        .await
+        .unwrap();
         assert!(!client.is_encrypted());
         let server_connection = server.await.unwrap().unwrap();
         assert!(matches!(

@@ -138,36 +138,6 @@ impl PeerConnection {
         .await
     }
 
-    async fn from_stream_with_timeout(
-        mut stream: tokio::net::TcpStream,
-        info_hash: &[u8; 20],
-        local_peer_id: &[u8; 20],
-        timeout: std::time::Duration,
-    ) -> Result<Self, String> {
-        let handshake = Handshake::new(info_hash, local_peer_id);
-        stream
-            .write_all(&handshake.to_bytes())
-            .await
-            .map_err(|e| format!("Failed to send handshake: {}", e))?;
-
-        let remote_hs = Self::read_remote_handshake(&mut stream, info_hash, timeout).await?;
-        Self::finish_handshake(stream, remote_hs)
-    }
-
-    pub async fn from_stream(
-        stream: tokio::net::TcpStream,
-        info_hash: &[u8; 20],
-    ) -> Result<Self, String> {
-        let my_peer_id = id::generate_peer_id();
-        Self::from_stream_with_timeout(
-            stream,
-            info_hash,
-            &my_peer_id,
-            std::time::Duration::from_secs(30),
-        )
-        .await
-    }
-
     /// Complete the server side of a BitTorrent handshake.
     ///
     /// Incoming peers send their handshake first.  The listener must validate

@@ -389,6 +389,27 @@ class TestTellLists:
         with pytest.raises(Aria2Error):
             await client.tell_active()
 
+    @pytest.mark.parametrize(
+        ("method_name", "args"),
+        [
+            ("get_files", ("gid1",)),
+            ("get_uris", ("gid1",)),
+            ("get_servers", ("gid1",)),
+            ("get_peers", ("gid1",)),
+            ("get_trackers", ("gid1",)),
+            ("tell_active", ()),
+            ("tell_waiting", (0, 10)),
+            ("tell_stopped", (0, 10)),
+        ],
+    )
+    async def test_list_methods_reject_non_object_items(
+        self, client, mock_transport, method_name, args
+    ):
+        mock_transport.send_request.return_value = [{"gid": "valid"}, "malformed"]
+
+        with pytest.raises(Aria2Error, match="Unexpected item type"):
+            await getattr(client, method_name)(*args)
+
 
 class TestGetGlobalStat:
     @pytest.mark.asyncio

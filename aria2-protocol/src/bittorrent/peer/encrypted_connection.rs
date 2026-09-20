@@ -45,28 +45,6 @@ impl EncryptedConnection {
         }
     }
 
-    pub async fn connect_with_mse(
-        addr: &PeerAddr,
-        info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-    ) -> Result<Self, String> {
-        let local_peer_id = crate::bittorrent::peer::id::generate_peer_id();
-        Self::connect_with_mse_with_options(
-            addr,
-            info_hash,
-            None,
-            MseConnectionOptions {
-                force_encryption,
-                prefer_encryption,
-                local_peer_id,
-                timeout: std::time::Duration::from_secs(15),
-                dht_enabled: false,
-            },
-        )
-        .await
-    }
-
     pub async fn connect_with_mse_with_options(
         addr: &PeerAddr,
         info_hash: &[u8; 20],
@@ -426,11 +404,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_unreachable_returns_err() {
-        let result = EncryptedConnection::connect_with_mse(
+        let result = EncryptedConnection::connect_with_mse_with_options(
             &PeerAddr::new("127.0.0.1", 1),
             &[0xAB; 20],
-            false,
-            false,
+            None,
+            MseConnectionOptions {
+                force_encryption: false,
+                prefer_encryption: false,
+                local_peer_id: [0x42; 20],
+                timeout: std::time::Duration::from_secs(2),
+                dht_enabled: false,
+            },
         )
         .await;
         assert!(result.is_err(), "unreachable address should fail");

@@ -36,29 +36,6 @@ impl BtPeerConn {
     // Connection constructors
     // -----------------------------------------------------------------------
 
-    /// Connect via MSE (Message Stream Encryption) over TCP.
-    pub async fn connect_mse(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-        force_encryption: bool,
-        prefer_encryption: bool,
-    ) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_mse_with_options(
-            addr,
-            info_hash,
-            None,
-            MseConnectionOptions {
-                force_encryption,
-                prefer_encryption,
-                local_peer_id,
-                timeout: std::time::Duration::from_secs(15),
-                dht_enabled: false,
-            },
-        )
-        .await
-    }
-
     /// Connect via MSE using the task's peer identity and connection timeout.
     pub async fn connect_mse_with_options(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
@@ -129,23 +106,6 @@ impl BtPeerConn {
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
         }
-    }
-
-    /// Connect via plain TCP.
-    pub async fn connect_plain(
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-        info_hash: &[u8; 20],
-    ) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_plain_with_options(
-            addr,
-            info_hash,
-            None,
-            &local_peer_id,
-            std::time::Duration::from_secs(15),
-            false,
-        )
-        .await
     }
 
     /// Connect via plain TCP using the task's peer identity and timeout.
@@ -346,30 +306,6 @@ impl BtPeerConn {
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
         }
-    }
-
-    /// Connect via uTP (Micro Transport Protocol).
-    ///
-    /// uTP is a UDP-based transport protocol that provides:
-    /// - Reliable, ordered delivery
-    /// - LEDBAT congestion control (low priority, background traffic)
-    /// - Better performance on congested networks
-    /// - NAT traversal benefits
-    pub async fn connect_utp(addr: std::net::SocketAddr, info_hash: &[u8; 20]) -> Result<Self> {
-        let local_peer_id = aria2_protocol::bittorrent::peer::id::generate_peer_id();
-        Self::connect_utp_with_options(
-            addr,
-            info_hash,
-            None,
-            UtpConnectionOptions {
-                local_peer_id,
-                timeout: std::time::Duration::from_secs(15),
-                listen_port: None,
-                shared_socket: None,
-                dht_enabled: false,
-            },
-        )
-        .await
     }
 
     /// Connect via uTP using the task's peer identity, timeout, and shared

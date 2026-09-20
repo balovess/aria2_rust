@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import base64
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, TypeVar, Union
 
 from typing_extensions import Self
 
@@ -30,6 +30,23 @@ def _http_to_ws(url: str) -> str:
     if url.startswith("http://"):
         return "ws://" + url[7:]
     return url
+
+
+T = TypeVar("T")
+
+
+def _parse_dict_list(
+    result: Any, method: str, parser: Callable[[Dict[str, Any]], T]
+) -> List[T]:
+    """Decode an RPC object list without silently dropping malformed entries."""
+    if not isinstance(result, list):
+        raise Aria2Error(f"Unexpected result type for {method}: {type(result)}")
+    for index, item in enumerate(result):
+        if not isinstance(item, dict):
+            raise Aria2Error(
+                f"Unexpected item type for {method} at index {index}: {type(item)}"
+            )
+    return [parser(item) for item in result]
 
 
 class Aria2Client:
@@ -193,41 +210,23 @@ class Aria2Client:
         metadata exchange before their file list is complete.
         """
         result = await self._call("aria2.getFiles", [gid])
-        if isinstance(result, list):
-            return [FileInfo.from_dict(item) for item in result if isinstance(item, dict)]
-        raise Aria2Error(f"Unexpected result type for getFiles: {type(result)}")
+        return _parse_dict_list(result, "getFiles", FileInfo.from_dict)
 
     async def get_uris(self, gid: str) -> List[UriEntry]:
         result = await self._call("aria2.getUris", [gid])
-        if isinstance(result, list):
-            return [UriEntry.from_dict(item) for item in result if isinstance(item, dict)]
-        raise Aria2Error(f"Unexpected result type for getUris: {type(result)}")
+        return _parse_dict_list(result, "getUris", UriEntry.from_dict)
 
     async def get_servers(self, gid: str) -> List[ServerInfoIndex]:
         result = await self._call("aria2.getServers", [gid])
-        if isinstance(result, list):
-            return [
-                ServerInfoIndex.from_dict(item)
-                for item in result
-                if isinstance(item, dict)
-            ]
-        raise Aria2Error(f"Unexpected result type for getServers: {type(result)}")
+        return _parse_dict_list(result, "getServers", ServerInfoIndex.from_dict)
 
     async def get_peers(self, gid: str) -> List[PeerInfo]:
         result = await self._call("aria2.getPeers", [gid])
-        if isinstance(result, list):
-            return [PeerInfo.from_dict(item) for item in result if isinstance(item, dict)]
-        raise Aria2Error(f"Unexpected result type for getPeers: {type(result)}")
+        return _parse_dict_list(result, "getPeers", PeerInfo.from_dict)
 
     async def get_trackers(self, gid: str) -> List[TrackerInfo]:
         result = await self._call("aria2.getTrackers", [gid])
-        if isinstance(result, list):
-            return [
-                TrackerInfo.from_dict(item)
-                for item in result
-                if isinstance(item, dict)
-            ]
-        raise Aria2Error(f"Unexpected result type for getTrackers: {type(result)}")
+        return _parse_dict_list(result, "getTrackers", TrackerInfo.from_dict)
 
     async def get_dht_status(self) -> DhtStatus:
         result = await self._call("aria2.getDhtStatus")
@@ -242,9 +241,7 @@ class Aria2Client:
         if keys is not None:
             params.append(keys)
         result = await self._call("aria2.tellActive", params)
-        if isinstance(result, list):
-            return [StatusInfo.from_dict(item) for item in result if isinstance(item, dict)]
-        raise Aria2Error(f"Unexpected result type for tellActive: {type(result)}")
+        return _parse_dict_list(result, "tellActive", StatusInfo.from_dict)
 
     async def tell_waiting(
         self, offset: int, num: int, keys: Optional[List[str]] = None
@@ -253,9 +250,7 @@ class Aria2Client:
         if keys is not None:
             params.append(keys)
         result = await self._call("aria2.tellWaiting", params)
-        if isinstance(result, list):
-            return [StatusInfo.from_dict(item) for item in result if isinstance(item, dict)]
-        raise Aria2Error(f"Unexpected result type for tellWaiting: {type(result)}")
+        return _parse_dict_list(result, "tellWaiting", StatusInfo.from_dict)
 
     async def tell_stopped(
         self, offset: int, num: int, keys: Optional[List[str]] = None
@@ -264,9 +259,7 @@ class Aria2Client:
         if keys is not None:
             params.append(keys)
         result = await self._call("aria2.tellStopped", params)
-        if isinstance(result, list):
-            return [StatusInfo.from_dict(item) for item in result if isinstance(item, dict)]
-        raise Aria2Error(f"Unexpected result type for tellStopped: {type(result)}")
+        return _parse_dict_list(result, "tellStopped", StatusInfo.from_dict)
 
     async def get_global_stat(self) -> GlobalStat:
         result = await self._call("aria2.getGlobalStat")
