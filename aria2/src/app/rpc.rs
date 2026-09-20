@@ -80,13 +80,11 @@ fn rpc_bind_hosts(host: &str, listen_all: bool, disable_ipv6: bool) -> Result<Ve
 ///
 /// # Lifetime
 ///
-/// The bridge holds a [`Weak`] reference to the [`RpcEngine`]. The core bus is
-/// a process-wide singleton with no listener-removal API, so a strong
-/// reference would keep the engine (and everything it owns — the group
-/// manager, the command channel, all task state) alive for the whole process
-/// lifetime even after the RPC server has been torn down. When the upgrade
-/// fails the event is silently dropped: there is no publisher left to receive
-/// it.
+/// The bridge holds a [`Weak`] reference to the [`RpcEngine`]. The registration
+/// is also explicitly removed when the RPC serving task exits, so a restarted
+/// server does not accumulate stale adapters on the process-wide core bus.
+/// When the weak upgrade fails, the event is silently dropped: there is no
+/// publisher left to receive it.
 pub struct CoreEventBridge {
     engine: Weak<RpcEngine>,
 }
@@ -333,7 +331,7 @@ impl App {
         // Registration must happen *before* the server starts serving so no
         // completion can slip through unobserved.
         let hooks = DownloadEventHooks::shared();
-        hooks.add_listener(Arc::new(CoreEventBridge::new(&rpc_engine)));
+        let listener_id = hooks.add_listener_with_id(Arc::new(CoreEventBridge::new(&rpc_engine)));
         info!(
             listeners = hooks.listener_count(),
             "Registered core→RPC download event bridge"
@@ -352,6 +350,7 @@ impl App {
             }
         }
         if listeners.is_empty() {
+            hooks.remove_listener(listener_id);
             return Err(format!(
                 "Failed to bind RPC server on {}: {}",
                 server.addr(),
@@ -370,6 +369,7 @@ impl App {
 
         // Spawn server in background
         let server = Arc::new(server);
+        let hooks = Arc::clone(hooks);
         let handle = tokio::spawn(async move {
             let mut tasks = Vec::with_capacity(listeners.len());
             for listener in listeners {
@@ -383,6 +383,7 @@ impl App {
             for task in tasks {
                 let _ = task.await;
             }
+            hooks.remove_listener(listener_id);
         });
 
         Ok(handle)

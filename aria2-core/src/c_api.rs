@@ -768,8 +768,8 @@ pub extern "C" fn aria2_rust_library_deinit() -> i32 {
 /// `options` must be null or point to `option_count` valid
 /// [`Aria2RustKeyValue`] entries. Each non-null name and value pointer in
 /// those entries must reference a valid NUL-terminated C string. The returned
-/// opaque pointer must be released with [`aria2_rust_session_final`] or
-/// [`aria2_rust_session_free`] exactly once.
+/// opaque pointer must be released with [`aria2_rust_session_final`] exactly
+/// once.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn aria2_rust_session_new(
     options: *const Aria2RustKeyValue,
@@ -806,16 +806,6 @@ pub unsafe extern "C" fn aria2_rust_session_final(session: *mut Aria2RustSession
         let mut session = unsafe { Box::from_raw(session) };
         session.finalize()
     })
-}
-
-/// Alias for callers that prefer an explicit free operation.
-///
-/// # Safety
-/// `session` must be null or a pointer previously returned by
-/// [`aria2_rust_session_new`] that has not already been finalized or freed.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn aria2_rust_session_free(session: *mut Aria2RustSession) {
-    let _ = unsafe { aria2_rust_session_final(session) };
 }
 
 /// Add one or more HTTP(S)/FTP(S), SFTP, magnet, or torrent URIs.

@@ -197,8 +197,8 @@ pub use engine::bt_piece::{
 };
 pub use engine::download_engine::DownloadEngine;
 pub use engine::download_event_hooks::{
-    DownloadEvent, DownloadEventHooks, DownloadEventListener, DownloadEventStream,
-    DownloadNotification, MetadataResolvedEvent,
+    DownloadEvent, DownloadEventHooks, DownloadEventListener, DownloadEventListenerId,
+    DownloadEventStream, DownloadNotification, MetadataResolvedEvent,
 };
 pub use engine::download_manager::{
     DownloadEngineHandle, DownloadHandle, DownloadManager, DownloadManagerError,

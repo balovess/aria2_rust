@@ -7,8 +7,6 @@ fn follow_mode_preserves_all_wire_values() {
     assert_eq!(FollowMode::parse("false"), Some(FollowMode::Disabled));
     assert_eq!(FollowMode::parse("mem"), Some(FollowMode::Memory));
     assert_eq!(FollowMode::parse("invalid"), None);
-    assert_eq!(FollowMode::from_bool(true), FollowMode::Follow);
-    assert_eq!(FollowMode::from_bool(false), FollowMode::Disabled);
     assert_eq!(FollowMode::Memory.as_str(), "mem");
 }
 

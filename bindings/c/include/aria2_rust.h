@@ -64,7 +64,6 @@ Aria2RustSession *aria2_rust_session_new(const Aria2RustKeyValue *options,
                                           size_t option_count,
                                           void *user_data);
 int32_t aria2_rust_session_final(Aria2RustSession *session);
-void aria2_rust_session_free(Aria2RustSession *session);
 
 /* mode 0 waits for all current downloads; mode 1 runs one event turn. */
 int32_t aria2_rust_run(Aria2RustSession *session, uint32_t mode);

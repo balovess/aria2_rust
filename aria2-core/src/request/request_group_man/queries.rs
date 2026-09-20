@@ -74,14 +74,6 @@ impl RequestGroupMan {
         snapshot
     }
 
-    pub fn is_group_active(&self, gid_hex: &str) -> std::result::Result<bool, String> {
-        let group = self
-            .group_by_hex(gid_hex)
-            .ok_or_else(|| format!("GID {} not found", gid_hex))?;
-        let g = group.recover();
-        Ok(g.status().is_active())
-    }
-
     /// Snapshot of all groups (active + reserved) as Arc clones.
     pub fn all_groups(&self) -> Vec<(GroupId, Arc<std::sync::RwLock<RequestGroup>>)> {
         self.groups_snapshot()

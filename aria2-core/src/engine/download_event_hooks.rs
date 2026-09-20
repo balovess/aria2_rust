@@ -59,7 +59,7 @@
 //! dedicated task).
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, atomic::AtomicU64};
 
 use tokio::sync::broadcast;
 
@@ -249,6 +249,9 @@ pub trait DownloadEventListener: Send + Sync {
     }
 }
 
+/// Stable identifier for one registered lifecycle listener.
+pub type DownloadEventListenerId = u64;
+
 // ============================================================================
 // DownloadEventHooks — manages hook registration and execution
 // ============================================================================
@@ -314,7 +317,8 @@ pub struct DownloadEventHooks {
     global_hooks: Arc<std::sync::RwLock<GlobalHookMap>>,
     /// Registered observers (sink 2). Notified for **every** fired event,
     /// regardless of whether a shell hook command is configured.
-    listeners: std::sync::RwLock<Vec<Arc<dyn DownloadEventListener>>>,
+    listeners: std::sync::RwLock<Vec<(DownloadEventListenerId, Arc<dyn DownloadEventListener>)>>,
+    next_listener_id: AtomicU64,
     /// De-duplication ledger for one-shot events
     /// ([`DownloadEvent::is_once_per_download`]).
     one_shot: std::sync::RwLock<OneShotLedger>,
@@ -338,6 +342,7 @@ impl DownloadEventHooks {
         Self {
             global_hooks: Arc::new(std::sync::RwLock::new(Vec::new())),
             listeners: std::sync::RwLock::new(Vec::new()),
+            next_listener_id: AtomicU64::new(1),
             one_shot: std::sync::RwLock::new(OneShotLedger::default()),
             notifications,
             metadata_history: std::sync::RwLock::new(VecDeque::new()),
@@ -360,17 +365,45 @@ impl DownloadEventHooks {
 
     /// Register an observer that is notified of every fired download event.
     ///
-    /// Mirrors C++ `Notifier::addDownloadEventListener()`. Registration is
-    /// additive and there is no removal API, matching C++ where listeners
-    /// live for the lifetime of the process.
+    /// Registration is additive. Call [`Self::add_listener_with_id`] when the
+    /// caller owns a bounded-lifetime adapter and needs explicit cleanup.
     pub fn add_listener(&self, listener: Arc<dyn DownloadEventListener>) {
+        let _ = self.add_listener_with_id(listener);
+    }
+
+    /// Register an observer and return its removal identifier.
+    ///
+    /// The identifier is local to this hook bus and remains valid until the
+    /// listener is removed or the bus is dropped. Registration still prunes
+    /// listeners whose [`DownloadEventListener::is_alive`] method is false.
+    pub fn add_listener_with_id(
+        &self,
+        listener: Arc<dyn DownloadEventListener>,
+    ) -> DownloadEventListenerId {
+        let id = self
+            .next_listener_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut listeners = self.listeners.recover_mut();
-        listeners.retain(|listener| listener.is_alive());
-        listeners.push(listener);
+        listeners.retain(|(_, listener)| listener.is_alive());
+        listeners.push((id, listener));
         debug!(
+            listener_id = id,
             count = listeners.len(),
             "Registered download event listener"
         );
+        id
+    }
+
+    /// Remove a listener previously returned by [`Self::add_listener_with_id`].
+    ///
+    /// Returns `true` only when the requested identifier was registered. Any
+    /// other listeners that are already dead are pruned as part of the same
+    /// operation.
+    pub fn remove_listener(&self, id: DownloadEventListenerId) -> bool {
+        let mut listeners = self.listeners.recover_mut();
+        let removed = listeners.iter().any(|(listener_id, _)| *listener_id == id);
+        listeners.retain(|(listener_id, listener)| *listener_id != id && listener.is_alive());
+        removed
     }
 
     /// Number of currently registered observers (primarily for tests).
@@ -418,13 +451,16 @@ impl DownloadEventHooks {
         // deadlock against `add_listener`.
         let listeners: Vec<Arc<dyn DownloadEventListener>> = {
             let mut guard = self.listeners.recover_mut();
-            guard.retain(|listener| listener.is_alive());
+            guard.retain(|(_, listener)| listener.is_alive());
             if guard.is_empty() && self.notifications.receiver_count() == 0 {
                 // Nothing to do — and importantly, do not pollute the
                 // de-duplication ledger when no one is listening.
                 return;
             }
-            guard.clone()
+            guard
+                .iter()
+                .map(|(_, listener)| Arc::clone(listener))
+                .collect()
         };
 
         if event.is_once_per_download()
@@ -470,11 +506,14 @@ impl DownloadEventHooks {
 
         let listeners: Vec<Arc<dyn DownloadEventListener>> = {
             let mut guard = self.listeners.recover_mut();
-            guard.retain(|listener| listener.is_alive());
+            guard.retain(|(_, listener)| listener.is_alive());
             if guard.is_empty() && self.notifications.receiver_count() == 0 {
                 return;
             }
-            guard.clone()
+            guard
+                .iter()
+                .map(|(_, listener)| Arc::clone(listener))
+                .collect()
         };
 
         let _ = self
@@ -931,6 +970,16 @@ mod tests {
         hooks.add_listener(Arc::new(RecordingListener::default()));
         hooks.add_listener(Arc::new(RecordingListener::default()));
         assert_eq!(hooks.listener_count(), 2);
+    }
+
+    #[test]
+    fn test_listener_can_be_removed_explicitly() {
+        let hooks = DownloadEventHooks::new();
+        let id = hooks.add_listener_with_id(Arc::new(RecordingListener::default()));
+        assert_eq!(hooks.listener_count(), 1);
+        assert!(hooks.remove_listener(id));
+        assert_eq!(hooks.listener_count(), 0);
+        assert!(!hooks.remove_listener(id));
     }
 
     struct ToggleListener {
