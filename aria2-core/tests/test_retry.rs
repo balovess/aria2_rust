@@ -1,5 +1,6 @@
+use aria2_core::engine::retry_policy::RetryPolicy;
 use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
-use aria2_core::retry::{RetryExecutor, RetryPolicy, RetryStats};
+use aria2_core::retry::{RetryExecutor, RetryStats};
 use std::sync::Arc;
 use std::time::Duration;
 

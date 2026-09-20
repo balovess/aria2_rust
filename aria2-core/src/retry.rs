@@ -1,9 +1,7 @@
+use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tracing::warn;
-
-// Re-export unified RetryPolicy from engine::retry_policy
-pub use crate::engine::retry_policy::RetryPolicy;
 
 #[derive(Debug, Default)]
 pub struct RetryStats {

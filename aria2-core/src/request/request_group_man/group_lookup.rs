@@ -2,8 +2,7 @@
 
 use std::sync::Arc;
 
-use super::reserved::PositionMode;
-use super::{ChangePositionMode, GroupId, RequestGroup, RequestGroupMan};
+use super::{GroupId, PositionMode, RequestGroup, RequestGroupMan};
 use crate::error::Result;
 
 impl RequestGroupMan {
@@ -30,12 +29,7 @@ impl RequestGroupMan {
     }
 
     /// Change a reserved group's queue position and return its new index.
-    pub fn change_position(
-        &self,
-        gid: GroupId,
-        pos: i32,
-        mode: ChangePositionMode,
-    ) -> Result<usize> {
+    pub fn change_position(&self, gid: GroupId, pos: i32, mode: PositionMode) -> Result<usize> {
         let _lifecycle = self.lifecycle_guard();
         if self.reserved.is_empty() {
             return Err(crate::error::Aria2Error::InvalidArgument(

@@ -21,7 +21,7 @@ use tracing::info;
 use reserved::ReservedQueue;
 use stopped::StoppedResults;
 
-pub use reserved::PositionMode as ChangePositionMode;
+pub use reserved::PositionMode;
 
 use super::global_net_stat::GlobalNetStat;
 use super::request_group::{ActivitySignal, GroupId, RequestGroup};

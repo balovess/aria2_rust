@@ -30,7 +30,7 @@ use crate::rate_limiter::RateLimiterConfig;
 use crate::request::request_group::{
     DownloadOptions, DownloadStatus, GroupId, HaltReason, RequestGroup,
 };
-use crate::request::request_group_man::{ChangePositionMode, RequestGroupMan};
+use crate::request::request_group_man::{PositionMode, RequestGroupMan};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// C-compatible key/value option entry.
@@ -656,9 +656,9 @@ impl Aria2RustSession {
         mode: u32,
     ) -> std::result::Result<usize, String> {
         let mode = match mode {
-            0 => ChangePositionMode::SetFromStart,
-            1 => ChangePositionMode::MoveFromStart,
-            2 => ChangePositionMode::SetFromEnd,
+            0 => PositionMode::SetFromStart,
+            1 => PositionMode::MoveFromStart,
+            2 => PositionMode::SetFromEnd,
             _ => return Err("invalid queue position mode".to_string()),
         };
         self.request_man

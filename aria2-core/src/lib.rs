@@ -210,7 +210,7 @@ pub use request::request_group::{
     FileEntry, GroupId, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,
     UriEntry, is_option_changeable,
 };
-pub use request::request_group_man::{ChangePositionMode, RequestGroupMan};
+pub use request::request_group_man::{PositionMode, RequestGroupMan};
 
 #[cfg(test)]
 mod integration_tests_j2_j5;

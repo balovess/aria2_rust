@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::request::request_group_man::ChangePositionMode;
+use aria2_core::request::request_group_man::PositionMode as CorePositionMode;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_rpc::{BackendError, BackendEvent, BackendResponse, BackendResult, PositionMode};
 
@@ -17,9 +17,9 @@ impl CoreRpcBackend {
     ) -> Result<BackendResult, BackendError> {
         let gid = Self::parse_gid(gid)?;
         let mode = match mode {
-            PositionMode::SetFromStart => ChangePositionMode::SetFromStart,
-            PositionMode::MoveFromStart => ChangePositionMode::MoveFromStart,
-            PositionMode::SetFromEnd => ChangePositionMode::SetFromEnd,
+            PositionMode::SetFromStart => CorePositionMode::SetFromStart,
+            PositionMode::MoveFromStart => CorePositionMode::MoveFromStart,
+            PositionMode::SetFromEnd => CorePositionMode::SetFromEnd,
         };
         let position = self
             .group_man

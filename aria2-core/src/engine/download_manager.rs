@@ -15,9 +15,9 @@ use super::download_event_hooks::{DownloadEventHooks, DownloadEventStream};
 use super::engine_command::{EngineCommand, EngineCommandSendError, EngineCommandSender};
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{
-    DownloadOptions, DownloadResult, DownloadStatusSnapshot, GroupId, RequestGroup,
+    DownloadOptions, DownloadResult, DownloadStatus, DownloadStatusSnapshot, GroupId, RequestGroup,
 };
-use crate::request::request_group_man::{ChangePositionMode, RequestGroupMan};
+use crate::request::request_group_man::{PositionMode, RequestGroupMan};
 use crate::util::rwlock_ext::RwLockRecover;
 
 /// Errors returned by the high-level download-management interface.
@@ -335,7 +335,7 @@ impl DownloadHandle {
     pub fn change_position(
         &self,
         position: i32,
-        mode: ChangePositionMode,
+        mode: PositionMode,
     ) -> std::result::Result<usize, DownloadManagerError> {
         self.manager
             .group_man
@@ -343,24 +343,75 @@ impl DownloadHandle {
             .map_err(DownloadManagerError::State)
     }
 
+    /// Queue a graceful pause command.
+    ///
+    /// Success means the command was accepted by the engine queue. Use
+    /// [`Self::wait_for_status`] with [`DownloadStatus::Paused`] when the
+    /// caller must wait until the state transition is visible.
     pub fn pause(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::Pause { gid: self.gid })
     }
 
+    /// Queue a forced pause command and return once it is accepted.
     pub fn force_pause(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::ForcePause { gid: self.gid })
     }
 
+    /// Queue a resume command and return once it is accepted.
+    ///
+    /// A resumed task first becomes [`DownloadStatus::Waiting`] and may later
+    /// be promoted to [`DownloadStatus::Active`].
     pub fn resume(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::Unpause { gid: self.gid })
     }
 
+    /// Queue a graceful removal command and return once it is accepted.
     pub fn remove(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::RemoveDownload { gid: self.gid })
     }
 
+    /// Queue a forced removal command and return once it is accepted.
     pub fn force_remove(&self) -> std::result::Result<(), DownloadManagerError> {
         self.send_control(EngineCommand::ForceRemoveDownload { gid: self.gid })
+    }
+
+    /// Wait until this download reaches `expected` without polling.
+    ///
+    /// The comparison is by status kind, so every [`DownloadStatus::Error`]
+    /// value matches `Error` regardless of its human-readable message. The
+    /// returned result is the freshest snapshot observed at the transition.
+    pub async fn wait_for_status(
+        &self,
+        expected: DownloadStatus,
+    ) -> std::result::Result<DownloadResult, DownloadManagerError> {
+        self.wait_for_status_with_cancellation(expected, &CancellationToken::new())
+            .await
+    }
+
+    /// Wait for a status transition while allowing the caller to cancel the
+    /// wait without changing the download.
+    pub async fn wait_for_status_with_cancellation(
+        &self,
+        expected: DownloadStatus,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<DownloadResult, DownloadManagerError> {
+        let signal = self.manager.group_man.activity_signal();
+        let mut observed = signal.generation();
+
+        loop {
+            if let Some(result) = self.download_result()
+                && result.status.as_str() == expected.as_str()
+            {
+                return Ok(result);
+            }
+
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(DownloadManagerError::WaitCancelled);
+                }
+                _ = signal.wait_for_change(&mut observed) => {}
+            }
+        }
     }
 
     /// Wait for a terminal result without polling the RPC status or file list.
@@ -485,7 +536,6 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::request::request_group::DownloadStatus;
     use crate::util::rwlock_ext::RwLockRecover;
 
     fn manager(
@@ -526,6 +576,37 @@ mod tests {
             .expect("wait task must not panic")
             .expect("terminal result");
         assert_eq!(result.status, DownloadStatus::Complete);
+    }
+
+    #[tokio::test]
+    async fn handle_waits_for_requested_status_without_polling() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["http://example.test/file".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.wait_for_status(DownloadStatus::Paused).await }
+        });
+
+        tokio::task::yield_now().await;
+        let group = group_man.find_group(handle.gid()).expect("group exists");
+        group
+            .recover_mut()
+            .pause()
+            .expect("pause transition should succeed");
+
+        let result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("status wait must be event-driven")
+            .expect("status wait task must not panic")
+            .expect("status transition should be observed");
+        assert_eq!(result.status, DownloadStatus::Paused);
     }
 
     #[tokio::test]
@@ -666,12 +747,12 @@ mod tests {
 
         assert_eq!(
             second
-                .change_position(0, ChangePositionMode::SetFromStart)
+                .change_position(0, PositionMode::SetFromStart)
                 .expect("reserved position change"),
             0
         );
         assert!(matches!(
-            first.change_position(-1, ChangePositionMode::SetFromStart),
+            first.change_position(-1, PositionMode::SetFromStart),
             Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
         ));
     }

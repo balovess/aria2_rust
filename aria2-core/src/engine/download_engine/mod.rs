@@ -13,9 +13,10 @@ use super::engine_command::{
     EngineCommandQueueSnapshot, EngineCommandReceiver, EngineCommandSender, channel,
 };
 use crate::dns::dns_cache::DnsCache;
+use crate::engine::retry_policy::RetryPolicy;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
-use crate::retry::{RetryPolicy, RetryStats};
+use crate::retry::RetryStats;
 use crate::session::auto_save_coordinator::AutoSaveCoordinator;
 #[cfg(feature = "bittorrent")]
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerCatalogConfig};
