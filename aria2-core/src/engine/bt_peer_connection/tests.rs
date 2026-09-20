@@ -144,18 +144,6 @@ fn test_peer_session_resource_fast_extension() {
 
     res.set_fast_extension_enabled(true);
     assert!(res.is_fast_extension_enabled());
-
-    // Peer-allowed index set
-    res.add_peer_allowed_index(5);
-    res.add_peer_allowed_index(10);
-    assert!(res.is_in_peer_allowed_index_set(5));
-    assert!(res.is_in_peer_allowed_index_set(10));
-    assert!(!res.is_in_peer_allowed_index_set(7));
-
-    // Am-allowed index set
-    res.add_am_allowed_index(3);
-    assert!(res.is_in_am_allowed_index_set(3));
-    assert!(!res.is_in_am_allowed_index_set(5));
 }
 
 // -----------------------------------------------------------------------
@@ -165,11 +153,6 @@ fn test_peer_session_resource_fast_extension() {
 #[test]
 fn test_peer_session_resource_extensions() {
     let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
-    assert!(!res.is_extended_messaging_enabled());
-
-    res.set_extended_messaging_enabled(true);
-    assert!(res.is_extended_messaging_enabled());
-
     // Register extensions
     res.add_extension("ut_pex", 1);
     res.add_extension("ut_metadata", 2);
@@ -177,51 +160,6 @@ fn test_peer_session_resource_extensions() {
     assert_eq!(res.get_extension_message_id("ut_pex"), Some(1));
     assert_eq!(res.get_extension_message_id("ut_metadata"), Some(2));
     assert_eq!(res.get_extension_message_id("unknown"), None);
-
-    assert_eq!(res.get_extension_name(1), Some("ut_pex"));
-    assert_eq!(res.get_extension_name(2), Some("ut_metadata"));
-    assert_eq!(res.get_extension_name(99), None);
-}
-
-// -----------------------------------------------------------------------
-// PeerSessionResource — DHT tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_peer_session_resource_dht() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
-    assert!(!res.is_dht_enabled());
-
-    res.set_dht_enabled(true);
-    assert!(res.is_dht_enabled());
-}
-
-// -----------------------------------------------------------------------
-// PeerSessionResource — Choking tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_peer_session_resource_choking() {
-    let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
-
-    // Default: choking_required = true, opt_unchoking = false
-    assert!(res.choking_required());
-    assert!(!res.opt_unchoking());
-    assert!(!res.snubbing());
-    assert!(res.should_be_choking());
-
-    // Opt unchoking overrides choking requirement
-    res.set_opt_unchoking(true);
-    assert!(!res.should_be_choking());
-
-    // Snubbing
-    res.set_snubbing(true);
-    assert!(res.snubbing());
-
-    // Release choking requirement
-    res.set_choking_required(false);
-    assert!(!res.choking_required());
-    assert!(!res.should_be_choking());
 }
 
 // -----------------------------------------------------------------------

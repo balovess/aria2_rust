@@ -304,7 +304,7 @@ class TestDownloadEvent:
             "aria2.onDownloadError", {"gid": "abc", "errorCode": "1"}
         )
         assert event.event_type == EventType.DOWNLOAD_ERROR
-        assert event.error_code == "1"
+        assert event.error_code == 1
 
     def test_from_rpc_notification_bt_complete(self):
         event = DownloadEvent.from_rpc_notification(
@@ -331,4 +331,4 @@ class TestDownloadEvent:
         event = DownloadEvent.from_rpc_notification(
             "aria2.onDownloadError", {"gid": "abc", "errorCode": "2"}
         )
-        assert event.error_code == "2"
+        assert event.error_code == 2

@@ -320,7 +320,7 @@ class DhtStatus:
 class DownloadEvent:
     event_type: EventType
     gid: Optional[str] = None
-    error_code: Optional[str] = None
+    error_code: Optional[int] = None
     files: Optional[List[FileInfo]] = None
 
     @classmethod
@@ -335,9 +335,15 @@ class DownloadEvent:
         files = None
         if files_data and isinstance(files_data, list):
             files = [FileInfo.from_dict(f) if isinstance(f, dict) else f for f in files_data]
+        raw_error_code = converted.get("error_code")
+        error_code = None
+        if isinstance(raw_error_code, int) and not isinstance(raw_error_code, bool):
+            error_code = raw_error_code
+        elif isinstance(raw_error_code, str) and raw_error_code.lstrip("-").isdigit():
+            error_code = int(raw_error_code)
         return cls(
             event_type=event_type,
             gid=converted.get("gid"),
-            error_code=converted.get("error_code"),
+            error_code=error_code,
             files=files,
         )

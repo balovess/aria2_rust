@@ -1,10 +1,10 @@
 //! Per-session resource for an active BitTorrent peer connection.
 //!
 //! Mirrors the C++ `PeerSessionResource`. Allocated when a peer session starts
-//! and released when it ends. Contains bitfield management, extension support,
-//! and choking algorithm integration fields.
+//! and released when it ends. Contains bitfield management, extension
+//! negotiation, and message validation state.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::engine::bt_message_validation::{BtMessageValidationError, BtMessageValidator};
 use crate::segment::bitfield_util;
@@ -12,8 +12,8 @@ use crate::segment::bitfield_util;
 /// Per-session resource for an active BitTorrent peer connection.
 ///
 /// Mirrors the C++ `PeerSessionResource`. Allocated when a peer session starts
-/// and released when it ends. Contains bitfield management, extension support,
-/// and choking algorithm integration fields.
+/// and released when it ends. Contains bitfield management, extension
+/// negotiation, and message validation state.
 pub struct PeerSessionResource {
     /// Bitfield tracking which pieces this peer has.
     bitfield: Vec<u8>,
@@ -31,28 +31,10 @@ pub struct PeerSessionResource {
     // Fast Extension (BEP 6)
     /// Whether fast extension is enabled for this peer.
     fast_extension_enabled: bool,
-    /// Piece indices that the peer has allowed us to request (even when choked).
-    peer_allowed_index_set: HashSet<u32>,
-    /// Piece indices that we have allowed the peer to request (even when choked).
-    am_allowed_index_set: HashSet<u32>,
 
     // Extension Protocol (BEP 10)
-    /// Whether extended messaging is enabled.
-    extended_messaging_enabled: bool,
     /// Extension message registry: key -> message ID.
     extension_registry: HashMap<Box<str>, u8>,
-
-    // DHT (BEP 5)
-    /// Whether DHT is enabled for this peer.
-    dht_enabled: bool,
-
-    // Choking Algorithm Integration
-    /// Whether choking this peer is required (set by choking algorithm).
-    choking_required: bool,
-    /// Whether this peer is eligible for optimistic unchoking.
-    opt_unchoking: bool,
-    /// Whether this peer is snubbing (not sending data despite being unchoked).
-    snubbing: bool,
 }
 
 impl PeerSessionResource {
@@ -74,14 +56,7 @@ impl PeerSessionResource {
             num_pieces,
             message_validator: BtMessageValidator::new(num_pieces, piece_length),
             fast_extension_enabled: false,
-            peer_allowed_index_set: HashSet::new(),
-            am_allowed_index_set: HashSet::new(),
-            extended_messaging_enabled: false,
             extension_registry: HashMap::new(),
-            dht_enabled: false,
-            choking_required: true,
-            opt_unchoking: false,
-            snubbing: false,
         }
     }
 
@@ -144,15 +119,6 @@ impl PeerSessionResource {
     /// Mark the peer as a seeder (has all pieces).
     pub fn mark_seeder(&mut self) {
         self.set_all_bitfield();
-    }
-
-    /// Clear the entire bitfield (peer has no pieces).
-    ///
-    /// Used after receiving a HaveNone message (BEP 6) to reset the
-    /// peer's piece availability.
-    /// Mirrors C++ `BtHaveNoneMessage::doReceivedAction()`.
-    pub fn clear_bitfield(&mut self) {
-        self.bitfield.fill(0);
     }
 
     /// Check whether the peer is a seeder (has all pieces).
@@ -236,39 +202,9 @@ impl PeerSessionResource {
         self.fast_extension_enabled
     }
 
-    /// Add a piece index to the set the peer has allowed us to request.
-    pub fn add_peer_allowed_index(&mut self, index: u32) {
-        self.peer_allowed_index_set.insert(index);
-    }
-
-    /// Check whether a piece index is in the peer-allowed set.
-    pub fn is_in_peer_allowed_index_set(&self, index: u32) -> bool {
-        self.peer_allowed_index_set.contains(&index)
-    }
-
-    /// Add a piece index to the set we have allowed the peer to request.
-    pub fn add_am_allowed_index(&mut self, index: u32) {
-        self.am_allowed_index_set.insert(index);
-    }
-
-    /// Check whether a piece index is in the am-allowed set.
-    pub fn is_in_am_allowed_index_set(&self, index: u32) -> bool {
-        self.am_allowed_index_set.contains(&index)
-    }
-
     // -----------------------------------------------------------------------
     // Extension Protocol (BEP 10)
     // -----------------------------------------------------------------------
-
-    /// Enable or disable extended messaging.
-    pub fn set_extended_messaging_enabled(&mut self, enabled: bool) {
-        self.extended_messaging_enabled = enabled;
-    }
-
-    /// Check whether extended messaging is enabled.
-    pub fn is_extended_messaging_enabled(&self) -> bool {
-        self.extended_messaging_enabled
-    }
 
     /// Register an extension with the given key and message ID.
     pub fn add_extension(&mut self, key: &str, id: u8) {
@@ -278,69 +214,5 @@ impl PeerSessionResource {
     /// Look up the message ID for a given extension key.
     pub fn get_extension_message_id(&self, key: &str) -> Option<u8> {
         self.extension_registry.get(key).copied()
-    }
-
-    /// Look up the extension name for a given message ID.
-    pub fn get_extension_name(&self, id: u8) -> Option<&str> {
-        self.extension_registry
-            .iter()
-            .find(|&(_, &v)| v == id)
-            .map(|(k, _)| &**k)
-    }
-
-    // -----------------------------------------------------------------------
-    // DHT (BEP 5)
-    // -----------------------------------------------------------------------
-
-    /// Enable or disable DHT for this peer.
-    pub fn set_dht_enabled(&mut self, enabled: bool) {
-        self.dht_enabled = enabled;
-    }
-
-    /// Check whether DHT is enabled.
-    pub fn is_dht_enabled(&self) -> bool {
-        self.dht_enabled
-    }
-
-    // -----------------------------------------------------------------------
-    // Choking Algorithm Integration
-    // -----------------------------------------------------------------------
-
-    /// Set whether choking this peer is required.
-    pub fn set_choking_required(&mut self, required: bool) {
-        self.choking_required = required;
-    }
-
-    /// Check whether choking this peer is required.
-    pub fn choking_required(&self) -> bool {
-        self.choking_required
-    }
-
-    /// Set whether this peer is eligible for optimistic unchoking.
-    pub fn set_opt_unchoking(&mut self, enabled: bool) {
-        self.opt_unchoking = enabled;
-    }
-
-    /// Check whether this peer is eligible for optimistic unchoking.
-    pub fn opt_unchoking(&self) -> bool {
-        self.opt_unchoking
-    }
-
-    /// Set whether this peer is snubbing.
-    pub fn set_snubbing(&mut self, snubbing: bool) {
-        self.snubbing = snubbing;
-    }
-
-    /// Check whether this peer is snubbing.
-    pub fn snubbing(&self) -> bool {
-        self.snubbing
-    }
-
-    /// Determine whether this peer should be choked.
-    ///
-    /// Returns `true` if choking is required and the peer is not eligible
-    /// for optimistic unchoking.
-    pub fn should_be_choking(&self) -> bool {
-        self.choking_required && !self.opt_unchoking
     }
 }

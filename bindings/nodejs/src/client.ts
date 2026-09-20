@@ -37,6 +37,52 @@ function parseObjectResult(result: unknown, method: string): Record<string, unkn
   return result as Record<string, unknown>;
 }
 
+function parseStringListResult(
+  result: unknown,
+  method: string,
+  expectedLength?: number,
+): string[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  if (expectedLength !== undefined && result.length !== expectedLength) {
+    throw new Aria2Error(
+      `Unexpected result length for ${method}: expected ${expectedLength}, got ${result.length}`,
+    );
+  }
+  for (const [index, item] of result.entries()) {
+    if (typeof item !== 'string') {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result;
+}
+
+function parseChangeUriCounts(result: unknown): string[] {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error('Unexpected result type for changeUri');
+  }
+  if (result.length !== 2) {
+    throw new Aria2Error(
+      `Unexpected result length for changeUri: expected 2, got ${result.length}`,
+    );
+  }
+  return result.map((item, index) => {
+    if (typeof item === 'string' && /^(0|[1-9]\d*)$/.test(item)) return item;
+    if (typeof item === 'number' && Number.isSafeInteger(item) && item >= 0) {
+      return String(item);
+    }
+    throw new Aria2Error(`Unexpected item type for changeUri at index ${index}`);
+  });
+}
+
+function parseStringResult(result: unknown, method: string): string {
+  if (typeof result !== 'string') {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
+
 function httpToWs(url: string): string {
   if (url.startsWith('https://')) {
     return url.replace('https://', 'wss://');
@@ -97,7 +143,8 @@ export class Aria2Client {
     const params: unknown[] = [uris];
     if (options !== undefined || position !== undefined) params.push(options ?? {});
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.addUri', params)) as string;
+    const result = await this.transport.sendRequest('aria2.addUri', params);
+    return parseStringResult(result, 'addUri');
   }
 
   async addTorrent(
@@ -112,7 +159,8 @@ export class Aria2Client {
     }
     if (options !== undefined || position !== undefined) params.push(options ?? {});
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.addTorrent', params)) as string;
+    const result = await this.transport.sendRequest('aria2.addTorrent', params);
+    return parseStringResult(result, 'addTorrent');
   }
 
   async addMetalink(
@@ -124,39 +172,48 @@ export class Aria2Client {
     if (options !== undefined) params.push(options);
     else if (position !== undefined) params.push({});
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.addMetalink', params)) as string[];
+    const result = await this.transport.sendRequest('aria2.addMetalink', params);
+    return parseStringListResult(result, 'addMetalink');
   }
 
   async remove(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.remove', [gid])) as string;
+    const result = await this.transport.sendRequest('aria2.remove', [gid]);
+    return parseStringResult(result, 'remove');
   }
 
   async pause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.pause', [gid])) as string;
+    const result = await this.transport.sendRequest('aria2.pause', [gid]);
+    return parseStringResult(result, 'pause');
   }
 
   async unpause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.unpause', [gid])) as string;
+    const result = await this.transport.sendRequest('aria2.unpause', [gid]);
+    return parseStringResult(result, 'unpause');
   }
 
   async forcePause(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forcePause', [gid])) as string;
+    const result = await this.transport.sendRequest('aria2.forcePause', [gid]);
+    return parseStringResult(result, 'forcePause');
   }
 
   async forceRemove(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forceRemove', [gid])) as string;
+    const result = await this.transport.sendRequest('aria2.forceRemove', [gid]);
+    return parseStringResult(result, 'forceRemove');
   }
 
   async pauseAll(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.pauseAll', [])) as string;
+    const result = await this.transport.sendRequest('aria2.pauseAll', []);
+    return parseStringResult(result, 'pauseAll');
   }
 
   async forcePauseAll(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forcePauseAll', [])) as string;
+    const result = await this.transport.sendRequest('aria2.forcePauseAll', []);
+    return parseStringResult(result, 'forcePauseAll');
   }
 
   async unpauseAll(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.unpauseAll', [])) as string;
+    const result = await this.transport.sendRequest('aria2.unpauseAll', []);
+    return parseStringResult(result, 'unpauseAll');
   }
 
   async changePosition(gid: string, position: number, mode: PositionMode): Promise<number> {
@@ -180,7 +237,8 @@ export class Aria2Client {
   ): Promise<string[]> {
     const params: unknown[] = [gid, fileIndex, deleteUris, addUris];
     if (position !== undefined) params.push(position);
-    return (await this.transport.sendRequest('aria2.changeUri', params)) as string[];
+    const result = await this.transport.sendRequest('aria2.changeUri', params);
+    return parseChangeUriCounts(result);
   }
 
   async tellStatus(gid: string, keys?: string[]): Promise<StatusInfo> {
@@ -236,11 +294,13 @@ export class Aria2Client {
   }
 
   async purgeDownloadResult(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.purgeDownloadResult', [])) as string;
+    const result = await this.transport.sendRequest('aria2.purgeDownloadResult', []);
+    return parseStringResult(result, 'purgeDownloadResult');
   }
 
   async removeDownloadResult(gid: string): Promise<string> {
-    return (await this.transport.sendRequest('aria2.removeDownloadResult', [gid])) as string;
+    const result = await this.transport.sendRequest('aria2.removeDownloadResult', [gid]);
+    return parseStringResult(result, 'removeDownloadResult');
   }
 
   async getGlobalOption(): Promise<Record<string, unknown>> {
@@ -249,7 +309,8 @@ export class Aria2Client {
   }
 
   async changeGlobalOption(options: Record<string, unknown>): Promise<string> {
-    return (await this.transport.sendRequest('aria2.changeGlobalOption', [options])) as string;
+    const result = await this.transport.sendRequest('aria2.changeGlobalOption', [options]);
+    return parseStringResult(result, 'changeGlobalOption');
   }
 
   async getOption(gid: string): Promise<Record<string, unknown>> {
@@ -258,7 +319,8 @@ export class Aria2Client {
   }
 
   async changeOption(gid: string, options: Record<string, unknown>): Promise<string> {
-    return (await this.transport.sendRequest('aria2.changeOption', [gid, options])) as string;
+    const result = await this.transport.sendRequest('aria2.changeOption', [gid, options]);
+    return parseStringResult(result, 'changeOption');
   }
 
   async getVersion(): Promise<VersionInfo> {
@@ -270,23 +332,28 @@ export class Aria2Client {
   }
 
   async shutdown(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.shutdown', [])) as string;
+    const result = await this.transport.sendRequest('aria2.shutdown', []);
+    return parseStringResult(result, 'shutdown');
   }
 
   async forceShutdown(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.forceShutdown', [])) as string;
+    const result = await this.transport.sendRequest('aria2.forceShutdown', []);
+    return parseStringResult(result, 'forceShutdown');
   }
 
   async saveSession(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.saveSession', [])) as string;
+    const result = await this.transport.sendRequest('aria2.saveSession', []);
+    return parseStringResult(result, 'saveSession');
   }
 
   async updateBrowserContext(context: unknown): Promise<string> {
-    return (await this.transport.sendRequest('aria2.updateBrowserContext', [context])) as string;
+    const result = await this.transport.sendRequest('aria2.updateBrowserContext', [context]);
+    return parseStringResult(result, 'updateBrowserContext');
   }
 
   async clearBrowserContext(): Promise<string> {
-    return (await this.transport.sendRequest('aria2.clearBrowserContext', [])) as string;
+    const result = await this.transport.sendRequest('aria2.clearBrowserContext', []);
+    return parseStringResult(result, 'clearBrowserContext');
   }
 
   async systemMulticall(
@@ -296,11 +363,13 @@ export class Aria2Client {
   }
 
   async systemListMethods(): Promise<string[]> {
-    return (await this.transport.sendRequest('system.listMethods', [])) as string[];
+    const result = await this.transport.sendRequest('system.listMethods', []);
+    return parseStringListResult(result, 'system.listMethods');
   }
 
   async systemListNotifications(): Promise<string[]> {
-    return (await this.transport.sendRequest('system.listNotifications', [])) as string[];
+    const result = await this.transport.sendRequest('system.listNotifications', []);
+    return parseStringListResult(result, 'system.listNotifications');
   }
 
   private registerEventListener(

@@ -359,9 +359,6 @@ impl BtPeerConn {
                 if let Some(id) = handshake.ut_pex_id() {
                     self.register_peer_extension("ut_pex", id);
                 }
-                if let Some(resource) = &mut self.session_resource {
-                    resource.set_extended_messaging_enabled(true);
-                }
             }
             Ok(message)
         });

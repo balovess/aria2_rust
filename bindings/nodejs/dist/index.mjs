@@ -436,6 +436,45 @@ function parseObjectResult(result, method) {
   }
   return result;
 }
+function parseStringListResult(result, method, expectedLength) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  if (expectedLength !== void 0 && result.length !== expectedLength) {
+    throw new Aria2Error(
+      `Unexpected result length for ${method}: expected ${expectedLength}, got ${result.length}`
+    );
+  }
+  for (const [index, item] of result.entries()) {
+    if (typeof item !== "string") {
+      throw new Aria2Error(`Unexpected item type for ${method} at index ${index}`);
+    }
+  }
+  return result;
+}
+function parseChangeUriCounts(result) {
+  if (!Array.isArray(result)) {
+    throw new Aria2Error("Unexpected result type for changeUri");
+  }
+  if (result.length !== 2) {
+    throw new Aria2Error(
+      `Unexpected result length for changeUri: expected 2, got ${result.length}`
+    );
+  }
+  return result.map((item, index) => {
+    if (typeof item === "string" && /^(0|[1-9]\d*)$/.test(item)) return item;
+    if (typeof item === "number" && Number.isSafeInteger(item) && item >= 0) {
+      return String(item);
+    }
+    throw new Aria2Error(`Unexpected item type for changeUri at index ${index}`);
+  });
+}
+function parseStringResult(result, method) {
+  if (typeof result !== "string") {
+    throw new Aria2Error(`Unexpected result type for ${method}`);
+  }
+  return result;
+}
 function httpToWs(url) {
   if (url.startsWith("https://")) {
     return url.replace("https://", "wss://");
@@ -483,7 +522,8 @@ var Aria2Client = class {
     const params = [uris];
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.addUri", params);
+    const result = await this.transport.sendRequest("aria2.addUri", params);
+    return parseStringResult(result, "addUri");
   }
   async addTorrent(torrent, options, webSeedUris, position) {
     const params = [torrent.toString("base64")];
@@ -492,38 +532,48 @@ var Aria2Client = class {
     }
     if (options !== void 0 || position !== void 0) params.push(options ?? {});
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.addTorrent", params);
+    const result = await this.transport.sendRequest("aria2.addTorrent", params);
+    return parseStringResult(result, "addTorrent");
   }
   async addMetalink(metalink, options, position) {
     const params = [metalink.toString("base64")];
     if (options !== void 0) params.push(options);
     else if (position !== void 0) params.push({});
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.addMetalink", params);
+    const result = await this.transport.sendRequest("aria2.addMetalink", params);
+    return parseStringListResult(result, "addMetalink");
   }
   async remove(gid) {
-    return await this.transport.sendRequest("aria2.remove", [gid]);
+    const result = await this.transport.sendRequest("aria2.remove", [gid]);
+    return parseStringResult(result, "remove");
   }
   async pause(gid) {
-    return await this.transport.sendRequest("aria2.pause", [gid]);
+    const result = await this.transport.sendRequest("aria2.pause", [gid]);
+    return parseStringResult(result, "pause");
   }
   async unpause(gid) {
-    return await this.transport.sendRequest("aria2.unpause", [gid]);
+    const result = await this.transport.sendRequest("aria2.unpause", [gid]);
+    return parseStringResult(result, "unpause");
   }
   async forcePause(gid) {
-    return await this.transport.sendRequest("aria2.forcePause", [gid]);
+    const result = await this.transport.sendRequest("aria2.forcePause", [gid]);
+    return parseStringResult(result, "forcePause");
   }
   async forceRemove(gid) {
-    return await this.transport.sendRequest("aria2.forceRemove", [gid]);
+    const result = await this.transport.sendRequest("aria2.forceRemove", [gid]);
+    return parseStringResult(result, "forceRemove");
   }
   async pauseAll() {
-    return await this.transport.sendRequest("aria2.pauseAll", []);
+    const result = await this.transport.sendRequest("aria2.pauseAll", []);
+    return parseStringResult(result, "pauseAll");
   }
   async forcePauseAll() {
-    return await this.transport.sendRequest("aria2.forcePauseAll", []);
+    const result = await this.transport.sendRequest("aria2.forcePauseAll", []);
+    return parseStringResult(result, "forcePauseAll");
   }
   async unpauseAll() {
-    return await this.transport.sendRequest("aria2.unpauseAll", []);
+    const result = await this.transport.sendRequest("aria2.unpauseAll", []);
+    return parseStringResult(result, "unpauseAll");
   }
   async changePosition(gid, position, mode) {
     const result = await this.transport.sendRequest("aria2.changePosition", [gid, position, mode]);
@@ -539,7 +589,8 @@ var Aria2Client = class {
   async changeUri(gid, fileIndex, deleteUris, addUris, position) {
     const params = [gid, fileIndex, deleteUris, addUris];
     if (position !== void 0) params.push(position);
-    return await this.transport.sendRequest("aria2.changeUri", params);
+    const result = await this.transport.sendRequest("aria2.changeUri", params);
+    return parseChangeUriCounts(result);
   }
   async tellStatus(gid, keys) {
     const params = [gid];
@@ -583,24 +634,28 @@ var Aria2Client = class {
     return await this.transport.sendRequest("aria2.getGlobalStat", []);
   }
   async purgeDownloadResult() {
-    return await this.transport.sendRequest("aria2.purgeDownloadResult", []);
+    const result = await this.transport.sendRequest("aria2.purgeDownloadResult", []);
+    return parseStringResult(result, "purgeDownloadResult");
   }
   async removeDownloadResult(gid) {
-    return await this.transport.sendRequest("aria2.removeDownloadResult", [gid]);
+    const result = await this.transport.sendRequest("aria2.removeDownloadResult", [gid]);
+    return parseStringResult(result, "removeDownloadResult");
   }
   async getGlobalOption() {
     const result = await this.transport.sendRequest("aria2.getGlobalOption", []);
     return parseObjectResult(result, "getGlobalOption");
   }
   async changeGlobalOption(options) {
-    return await this.transport.sendRequest("aria2.changeGlobalOption", [options]);
+    const result = await this.transport.sendRequest("aria2.changeGlobalOption", [options]);
+    return parseStringResult(result, "changeGlobalOption");
   }
   async getOption(gid) {
     const result = await this.transport.sendRequest("aria2.getOption", [gid]);
     return parseObjectResult(result, "getOption");
   }
   async changeOption(gid, options) {
-    return await this.transport.sendRequest("aria2.changeOption", [gid, options]);
+    const result = await this.transport.sendRequest("aria2.changeOption", [gid, options]);
+    return parseStringResult(result, "changeOption");
   }
   async getVersion() {
     return await this.transport.sendRequest("aria2.getVersion", []);
@@ -609,28 +664,35 @@ var Aria2Client = class {
     return await this.transport.sendRequest("aria2.getSessionInfo", []);
   }
   async shutdown() {
-    return await this.transport.sendRequest("aria2.shutdown", []);
+    const result = await this.transport.sendRequest("aria2.shutdown", []);
+    return parseStringResult(result, "shutdown");
   }
   async forceShutdown() {
-    return await this.transport.sendRequest("aria2.forceShutdown", []);
+    const result = await this.transport.sendRequest("aria2.forceShutdown", []);
+    return parseStringResult(result, "forceShutdown");
   }
   async saveSession() {
-    return await this.transport.sendRequest("aria2.saveSession", []);
+    const result = await this.transport.sendRequest("aria2.saveSession", []);
+    return parseStringResult(result, "saveSession");
   }
   async updateBrowserContext(context) {
-    return await this.transport.sendRequest("aria2.updateBrowserContext", [context]);
+    const result = await this.transport.sendRequest("aria2.updateBrowserContext", [context]);
+    return parseStringResult(result, "updateBrowserContext");
   }
   async clearBrowserContext() {
-    return await this.transport.sendRequest("aria2.clearBrowserContext", []);
+    const result = await this.transport.sendRequest("aria2.clearBrowserContext", []);
+    return parseStringResult(result, "clearBrowserContext");
   }
   async systemMulticall(calls) {
     return await this.transport.sendRequest("system.multicall", [calls]);
   }
   async systemListMethods() {
-    return await this.transport.sendRequest("system.listMethods", []);
+    const result = await this.transport.sendRequest("system.listMethods", []);
+    return parseStringListResult(result, "system.listMethods");
   }
   async systemListNotifications() {
-    return await this.transport.sendRequest("system.listNotifications", []);
+    const result = await this.transport.sendRequest("system.listNotifications", []);
+    return parseStringListResult(result, "system.listNotifications");
   }
   registerEventListener(event, handler, once) {
     const emitter = this.getOrCreateEventEmitter();

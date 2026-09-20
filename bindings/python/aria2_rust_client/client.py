@@ -56,6 +56,57 @@ def _parse_dict_result(result: Any, method: str) -> Dict[str, Any]:
     return result
 
 
+def _parse_string_list(
+    result: Any, method: str, expected_length: Optional[int] = None
+) -> List[str]:
+    """Decode a wire string list without coercing malformed values."""
+    if not isinstance(result, list):
+        raise Aria2Error(f"Unexpected result type for {method}: {type(result)}")
+    if expected_length is not None and len(result) != expected_length:
+        raise Aria2Error(
+            f"Unexpected result length for {method}: expected {expected_length}, "
+            f"got {len(result)}"
+        )
+    for index, item in enumerate(result):
+        if not isinstance(item, str):
+            raise Aria2Error(
+                f"Unexpected item type for {method} at index {index}: {type(item)}"
+            )
+    return result
+
+
+def _parse_change_uri_counts(result: Any) -> List[str]:
+    """Decode aria2's two changeUri counts from numeric or string JSON values."""
+    if not isinstance(result, list):
+        raise Aria2Error(f"Unexpected result type for changeUri: {type(result)}")
+    if len(result) != 2:
+        raise Aria2Error(
+            f"Unexpected result length for changeUri: expected 2, got {len(result)}"
+        )
+    counts: List[str] = []
+    for index, item in enumerate(result):
+        if isinstance(item, bool):
+            raise Aria2Error(
+                f"Unexpected item type for changeUri at index {index}: {type(item)}"
+            )
+        if isinstance(item, int) and item >= 0:
+            counts.append(str(item))
+        elif isinstance(item, str) and item.isascii() and item.isdecimal():
+            counts.append(item)
+        else:
+            raise Aria2Error(
+                f"Unexpected item type for changeUri at index {index}: {type(item)}"
+            )
+    return counts
+
+
+def _parse_string_result(result: Any, method: str) -> str:
+    """Decode a standard aria2 string result without coercion."""
+    if not isinstance(result, str):
+        raise Aria2Error(f"Unexpected result type for {method}: {type(result)}")
+    return result
+
+
 class Aria2Client:
     def __init__(
         self,
@@ -100,7 +151,7 @@ class Aria2Client:
         if position is not None:
             params.append(position)
         result = await self._call("aria2.addUri", params)
-        return str(result)
+        return _parse_string_result(result, "addUri")
 
     async def add_torrent(
         self,
@@ -118,7 +169,7 @@ class Aria2Client:
         if position is not None:
             params.append(position)
         result = await self._call("aria2.addTorrent", params)
-        return str(result)
+        return _parse_string_result(result, "addTorrent")
 
     async def add_metalink(
         self,
@@ -135,41 +186,39 @@ class Aria2Client:
         if position is not None:
             params.append(position)
         result = await self._call("aria2.addMetalink", params)
-        if isinstance(result, list):
-            return [str(gid) for gid in result]
-        raise Aria2Error(f"Unexpected result type for addMetalink: {type(result)}")
+        return _parse_string_list(result, "addMetalink")
 
     async def remove(self, gid: str) -> str:
         result = await self._call("aria2.remove", [gid])
-        return str(result)
+        return _parse_string_result(result, "remove")
 
     async def pause(self, gid: str) -> str:
         result = await self._call("aria2.pause", [gid])
-        return str(result)
+        return _parse_string_result(result, "pause")
 
     async def unpause(self, gid: str) -> str:
         result = await self._call("aria2.unpause", [gid])
-        return str(result)
+        return _parse_string_result(result, "unpause")
 
     async def force_pause(self, gid: str) -> str:
         result = await self._call("aria2.forcePause", [gid])
-        return str(result)
+        return _parse_string_result(result, "forcePause")
 
     async def force_remove(self, gid: str) -> str:
         result = await self._call("aria2.forceRemove", [gid])
-        return str(result)
+        return _parse_string_result(result, "forceRemove")
 
     async def pause_all(self) -> str:
         result = await self._call("aria2.pauseAll")
-        return str(result)
+        return _parse_string_result(result, "pauseAll")
 
     async def force_pause_all(self) -> str:
         result = await self._call("aria2.forcePauseAll")
-        return str(result)
+        return _parse_string_result(result, "forcePauseAll")
 
     async def unpause_all(self) -> str:
         result = await self._call("aria2.unpauseAll")
-        return str(result)
+        return _parse_string_result(result, "unpauseAll")
 
     async def change_position(
         self, gid: str, position: int, mode: Union[PositionMode, str]
@@ -193,9 +242,7 @@ class Aria2Client:
         if position is not None:
             params.append(position)
         result = await self._call("aria2.changeUri", params)
-        if isinstance(result, list):
-            return [str(count) for count in result]
-        raise Aria2Error(f"Unexpected result type for changeUri: {type(result)}")
+        return _parse_change_uri_counts(result)
 
     async def tell_status(
         self, gid: str, keys: Optional[List[str]] = None
@@ -276,11 +323,11 @@ class Aria2Client:
 
     async def purge_download_result(self) -> str:
         result = await self._call("aria2.purgeDownloadResult")
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "purgeDownloadResult")
 
     async def remove_download_result(self, gid: str) -> str:
         result = await self._call("aria2.removeDownloadResult", [gid])
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "removeDownloadResult")
 
     async def get_global_option(self) -> Dict:
         result = await self._call("aria2.getGlobalOption")
@@ -288,7 +335,7 @@ class Aria2Client:
 
     async def change_global_option(self, options: Dict) -> str:
         result = await self._call("aria2.changeGlobalOption", [options])
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "changeGlobalOption")
 
     async def get_option(self, gid: str) -> Dict:
         result = await self._call("aria2.getOption", [gid])
@@ -296,7 +343,7 @@ class Aria2Client:
 
     async def change_option(self, gid: str, options: Dict) -> str:
         result = await self._call("aria2.changeOption", [gid, options])
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "changeOption")
 
     async def get_version(self) -> VersionInfo:
         result = await self._call("aria2.getVersion")
@@ -312,23 +359,23 @@ class Aria2Client:
 
     async def shutdown(self) -> str:
         result = await self._call("aria2.shutdown")
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "shutdown")
 
     async def force_shutdown(self) -> str:
         result = await self._call("aria2.forceShutdown")
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "forceShutdown")
 
     async def save_session(self) -> str:
         result = await self._call("aria2.saveSession")
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "saveSession")
 
     async def update_browser_context(self, context: Any) -> str:
         result = await self._call("aria2.updateBrowserContext", [context])
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "updateBrowserContext")
 
     async def clear_browser_context(self) -> str:
         result = await self._call("aria2.clearBrowserContext")
-        return str(result) if result is not None else "OK"
+        return _parse_string_result(result, "clearBrowserContext")
 
     async def system_multicall(self, calls: List[Dict[str, Any]]) -> List[Any]:
         result = await self._call("system.multicall", [calls])
@@ -338,17 +385,11 @@ class Aria2Client:
 
     async def system_list_methods(self) -> List[str]:
         result = await self._call("system.listMethods")
-        if isinstance(result, list):
-            return [str(method) for method in result]
-        raise Aria2Error(f"Unexpected result type for system.listMethods: {type(result)}")
+        return _parse_string_list(result, "system.listMethods")
 
     async def system_list_notifications(self) -> List[str]:
         result = await self._call("system.listNotifications")
-        if isinstance(result, list):
-            return [str(notification) for notification in result]
-        raise Aria2Error(
-            f"Unexpected result type for system.listNotifications: {type(result)}"
-        )
+        return _parse_string_list(result, "system.listNotifications")
 
     async def subscribe_events(
         self, filter: Optional[List[EventType]] = None

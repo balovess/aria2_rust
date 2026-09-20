@@ -143,6 +143,12 @@ class TestAddMetalink:
             "aria2.addMetalink", [base64.b64encode(b"<metalink />").decode("ascii"), {}, 1]
         )
 
+    @pytest.mark.asyncio
+    async def test_rejects_malformed_gid_list(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["gid1", 2]
+        with pytest.raises(Aria2Error, match="Unexpected item type for addMetalink"):
+            await client.add_metalink(b"<metalink />")
+
 
 class TestGenericCall:
     @pytest.mark.asyncio
@@ -233,6 +239,17 @@ class TestSimpleMethods:
         mock_transport.send_request.assert_called_once_with(
             "aria2.changeUri", ["gid1", 1, ["old"], ["new"], 0]
         )
+
+    @pytest.mark.asyncio
+    async def test_change_uri_accepts_numeric_wire_counts(self, client, mock_transport):
+        mock_transport.send_request.return_value = [0, 1]
+        assert await client.change_uri("gid1", 1, [], ["new"]) == ["0", "1"]
+
+    @pytest.mark.asyncio
+    async def test_change_uri_requires_two_string_counts(self, client, mock_transport):
+        mock_transport.send_request.return_value = ["1"]
+        with pytest.raises(Aria2Error, match="Unexpected result length for changeUri"):
+            await client.change_uri("gid1", 1, [], ["new"])
 
 class TestTellStatus:
     @pytest.mark.asyncio
@@ -559,10 +576,28 @@ class TestShutdown:
         mock_transport.send_request.assert_called_once_with("system.listMethods", [])
 
     @pytest.mark.asyncio
+    async def test_system_list_methods_rejects_non_string_items(
+        self, client, mock_transport
+    ):
+        mock_transport.send_request.return_value = ["aria2.addUri", 2]
+        with pytest.raises(Aria2Error, match="Unexpected item type for system.listMethods"):
+            await client.system_list_methods()
+
+    @pytest.mark.asyncio
     async def test_system_list_notifications(self, client, mock_transport):
         mock_transport.send_request.return_value = ["aria2.onDownloadStart"]
         assert await client.system_list_notifications() == ["aria2.onDownloadStart"]
         mock_transport.send_request.assert_called_once_with("system.listNotifications", [])
+
+    @pytest.mark.asyncio
+    async def test_system_list_notifications_rejects_non_string_items(
+        self, client, mock_transport
+    ):
+        mock_transport.send_request.return_value = [{"method": "invalid"}]
+        with pytest.raises(
+            Aria2Error, match="Unexpected item type for system.listNotifications"
+        ):
+            await client.system_list_notifications()
 
 
 class TestContextManager:

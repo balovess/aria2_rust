@@ -109,6 +109,13 @@ describe('Aria2Client', () => {
         1,
       ]);
     });
+
+    it('rejects a malformed GID list', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['gid1', 2]);
+      await expect(client.addMetalink(Buffer.from('metalink-data'))).rejects.toThrow(
+        'Unexpected item type for addMetalink',
+      );
+    });
   });
 
   describe('call', () => {
@@ -207,6 +214,18 @@ describe('Aria2Client', () => {
         ['new'],
         0,
       ]);
+    });
+
+    it('changeUri accepts numeric wire counts', async () => {
+      mockTransport.sendRequest.mockResolvedValue([0, 1]);
+      await expect(client.changeUri('gid1', 1, [], ['new'])).resolves.toEqual(['0', '1']);
+    });
+
+    it('changeUri requires two string counts', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['1']);
+      await expect(client.changeUri('gid1', 1, [], ['new'])).rejects.toThrow(
+        'Unexpected result length for changeUri',
+      );
     });
 
   });
@@ -476,10 +495,24 @@ describe('Aria2Client', () => {
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('system.listMethods', []);
     });
 
+    it('systemListMethods rejects non-string items', async () => {
+      mockTransport.sendRequest.mockResolvedValue(['aria2.addUri', 2]);
+      await expect(client.systemListMethods()).rejects.toThrow(
+        'Unexpected item type for system.listMethods',
+      );
+    });
+
     it('systemListNotifications sends correct method', async () => {
       mockTransport.sendRequest.mockResolvedValue(['aria2.onDownloadStart']);
       expect(await client.systemListNotifications()).toEqual(['aria2.onDownloadStart']);
       expect(mockTransport.sendRequest).toHaveBeenCalledWith('system.listNotifications', []);
+    });
+
+    it('systemListNotifications rejects non-string items', async () => {
+      mockTransport.sendRequest.mockResolvedValue([{ method: 'invalid' }]);
+      await expect(client.systemListNotifications()).rejects.toThrow(
+        'Unexpected item type for system.listNotifications',
+      );
     });
   });
 
