@@ -60,7 +60,7 @@ fn test_peer_session_resource_bitfield() {
     // 4 pieces of 256 KiB each = 1 MiB total
     let mut res = PeerSessionResource::new(256 * 1024, 1024 * 1024);
     assert_eq!(res.num_pieces(), 4);
-    assert_eq!(res.bitfield_length, 1);
+    assert_eq!(res.bitfield_length(), 1);
 
     // Initially no pieces
     for i in 0..4 {
@@ -116,7 +116,7 @@ fn test_peer_session_resource_reconfigure() {
 
     res.reconfigure(512 * 1024, 4 * 1024 * 1024);
     assert_eq!(res.num_pieces(), 8);
-    assert_eq!(res.bitfield_length, 1);
+    assert_eq!(res.bitfield_length(), 1);
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn test_peer_session_resource_large_bitfield() {
     // 100 pieces of 1 MiB each = 100 MiB total
     let mut res = PeerSessionResource::new(1024 * 1024, 100 * 1024 * 1024);
     assert_eq!(res.num_pieces(), 100);
-    assert_eq!(res.bitfield_length, 13); // ceil(100/8) = 13
+    assert_eq!(res.bitfield_length(), 13); // ceil(100/8) = 13
 
     // Set piece 0 and 99
     res.update_bitfield(0, 1);

@@ -25,6 +25,7 @@ export class Aria2EventEmitter extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private connectPromise: Promise<void> | null = null;
+  private pendingConnectReject: ((error: Error) => void) | null = null;
 
   constructor(wsUrl: string, _options?: ClientOptions) {
     super();
@@ -67,6 +68,9 @@ export class Aria2EventEmitter extends EventEmitter {
         if (this.pendingWs === ws) {
           this.pendingWs = null;
         }
+        if (this.pendingConnectReject === rejectPendingConnection) {
+          this.pendingConnectReject = null;
+        }
       };
 
       const rejectConnection = (message: string): void => {
@@ -74,6 +78,10 @@ export class Aria2EventEmitter extends EventEmitter {
         settled = true;
         cleanup();
         reject(new ConnectionError(message));
+      };
+
+      const rejectPendingConnection = (error: Error): void => {
+        rejectConnection(error.message);
       };
 
       const openHandler = (): void => {
@@ -104,6 +112,7 @@ export class Aria2EventEmitter extends EventEmitter {
         );
       };
 
+      this.pendingConnectReject = rejectPendingConnection;
       ws.once('open', openHandler);
       ws.once('error', errorHandler);
       ws.once('close', closeHandler);
@@ -198,6 +207,11 @@ export class Aria2EventEmitter extends EventEmitter {
   async close(): Promise<void> {
     this.closed = true;
 
+    const pendingWs = this.pendingWs;
+    const pendingReject = this.pendingConnectReject;
+    this.pendingConnectReject = null;
+    pendingReject?.(new ConnectionError('Emitter has been closed'));
+
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -209,9 +223,13 @@ export class Aria2EventEmitter extends EventEmitter {
       this.ws = null;
     }
 
-    if (this.pendingWs) {
-      this.pendingWs.terminate();
-      this.pendingWs = null;
+    if (pendingWs) {
+      pendingWs.removeAllListeners();
+      pendingWs.once('error', () => {});
+      pendingWs.terminate();
+      if (this.pendingWs === pendingWs) {
+        this.pendingWs = null;
+      }
     }
 
     this.connectPromise = null;

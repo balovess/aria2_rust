@@ -18,7 +18,7 @@ pub struct PeerSessionResource {
     /// Bitfield tracking which pieces this peer has.
     bitfield: Vec<u8>,
     /// Bitfield length in bytes.
-    pub bitfield_length: usize,
+    bitfield_length: usize,
     /// Piece length for the torrent.
     piece_length: u32,
     /// Total length of the torrent.
@@ -143,6 +143,11 @@ impl PeerSessionResource {
     /// Get a reference to the raw bitfield bytes.
     pub fn bitfield(&self) -> &[u8] {
         &self.bitfield
+    }
+
+    /// Return the bitfield length in bytes.
+    pub fn bitfield_length(&self) -> usize {
+        self.bitfield_length
     }
 
     /// Reconfigure the session resource for a new piece/total length.

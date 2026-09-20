@@ -139,6 +139,7 @@ declare class Aria2EventEmitter extends EventEmitter {
     private reconnectTimer;
     private closed;
     private connectPromise;
+    private pendingConnectReject;
     constructor(wsUrl: string, _options?: ClientOptions);
     connect(): Promise<void>;
     private doConnect;

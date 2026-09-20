@@ -34,6 +34,7 @@ class EventSubscriber:
         self._filter = set(filter) if filter is not None else None
         self._ws: Any = None
         self._listener_task: Optional[asyncio.Task] = None
+        self._connect_task: Optional[asyncio.Task] = None
         self._queue: asyncio.Queue[Optional[DownloadEvent]] = asyncio.Queue()
         self._closed = False
         self._reconnect_attempts = 0
@@ -45,11 +46,36 @@ class EventSubscriber:
         return event.event_type in self._filter
 
     async def _connect(self) -> None:
+        if self._closed:
+            raise ConnectionError("Subscriber has been closed")
+
+        task = self._connect_task
+        if task is None:
+            task = asyncio.create_task(self._open_connection())
+            self._connect_task = task
+
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if self._closed:
+                raise ConnectionError("Subscriber has been closed") from exc
+            raise
+        finally:
+            if self._connect_task is task:
+                self._connect_task = None
+
+    async def _open_connection(self) -> None:
         try:
             import websockets
 
-            self._ws = await websockets.connect(self._ws_url)
+            ws = await websockets.connect(self._ws_url)
+            if self._closed:
+                await ws.close()
+                raise ConnectionError("Subscriber has been closed")
+            self._ws = ws
             self._reconnect_attempts = 0
+        except ConnectionError:
+            raise
         except Exception as exc:
             raise ConnectionError(f"Failed to connect WebSocket: {exc}") from exc
 
@@ -63,8 +89,12 @@ class EventSubscriber:
                         break
                     continue
 
+            connection = self._ws
+            if connection is None:
+                continue
+
             try:
-                async for raw_message in self._ws:
+                async for raw_message in connection:
                     try:
                         message = json.loads(raw_message)
                     except (json.JSONDecodeError, TypeError):
@@ -85,10 +115,12 @@ class EventSubscriber:
             except asyncio.CancelledError:
                 break
             except Exception:
-                if self._closed:
-                    break
-                if not await self._try_reconnect():
-                    break
+                pass
+
+            if self._ws is connection:
+                self._ws = None
+            if self._closed or not await self._try_reconnect():
+                break
 
         await self._queue.put(None)
 
@@ -114,6 +146,8 @@ class EventSubscriber:
 
     async def start(self) -> None:
         await self._connect()
+        if self._closed:
+            raise ConnectionError("Subscriber has been closed")
         self._listener_task = asyncio.create_task(self._listen())
 
     async def __aenter__(self) -> Self:
@@ -139,6 +173,14 @@ class EventSubscriber:
     async def close(self) -> None:
         self._closed = True
 
+        if self._connect_task is not None:
+            self._connect_task.cancel()
+            try:
+                await self._connect_task
+            except asyncio.CancelledError:
+                pass
+            self._connect_task = None
+
         if self._listener_task is not None:
             self._listener_task.cancel()
             try:
@@ -159,3 +201,4 @@ class EventSubscriber:
                 self._queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        await self._queue.put(None)
