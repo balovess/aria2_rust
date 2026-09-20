@@ -47,7 +47,7 @@ fn stale_terminal_add_command_does_not_reinsert_group() {
 
     assert!(man.find_group(gid).is_none());
     assert_eq!(man.reserved.len(), 0);
-    assert_eq!(man.stopped_count(), 1);
+    assert_eq!(man.stopped_results_len(), 1);
 }
 
 #[test]

@@ -470,7 +470,7 @@ async fn metalink_follow_mem_engine_creates_child_without_source_file() {
         parent.followed_by.len(),
         1,
         "parent result did not record a Metalink child: {parent:?}; stopped_count={}",
-        group_man.stopped_count()
+        group_man.stopped_results_len()
     );
 
     let child = group_man

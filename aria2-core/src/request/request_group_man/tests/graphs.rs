@@ -400,7 +400,7 @@ fn test_remove_rejects_dependency_blocked_metalink_payload() {
     );
     assert!(man.find_group(metadata_gid).is_some());
     assert!(man.find_group(payload_gid).is_some());
-    assert_eq!(man.stopped_count(), 0);
+    assert_eq!(man.stopped_results_len(), 0);
 }
 
 #[test]

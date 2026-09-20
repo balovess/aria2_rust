@@ -698,7 +698,7 @@ impl Aria2RustSession {
     fn global_stat(&mut self) -> Aria2RustGlobalStat {
         let manager = &self.request_man;
         let mut stat = Aria2RustGlobalStat {
-            num_stopped: manager.stopped_count() as u64,
+            num_stopped: manager.stopped_results_len() as u64,
             ..Default::default()
         };
         for group in manager.list_groups() {

@@ -60,7 +60,7 @@ fn test_active_remove_requests_halt_without_removing_group() {
     let guard = group.recover();
     assert!(guard.is_halt_requested());
     assert_eq!(guard.get_halt_reason(), HaltReason::UserRequest);
-    assert_eq!(man.stopped_count(), 0);
+    assert_eq!(man.stopped_results_len(), 0);
 }
 
 #[test]
@@ -147,7 +147,11 @@ fn test_remove_group_writes_stopped_removed_result() {
     man.remove_group(gid).unwrap();
 
     assert!(man.find_group(gid).is_none(), "group must be removed");
-    assert_eq!(man.stopped_count(), 1, "REMOVED result must be stored");
+    assert_eq!(
+        man.stopped_results_len(),
+        1,
+        "REMOVED result must be stored"
+    );
     let result = man
         .find_stopped_result(&gid.to_hex_string())
         .expect("stopped result must be findable by GID");

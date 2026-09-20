@@ -167,11 +167,6 @@ impl RequestGroupMan {
         self.groups.len()
     }
 
-    /// Number of groups in the stopped results storage.
-    pub fn stopped_count(&self) -> usize {
-        self.stopped.len()
-    }
-
     // ── Max Concurrent ──────────────────────────────────────────────────
 
     /// Get the maximum concurrent download limit.

@@ -282,6 +282,45 @@ impl DownloadManager {
         self.event_hooks.subscribe()
     }
 
+    /// Return the engine-applied maximum concurrent-download limit.
+    ///
+    /// A value of `0` means unlimited. After [`Self::set_max_concurrent`],
+    /// this value changes when the engine consumes the queued command.
+    pub fn max_concurrent(&self) -> usize {
+        self.group_man.max_concurrent()
+    }
+
+    /// Return the engine-applied process-wide download limit in bytes/sec.
+    pub fn global_download_limit(&self) -> Option<u64> {
+        self.group_man.global_download_limit()
+    }
+
+    /// Return the engine-applied process-wide upload limit in bytes/sec.
+    pub fn global_upload_limit(&self) -> Option<u64> {
+        self.group_man.global_upload_limit()
+    }
+
+    /// Return a snapshot of retained terminal results using aria2 pagination
+    /// semantics. Negative offsets count backward from the newest result.
+    pub fn stopped_results(&self, offset: i32, count: usize) -> Vec<DownloadResult> {
+        self.group_man.get_stopped_results(offset, count)
+    }
+
+    /// Return the number of retained terminal results.
+    pub fn stopped_results_len(&self) -> usize {
+        self.group_man.stopped_results_len()
+    }
+
+    /// Remove completed, failed, and retained terminal results.
+    ///
+    /// Returns the number of entries removed from both live scheduling stores
+    /// and stopped-result retention.
+    pub fn clear_completed(&self) -> std::result::Result<usize, DownloadManagerError> {
+        self.group_man
+            .clear_completed()
+            .map_err(DownloadManagerError::State)
+    }
+
     /// Queue a graceful pause for every active and reserved download.
     ///
     /// The command is coalesced with other pending pause-all commands. Success
@@ -301,6 +340,35 @@ impl DownloadManager {
     /// Queue a resume for every paused download.
     pub fn resume_all(&self) -> std::result::Result<(), DownloadManagerError> {
         self.command_sender.send(EngineCommand::UnpauseAll)?;
+        Ok(())
+    }
+
+    /// Update the process-wide concurrent-download limit.
+    ///
+    /// `0` means unlimited, matching aria2 and [`RequestGroupMan`]. The
+    /// change is applied by the engine loop; if the limit is lowered, the
+    /// existing scheduler pauses excess active downloads.
+    pub fn set_max_concurrent(&self, max: u32) -> std::result::Result<(), DownloadManagerError> {
+        self.command_sender
+            .send(EngineCommand::SetMaxConcurrent { max })?;
+        Ok(())
+    }
+
+    /// Update process-wide download and upload limits in bytes per second.
+    ///
+    /// Passing `None` for one direction removes that direction's limit. The
+    /// shared limiter is updated by the engine loop, so already-running
+    /// downloads observe the new rates without being recreated.
+    pub fn set_global_rate_limit(
+        &self,
+        download_limit: Option<u64>,
+        upload_limit: Option<u64>,
+    ) -> std::result::Result<(), DownloadManagerError> {
+        self.command_sender
+            .send(EngineCommand::SetGlobalRateLimit {
+                download_limit,
+                upload_limit,
+            })?;
         Ok(())
     }
 }
@@ -896,6 +964,52 @@ mod tests {
             command_receiver.try_recv(),
             Ok(EngineCommand::UnpauseAll)
         ));
+
+        manager
+            .set_max_concurrent(3)
+            .expect("max-concurrent command should be accepted");
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(EngineCommand::SetMaxConcurrent { max: 3 })
+        ));
+
+        manager
+            .set_global_rate_limit(Some(1024), None)
+            .expect("global rate-limit command should be accepted");
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Ok(EngineCommand::SetGlobalRateLimit {
+                download_limit: Some(1024),
+                upload_limit: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn manager_exposes_runtime_queries_and_stopped_results() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+
+        assert_eq!(manager.max_concurrent(), 5);
+        assert_eq!(manager.global_download_limit(), None);
+        assert_eq!(manager.global_upload_limit(), None);
+        assert_eq!(manager.stopped_results_len(), 0);
+
+        let handle = manager
+            .add_uri(
+                vec!["https://example.test/file".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        group_man
+            .remove_group(handle.gid())
+            .expect("reserved download should be removable");
+
+        assert_eq!(manager.stopped_results_len(), 1);
+        assert_eq!(manager.stopped_results(0, 1)[0].gid, handle.gid());
+        assert_eq!(manager.clear_completed().expect("clear should succeed"), 1);
+        assert_eq!(manager.stopped_results_len(), 0);
     }
 
     #[test]
