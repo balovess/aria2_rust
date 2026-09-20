@@ -33,24 +33,6 @@ const MAX_BUFFER_SIZE: usize = 1024 * 1024;
 /// Interval in bytes between progress reports (256 KB)
 const PROGRESS_REPORT_INTERVAL: u64 = 256 * 1024;
 
-// =============================================================================
-// Transfer Mode and Options
-// =============================================================================
-
-/// Data transfer mode for text/binary handling.
-///
-/// Note: SFTP always transfers data as binary streams. This enum exists
-/// for API consistency with FTP transfer modes but has no effect on
-/// the actual wire protocol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TransferMode {
-    /// Binary mode - no line ending translation
-    #[default]
-    Binary,
-    /// Text mode (no-op in SFTP, for API consistency)
-    Text,
-}
-
 /// Progress callback signature: receives (bytes_transferred, total_bytes, speed_bps)
 pub type ProgressCallback = Box<dyn Fn(u64, u64, f64) + Send + Sync>;
 
@@ -60,8 +42,6 @@ pub struct TransferOptions {
     pub buffer_size: usize,
     /// Starting byte offset for resume/partial downloads
     pub resume_offset: u64,
-    /// Transfer mode (always binary for SFTP)
-    pub mode: TransferMode,
     /// Whether to preserve remote file permissions on local copy
     pub preserve_permissions: bool,
     /// Whether to preserve remote file timestamps on local copy
@@ -75,7 +55,6 @@ impl Default for TransferOptions {
         Self {
             buffer_size: TRANSFER_BUF_SIZE,
             resume_offset: 0,
-            mode: TransferMode::Binary,
             preserve_permissions: false,
             preserve_time: false,
             progress_callback: None,
@@ -1094,7 +1073,6 @@ mod tests {
         let opts = TransferOptions::default();
         assert_eq!(opts.buffer_size, TRANSFER_BUF_SIZE);
         assert_eq!(opts.resume_offset, 0);
-        assert!(matches!(opts.mode, TransferMode::Binary));
         assert!(!opts.preserve_permissions);
         assert!(!opts.preserve_time);
         assert!(opts.progress_callback.is_none());
@@ -1208,15 +1186,6 @@ mod tests {
             elapsed_secs: 10.0,
         };
         assert!(prog.eta_secs().is_none()); // Cannot calculate ETA with zero speed
-    }
-
-    #[test]
-    fn test_transfer_mode_variants() {
-        assert!(matches!(TransferMode::default(), TransferMode::Binary));
-        let modes = [TransferMode::Binary, TransferMode::Text];
-        for m in &modes {
-            let _ = format!("{:?}", m);
-        }
     }
 
     #[test]

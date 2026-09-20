@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 
 use super::super::net_stat::NetStat;
-use super::super::types::{ContextAttributeType, Signature};
+use super::super::types::ContextAttributeType;
 use crate::download::file_entry::FileEntry;
 
 /// Central metadata object binding file entries, URIs, and download metadata.
@@ -34,9 +34,6 @@ use crate::download::file_entry::FileEntry;
 /// assert!(ctx.knows_total_length());
 /// ```
 pub struct DownloadContext {
-    // -- Optional signature (Metalink/PGP) --
-    pub(super) signature: Option<Signature>,
-
     // -- Back-pointer to owning RequestGroup (ID-based, not a raw pointer) --
     pub(super) owner_request_group_id: Option<u64>,
 
@@ -125,10 +122,9 @@ impl DownloadContext {
     /// - `knows_total_length` = true
     /// - `checksum_verified` = false
     /// - `accept_metalink` = true (matches C++ `ENABLE_METALINK` default)
-    /// - No file entries, no hashes, no signature.
+    /// - No file entries and no hashes.
     pub fn new_default() -> Self {
         Self {
-            signature: None,
             owner_request_group_id: None,
             attrs: HashMap::new(),
             file_entries: Vec::new(),
@@ -164,7 +160,6 @@ impl DownloadContext {
         Self {
             piece_length,
             file_entries: vec![file_entry],
-            signature: None,
             owner_request_group_id: None,
             attrs: HashMap::new(),
             piece_hashes: Vec::new(),

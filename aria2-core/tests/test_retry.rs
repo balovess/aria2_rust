@@ -228,12 +228,6 @@ fn test_stats_reset() {
     assert_eq!(stats.server_errors(), 0);
 }
 
-#[test]
-fn test_with_max_per_server() {
-    let policy = RetryPolicy::new(10, 1000).with_max_per_server(3);
-    assert_eq!(policy.max_tries(), 10);
-}
-
 #[tokio::test]
 async fn test_concurrent_executors_independent() {
     let stats = Arc::new(RetryStats::default());

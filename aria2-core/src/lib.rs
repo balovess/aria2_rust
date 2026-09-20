@@ -10,7 +10,7 @@
 //! | HTTP / HTTPS | ✅ Full | Range requests, redirects, cookies, gzip/bzip2/chunked decoding |
 //! | FTP / SFTP | ✅ Full | Passive/active mode, REST resume, LIST/MLSD parsing |
 //! | BitTorrent | ✅ Full | Piece picker, choke algorithm, DHT, tracker (HTTP/UDP), seeding |
-//! | Metalink | ✅ Full | v3/v4 parsing, multi-source, checksum verification, signature |
+//! | Metalink | ✅ Full | v3/v4 parsing, multi-source, checksum verification |
 //! | Auth: Basic (RFC 7617) | ✅ | Base64 credential encoding, HTTPS-only enforcement |
 //! | Auth: Digest (RFC 7616) | ✅ | MD5/SHA256/SHA512 HA1→HA2→Response chain, nonce/qop/stale |
 //! | LPD (BEP 14) | ✅ | UDP multicast peer discovery on 239.192.152.143:6771 |

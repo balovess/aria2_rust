@@ -480,33 +480,44 @@ impl DownloadHandle {
 
     /// Queue a graceful pause command.
     ///
-    /// Success means the command was accepted by the engine queue. Use
+    /// The current state is validated before the command is queued. Success
+    /// means the command was accepted by the engine queue; a concurrent state
+    /// transition may still make the engine ignore it. Use
     /// [`Self::wait_for_status`] with [`DownloadStatus::Paused`] when the
     /// caller must wait until the state transition is visible.
     pub fn pause(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.require_status("pause", |status| {
+            matches!(status, DownloadStatus::Active | DownloadStatus::Waiting)
+        })?;
         self.send_control(EngineCommand::Pause { gid: self.gid })
     }
 
-    /// Queue a forced pause command and return once it is accepted.
+    /// Queue a forced pause command after validating the current state.
     pub fn force_pause(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.require_status("force-pause", |status| {
+            matches!(status, DownloadStatus::Active | DownloadStatus::Waiting)
+        })?;
         self.send_control(EngineCommand::ForcePause { gid: self.gid })
     }
 
-    /// Queue a resume command and return once it is accepted.
+    /// Queue a resume command after validating that the task is paused.
     ///
     /// A resumed task first becomes [`DownloadStatus::Waiting`] and may later
     /// be promoted to [`DownloadStatus::Active`].
     pub fn resume(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.require_status("resume", |status| status.is_paused())?;
         self.send_control(EngineCommand::Unpause { gid: self.gid })
     }
 
-    /// Queue a graceful removal command and return once it is accepted.
+    /// Queue a graceful removal command for a live task.
     pub fn remove(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.require_live()?;
         self.send_control(EngineCommand::RemoveDownload { gid: self.gid })
     }
 
-    /// Queue a forced removal command and return once it is accepted.
+    /// Queue a forced removal command for a live task.
     pub fn force_remove(&self) -> std::result::Result<(), DownloadManagerError> {
+        self.require_live()?;
         self.send_control(EngineCommand::ForceRemoveDownload { gid: self.gid })
     }
 
@@ -630,6 +641,38 @@ impl DownloadHandle {
     ) -> std::result::Result<(), DownloadManagerError> {
         self.manager.command_sender.send(command)?;
         Ok(())
+    }
+
+    fn require_live(&self) -> std::result::Result<(), DownloadManagerError> {
+        if self.manager.group_man.find_group(self.gid).is_some() {
+            Ok(())
+        } else {
+            Err(self.not_found_error())
+        }
+    }
+
+    fn require_status(
+        &self,
+        operation: &str,
+        accepts: impl FnOnce(&DownloadStatus) -> bool,
+    ) -> std::result::Result<(), DownloadManagerError> {
+        let group = self
+            .manager
+            .group_man
+            .find_group(self.gid)
+            .ok_or_else(|| self.not_found_error())?;
+        let status = group.recover().status();
+        if accepts(&status) {
+            Ok(())
+        } else {
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(
+                format!(
+                    "GID#{} cannot be {operation} while status is {}",
+                    self.gid_hex(),
+                    status.as_str()
+                ),
+            )))
+        }
     }
 
     fn not_found_error(&self) -> DownloadManagerError {
@@ -917,6 +960,50 @@ mod tests {
             .expect("unknown terminal wait must return promptly");
         assert!(matches!(
             terminal_result,
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+    }
+
+    #[test]
+    fn control_commands_reject_unknown_and_invalid_states_before_queueing() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, mut command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let unknown = manager.handle(GroupId::new(0xdead_beef));
+
+        assert!(matches!(
+            unknown.pause(),
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+        assert!(matches!(
+            unknown.force_pause(),
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+        assert!(matches!(
+            unknown.resume(),
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+        assert!(matches!(
+            unknown.remove(),
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+        assert!(matches!(
+            unknown.force_remove(),
+            Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
+        ));
+        assert!(matches!(
+            command_receiver.try_recv(),
+            Err(super::super::engine_command::EngineCommandTryRecvError::Empty)
+        ));
+
+        let live = manager
+            .add_uri(
+                vec!["https://example.test/file".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+        assert!(matches!(
+            live.resume(),
             Err(DownloadManagerError::State(Aria2Error::InvalidArgument(_)))
         ));
     }

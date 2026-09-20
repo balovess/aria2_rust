@@ -3,7 +3,7 @@
 //! - `struct_def`  — struct definition, Debug impl, constructors, Default impl
 //! - `file_ops`    — file entry accessors, lookup, filtering, path management
 //! - `hash_ops`    — piece hash and whole-file checksum operations
-//! - `context_ops` — attributes, timing, Metalink, BT info hash, signature, owner, network stats
+//! - `context_ops` — attributes, timing, Metalink, BT info hash, owner, network stats
 
 mod context_ops;
 mod file_ops;

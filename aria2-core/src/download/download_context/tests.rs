@@ -1,7 +1,7 @@
 //! Unit tests for DownloadContext and related types.
 
 use super::context::DownloadContext;
-use super::types::{ContextAttributeType, Signature};
+use super::types::ContextAttributeType;
 use crate::download::file_entry::FileEntry;
 
 // Helper: create a FileEntry with given path, length, offset
@@ -23,7 +23,6 @@ fn test_default_constructor() {
     assert!(ctx.get_accept_metalink());
     assert!(ctx.get_file_entries().is_empty());
     assert_eq!(ctx.get_total_length(), 0);
-    assert!(ctx.get_signature().is_none());
     assert!(ctx.get_owner_request_group_id().is_none());
     // get_base_path() panics on empty file entries, so we skip it here
     // and test it in the base_path tests below.
@@ -519,24 +518,6 @@ fn test_checksum_verified_flag() {
 
     ctx.set_checksum_verified(true);
     assert!(!ctx.is_checksum_verification_needed());
-}
-
-// -----------------------------------------------------------------------
-// 19. Signature get/set
-// -----------------------------------------------------------------------
-#[test]
-fn test_signature_get_set() {
-    let mut ctx = DownloadContext::new_default();
-    assert!(ctx.get_signature().is_none());
-
-    ctx.set_signature(Signature::new(
-        "-----BEGIN PGP SIGNATURE-----\nabc\n-----END PGP SIGNATURE-----".to_string(),
-        "sha-256".to_string(),
-    ));
-
-    let sig = ctx.get_signature().unwrap();
-    assert_eq!(sig.hash_type, "sha-256");
-    assert!(sig.body.contains("BEGIN PGP"));
 }
 
 // -----------------------------------------------------------------------
