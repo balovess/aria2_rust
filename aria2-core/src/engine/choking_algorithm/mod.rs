@@ -177,36 +177,9 @@ impl ChokingAlgorithm {
         selection::rotate_choke_by_identity(self)
     }
 
-    /// Called every ~30 seconds (config.optimistic_unchoke_interval_secs)
-    ///
-    /// Selects ONE choked+interested peer for optimistic unchoke.
-    /// This gives new/unknown peers a chance to prove themselves.
-    ///
-    /// Uses round-robin rotation among eligible non-snubbed peers
-    /// to ensure fair distribution of the optimistic unchoke slot.
-    ///
-    /// Returns Some(index) if found, None if no eligible peer
-    pub fn optimistically_unchoke(&mut self) -> Option<usize> {
-        optimistic::optimistically_unchoke(self)
-    }
-
     /// Select an optimistic-un choke target using stable identity.
     pub fn optimistically_unchoke_by_identity(&mut self) -> Option<PeerIdentity> {
         optimistic::optimistically_unchoke_by_identity(self)
-    }
-
-    /// Rotate which peer gets the optimistic unchoke slot using round-robin.
-    ///
-    /// Picks a different peer than the current one when possible,
-    /// cycling through eligible peers in order.
-    ///
-    /// # Arguments
-    /// * eligible_peers - Indices of peers that are eligible for optimistic unchoke
-    ///
-    /// # Returns
-    /// The index of the selected peer from the eligible set
-    pub fn rotate_optimistic_unchoked(&mut self, eligible_peers: &[usize]) -> usize {
-        optimistic::rotate_optimistic_unchoked(self, eligible_peers)
     }
 
     /// Called whenever we receive data from a peer.

@@ -172,18 +172,20 @@ fn test_optimistically_unchoke_selects_choked_peer() {
     let mut algo = ChokingAlgorithm::new(config);
 
     // Add peers
-    algo.add_peer(create_test_peer(1000.0, 100.0, true, true)); // Choked + interested
+    let first = create_test_peer(1000.0, 100.0, true, true);
+    let first_identity = PeerIdentity::from(&first);
+    algo.add_peer(first); // Choked + interested
     algo.add_peer(create_test_peer(2000.0, 200.0, false, true)); // Unchoked
     algo.add_peer(create_test_peer(3000.0, 300.0, true, false)); // Not interested
 
-    let result = algo.optimistically_unchoke();
+    let result = algo.optimistically_unchoke_by_identity();
 
     // Should select peer 0 (only one that meets criteria)
     assert!(
         result.is_some(),
         "Expected to select a peer for optimistic unchoke"
     );
-    assert_eq!(result.unwrap(), 0);
+    assert_eq!(result, Some(first_identity));
 }
 
 #[test]
@@ -199,7 +201,7 @@ fn test_optimistically_avoids_recent() {
     peer.record_optimistic_unchoke(); // Just marked, so < 30s ago
     algo.add_peer(peer);
 
-    let result = algo.optimistically_unchoke();
+    let result = algo.optimistically_unchoke_by_identity();
 
     // Should not select this peer (too recent)
     assert!(result.is_none());
@@ -457,14 +459,20 @@ fn test_opt_unchoking_rotation_changes_peer() {
     let mut algo = ChokingAlgorithm::new(config);
 
     // Add 3 eligible peers (all choked + interested)
-    algo.add_peer(create_test_peer(1000.0, 100.0, true, true));
-    algo.add_peer(create_test_peer(2000.0, 200.0, true, true));
-    algo.add_peer(create_test_peer(3000.0, 300.0, true, true));
+    let peers = [
+        create_test_peer(1000.0, 100.0, true, true),
+        create_test_peer(2000.0, 200.0, true, true),
+        create_test_peer(3000.0, 300.0, true, true),
+    ];
+    let identities: Vec<_> = peers.iter().map(PeerIdentity::from).collect();
+    for peer in peers {
+        algo.add_peer(peer);
+    }
 
     // First optimistic unchoke
-    let first = algo.optimistically_unchoke();
+    let first = algo.optimistically_unchoke_by_identity();
     assert!(first.is_some());
-    let first_idx = first.unwrap();
+    let first_identity = first.unwrap();
 
     // Second optimistic unchoke - should pick a DIFFERENT peer (round-robin)
     // Reset the last_optimistic_unchoke time so they're eligible again
@@ -475,16 +483,18 @@ fn test_opt_unchoking_rotation_changes_peer() {
         }
     }
 
-    let second = algo.optimistically_unchoke();
+    let second = algo.optimistically_unchoke_by_identity();
     assert!(second.is_some());
-    let second_idx = second.unwrap();
+    let second_identity = second.unwrap();
 
     // With round-robin, second should differ from first (unless only 1 candidate)
     // Since all 3 are eligible and we use rotation, we expect different peer
     assert_ne!(
-        first_idx, second_idx,
+        first_identity, second_identity,
         "Optimistic unchoke should rotate to a different peer"
     );
+    assert!(identities.contains(&first_identity));
+    assert!(identities.contains(&second_identity));
 }
 
 #[test]
@@ -499,19 +509,17 @@ fn test_opt_unchoking_excludes_snubbed_peers() {
     // Peer 0: eligible but will be snubbed
     algo.add_peer(create_test_peer(5000.0, 500.0, true, true));
     // Peer 1: eligible and NOT snubbed
-    algo.add_peer(create_test_peer(3000.0, 300.0, true, true));
+    let available = create_test_peer(3000.0, 300.0, true, true);
+    let available_identity = PeerIdentity::from(&available);
+    algo.add_peer(available);
 
     // Snub peer 0
     algo.mark_peer_snubbed(0);
 
     // Optimistic unchoke should ONLY select peer 1
-    let result = algo.optimistically_unchoke();
+    let result = algo.optimistically_unchoke_by_identity();
     assert!(result.is_some());
-    assert_eq!(
-        result.unwrap(),
-        1,
-        "Should select non-snubbed peer for optimistic unchoke"
-    );
+    assert_eq!(result, Some(available_identity));
 }
 
 #[test]
