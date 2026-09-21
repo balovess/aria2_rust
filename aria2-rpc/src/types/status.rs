@@ -217,7 +217,7 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub num_pieces: Option<u32>,
-    /// Number of locally verified pieces (BitTorrent only).
+    /// Number of locally verified pieces (BitTorrent extension).
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
@@ -225,7 +225,7 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub completed_pieces: Option<u32>,
-    /// Number of pieces still missing locally (BitTorrent only).
+    /// Number of pieces still missing locally (BitTorrent extension).
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",

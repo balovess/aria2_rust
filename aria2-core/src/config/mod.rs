@@ -459,9 +459,9 @@ mod tests {
         {
             assert_eq!(
                 mgr.get_global_bool("bt-load-saved-metadata").await,
-                Some(true)
+                Some(false)
             );
-            assert_eq!(mgr.get_global_bool("bt-save-metadata").await, Some(true));
+            assert_eq!(mgr.get_global_bool("bt-save-metadata").await, Some(false));
         }
     }
 

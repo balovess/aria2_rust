@@ -119,6 +119,7 @@ pub struct RequestGroup {
     pub bt_piece_length: AtomicU32,
     /// Info hash hex string for torrent identification (None for non-BT).
     pub bt_info_hash_hex: std::sync::RwLock<Option<String>>,
+    /// Owned BT metadata retained when the live download context is released.
 
     /// Handle to the download's `RateLimiter` for dynamic rate adjustment.
     /// `None` until the download engine wires up a `ThrottledWriter`.

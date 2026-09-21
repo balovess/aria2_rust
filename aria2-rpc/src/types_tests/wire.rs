@@ -73,7 +73,7 @@ fn test_status_info_deserialization_roundtrip() {
 }
 
 #[test]
-fn test_status_info_piece_counts_use_wire_strings() {
+fn test_piece_count_extensions_keep_aria2_wire_types() {
     let info = StatusInfo::new("bt-test")
         .with_num_pieces(10)
         .with_completed_pieces(9)

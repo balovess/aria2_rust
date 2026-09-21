@@ -866,6 +866,80 @@ async fn regression_add_torrent_get_files_is_available_before_start() {
     assert_eq!(files[0]["length"], "4");
 }
 
+/// Test: live BitTorrent status includes the original nested metadata fields.
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn regression_tell_status_includes_original_bt_metadata() {
+    let engine = core_engine();
+    let add_resp = engine
+        .handle_request(&make_request(
+            "aria2.addTorrent",
+            serde_json::json!([valid_torrent(), [], {"pause": true}]),
+        ))
+        .await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let status_resp = engine
+        .handle_request(&make_request("aria2.tellStatus", serde_json::json!([gid])))
+        .await;
+    assert_success(&status_resp);
+    let status = status_resp.result.unwrap();
+
+    assert_eq!(
+        status["infoHash"], "50af51cbddffdba351a3ed78daffe312c3bdb7bd",
+        "live status: {status}"
+    );
+    assert_eq!(
+        status["bittorrent"]["announceList"][0][0],
+        "http://example.com/announce"
+    );
+    assert_eq!(status["bittorrent"]["mode"], "single");
+    assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
+    assert_eq!(status["seeder"], "false");
+    assert_eq!(status["completedPieces"], "0");
+    assert_eq!(status["missingPieces"], "1");
+}
+
+/// Test: stopped BitTorrent status keeps the original torrent metadata.
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn regression_tell_stopped_includes_original_bt_metadata() {
+    let engine = core_engine();
+    let add_resp = engine
+        .handle_request(&make_request(
+            "aria2.addTorrent",
+            serde_json::json!([valid_torrent(), [], {"pause": true}]),
+        ))
+        .await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let remove_resp = engine
+        .handle_request(&make_request("aria2.forceRemove", serde_json::json!([gid])))
+        .await;
+    assert_success(&remove_resp);
+
+    let status_resp = engine
+        .handle_request(&make_request("aria2.tellStatus", serde_json::json!([gid])))
+        .await;
+    assert_success(&status_resp);
+    let status = status_resp.result.unwrap();
+
+    assert_eq!(
+        status["infoHash"], "50af51cbddffdba351a3ed78daffe312c3bdb7bd",
+        "stopped status: {status}"
+    );
+    assert_eq!(
+        status["bittorrent"]["announceList"][0][0],
+        "http://example.com/announce"
+    );
+    assert_eq!(status["bittorrent"]["mode"], "single");
+    assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
+    assert_eq!(status["completedPieces"], "0");
+    assert_eq!(status["missingPieces"], "1");
+}
+
 /// Test: aria2.getServers returns array with server info.
 #[tokio::test]
 async fn regression_get_servers_format() {

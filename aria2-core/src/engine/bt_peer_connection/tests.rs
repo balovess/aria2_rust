@@ -15,14 +15,11 @@ use super::types::SendBuffer;
 fn test_send_buffer_push_and_drain() {
     let mut buf = SendBuffer::new();
     assert!(buf.is_empty());
-    assert_eq!(buf.len(), 0);
 
     buf.push_bytes(vec![1, 2, 3]);
     assert!(!buf.is_empty());
-    assert_eq!(buf.len(), 3);
 
     buf.push_bytes(vec![4, 5, 6]);
-    assert_eq!(buf.len(), 6);
 
     let drained = buf.take_pending();
     assert_eq!(drained, vec![1, 2, 3, 4, 5, 6]);
@@ -37,10 +34,6 @@ fn test_send_buffer_empty_check() {
     buf.push_bytes(vec![42]);
     assert!(!buf.is_empty());
 
-    buf.clear();
-    assert!(buf.is_empty());
-
-    buf.push_bytes(vec![1]);
     let _ = buf.take_pending();
     assert!(buf.is_empty());
 }

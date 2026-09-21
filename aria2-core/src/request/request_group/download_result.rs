@@ -7,6 +7,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "bittorrent")]
+use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
+
 use super::GroupId;
 use super::result_code::DownloadResultCode;
 use super::status::DownloadStatus;
@@ -39,6 +42,37 @@ pub struct UriEntry {
     pub uri: String,
     /// Current status of this URI ("used", "waiting", "spent").
     pub status: String,
+}
+
+/// BitTorrent metadata retained with a stopped result for RPC snapshots.
+///
+/// The live download context is released when a group is demoted. Keeping
+/// this small owned projection preserves the original aria2 stopped-status
+/// fields without retaining protocol state or sockets.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BittorrentResultMetadata {
+    pub announce_list: Vec<Vec<String>>,
+    pub comment: Option<String>,
+    pub creation_date: Option<i64>,
+    pub mode: Option<String>,
+    pub name: Option<String>,
+}
+
+#[cfg(feature = "bittorrent")]
+impl BittorrentResultMetadata {
+    pub(crate) fn from_torrent_attribute(attribute: &TorrentAttribute) -> Self {
+        let mode = match attribute.mode {
+            crate::download::download_context::BtFileMode::Single => "single",
+            crate::download::download_context::BtFileMode::Multi => "multi",
+        };
+        Self {
+            announce_list: attribute.announce_list.clone(),
+            comment: (!attribute.comment.is_empty()).then(|| attribute.comment.clone()),
+            creation_date: (attribute.creation_date != 0).then_some(attribute.creation_date),
+            mode: Some(mode.to_string()),
+            name: (!attribute.name.is_empty()).then(|| attribute.name.clone()),
+        }
+    }
 }
 
 /// Rich download result for RPC consumers.
@@ -99,6 +133,8 @@ pub struct DownloadResult {
     pub files: Vec<FileEntry>,
     /// BT info hash (empty string for non-BT).
     pub info_hash: String,
+    /// BT metadata needed after the live download context is released.
+    pub bt_metadata: Option<BittorrentResultMetadata>,
 
     // ── Metadata ───────────────────────────────────────────────────────
     /// Download context attributes (e.g. CTX_ATTR_ED2K for aria2-next).
@@ -141,6 +177,7 @@ impl DownloadResult {
             dir: String::new(),
             files: Vec::new(),
             info_hash: String::new(),
+            bt_metadata: None,
             attrs: std::collections::HashMap::new(),
             in_memory_download: false,
             session_download_length: 0,
@@ -182,6 +219,7 @@ impl DownloadResult {
             dir: String::new(),
             files: Vec::new(),
             info_hash: String::new(),
+            bt_metadata: None,
             attrs: std::collections::HashMap::new(),
             in_memory_download: false,
             session_download_length: 0,
@@ -254,8 +292,21 @@ impl DownloadResult {
         self.upload_speed = group.upload_speed();
         self.session_time = group.elapsed_time().map_or(0, |elapsed| elapsed.as_secs());
         self.dir = group.options().dir.clone().unwrap_or_default();
-        self.info_hash = group.info_hash_hex().unwrap_or_default();
+        self.info_hash = group
+            .info_hash_hex()
+            .or_else(|| group.get_bt_info_hash_hex())
+            .unwrap_or_default();
         self.in_memory_download = group.is_in_memory_download();
+
+        #[cfg(feature = "bittorrent")]
+        {
+            self.bt_metadata = group.get_download_context().and_then(|context| {
+                context
+                    .get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|value| value.downcast_ref::<TorrentAttribute>())
+                    .map(BittorrentResultMetadata::from_torrent_attribute)
+            });
+        }
 
         let fallback_path = {
             let options = group.options();

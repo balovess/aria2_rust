@@ -4,8 +4,8 @@
 //! Mirrors the C++ aria2 architecture of `Peer` + `PeerSessionResource` +
 //! `PeerConnection` + `SocketBuffer`:
 //!
-//! - [`SendBuffer`] — outbound message buffer that batches small messages
-//!   into larger TCP writes (C++ `SocketBuffer`).
+//! - An internal send buffer that batches small messages into larger TCP
+//!   writes (C++ `SocketBuffer`).
 //! - [`PeerSessionResource`] — per-session state allocated when a peer becomes
 //!   active and released on disconnect (C++ `PeerSessionResource`).
 //! - [`BtPeerConn`] — the public connection type that composes the above with
@@ -31,5 +31,5 @@ mod utp_connection_tests;
 // Public connection types and their supporting data structures.
 pub use peer_conn::BtPeerConn;
 pub use session_resource::PeerSessionResource;
-pub use types::{ConnectionType, SendBuffer};
+pub use types::ConnectionType;
 pub use utp_connection::UtpPeerConnection;

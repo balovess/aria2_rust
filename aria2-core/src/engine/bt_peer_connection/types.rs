@@ -1,6 +1,6 @@
 //! Small shared types for the BitTorrent peer connection module.
 //!
-//! Contains [`ConnectionType`] and [`SendBuffer`], which are used across
+//! Contains [`ConnectionType`] and the internal send buffer used across
 //! multiple sub-modules.
 
 // ===========================================================================
@@ -26,42 +26,32 @@ pub enum ConnectionType {
 /// only written to the socket when flushed. This reduces the number of
 /// syscalls and improves throughput, especially when sending multiple small
 /// messages (e.g., a burst of Have messages).
-pub struct SendBuffer {
+pub(crate) struct SendBuffer {
     /// Queued message bytes, waiting to be written to the socket.
     pending: Vec<u8>,
 }
 
 impl SendBuffer {
     /// Create a new empty send buffer.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             pending: Vec::new(),
         }
     }
 
     /// Add data to the pending buffer.
-    pub fn push_bytes(&mut self, data: Vec<u8>) {
+    pub(crate) fn push_bytes(&mut self, data: Vec<u8>) {
         self.pending.extend_from_slice(&data);
     }
 
     /// Check whether the pending buffer is empty.
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
-    }
-
-    /// Get the number of bytes in the pending buffer.
-    pub fn len(&self) -> usize {
-        self.pending.len()
-    }
-
-    /// Clear the pending buffer.
-    pub fn clear(&mut self) {
-        self.pending.clear();
     }
 
     /// Drain the pending data, returning it as a `Vec<u8>` for writing to
     /// the socket.
-    pub fn take_pending(&mut self) -> Vec<u8> {
+    pub(crate) fn take_pending(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
     }
 }

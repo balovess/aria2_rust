@@ -1,12 +1,15 @@
 use std::path::PathBuf;
 
 #[cfg(feature = "bittorrent")]
+use aria2_core::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+#[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_tracker_comm::TrackerRuntimeSnapshot;
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_rpc::{
-    BackendError, BackendReadSnapshot, BackendResponse, BackendResult, FileInfo, GlobalStat,
-    PeerInfo, ServerInfo, ServerInfoIndex, StatusInfo, UriEntry, UriStatus,
+    BackendError, BackendReadSnapshot, BackendResponse, BackendResult, BittorrentInfo,
+    BittorrentMetaInfo, FileInfo, GlobalStat, PeerInfo, ServerInfo, ServerInfoIndex, StatusInfo,
+    UriEntry, UriStatus,
 };
 
 use super::{CoreRpcBackend, rpc_peer_port};
@@ -34,7 +37,8 @@ impl CoreRpcBackend {
                 .with_num_pieces(bt.num_pieces)
                 .with_piece_length(bt.piece_length as u64)
                 .with_completed_pieces(bt.completed_pieces)
-                .with_missing_pieces(bt.missing_pieces);
+                .with_missing_pieces(bt.missing_pieces)
+                .with_seeder(if bt.is_complete() { "true" } else { "false" });
             if let Some(bitfield) = &bt.bitfield {
                 info = info.with_bitfield(
                     bitfield
@@ -42,6 +46,28 @@ impl CoreRpcBackend {
                         .map(|byte| format!("{byte:02x}"))
                         .collect::<String>(),
                 );
+            }
+
+            #[cfg(feature = "bittorrent")]
+            if let Some(context) = group.get_download_context()
+                && let Some(attribute) = context
+                    .get_attribute(ContextAttributeType::BitTorrent)
+                    .and_then(|value| value.downcast_ref::<TorrentAttribute>())
+            {
+                let mode = match attribute.mode {
+                    BtFileMode::Single => "single",
+                    BtFileMode::Multi => "multi",
+                };
+                info = info.with_bittorrent(BittorrentInfo {
+                    announce_list: attribute.announce_list.clone(),
+                    comment: (!attribute.comment.is_empty()).then(|| attribute.comment.clone()),
+                    creation_date: (attribute.creation_date != 0)
+                        .then_some(attribute.creation_date),
+                    mode: Some(mode.to_string()),
+                    info: (!attribute.name.is_empty()).then(|| BittorrentMetaInfo {
+                        name: attribute.name.clone(),
+                    }),
+                });
             }
         }
         if info.piece_length.is_none() && snapshot.total_length > 0 {
@@ -79,7 +105,56 @@ impl CoreRpcBackend {
         if !result.files.is_empty() {
             info = info.with_files(build_file_infos_from_result(result));
         }
+        if !result.info_hash.is_empty() {
+            info = info
+                .with_info_hash(result.info_hash.clone())
+                .with_num_seeders(0);
+        }
+        if result.num_pieces > 0 {
+            let completed_pieces =
+                Self::completed_pieces_from_bitfield(result.num_pieces, &result.bitfield);
+            info = info
+                .with_num_pieces(result.num_pieces)
+                .with_piece_length(result.piece_length as u64)
+                .with_completed_pieces(completed_pieces)
+                .with_missing_pieces(result.num_pieces.saturating_sub(completed_pieces));
+            if !result.bitfield.is_empty() {
+                info = info.with_bitfield(result.bitfield.clone());
+            }
+        }
+        if let Some(metadata) = &result.bt_metadata {
+            info = info.with_bittorrent(BittorrentInfo {
+                announce_list: metadata.announce_list.clone(),
+                comment: metadata.comment.clone(),
+                creation_date: metadata.creation_date,
+                mode: metadata.mode.clone(),
+                info: metadata
+                    .name
+                    .clone()
+                    .map(|name| BittorrentMetaInfo { name }),
+            });
+        }
         info
+    }
+
+    fn completed_pieces_from_bitfield(num_pieces: u32, bitfield: &str) -> u32 {
+        bitfield
+            .as_bytes()
+            .chunks(2)
+            .enumerate()
+            .map(|(byte_index, pair)| {
+                let Ok(pair) = std::str::from_utf8(pair) else {
+                    return 0;
+                };
+                let Ok(byte) = u8::from_str_radix(pair, 16) else {
+                    return 0;
+                };
+                (0..8)
+                    .take_while(|bit| byte_index * 8 + bit < num_pieces as usize)
+                    .filter(|bit| byte & (0x80 >> bit) != 0)
+                    .count() as u32
+            })
+            .sum()
     }
 
     pub(super) fn capture_snapshot(&self) -> BackendReadSnapshot {
