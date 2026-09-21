@@ -4,7 +4,7 @@
 //! lists with tier-based failover, matching the C++ aria2 behavior.
 
 use super::types::AnnounceEvent;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 // ======================================================================
 // AnnounceTier (from C++ AnnounceTier)
@@ -367,6 +367,13 @@ impl AnnounceList {
         self.tiers.get(tier_idx).and_then(|t| t.urls.get(entry_idx))
     }
 
+    /// Return whether a tracker URL already belongs to any tier.
+    pub fn contains_url(&self, url: &str) -> bool {
+        self.tiers
+            .iter()
+            .any(|tier| tier.urls.iter().any(|candidate| candidate == url))
+    }
+
     /// Reconfigure the announce list from a new multi-tier list.
     ///
     /// C++: `AnnounceList::reconfigure(const vector<vector<string>>& announceList)`
@@ -393,5 +400,46 @@ impl AnnounceList {
         urls.push_back(url.to_string());
         self.tiers.push(AnnounceTier::new(urls));
         self.reset_iterator();
+    }
+
+    /// Append tiers without replacing the trackers already supplied by the
+    /// torrent or the user.
+    ///
+    /// The caller may use this for trackers discovered after the download has
+    /// started. Existing URLs keep their tier and order; only URLs not
+    /// present anywhere in the list are appended. If the previous list was
+    /// exhausted, the first newly appended tier becomes immediately usable.
+    /// Returns the URLs that were actually added.
+    pub fn append_tiers(&mut self, tiers: &[Vec<String>]) -> Vec<String> {
+        let was_exhausted =
+            !self.current_tracker_initialized || self.current_tier >= self.tiers.len();
+        let mut existing = self
+            .tiers
+            .iter()
+            .flat_map(|tier| tier.urls.iter().cloned())
+            .collect::<HashSet<_>>();
+        let mut added = Vec::new();
+        let first_added_tier = self.tiers.len();
+
+        for tier_urls in tiers {
+            let unique_urls = tier_urls
+                .iter()
+                .filter(|url| !url.is_empty() && existing.insert((*url).clone()))
+                .cloned()
+                .collect::<Vec<_>>();
+            if unique_urls.is_empty() {
+                continue;
+            }
+            added.extend(unique_urls.iter().cloned());
+            self.tiers.push(AnnounceTier::from_urls(unique_urls));
+        }
+
+        if !added.is_empty() && was_exhausted {
+            self.current_tier = first_added_tier;
+            self.current_tracker = 0;
+            self.current_tracker_initialized = true;
+        }
+
+        added
     }
 }

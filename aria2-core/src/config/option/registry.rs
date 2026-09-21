@@ -582,9 +582,18 @@ mod tests {
         {
             assert!(!projected.contains_key("enable-utp"));
             assert!(!projected.contains_key("utp-listen-port"));
-            assert!(!projected.contains_key("bt-tracker-source"));
-            assert!(!projected.contains_key("bt-tracker-update-interval"));
-            assert!(!projected.contains_key("enable-public-trackers"));
+            assert_eq!(
+                projected.get("bt-tracker-source"),
+                Some(&serde_json::json!("https://example.test/trackers.txt"))
+            );
+            assert_eq!(
+                projected.get("bt-tracker-update-interval"),
+                Some(&serde_json::json!(86400))
+            );
+            assert_eq!(
+                projected.get("enable-public-trackers"),
+                Some(&serde_json::json!(true))
+            );
         }
     }
 }

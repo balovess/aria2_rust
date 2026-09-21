@@ -355,3 +355,46 @@ fn test_announce_list_shuffle() {
     let tier_urls: Vec<&str> = list.tiers[0].urls.iter().map(|s| s.as_str()).collect();
     assert_eq!(tier_urls.len(), 20);
 }
+
+#[test]
+fn test_announce_list_appends_new_trackers_without_duplicates() {
+    let mut list = AnnounceList::new(
+        &[
+            vec!["http://torrent.test/announce".to_string()],
+            vec!["udp://torrent.test:6969/announce".to_string()],
+        ],
+        &None,
+    );
+
+    let added = list.append_tiers(&[
+        vec![
+            "http://torrent.test/announce".to_string(),
+            "http://public.test/announce".to_string(),
+        ],
+        vec!["http://public.test/announce".to_string()],
+    ]);
+
+    assert_eq!(added, vec!["http://public.test/announce"]);
+    assert_eq!(list.tier_count(), 3);
+    assert_eq!(
+        list.get_tracker_url(0, 0).unwrap(),
+        "http://torrent.test/announce"
+    );
+    assert_eq!(
+        list.get_tracker_url(2, 0).unwrap(),
+        "http://public.test/announce"
+    );
+}
+
+#[test]
+fn test_announce_list_appends_after_all_tiers_failed() {
+    let mut list = AnnounceList::new(&[vec!["http://torrent.test/announce".to_string()]], &None);
+    list.announce_failure();
+    assert!(list.all_tiers_failed());
+
+    let added = list.append_tiers(&[vec!["http://public.test/announce".to_string()]]);
+
+    assert_eq!(added, vec!["http://public.test/announce"]);
+    assert_eq!(list.get_announce(), Some("http://public.test/announce"));
+    assert!(!list.all_tiers_failed());
+}

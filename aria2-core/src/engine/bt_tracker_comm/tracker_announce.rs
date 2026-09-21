@@ -134,6 +134,8 @@ pub struct TrackerAnnouncer {
     public_tracker_catalog: Option<Arc<PublicTrackerList>>,
     /// Public URLs appended to this command's announce list.
     public_tracker_urls: HashSet<String>,
+    /// Tracker URLs excluded by the download options, including `*`.
+    excluded_tracker_urls: Vec<String>,
     /// Failure classification from the most recent announce attempt.
     last_failure_kind: Option<TrackerFailureKind>,
     /// Existing download TLS settings used by HTTPS tracker announces.
@@ -162,6 +164,7 @@ impl TrackerAnnouncer {
             last_attempt_tracker_url: None,
             public_tracker_catalog: None,
             public_tracker_urls: HashSet::new(),
+            excluded_tracker_urls: Vec::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
             websocket_options: DownloadOptions::default(),
@@ -182,6 +185,7 @@ impl TrackerAnnouncer {
             last_attempt_tracker_url: None,
             public_tracker_catalog: None,
             public_tracker_urls: HashSet::new(),
+            excluded_tracker_urls: Vec::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
             websocket_options: DownloadOptions::default(),
@@ -287,6 +291,51 @@ impl TrackerAnnouncer {
     ) {
         self.public_tracker_catalog = Some(catalog);
         self.public_tracker_urls = public_tracker_urls;
+    }
+
+    /// Apply the download's tracker exclusion policy to future catalog merges.
+    pub fn set_excluded_tracker_urls(&mut self, excluded: Vec<String>) {
+        self.excluded_tracker_urls = excluded;
+    }
+
+    /// Merge newly available public trackers into this running download.
+    ///
+    /// The announce list owns the ordering rule: torrent and explicit user
+    /// trackers remain ahead of public trackers, and duplicate URLs are
+    /// ignored. The limit is per download, so a refresh cannot grow an
+    /// announce list without bound.
+    pub async fn sync_public_trackers(&mut self, max_trackers: usize) -> usize {
+        if self.public_tracker_urls.len() >= max_trackers {
+            return 0;
+        }
+        let Some(catalog) = self.public_tracker_catalog.as_ref().cloned() else {
+            return 0;
+        };
+        let available = catalog.available_snapshot().await;
+        let remaining = max_trackers - self.public_tracker_urls.len();
+        let mut tiers = Vec::with_capacity(remaining);
+        for entry in available.iter() {
+            if self
+                .excluded_tracker_urls
+                .iter()
+                .any(|excluded| excluded == "*" || excluded == &entry.url)
+                || self.public_tracker_urls.contains(&entry.url)
+                || self.announce.announce_list().contains_url(&entry.url)
+            {
+                continue;
+            }
+            tiers.push(vec![entry.url.clone()]);
+            if tiers.len() == remaining {
+                break;
+            }
+        }
+        let added = self.announce.append_tracker_tiers(&tiers);
+        let added_count = added.len();
+        self.public_tracker_urls.extend(added);
+        if added_count > 0 {
+            self.publish_runtime_snapshot();
+        }
+        added_count
     }
 
     /// Execute a tracker announce, dispatching to HTTP or UDP as appropriate.
@@ -961,6 +1010,44 @@ mod tests {
         assert!(result.is_none(), "slow tracker request should time out");
 
         server.await.expect("tracker test server should exit");
+    }
+
+    #[tokio::test]
+    async fn refreshed_public_trackers_are_appended_after_torrent_trackers() {
+        let catalog = Arc::new(PublicTrackerList::new());
+        let existing_torrent_tracker = catalog
+            .snapshot()
+            .await
+            .first()
+            .expect("embedded catalog should contain a tracker")
+            .url
+            .clone();
+        let mut announcer = TrackerAnnouncer::new(&[vec![existing_torrent_tracker.clone()]], &None);
+        announcer.set_public_tracker_catalog(catalog, HashSet::new());
+
+        let added = announcer.sync_public_trackers(3).await;
+
+        assert_eq!(added, 3);
+        assert_eq!(
+            announcer
+                .announce
+                .announce_list()
+                .get_tracker_url(0, 0)
+                .map(String::as_str),
+            Some(existing_torrent_tracker.as_str())
+        );
+        assert_eq!(announcer.announce.announce_list().tier_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn excluded_public_trackers_are_not_added_after_refresh() {
+        let catalog = Arc::new(PublicTrackerList::new());
+        let mut announcer = TrackerAnnouncer::new(&[], &None);
+        announcer.set_public_tracker_catalog(catalog, HashSet::new());
+        announcer.set_excluded_tracker_urls(vec!["*".to_string()]);
+
+        assert_eq!(announcer.sync_public_trackers(3).await, 0);
+        assert_eq!(announcer.announce.announce_list().tier_count(), 0);
     }
 
     #[tokio::test]

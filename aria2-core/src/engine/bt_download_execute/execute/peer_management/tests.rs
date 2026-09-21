@@ -60,6 +60,34 @@ fn tracker_exclusions_and_user_trackers_follow_announce_policy() {
 }
 
 #[test]
+fn torrent_trackers_keep_priority_before_user_trackers() {
+    let tiers = prepare_tracker_tiers(
+        vec![
+            vec![
+                "http://torrent-one.test/announce".to_string(),
+                "http://torrent-two.test/announce".to_string(),
+            ],
+            vec!["udp://torrent-three.test:6969/announce".to_string()],
+        ],
+        "",
+        Some(vec!["http://custom.test/announce".to_string()]),
+        &[],
+    );
+
+    assert_eq!(
+        tiers,
+        vec![
+            vec![
+                "http://torrent-one.test/announce".to_string(),
+                "http://torrent-two.test/announce".to_string(),
+            ],
+            vec!["udp://torrent-three.test:6969/announce".to_string()],
+            vec!["http://custom.test/announce".to_string()],
+        ]
+    );
+}
+
+#[test]
 fn wildcard_tracker_exclusion_removes_torrent_trackers_but_keeps_override() {
     let tiers = prepare_tracker_tiers(
         vec![vec!["http://torrent.test/announce".to_string()]],

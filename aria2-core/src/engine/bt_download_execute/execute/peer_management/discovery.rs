@@ -120,7 +120,12 @@ impl BtDownloadCommand {
             let public_urls: Vec<String> = public_entries
                 .iter()
                 .map(|entry| entry.url.clone())
-                .filter(|url| !existing_urls.contains(url))
+                .filter(|url| {
+                    !existing_urls.contains(url)
+                        && !excluded_trackers
+                            .iter()
+                            .any(|excluded| excluded == "*" || excluded == url)
+                })
                 .take(MAX_PUBLIC_TRACKERS_TO_TRY)
                 .collect();
             for url in public_urls {
@@ -131,6 +136,7 @@ impl BtDownloadCommand {
 
         tracker_tiers = super::super::deduplicate_tracker_tiers(tracker_tiers);
         let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
+        announcer.set_excluded_tracker_urls(excluded_trackers.clone());
         announcer.set_http_tls_config(tracker_tls);
         announcer.set_websocket_options(&websocket_options);
         announcer.set_timeouts(
@@ -154,6 +160,9 @@ impl BtDownloadCommand {
         // The listener is created before discovery so incoming peers can join
         // as soon as discovery starts. Advertise its actual port in every announce.
         announcer.set_tcp_port(self.listen_port);
+        if let Some(runtime) = self.tracker_runtime.clone() {
+            announcer.set_runtime_snapshot(runtime);
+        }
 
         let mut peer_addrs: Vec<(String, u16)> = Vec::new();
 
@@ -346,6 +355,20 @@ impl BtDownloadCommand {
         left: u64,
         uploaded: u64,
     ) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
+        let enable_public_trackers =
+            !self.is_private && self.group.recover().options().enable_public_trackers;
+        if enable_public_trackers && let Some(announcer) = self.tracker_announcer.as_mut() {
+            let added = announcer
+                .sync_public_trackers(MAX_PUBLIC_TRACKERS_TO_TRY)
+                .await;
+            if added > 0 {
+                debug!(
+                    added,
+                    "[BT] Added refreshed public trackers to running download"
+                );
+            }
+        }
+
         let Some(ref mut announcer) = self.tracker_announcer else {
             return Vec::new();
         };

@@ -10,6 +10,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::super::super::types::{EndgameState, PeerKey};
 
+const PUBLIC_TRACKER_REFRESH_POLL_SECS: u64 = 30;
+
 pub(super) struct NewPeerConnectionsContext<'a> {
     pub(super) peer_last_data_time: &'a mut HashMap<PeerKey, Instant>,
     pub(super) pex_enabled_peers: &'a mut HashSet<PeerKey>,
@@ -50,6 +52,14 @@ impl BtDownloadCommand {
             .and_then(|announcer| announcer.next_default_announce_delay())
         {
             deadline = deadline.min(now + delay);
+        }
+        if !self.is_private
+            && self.group.recover().options().enable_public_trackers
+            && self.public_trackers.is_some()
+        {
+            // A catalog refresh can add trackers after all current tiers have
+            // failed, so keep a bounded wake-up for the merge path above.
+            deadline = deadline.min(now + Duration::from_secs(PUBLIC_TRACKER_REFRESH_POLL_SECS));
         }
         if let Some(stop_timeout_deadline) = stop_timeout_deadline {
             deadline = deadline.min(stop_timeout_deadline);

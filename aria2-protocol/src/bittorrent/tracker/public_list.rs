@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::stream::{self, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -11,6 +12,9 @@ use crate::http::client::ensure_ring_provider;
 
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
 pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(86_400);
+/// Bound source downloads so a large user-provided source list cannot create
+/// an unbounded burst of outbound HTTP requests.
+pub const MAX_TRACKER_SOURCE_CONCURRENCY: usize = 4;
 const TRACKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BACKOFF: Duration = Duration::from_secs(3_600);
 const REMOTE_TEMPORARY_BACKOFF: Duration = Duration::from_secs(30);
@@ -371,19 +375,23 @@ impl PublicTrackerList {
         }
 
         let client = self.http_client.clone();
-        let results = futures::future::join_all(
-            sources
-                .iter()
-                .map(|source| fetch_tracker_source(&client, source)),
-        )
+        let results = stream::iter(sources.iter().cloned().map(|source| {
+            let client = client.clone();
+            async move {
+                let result = fetch_tracker_source(&client, &source).await;
+                (source, result)
+            }
+        }))
+        .buffer_unordered(MAX_TRACKER_SOURCE_CONCURRENCY)
+        .collect::<Vec<_>>()
         .await;
         let mut errors = Vec::new();
         let mut source_entries = self.source_entries.write().await;
         source_entries.retain(|source, _| sources.contains(source));
-        for (source, result) in sources.iter().zip(results) {
+        for (source, result) in results {
             match result {
                 Ok(entries) => {
-                    source_entries.insert(source.clone(), entries);
+                    source_entries.insert(source, entries);
                 }
                 Err(error) => errors.push(format!("{}: {}", source, error)),
             }

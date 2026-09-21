@@ -636,4 +636,15 @@ impl BtAnnounce {
     pub fn announce_list_mut(&mut self) -> &mut AnnounceList {
         &mut self.announce_list
     }
+
+    /// Append newly discovered tracker tiers while preserving the original
+    /// torrent/user tracker order and failover state.
+    pub fn append_tracker_tiers(&mut self, tiers: &[Vec<String>]) -> Vec<String> {
+        let was_exhausted = self.announce_list.all_tiers_failed();
+        let added = self.announce_list.append_tiers(tiers);
+        if was_exhausted && !added.is_empty() {
+            self.prev_announce_time = None;
+        }
+        added
+    }
 }

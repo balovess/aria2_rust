@@ -319,10 +319,9 @@ impl crate::config::OptionRegistry {
             cumulative_delimiter: Some("\n"),
             description: "Remote public tracker list sources".into(),
             category: OptionCategory::BitTorrent,
-            // Rust-only extension. Keep it out of the original
-            // getGlobalOption/getOption projections while retaining the
-            // explicit extension option for local configuration and RPC.
-            expose_in_aria2_rpc: false,
+            // Rust-only extension: expose it explicitly so RPC clients can
+            // inspect and change the public tracker catalog configuration.
+            expose_in_aria2_rpc: true,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -332,7 +331,7 @@ impl crate::config::OptionRegistry {
             min: Some(1),
             description: "Public tracker list refresh interval in seconds".into(),
             category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: false,
+            expose_in_aria2_rpc: true,
             ..Default::default()
         });
         self.register(OptionDef {
@@ -341,7 +340,7 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Bool(true),
             description: "Use public trackers in addition to torrent trackers".into(),
             category: OptionCategory::BitTorrent,
-            expose_in_aria2_rpc: false,
+            expose_in_aria2_rpc: true,
             ..Default::default()
         });
         self.register(OptionDef {
