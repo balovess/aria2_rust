@@ -45,6 +45,7 @@ impl FtpDownloadCommand {
         let port = self.port;
         let ftps_config = self.ftps_config.clone();
         let ftps_implicit = self.ftps_implicit;
+        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
         let connect_timeout = self.connect_timeout;
         let proxy_for_connection = proxy_config.as_ref().map(|(proxy, _)| proxy.clone());
         let connect_result = tokio::time::timeout(connect_timeout, async move {
@@ -55,18 +56,32 @@ impl FtpDownloadCommand {
                     proxy,
                     ftps_config.as_ref(),
                     ftps_implicit,
+                    Arc::clone(&outbound_network_policy),
                 )
                 .await
             } else if let Some(config) = ftps_config.as_ref() {
                 if ftps_implicit {
-                    RawFtpControl::connect_ftps_implicit_at(&host, port, control_address, config)
-                        .await
+                    RawFtpControl::connect_ftps_implicit_at(
+                        &host,
+                        port,
+                        control_address,
+                        config,
+                        Arc::clone(&outbound_network_policy),
+                    )
+                    .await
                 } else {
-                    RawFtpControl::connect_ftps_explicit_at(&host, port, control_address, config)
-                        .await
+                    RawFtpControl::connect_ftps_explicit_at(
+                        &host,
+                        port,
+                        control_address,
+                        config,
+                        Arc::clone(&outbound_network_policy),
+                    )
+                    .await
                 }
             } else {
-                RawFtpControl::connect_at(&host, port, control_address).await
+                RawFtpControl::connect_at(&host, port, control_address, outbound_network_policy)
+                    .await
             }
         })
         .await;

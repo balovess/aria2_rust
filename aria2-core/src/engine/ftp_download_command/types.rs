@@ -20,6 +20,7 @@ use aria2_protocol::ftp::tls::{FtpsConfig, TlsVersion};
 use crate::ftp::connection::{FtpProxyConfig, ProxyMethod};
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::network::ConnectionContext;
+use crate::network::OutboundNetworkPolicy;
 
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
@@ -55,6 +56,7 @@ pub struct FtpDownloadCommand {
     pub(super) retry_policy: RetryPolicy,
     pub(super) last_connection_context: Option<ConnectionContext>,
     pub(super) resolved_addresses: Vec<SocketAddr>,
+    pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     pub(super) dns_cache: Option<Arc<tokio::sync::Mutex<DnsCache>>>,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for this download.
@@ -173,6 +175,7 @@ impl FtpDownloadCommand {
             ),
             last_connection_context: None,
             resolved_addresses: Vec::new(),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             dns_cache: None,
             global_limiter: None,
             file_allocation: options
@@ -187,6 +190,10 @@ impl FtpDownloadCommand {
     /// Parse FTP URI into components
     pub fn set_resolved_addresses(&mut self, addresses: Vec<SocketAddr>) {
         self.resolved_addresses = addresses;
+    }
+
+    pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
+        self.outbound_network_policy = policy;
     }
 
     pub fn set_dns_cache(&mut self, dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) {

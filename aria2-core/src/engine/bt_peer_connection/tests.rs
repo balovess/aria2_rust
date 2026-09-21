@@ -7,6 +7,45 @@ use super::peer_conn::{BtPeerConn, KEEPALIVE_INTERVAL_SECS, PEER_TIMEOUT_SECS};
 use super::session_resource::PeerSessionResource;
 use super::types::SendBuffer;
 
+#[tokio::test]
+async fn plain_peer_connection_uses_the_outbound_policy_source() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let info_hash = [7u8; 20];
+    let peer_id = [8u8; 20];
+    let server = tokio::spawn(async move {
+        let (stream, peer) = listener.accept().await.unwrap();
+        let _connection =
+            aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
+                stream, &info_hash, &peer_id,
+            )
+            .await
+            .unwrap();
+        peer
+    });
+
+    let policy = crate::network::OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap());
+    let connection = BtPeerConn::connect_plain_with_policy(
+        &aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+            &address.ip().to_string(),
+            address.port(),
+        ),
+        &info_hash,
+        None,
+        &peer_id,
+        Duration::from_secs(2),
+        false,
+        &policy,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        server.await.unwrap().ip(),
+        "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+    );
+    drop(connection);
+}
+
 // -----------------------------------------------------------------------
 // SendBuffer tests
 // -----------------------------------------------------------------------

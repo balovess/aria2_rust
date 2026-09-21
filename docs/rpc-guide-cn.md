@@ -150,7 +150,7 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.getFiles` | `gid` | 文件对象数组 |
 | `aria2.getServers` | `gid` | 服务器对象数组；通常仅 active 任务可用 |
 | `aria2.getPeers` | `gid` | peer 对象数组；需 BitTorrent |
-| `aria2.getTrackers` | `gid` | tracker 运行状态数组；需 BitTorrent |
+| `aria2.getTrackers` | `gid` | 按 URL 返回的 tracker 运行快照；需 BitTorrent |
 | `aria2.getDhtStatus` | 无 | 当前活动 BT/magnet 任务聚合的 DHT 状态；需 BitTorrent |
 | `aria2.saveDhtState` | 无 | 立即保存所有活动 DHT 引擎的路由表和 BEP 44 项；需 BitTorrent |
 | `aria2.evictDhtNodes` | 无 | 立即淘汰 bad 节点并尝试缓存替换；返回 `[淘汰数, 替换尝试数]`；需 BitTorrent |
@@ -174,7 +174,10 @@ BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对�
 `announceList`，以及已存在时的 `comment`、`creationDate`、`mode` 和
 `info.name`。piece 进度通过原版定义的 `bitfield`、`pieceLength` 和
 `numPieces` 返回；BT 运行统计还包括 `seeder`、`numSeeders`、
-`verifiedLength` 和 `verifyIntegrityPending`。`completedPieces` 和
+`verifiedLength` 和 `verifyIntegrityPending`。其中 `numSeeders` 是当前已连接、
+被识别为 seeder 的 Peer 数，不是 Tracker swarm 的 `complete` 做种数；
+`verifiedLength` 与 `verifyIntegrityPending` 分别表示完整性校验进度和排队
+状态。`completedPieces` 和
 `missingPieces` 是内部运行时统计，不属于原版 `tellStatus` wire 响应。
 长度、速度、计数等兼容字段按 aria2 wire 格式序列化为字符串。
 
@@ -184,13 +187,16 @@ BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对�
 发现来源（`tracker`、`dht`、`pex`、`lpd`、`incoming` 或 `unknown`）仅作为内部运行时数据保存，不进入原版响应。端口、
 速度、布尔值和 seeder 状态遵循 aria2 的字符串 wire 格式。
 
-`aria2.getTrackers` 返回指定 GID 的实时 tracker 快照，每个元素包含
-`uri`、1-based `tier`、`current`、`lastAttempt`、`announceReady`、
+`aria2.getTrackers` 返回指定 GID 的某一时点运行快照，并不表示每个 tracker
+当前都在线或正在实时返回数据。每个元素包含 `uri`、1-based `tier`、`current`、`lastAttempt`、`announceReady`、
 `allFailed`、`inFlight`、`interval`、`minInterval`、`seeders`、`leechers`、
 `trackerId` 和可选的 `secondsSinceLastSuccess`。状态来自正在执行的 BT
 命令；命令退出后不再保留该 GID 的运行快照。`current` 是下一次选择的
 tracker，`lastAttempt` 是最近一次尝试的 tracker。该扩展接口中
 `interval` 按字符串返回，其他 tracker 数字和布尔状态按 JSON 原生类型返回。
+当 tracker 没有提供对应的有效 `complete` 或 `incomplete` 值时，`seeders`
+或 `leechers` 字段会省略；明确返回的 `0` 会保留为真实零值。这些调度字段
+描述 announce 状态，不能把所有 URL 解读为统一的实时/在线状态。
 
 `aria2.getDhtStatus` 是进程级聚合接口，汇总当前活动 BT/magnet 命令注册的
 DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
@@ -200,6 +206,7 @@ DHT 配置的 `persistenceEnabled`、`persistenceMaxAgeSecs`、
 `cleanupIntervalSecs` 和 `saveIntervalSecs`。数字字段按 aria2 wire 格式返回
 字符串，`persistenceEnabled` 是 JSON 原生布尔值。没有活动 DHT 引擎时返回
 `stopped`、零计数，并将持久化标记设为 false。
+其中 `totalNodes`/`goodNodes` 是 DHT 路由表节点计数，不是 BitTorrent 的做种数。
 
 `aria2.saveDhtState` 和 `aria2.evictDhtNodes` 不需要参数。前者复用自动保存链的
 串行化锁、路由表合并和 BEP 44 保存逻辑；后者复用周期 cleanup 的 bad 节点淘汰及

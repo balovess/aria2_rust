@@ -30,6 +30,7 @@ use tokio::sync::Mutex;
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::network::OutboundNetworkPolicy;
 use tracing::{debug, error, info, warn};
 
 /// BT Peer Interaction Manager
@@ -63,6 +64,7 @@ impl BtPeerInteraction {
     ///
     /// # Returns
     /// * `PeerConnectionResult` containing connected peers and failure count
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_to_peers(
         peer_addrs: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         info_hash_raw: &[u8; 20],
@@ -71,6 +73,7 @@ impl BtPeerInteraction {
         total_length: u64,
         connection_options: &BtPeerConnectionOptions,
         utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        policy: &OutboundNetworkPolicy,
     ) -> Result<PeerConnectionResult> {
         info!("[BT] Connecting to {} peers...", peer_addrs.len());
 
@@ -90,6 +93,7 @@ impl BtPeerInteraction {
                         piece_length,
                         total_length,
                         utp_socket.clone(),
+                        policy,
                     )
                     .await;
                     (addr, result)
@@ -129,6 +133,7 @@ impl BtPeerInteraction {
 
     /// Establish and initialize one peer using the same crypto and protocol path
     /// as the initial peer batch.
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect_peer_ready(
         addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
         info_hash_raw: &[u8; 20],
@@ -137,9 +142,11 @@ impl BtPeerInteraction {
         piece_length: u32,
         total_length: u64,
         utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        policy: &OutboundNetworkPolicy,
     ) -> Result<BtPeerConn> {
         let mut conn =
-            Self::connect_single_peer(addr, info_hash_raw, connection_options, utp_socket).await?;
+            Self::connect_single_peer(addr, info_hash_raw, connection_options, utp_socket, policy)
+                .await?;
         conn.set_timeouts(
             connection_options.keep_alive_interval,
             connection_options.peer_timeout,
@@ -167,6 +174,7 @@ impl BtPeerInteraction {
         info_hash_raw: &[u8; 20],
         connection_options: &BtPeerConnectionOptions,
         utp_socket: Option<Arc<Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+        policy: &OutboundNetworkPolicy,
     ) -> Result<BtPeerConn> {
         if connection_options.enable_utp && !connection_options.crypto.require_mse {
             let endpoint = format!("{}:{}", addr.ip, addr.port)
@@ -177,7 +185,7 @@ impl BtPeerInteraction {
                         addr.ip, addr.port
                     )))
                 })?;
-            let utp_result = BtPeerConn::connect_utp_with_options(
+            let utp_result = BtPeerConn::connect_utp_with_policy(
                 endpoint,
                 info_hash_raw,
                 connection_options.hybrid_info_hash_v2.as_ref(),
@@ -188,6 +196,7 @@ impl BtPeerInteraction {
                     shared_socket: utp_socket,
                     dht_enabled: connection_options.dht_enabled,
                 },
+                policy,
             )
             .await;
             match utp_result {
@@ -206,7 +215,7 @@ impl BtPeerInteraction {
 
         if connection_options.crypto.require_mse {
             // Try MSE encrypted connection
-            BtPeerConn::connect_mse_with_options(
+            BtPeerConn::connect_mse_with_policy(
                 addr,
                 info_hash_raw,
                 connection_options.hybrid_info_hash_v2.as_ref(),
@@ -217,11 +226,12 @@ impl BtPeerInteraction {
                     timeout: connection_options.connection_timeout,
                     dht_enabled: connection_options.dht_enabled,
                 },
+                policy,
             )
             .await
         } else {
             // Try MSE first, fall back to plain
-            let mse_result = BtPeerConn::connect_mse_with_options(
+            let mse_result = BtPeerConn::connect_mse_with_policy(
                 addr,
                 info_hash_raw,
                 connection_options.hybrid_info_hash_v2.as_ref(),
@@ -232,19 +242,21 @@ impl BtPeerInteraction {
                     timeout: connection_options.connection_timeout,
                     dht_enabled: connection_options.dht_enabled,
                 },
+                policy,
             )
             .await;
             match mse_result {
                 Ok(conn) => Ok(conn),
                 Err(_) => {
                     debug!("[BT] MSE failed, trying plain connection");
-                    BtPeerConn::connect_plain_with_options(
+                    BtPeerConn::connect_plain_with_policy(
                         addr,
                         info_hash_raw,
                         connection_options.hybrid_info_hash_v2.as_ref(),
                         &connection_options.local_peer_id,
                         connection_options.connection_timeout,
                         connection_options.dht_enabled,
+                        policy,
                     )
                     .await
                 }

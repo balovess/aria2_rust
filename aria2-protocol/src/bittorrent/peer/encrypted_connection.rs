@@ -70,6 +70,16 @@ impl EncryptedConnection {
         .map_err(|_| format!("Connection to peer timed out: {}", socket_addr))?
         .map_err(|e| format!("Failed to connect to peer: {}", e))?;
 
+        Self::connect_with_stream(stream, info_hash, info_hash_v2, options).await
+    }
+
+    /// Complete MSE over a TCP stream selected by the caller.
+    pub async fn connect_with_stream(
+        stream: tokio::net::TcpStream,
+        info_hash: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        options: MseConnectionOptions,
+    ) -> Result<Self, String> {
         Self::complete_mse_handshake(stream, info_hash, info_hash_v2, options).await
     }
 

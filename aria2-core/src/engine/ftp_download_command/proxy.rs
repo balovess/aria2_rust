@@ -54,11 +54,12 @@ impl FtpDownloadCommand {
             0
         };
 
-        let mut response = crate::ftp::connection::execute_proxy_get(
+        let mut response = crate::ftp::connection::execute_proxy_get_with_policy(
             ftp_url,
             proxy,
             requested_offset,
             options.http_no_cache,
+            &self.outbound_network_policy,
         )
         .await?;
         let status = response.head.status_code;

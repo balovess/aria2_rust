@@ -12,6 +12,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::network::OutboundNetworkPolicy;
+
 pub(crate) use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpEvent;
 
 pub(crate) use protocol::UdpTrackerRequest;
@@ -39,10 +41,20 @@ pub struct UdpTrackerClient {
 
 impl UdpTrackerClient {
     pub async fn new(bind_port: u16) -> Result<Self, String> {
-        let addr = format!("0.0.0.0:{}", bind_port);
-        let socket = tokio::net::UdpSocket::bind(&addr)
+        Self::new_with_policy(bind_port, &OutboundNetworkPolicy::direct()).await
+    }
+
+    pub async fn new_with_policy(
+        bind_port: u16,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self, String> {
+        let socket = policy
+            .bind_udp(bind_port)
             .await
-            .map_err(|e| format!("UDP bind failed on {}: {}", addr, e))?;
+            .map_err(|e| format!("UDP bind failed: {e}"))?;
+        let addr = socket
+            .local_addr()
+            .map_err(|e| format!("UDP local address unavailable: {e}"))?;
 
         info!("UdpTrackerClient bound to {}", addr);
 
@@ -127,6 +139,14 @@ pub type SharedUdpClient = Arc<Mutex<UdpTrackerClient>>;
 impl UdpTrackerClient {
     pub async fn create_shared(bind_port: u16) -> Result<SharedUdpClient, String> {
         let client = Self::new(bind_port).await?;
+        Ok(Arc::new(Mutex::new(client)))
+    }
+
+    pub async fn create_shared_with_policy(
+        bind_port: u16,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<SharedUdpClient, String> {
+        let client = Self::new_with_policy(bind_port, policy).await?;
         Ok(Arc::new(Mutex::new(client)))
     }
 }

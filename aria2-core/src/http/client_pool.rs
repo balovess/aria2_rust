@@ -6,9 +6,12 @@
 
 use once_cell::sync::Lazy;
 use reqwest::Client;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
+
+use dashmap::DashMap;
 
 /// Ensure the rustls ring crypto provider is installed.
 ///
@@ -68,6 +71,55 @@ pub fn get_global_client() -> Arc<Client> {
     GLOBAL_CLIENT.clone()
 }
 
+type BoundClientKey = (Option<IpAddr>, bool);
+type BoundClients = DashMap<BoundClientKey, Arc<Client>>;
+
+static BOUND_CLIENTS: Lazy<BoundClients> = Lazy::new(DashMap::new);
+
+/// Return a process-wide reusable reqwest client for a source address.
+///
+/// reqwest fixes `local_address` on a client, so each configured source gets
+/// one lazily-created connection pool. Clients are reused by every download
+/// using the same source and gzip mode.
+pub fn get_bound_client(local_address: Option<IpAddr>, accept_gzip: bool) -> Arc<Client> {
+    if local_address.is_none() && !accept_gzip {
+        return get_global_client();
+    }
+    let key = (local_address, accept_gzip);
+    if let Some(client) = BOUND_CLIENTS.get(&key) {
+        return Arc::clone(client.value());
+    }
+
+    ensure_rustls_provider();
+    let mut builder = Client::builder()
+        .connect_timeout(Duration::from_secs(
+            crate::constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+        ))
+        .gzip(accept_gzip)
+        .user_agent(crate::constants::USER_AGENT)
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(crate::constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(Some(Duration::from_secs(
+            crate::constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+        )))
+        .tcp_keepalive(Some(Duration::from_secs(
+            crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+        )))
+        .tcp_nodelay(true);
+    if let Some(address) = local_address {
+        builder = builder.local_address(address);
+    }
+    let client = Arc::new(
+        builder
+            .build()
+            .expect("bound HTTP client construction should be infallible"),
+    );
+    let entry = BOUND_CLIENTS
+        .entry(key)
+        .or_insert_with(|| Arc::clone(&client));
+    Arc::clone(entry.value())
+}
+
 /// Create a custom HTTP client with specific configuration.
 ///
 /// Use this when you need client settings different from the global defaults.
@@ -119,5 +171,57 @@ mod tests {
 
         // Should be different instances
         assert!(!Arc::ptr_eq(&global, &custom));
+    }
+
+    #[test]
+    fn bound_clients_are_reused_per_source_and_gzip_mode() {
+        let source = Some("127.0.0.1".parse().unwrap());
+        let first = get_bound_client(source, false);
+        let second = get_bound_client(source, false);
+        let gzip = get_bound_client(source, true);
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &gzip));
+    }
+
+    #[tokio::test]
+    async fn bound_client_reuses_one_real_tcp_connection() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let source = "127.0.0.3".parse().unwrap();
+        let listener = TcpListener::bind((source, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, peer) = listener.accept().await.unwrap();
+            for _ in 0..2 {
+                let mut request = Vec::new();
+                loop {
+                    let mut byte = [0u8; 1];
+                    stream.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                    )
+                    .await
+                    .unwrap();
+            }
+            peer
+        });
+
+        let client = get_bound_client(Some(source), false);
+        for path in ["/one", "/two"] {
+            let response = client
+                .get(format!("http://{address}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.text().await.unwrap(), "ok");
+        }
+        assert_eq!(server.await.unwrap().ip(), source);
     }
 }

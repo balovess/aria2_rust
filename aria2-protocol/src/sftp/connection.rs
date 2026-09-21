@@ -321,7 +321,7 @@ impl std::fmt::Debug for SshConnection {
 impl SshConnection {
     /// Establish a new SSH connection to the specified target using russh.
     ///
-    /// russh's `client::connect()` handles TCP connection internally.
+    /// The default direct-routing SFTP entry point.
     ///
     /// # Arguments
     /// * `options` - Connection configuration including host, credentials, etc.
@@ -338,6 +338,33 @@ impl SshConnection {
     pub async fn connect(options: SshOptions) -> Result<Self, SshError> {
         let target = options.target();
         debug!("[SFTP] Connecting to SSH (russh): {}", target);
+        let stream = tokio::time::timeout(
+            options.connect_timeout,
+            tokio::net::TcpStream::connect((options.host.as_str(), options.port)),
+        )
+        .await
+        .map_err(|_| SshError::ConnectTimeout {
+            host: options.host.clone(),
+            port: options.port,
+            timeout_secs: options.connect_timeout.as_secs(),
+        })?
+        .map_err(|error| SshError::Handshake {
+            message: format!("SSH TCP connection failed: {error}"),
+        })?;
+        Self::connect_with_stream(options, stream).await
+    }
+
+    /// Complete the SSH handshake over a TCP stream created by the caller.
+    ///
+    /// Keeping socket creation outside this protocol crate lets the engine
+    /// apply its process-wide outbound policy without exposing that policy in
+    /// the public SFTP option structure.
+    pub async fn connect_with_stream(
+        options: SshOptions,
+        stream: tokio::net::TcpStream,
+    ) -> Result<Self, SshError> {
+        let target = options.target();
+        debug!("[SFTP] Connecting to SSH (russh): {}", target);
 
         let options_arc = Arc::new(options);
 
@@ -345,13 +372,12 @@ impl SshConnection {
         let config = client::Config::default();
         let config = Arc::new(config);
 
-        // Step 2: Create handler and establish SSH connection (russh handles TCP)
+        // Step 2: Create handler and establish SSH connection over the supplied TCP stream.
         let handler = SshClientHandler::new(Arc::clone(&options_arc));
-        let addr = (options_arc.host.as_str(), options_arc.port);
 
         let mut handle = tokio::time::timeout(
             options_arc.connect_timeout,
-            client::connect(config, addr, handler),
+            client::connect_stream(config, stream, handler),
         )
         .await
         .map_err(|_| SshError::ConnectTimeout {

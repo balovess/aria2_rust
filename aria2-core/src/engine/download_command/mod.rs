@@ -3,6 +3,7 @@ mod tail_reclaim;
 #[cfg(test)]
 mod tests;
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -16,7 +17,9 @@ use crate::error::{Aria2Error, Result};
 use crate::http::HttpRequestPolicy;
 use crate::http::cookie::Cookie;
 use crate::http::cookie::CookieStorage;
+use crate::http::response_processor::extract_filename_from_url;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, RequestGroup};
 use crate::selector::server_stat_man::ServerStatMan;
@@ -41,6 +44,9 @@ pub struct DownloadCommand {
     /// being attempted.
     pub(super) initial_uri: String,
     pub(super) output_path: std::path::PathBuf,
+    /// Whether the filename came from an explicit `--out`/metadata name.
+    /// Implicit HTTP names may be replaced by response metadata before I/O.
+    pub(super) output_name_explicit: bool,
     /// Whether the output path has already gone through collision resolution.
     /// Mirror failover reuses this resolved path after the prior attempt
     /// releases its temporary registry claim.
@@ -101,6 +107,16 @@ pub struct DownloadCommand {
 
 fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
+}
+
+fn apply_local_address(
+    builder: reqwest::ClientBuilder,
+    local_address: Option<IpAddr>,
+) -> reqwest::ClientBuilder {
+    match local_address {
+        Some(address) => builder.local_address(address),
+        None => builder,
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -273,6 +289,26 @@ impl DownloadCommand {
         output_name: Option<&str>,
         resolved_addresses: Option<Vec<std::net::SocketAddr>>,
     ) -> Result<Self> {
+        Self::new_with_group_and_resolved_addresses_and_policy(
+            group,
+            uri,
+            options,
+            output_dir,
+            output_name,
+            resolved_addresses,
+            Arc::new(OutboundNetworkPolicy::direct()),
+        )
+    }
+
+    pub fn new_with_group_and_resolved_addresses_and_policy(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+        resolved_addresses: Option<Vec<std::net::SocketAddr>>,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    ) -> Result<Self> {
         if options.uses_memory_download_for_uri(uri) {
             group.recover().mark_in_memory_download();
         }
@@ -287,8 +323,7 @@ impl DownloadCommand {
 
         let filename = output_name
             .map(|n| n.to_string())
-            .or_else(|| Self::extract_filename(uri))
-            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
+            .unwrap_or_else(|| extract_filename_from_url(uri));
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
         let request_policy = options.http_request_policy();
@@ -308,6 +343,32 @@ impl DownloadCommand {
         .flatten()
         .any(|proxy| !proxy.is_empty());
         let has_custom_tls = client_tls.requires_custom_client();
+        let policy_remote = resolved_addresses
+            .as_ref()
+            .and_then(|addresses| addresses.first().copied())
+            .or_else(|| {
+                uri_host(uri).and_then(|host| {
+                    host.parse::<std::net::IpAddr>().ok().map(|ip| {
+                        std::net::SocketAddr::new(
+                            ip,
+                            url::Url::parse(uri)
+                                .ok()
+                                .and_then(|url| url.port_or_known_default())
+                                .unwrap_or(80),
+                        )
+                    })
+                })
+            });
+        let local_address = policy_remote
+            .map(|remote| outbound_network_policy.source_for(remote))
+            .transpose()
+            .map_err(|error| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                    "Outbound network policy cannot serve {uri}: {error}"
+                )))
+            })?
+            .flatten()
+            .or_else(|| outbound_network_policy.addresses().into_iter().next());
         let client = if no_proxy {
             if let Some(addresses) = resolved_addresses.as_deref()
                 && !addresses.is_empty()
@@ -325,13 +386,14 @@ impl DownloadCommand {
                     .user_agent(constants::USER_AGENT)
                     .redirect(reqwest::redirect::Policy::none())
                     .resolve_to_addrs(&host, addresses);
+                let builder = apply_local_address(builder, local_address);
                 let builder = crate::http::client_identity::apply(builder, &client_tls)?;
                 Arc::new(builder.build().map_err(|e| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
                         "Failed to build HTTP client with DNS cache: {e}"
                     )))
                 })?)
-            } else if options.http_accept_gzip || has_custom_tls {
+            } else if has_custom_tls {
                 let builder = reqwest::Client::builder()
                     .connect_timeout(Duration::from_secs(
                         constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
@@ -346,6 +408,7 @@ impl DownloadCommand {
                     .tcp_keepalive(Some(Duration::from_secs(
                         constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
                     )));
+                let builder = apply_local_address(builder, local_address);
                 let builder = crate::http::client_identity::apply(builder, &client_tls)?;
                 Arc::new(builder.build().map_err(|error| {
                     Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -353,7 +416,7 @@ impl DownloadCommand {
                     )))
                 })?)
             } else {
-                crate::http::client_pool::get_global_client()
+                crate::http::client_pool::get_bound_client(local_address, options.http_accept_gzip)
             }
         } else {
             let mut builder = reqwest::Client::builder()
@@ -433,6 +496,7 @@ impl DownloadCommand {
                 }
             }
 
+            let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, &client_tls)?;
             let client = builder.build().map_err(|e| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -459,6 +523,7 @@ impl DownloadCommand {
             client,
             initial_uri: uri.to_string(),
             output_path: path,
+            output_name_explicit: output_name.is_some(),
             output_path_resolved: false,
             started: false,
             completed: false,
@@ -564,8 +629,7 @@ impl DownloadCommand {
 
         let filename = output_name
             .map(|n| n.to_string())
-            .or_else(|| Self::extract_filename(uri))
-            .unwrap_or_else(|| constants::DEFAULT_FILENAME.to_string());
+            .unwrap_or_else(|| extract_filename_from_url(uri));
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 
@@ -589,6 +653,7 @@ impl DownloadCommand {
             client,
             initial_uri: uri.to_string(),
             output_path: path,
+            output_name_explicit: output_name.is_some(),
             output_path_resolved: false,
             started: false,
             completed: false,
@@ -688,13 +753,6 @@ impl DownloadCommand {
 
     pub fn get_perf_report_json(&self) -> Option<String> {
         self.perf_monitor.as_ref().map(|m| m.export_json())
-    }
-
-    fn extract_filename(uri: &str) -> Option<String> {
-        uri.rsplit('/')
-            .next()
-            .filter(|s| !s.is_empty() && *s != "/")
-            .map(|s| s.split('?').next().unwrap_or(s).to_string())
     }
 
     fn extract_host(uri: &str) -> String {

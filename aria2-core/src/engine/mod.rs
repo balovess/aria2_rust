@@ -15,6 +15,7 @@ pub mod engine_command;
 pub mod engine_loop;
 pub mod halt_watchers;
 pub(crate) mod http_adaptive_concurrency;
+pub(crate) mod http_auth;
 pub mod http_segment_downloader;
 pub(crate) mod http_segment_request_executor;
 pub(crate) mod http_tail_reclaim;

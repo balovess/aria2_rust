@@ -22,6 +22,7 @@ use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::network::OutboundNetworkPolicy;
 
 /// Configuration for establishing an FTP-over-HTTP-proxy tunnel.
 #[derive(Debug, Clone)]
@@ -102,26 +103,55 @@ impl FtpProxyTunnel {
     /// - If proxy authentication fails after retry
     /// - If timeout occurs
     pub async fn establish(config: &FtpProxyTunnelConfig) -> Result<TcpStream> {
+        Self::establish_with_policy(config, &OutboundNetworkPolicy::direct()).await
+    }
+
+    /// Establish a tunnel through the shared outbound policy.
+    pub async fn establish_with_policy(
+        config: &FtpProxyTunnelConfig,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<TcpStream> {
         // Step 1: Connect to the proxy server
         debug!(
             "Connecting to HTTP proxy {}:{} for FTP tunnel to {}:{}",
             config.proxy_host, config.proxy_port, config.target_host, config.target_port
         );
 
-        let mut stream = timeout(
-            config.connect_timeout,
-            TcpStream::connect((config.proxy_host.as_str(), config.proxy_port)),
-        )
-        .await
-        .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
-        .map_err(|e| {
-            Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                message: format!(
-                    "Failed to connect to proxy {}:{}: {}",
-                    config.proxy_host, config.proxy_port, e
-                ),
-            })
-        })?;
+        let connect = async {
+            if policy.is_direct() {
+                TcpStream::connect((config.proxy_host.as_str(), config.proxy_port))
+                    .await
+                    .map_err(|error| Aria2Error::Network(error.to_string()))
+            } else {
+                let proxy_address =
+                    tokio::net::lookup_host((config.proxy_host.as_str(), config.proxy_port))
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::Network(format!("proxy lookup failed: {error}"))
+                        })?
+                        .find(|address| policy.source_for(*address).is_ok())
+                        .ok_or_else(|| {
+                            Aria2Error::Network(
+                                "proxy has no address matching the outbound policy".into(),
+                            )
+                        })?;
+                policy
+                    .connect(proxy_address)
+                    .await
+                    .map_err(|error| Aria2Error::Network(error.to_string()))
+            }
+        };
+        let mut stream = timeout(config.connect_timeout, connect)
+            .await
+            .map_err(|_| Aria2Error::Recoverable(RecoverableError::Timeout))?
+            .map_err(|e: Aria2Error| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "Failed to connect to proxy {}:{}: {}",
+                        config.proxy_host, config.proxy_port, e
+                    ),
+                })
+            })?;
 
         stream.set_nodelay(true).map_err(|e| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {

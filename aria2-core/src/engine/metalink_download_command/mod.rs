@@ -47,6 +47,7 @@ pub struct MetalinkDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// When `Some`, passed down to `ThrottledWriter` for mirror downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
+    pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
     #[cfg(feature = "bittorrent")]
     pub(crate) public_tracker_catalog:
         Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
@@ -118,6 +119,13 @@ impl MetalinkDownloadCommand {
 
 /// Build the shared HTTP client for Metalink downloads.
 pub(crate) fn build_http_client(options: &DownloadOptions) -> Result<reqwest::Client> {
+    build_http_client_with_source(options, None)
+}
+
+pub(crate) fn build_http_client_with_source(
+    options: &DownloadOptions,
+    local_address: Option<std::net::IpAddr>,
+) -> Result<reqwest::Client> {
     crate::http::client_pool::ensure_rustls_provider();
     let client_tls = crate::http::client_identity::ClientTlsConfig::from_download_options(options);
     let builder = reqwest::Client::builder()
@@ -125,6 +133,10 @@ pub(crate) fn build_http_client(options: &DownloadOptions) -> Result<reqwest::Cl
         .gzip(options.http_accept_gzip)
         .user_agent(crate::constants::USER_AGENT)
         .redirect(reqwest::redirect::Policy::limited(5));
+    let builder = match local_address {
+        Some(address) => builder.local_address(address),
+        None => builder,
+    };
     crate::http::client_identity::apply(builder, &client_tls)?
         .build()
         .map_err(|e| {

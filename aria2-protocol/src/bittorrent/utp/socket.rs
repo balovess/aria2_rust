@@ -100,6 +100,14 @@ pub struct UtpSocket {
 impl UtpSocket {
     /// Create a new uTP socket bound to the specified address
     pub fn bind(addr: &str) -> Result<Self, UtpSocketError> {
+        let address = addr.parse::<SocketAddr>().map_err(|error| {
+            UtpSocketError::BindFailed(std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        })?;
+        Self::bind_addr(address)
+    }
+
+    /// Create a new uTP socket bound to an explicit local socket address.
+    pub fn bind_addr(addr: SocketAddr) -> Result<Self, UtpSocketError> {
         let socket = UdpSocket::bind(addr).map_err(UtpSocketError::BindFailed)?;
         let local_addr = socket.local_addr().map_err(UtpSocketError::BindFailed)?;
         socket

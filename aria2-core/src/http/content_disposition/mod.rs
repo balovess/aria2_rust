@@ -82,6 +82,19 @@ pub struct ContentDispositionResult {
 /// assert_eq!(result.filename.as_deref(), Some("example.html"));
 /// ```
 pub fn parse_content_disposition(header_value: &str) -> ContentDispositionResult {
+    parse_content_disposition_with_default_utf8(header_value, true)
+}
+
+/// Parse a `Content-Disposition` value while choosing the legacy decoding rule
+/// for the plain `filename=` parameter.
+///
+/// The extended `filename*=` form always uses the charset declared in the
+/// header. `default_utf8` only affects a plain `filename=` value that has no
+/// charset marker; `false` preserves aria2's historical ISO-8859-1 default.
+pub fn parse_content_disposition_with_default_utf8(
+    header_value: &str,
+    default_utf8: bool,
+) -> ContentDispositionResult {
     let (disposition_type, raw) = match parser::parse_raw(header_value) {
         Some(pair) => pair,
         None => {
@@ -98,7 +111,7 @@ pub fn parse_content_disposition(header_value: &str) -> ContentDispositionResult
     };
 
     // Decode filename= (the plain parameter)
-    let filename_ascii = encoding::decode_filename_ascii(&raw.filename_bytes);
+    let filename_ascii = encoding::decode_filename_ascii(&raw.filename_bytes, default_utf8);
 
     // Decode filename*= (the extended parameter)
     let filename_ext = encoding::decode_filename_ext(&raw.ext_filename_bytes, raw.ext_charset);

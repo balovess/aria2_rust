@@ -80,7 +80,7 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **速率限制**: 令牌桶算法，支持全局/单任务限速
 - **Cookie 管理**: Netscape 格式持久化 + 自动从文件加载
 - **会话管理**: 自动保存 + 手动保存/加载，使用 .aria2 控制文件
-- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 40 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
+- **RPC 远程控制**: JSON-RPC 2.0、XML-RPC、WebSocket（方法和通知数量随 feature 变化，最多 42 个方法和 6 个通知；BT 状态包含 torrent、tracker、peer 和 DHT 运行信息）
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
@@ -548,7 +548,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 | CLI 参数              | ✅ 核心  | 已实现 \~50 个最常用选项                 |
 | 配置文件 (`aria2.conf`) | ✅     | 相同语法格式                          |
 | 环境变量                | ✅     | `ARIA2_*` 前缀映射                  |
-| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/37/40）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
+| JSON-RPC API        | PARTIAL | `system.listMethods` 按 feature 返回清单（35/41/42）；BT 元数据、tracker 运行状态和 DHT 运行计数已提供 |
 | XML-RPC API         | PARTIAL | methodCall/response/fault 支持；与原版客户端的完整互操作仍在验证 |
 | WebSocket 通知        | PARTIAL | `system.listNotifications` 按 feature 返回 5/6 个通知；浏览器插件互操作仍在验证 |
 | URI 列表文件 (`-i`)     | ✅     | 镜像 + 内联选项                       |
@@ -574,7 +574,7 @@ Chrome 插件和其他客户端无需修改。Rust 内部实现可以在这个�
 - `aria2.forceShutdown`、`system.listMethods` 和 `system.listNotifications` 已实现，并有 handler/集成测试覆盖。
 - HTTPS RPC 已有 TLS 配置、服务器实现和专门测试；更广泛的客户端/服务器互操作测试仍在跟踪。
 - IPv6 DHT 已有 CLI 和协议层支持；完整网络互操作覆盖仍在跟踪。
-- BT RPC 已覆盖 torrent 元数据、tracker 分层及实时运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；peer 首次发现来源只保留在内部，不加入原版 `getPeers` wire 响应。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
+- BT RPC 已覆盖 torrent 元数据、tracker 分层及运行状态、文件、URI、server、peer、piece 进度和聚合后的 DHT 计数；peer 首次发现来源只保留在内部，不加入原版 `getPeers` wire 响应。tracker 与 DHT 数据由活动中的 BT 命令发布，命令退出后会清理。
 - 仍需逐项对照 `aria2_original` 验证更多 CLI/运行时选项行为。
 - `aria2-core/src/c_api.rs` 已提供 opaque-handle `extern "C"`/cdylib 迁移接口；它不是原版 C++ STL 类 ABI 的二进制兼容实现。
 - Metalink torrent `metaurl` 依赖生命周期、完整性回调路径和部分协议互操作仍未闭环。

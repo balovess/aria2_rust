@@ -638,7 +638,7 @@ cross-platform evidence is incomplete.
 - `aria2.forceShutdown`, `system.listMethods`, and `system.listNotifications` are implemented and covered by handler/integration tests.
 - HTTPS RPC has TLS configuration, server implementation, and dedicated test coverage; broader client/server interoperability testing remains tracked.
 - IPv6 DHT has CLI and protocol support; full network interoperability coverage remains tracked.
-- BitTorrent RPC exposes torrent metadata, live tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. Tracker and DHT values are published from the active BT command and are removed when that command exits; peer discovery attribution is retained internally and is not added to the upstream `getPeers` wire response.
+- BitTorrent RPC exposes torrent metadata, tracker tiers/runtime state, files, URIs, servers, peers, piece progress, and aggregated DHT counters. Tracker and DHT values are published from the active BT command and are removed when that command exits; peer discovery attribution is retained internally and is not added to the upstream `getPeers` wire response.
 - Additional CLI/runtime option behavior still requires systematic comparison against `aria2_original`.
 
 ## License

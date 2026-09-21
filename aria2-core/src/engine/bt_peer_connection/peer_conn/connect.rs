@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 
 use crate::engine::peer_stats::PeerStats;
 use crate::error::{Aria2Error, FatalError, Result};
+use crate::network::OutboundNetworkPolicy;
 
 use super::super::types::{ConnectionType, SendBuffer};
 use super::super::utp_connection::UtpPeerConnection;
@@ -43,7 +44,25 @@ impl BtPeerConn {
         info_hash_v2: Option<&[u8; 32]>,
         options: MseConnectionOptions,
     ) -> Result<Self> {
-        Self::connect_mse_with_hashes(addr, info_hash_v1, info_hash_v2, options).await
+        Self::connect_mse_with_policy(
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            options,
+            &OutboundNetworkPolicy::direct(),
+        )
+        .await
+    }
+
+    /// Connect through the process-wide outbound network policy.
+    pub async fn connect_mse_with_policy(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        options: MseConnectionOptions,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        Self::connect_mse_with_hashes(addr, info_hash_v1, info_hash_v2, options, policy).await
     }
 
     async fn connect_mse_with_hashes(
@@ -51,10 +70,18 @@ impl BtPeerConn {
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
         options: MseConnectionOptions,
+        policy: &OutboundNetworkPolicy,
     ) -> Result<Self> {
+        let socket_addr = addr
+            .to_socket_addr()
+            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
+        let stream = tokio::time::timeout(options.timeout, policy.connect(socket_addr))
+            .await
+            .map_err(|_| Aria2Error::Fatal(FatalError::Config("peer connection timeout".into())))?
+            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
         let connection =
-            aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_mse_with_options(
-                addr,
+            aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection::connect_with_stream(
+                stream,
                 info_hash_v1,
                 info_hash_v2,
                 aria2_protocol::bittorrent::peer::encrypted_connection::MseConnectionOptions {
@@ -126,6 +153,28 @@ impl BtPeerConn {
             local_peer_id,
             timeout,
             dht_enabled,
+            &OutboundNetworkPolicy::direct(),
+        )
+        .await
+    }
+
+    pub async fn connect_plain_with_policy(
+        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        Self::connect_plain_with_hashes(
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+            timeout,
+            dht_enabled,
+            policy,
         )
         .await
     }
@@ -137,17 +186,27 @@ impl BtPeerConn {
         local_peer_id: &[u8; 20],
         timeout: std::time::Duration,
         dht_enabled: bool,
+        policy: &OutboundNetworkPolicy,
     ) -> Result<Self> {
-        let result =
-            aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_timeout(
-                addr,
-                info_hash_v1,
-                info_hash_v2,
-                local_peer_id,
-                timeout,
-                dht_enabled,
-            )
-            .await;
+        let socket_addr = addr
+            .to_socket_addr()
+            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error.to_string())))?;
+        let result = match tokio::time::timeout(timeout, policy.connect(socket_addr)).await {
+            Ok(Ok(stream)) => {
+                aria2_protocol::bittorrent::peer::connection::PeerConnection::connect_with_stream(
+                    stream,
+                    socket_addr,
+                    info_hash_v1,
+                    info_hash_v2,
+                    local_peer_id,
+                    timeout,
+                    dht_enabled,
+                )
+                .await
+            }
+            Ok(Err(error)) => Err(error.to_string()),
+            Err(_) => Err(format!("Peer connection timeout: {socket_addr}")),
+        };
         match result {
             Ok(conn) => {
                 let now = Instant::now();
@@ -326,7 +385,24 @@ impl BtPeerConn {
         info_hash_v2: Option<&[u8; 32]>,
         options: UtpConnectionOptions,
     ) -> Result<Self> {
-        Self::connect_utp_with_hashes(addr, info_hash_v1, info_hash_v2, options).await
+        Self::connect_utp_with_policy(
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            options,
+            &OutboundNetworkPolicy::direct(),
+        )
+        .await
+    }
+
+    pub async fn connect_utp_with_policy(
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        options: UtpConnectionOptions,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        Self::connect_utp_with_hashes(addr, info_hash_v1, info_hash_v2, options, policy).await
     }
 
     async fn connect_utp_with_hashes(
@@ -334,6 +410,7 @@ impl BtPeerConn {
         info_hash_v1: &[u8; 20],
         info_hash_v2: Option<&[u8; 32]>,
         options: UtpConnectionOptions,
+        policy: &OutboundNetworkPolicy,
     ) -> Result<Self> {
         let utp_conn = match options.shared_socket {
             Some(socket) => {
@@ -349,7 +426,7 @@ impl BtPeerConn {
                 .await?
             }
             None => {
-                UtpPeerConnection::connect_with_options(
+                UtpPeerConnection::connect_with_policy(
                     addr,
                     info_hash_v1,
                     info_hash_v2,
@@ -357,6 +434,7 @@ impl BtPeerConn {
                     options.timeout,
                     options.listen_port,
                     options.dht_enabled,
+                    policy,
                 )
                 .await?
             }

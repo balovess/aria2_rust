@@ -78,7 +78,8 @@ impl HttpResponseProcessor {
     ///
     /// * `response_head` - Parsed HTTP response headers.
     /// * `request_method` - The HTTP method of the original request.
-    /// * `request_url` - The URL of the original request (for filename derivation).
+    /// * `request_url` - The URL associated with this response (for filename
+    ///   derivation). After a redirect, pass the final response URL.
     /// * `requested_range` - The (start, end) range requested, if any.
     /// * `piece_storage_initialized` - Whether piece storage has already been set up.
     /// * `is_unique_protocol` - Whether all URIs use the same protocol.

@@ -330,6 +330,8 @@ fn cli_contract_value(definition: &aria2_core::config::OptionDef) -> String {
         OptionType::Path | OptionType::String => {
             if definition.name() == "checksum" {
                 "sha-256=contract-digest".to_string()
+            } else if definition.name() == "async-dns-server" {
+                "127.0.0.1,::1".to_string()
             } else {
                 "contract-consumer-value".to_string()
             }
@@ -907,6 +909,28 @@ async fn test_original_async_dns_options_reach_the_engine_resolver() {
         engine.dns_cache().lock().await.dns_server_addresses(),
         ["127.0.0.1:53".parse().unwrap(), "[::1]:53".parse().unwrap(),],
         "async-dns-server must configure the resolver nameservers"
+    );
+}
+
+#[tokio::test]
+async fn test_original_interface_reaches_outgoing_connection_configuration() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--interface=127.0.0.1"])
+            .expect("--interface should parse through the CLI seam"),
+    )
+    .await
+    .expect("--interface should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for network binding");
+    let policy = engine.outbound_network_policy();
+    assert_eq!(
+        policy.addresses(),
+        vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)]
     );
 }
 

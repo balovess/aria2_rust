@@ -27,6 +27,7 @@ use crate::dns::dns_cache::DnsCache;
 use crate::error::{Aria2Error, RecoverableError};
 use crate::filesystem::file_allocation_man::FileAllocationMan;
 use crate::network::ConnectionContext;
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadResultCode, DownloadStatus, GroupId, HaltReason};
 use crate::request::request_group_man::RequestGroupMan;
@@ -79,6 +80,9 @@ pub struct EngineLoopContext {
 
     /// DNS cache for dependency injection.
     pub dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+
+    /// Process-wide source-address policy for outgoing connections.
+    pub outbound_network_policy: Arc<OutboundNetworkPolicy>,
 
     /// Unified deadline-driven coordinator for session and control-file saves.
     pub auto_save: Option<Arc<tokio::sync::Mutex<AutoSaveCoordinator>>>,

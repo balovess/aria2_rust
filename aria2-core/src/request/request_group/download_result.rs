@@ -314,13 +314,10 @@ impl DownloadResult {
                 .output_name()
                 .or_else(|| options.out.clone())
                 .or_else(|| {
-                    group.uris().first().and_then(|uri| {
-                        uri.rsplit('/')
-                            .next()
-                            .map(|name| name.split(['?', '#']).next().unwrap_or(name))
-                            .map(str::to_owned)
-                            .filter(|name| !name.is_empty())
-                    })
+                    group
+                        .uris()
+                        .first()
+                        .map(|uri| crate::http::response_processor::extract_filename_from_url(uri))
                 })
                 .unwrap_or_default();
             match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
@@ -436,6 +433,22 @@ mod tests {
         assert_eq!(result.files.len(), 1);
         assert_eq!(result.files[0].path, "file.zip");
         assert_eq!(result.files[0].length, 4096);
+    }
+
+    #[test]
+    fn fill_from_group_uses_the_safe_decoded_url_segment() {
+        let group = crate::request::request_group::RequestGroup::new(
+            GroupId::new(2),
+            vec!["https://example.com/releases/my%20file.zip?token=ignored#fragment".to_string()],
+            crate::request::request_group::DownloadOptions::default(),
+        );
+        group.set_total_length(4096);
+
+        let mut result = DownloadResult::finished();
+        result.fill_from_group(&group);
+
+        assert_eq!(result.files.len(), 1);
+        assert_eq!(result.files[0].path, "my file.zip");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! FTP control connection establishment and data-channel TLS.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncWriteExt, BufReader};
@@ -12,7 +13,7 @@ use aria2_protocol::ftp::tls::{self as tls, FtpControlStream, FtpDataStream, Ftp
 use crate::ftp::connection::{
     FtpProxyConfig, FtpProxyTunnel, FtpProxyTunnelConfig, read_response_impl,
 };
-use crate::network::ConnectionContext;
+use crate::network::{ConnectionContext, OutboundNetworkPolicy};
 
 // ---------------------------------------------------------------------------
 // RawFtpControl
@@ -24,6 +25,7 @@ pub(super) struct RawFtpControl {
     pub(super) host: String,
     pub(super) connection: ConnectionContext,
     pub(super) ftps_config: Option<FtpsConfig>,
+    pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
 }
 
 impl RawFtpControl {
@@ -31,11 +33,13 @@ impl RawFtpControl {
         host: &str,
         port: u16,
         socket_addr: std::net::SocketAddr,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Result<(tokio::net::TcpStream, ConnectionContext)> {
         let addr = format!("{}:{}", host, port);
         debug!("Connecting to FTP server at {} via {}", addr, socket_addr);
 
-        let stream = tokio::net::TcpStream::connect(socket_addr)
+        let stream = outbound_network_policy
+            .connect(socket_addr)
             .await
             .map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
@@ -63,12 +67,14 @@ impl RawFtpControl {
         host: &str,
         connection: ConnectionContext,
         ftps_config: Option<FtpsConfig>,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
         Self {
             reader: BufReader::new(stream),
             host: host.to_string(),
             connection,
             ftps_config,
+            outbound_network_policy,
         }
     }
 
@@ -144,9 +150,22 @@ impl RawFtpControl {
         host: &str,
         port: u16,
         socket_addr: std::net::SocketAddr,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Result<Self> {
-        let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
-        let mut ctrl = Self::from_stream(FtpControlStream::Plain(stream), host, connection, None);
+        let (stream, connection) = Self::connect_tcp_at(
+            host,
+            port,
+            socket_addr,
+            Arc::clone(&outbound_network_policy),
+        )
+        .await?;
+        let mut ctrl = Self::from_stream(
+            FtpControlStream::Plain(stream),
+            host,
+            connection,
+            None,
+            outbound_network_policy,
+        );
         ctrl.read_welcome().await?;
 
         info!("Connected to FTP server {}:{}", host, port);
@@ -164,6 +183,7 @@ impl RawFtpControl {
         proxy: &FtpProxyConfig,
         ftps_config: Option<&FtpsConfig>,
         ftps_implicit: bool,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Result<Self> {
         let tunnel_config = FtpProxyTunnelConfig {
             proxy_host: proxy.proxy_host.clone(),
@@ -176,7 +196,8 @@ impl RawFtpControl {
             read_timeout: proxy.connect_timeout,
             user_agent: proxy.user_agent.clone(),
         };
-        let stream = FtpProxyTunnel::establish(&tunnel_config).await?;
+        let stream =
+            FtpProxyTunnel::establish_with_policy(&tunnel_config, &outbound_network_policy).await?;
         let peer_addr = stream.peer_addr().map_err(|error| {
             Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                 message: format!("FTP proxy peer address unavailable: {}", error),
@@ -196,6 +217,7 @@ impl RawFtpControl {
                     host,
                     connection,
                     Some(config.clone()),
+                    Arc::clone(&outbound_network_policy),
                 );
                 ctrl.read_welcome().await?;
                 tls::negotiate_protected_data_channel(&mut ctrl.reader)
@@ -211,6 +233,7 @@ impl RawFtpControl {
                 host,
                 connection.clone(),
                 None,
+                Arc::clone(&outbound_network_policy),
             );
             plain.read_welcome().await?;
             let Self {
@@ -233,12 +256,19 @@ impl RawFtpControl {
                 &host,
                 connection,
                 Some(config.clone()),
+                Arc::clone(&outbound_network_policy),
             );
             ctrl.read_welcome().await?;
             return Ok(ctrl);
         }
 
-        let mut ctrl = Self::from_stream(FtpControlStream::Plain(stream), host, connection, None);
+        let mut ctrl = Self::from_stream(
+            FtpControlStream::Plain(stream),
+            host,
+            connection,
+            None,
+            outbound_network_policy,
+        );
         ctrl.read_welcome().await?;
         info!(
             "Connected to FTP server {}:{} through HTTP proxy {}:{}",
@@ -253,9 +283,22 @@ impl RawFtpControl {
         port: u16,
         socket_addr: std::net::SocketAddr,
         config: &FtpsConfig,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Result<Self> {
-        let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
-        let mut plain = Self::from_stream(FtpControlStream::Plain(stream), host, connection, None);
+        let (stream, connection) = Self::connect_tcp_at(
+            host,
+            port,
+            socket_addr,
+            Arc::clone(&outbound_network_policy),
+        )
+        .await?;
+        let mut plain = Self::from_stream(
+            FtpControlStream::Plain(stream),
+            host,
+            connection,
+            None,
+            Arc::clone(&outbound_network_policy),
+        );
         plain.read_welcome().await?;
 
         let Self {
@@ -280,6 +323,7 @@ impl RawFtpControl {
             &host,
             connection,
             Some(config.clone()),
+            outbound_network_policy,
         ))
     }
 
@@ -289,8 +333,15 @@ impl RawFtpControl {
         port: u16,
         socket_addr: std::net::SocketAddr,
         config: &FtpsConfig,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Result<Self> {
-        let (stream, connection) = Self::connect_tcp_at(host, port, socket_addr).await?;
+        let (stream, connection) = Self::connect_tcp_at(
+            host,
+            port,
+            socket_addr,
+            Arc::clone(&outbound_network_policy),
+        )
+        .await?;
         let tls_stream = tls::perform_tls_handshake(stream, host, config)
             .await
             .map_err(|error| {
@@ -301,6 +352,7 @@ impl RawFtpControl {
             host,
             connection,
             Some(config.clone()),
+            outbound_network_policy,
         );
         ctrl.read_welcome().await?;
 

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::hook_manager::HookManager;
@@ -12,6 +12,58 @@ use super::BtDownloadCommand;
 // ==================== P1/P2 Integration API ====================
 
 impl BtDownloadCommand {
+    /// Set the process-wide policy used for outbound peer TCP connections.
+    pub fn set_outbound_network_policy(
+        &mut self,
+        policy: Arc<crate::network::OutboundNetworkPolicy>,
+    ) {
+        if !policy.is_direct()
+            && let Some(socket) = self.utp_socket.take()
+        {
+            let local_address = socket.try_lock().ok().map(|socket| socket.local_addr());
+            if let Some(old_address) = local_address {
+                // The old socket must be dropped before rebinding its fixed
+                // listen port. This setter runs before command execution, so
+                // there are no active uTP sessions to preserve here.
+                drop(socket);
+                let source = policy
+                    .addresses()
+                    .into_iter()
+                    .find(|address| address.is_ipv4() == old_address.is_ipv4())
+                    .or_else(|| policy.addresses().into_iter().next());
+                let rebind = source.map(|source| {
+                    aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                        std::net::SocketAddr::new(source, old_address.port()),
+                    )
+                });
+                match rebind {
+                    Some(Ok(replacement)) => {
+                        self.utp_socket = Some(Arc::new(tokio::sync::Mutex::new(replacement)));
+                    }
+                    Some(Err(error)) => {
+                        warn!(%error, "Failed to rebind BT uTP socket to outbound policy source; retaining the original socket");
+                        self.utp_socket =
+                            aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(old_address)
+                                .ok()
+                                .map(|replacement| Arc::new(tokio::sync::Mutex::new(replacement)));
+                    }
+                    None => {
+                        warn!(
+                            "Outbound policy has no source address for the existing BT uTP socket"
+                        );
+                        self.utp_socket = None;
+                    }
+                }
+            } else {
+                warn!(
+                    "BT uTP socket was busy while applying outbound policy; retaining the original socket"
+                );
+                self.utp_socket = Some(socket);
+            }
+        }
+        self.outbound_network_policy = policy;
+    }
+
     /// Enable BT progress persistence for resume support.
     pub fn set_progress_manager(&mut self, manager: BtProgressManager) {
         info!("BT progress manager enabled");

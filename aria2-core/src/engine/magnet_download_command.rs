@@ -84,6 +84,7 @@ pub struct MagnetDownloadCommand {
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// Carried through to the internally-created `BtDownloadCommand`.
     global_limiter: Option<RateLimiter>,
+    outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
     #[cfg(feature = "bittorrent")]
     public_tracker_catalog:
         Option<Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
@@ -116,6 +117,13 @@ impl MagnetDownloadCommand {
     /// limiter so the resolved torrent's piece writes share the global ceiling.
     pub fn set_global_limiter(&mut self, limiter: RateLimiter) {
         self.global_limiter = Some(limiter);
+    }
+
+    pub fn set_outbound_network_policy(
+        &mut self,
+        policy: Arc<crate::network::OutboundNetworkPolicy>,
+    ) {
+        self.outbound_network_policy = policy;
     }
 
     /// Create a magnet download command that reuses an externally-managed
@@ -177,6 +185,7 @@ impl MagnetDownloadCommand {
             metadata_complete: false,
             dht_engine: None,
             global_limiter: None,
+            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -325,7 +334,7 @@ impl MagnetDownloadCommand {
                 .ok()
                 .map(|url| url.scheme().to_owned());
             if matches!(tracker_scheme.as_deref(), Some("ws" | "wss")) {
-                match crate::engine::websocket_tracker::announce(
+                match crate::engine::websocket_tracker::announce_with_policy(
                     &tracker_url,
                     crate::engine::websocket_tracker::AnnounceRequest {
                         info_hash: &magnet.info_hash,
@@ -338,6 +347,7 @@ impl MagnetDownloadCommand {
                         event: crate::engine::bt_tracker_comm::AnnounceEvent::Started,
                         options,
                     },
+                    &self.outbound_network_policy,
                 )
                 .await
                 {
@@ -364,11 +374,18 @@ impl MagnetDownloadCommand {
 
             let tracker_tiers = vec![vec![tracker_url.clone()]];
             let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
+            announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
             announcer.set_http_tls_config(tracker_tls.clone());
             announcer.set_timeouts(max_tracker_timeout, connect_timeout);
             announcer.set_tcp_port(announce_port);
 
-            if let Ok(client) = crate::engine::udp_tracker_client::UdpTrackerClient::new(0).await {
+            if let Ok(client) =
+                crate::engine::udp_tracker_client::UdpTrackerClient::new_with_policy(
+                    0,
+                    &self.outbound_network_policy,
+                )
+                .await
+            {
                 announcer.set_udp_client(Arc::new(tokio::sync::Mutex::new(client)));
             }
 
@@ -617,8 +634,12 @@ impl MagnetDownloadCommand {
             .iter()
             .any(|(_, url)| matches!(url.scheme(), "http" | "https"))
         {
-            match Self::build_magnet_exact_source_client(options, request_timeout, connect_timeout)
-            {
+            match Self::build_magnet_exact_source_client(
+                options,
+                request_timeout,
+                connect_timeout,
+                &self.outbound_network_policy,
+            ) {
                 Ok(client) => Some(client),
                 Err(error) => {
                     warn!(%error, "Magnet exact-source HTTP client creation failed");
@@ -692,6 +713,7 @@ impl MagnetDownloadCommand {
         options: &DownloadOptions,
         request_timeout: u64,
         connect_timeout: u64,
+        policy: &crate::network::OutboundNetworkPolicy,
     ) -> std::result::Result<reqwest::Client, String> {
         crate::http::client_pool::ensure_rustls_provider();
         let mut builder = reqwest::Client::builder()
@@ -700,6 +722,9 @@ impl MagnetDownloadCommand {
             .gzip(false)
             .user_agent(crate::constants::USER_AGENT)
             .redirect(reqwest::redirect::Policy::limited(5));
+        if let Some(address) = policy.addresses().into_iter().next() {
+            builder = builder.local_address(address);
+        }
         let no_proxy = options.no_proxy.as_deref();
 
         if let Some(proxy) = options
@@ -760,7 +785,8 @@ impl MagnetDownloadCommand {
         url: &reqwest::Url,
         options: &DownloadOptions,
     ) -> std::result::Result<reqwest::Response, String> {
-        let (mut auth_factory, auth_options) = Self::magnet_auth_context(options);
+        let auth_context = crate::engine::http_auth::from_options(options, url.scheme());
+        let (mut auth_factory, auth_options) = (auth_context.factory, auth_context.options);
         let mut request = client.get(url.clone());
         if let Some(authorization) = auth_factory.resolve_basic_authorization(url, &auth_options) {
             request = request.header(reqwest::header::AUTHORIZATION, authorization);
@@ -817,34 +843,6 @@ impl MagnetDownloadCommand {
             .send()
             .await
             .map_err(|error| error.to_string())
-    }
-
-    fn magnet_auth_context(
-        options: &DownloadOptions,
-    ) -> (
-        crate::http::AuthConfigFactory,
-        crate::http::AuthResolveOptions,
-    ) {
-        let mut factory = crate::http::AuthConfigFactory::new();
-        if !options.no_netrc {
-            let netrc_path = options
-                .netrc_path
-                .clone()
-                .or_else(crate::http::find_netrc_file);
-            if let Some(netrc_path) = netrc_path
-                && let Err(error) = factory.load_netrc_file(std::path::Path::new(&netrc_path))
-            {
-                tracing::debug!(path = %netrc_path, %error, "Failed to load exact-source netrc file");
-            }
-        }
-        let auth_options = crate::http::AuthResolveOptions {
-            http_auth_challenge: options.http_auth_challenge,
-            no_netrc: options.no_netrc,
-            http_user: options.http_user.clone(),
-            http_passwd: options.http_passwd.clone(),
-            ..crate::http::AuthResolveOptions::default()
-        };
-        (factory, auth_options)
     }
 
     /// Add web seeds from the magnet URI to the resolved torrent metadata.
@@ -952,7 +950,11 @@ impl MagnetDownloadCommand {
         };
 
         if enable_dht && self.dht_engine.is_none() {
-            let dht_config = crate::engine::dht_config::build_dht_engine_config(&options).await?;
+            let dht_config = crate::engine::dht_config::build_dht_engine_config_with_policy(
+                &options,
+                &self.outbound_network_policy,
+            )
+            .await?;
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
@@ -1175,17 +1177,20 @@ impl Command for MagnetDownloadCommand {
 
         use crate::engine::bt_download_command::BtDownloadCommand;
         let gid = self.group.recover().gid();
-        let mut bt_cmd = BtDownloadCommand::new_with_group(
+        let mut bt_cmd = BtDownloadCommand::new_with_group_and_mappings_with_policy(
             Arc::clone(&self.group),
             &torrent_bytes,
             self.group.recover().options(),
             self.output_path.parent().and_then(|p| p.to_str()),
+            &[],
+            &self.outbound_network_policy,
         )?;
         DownloadEventHooks::shared()
             .notify_metadata_resolved(MetadataResolvedEvent::new(gid, vec![gid]));
         if let Some(gl) = self.global_limiter.clone() {
             bt_cmd.set_global_limiter(gl);
         }
+        bt_cmd.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
         #[cfg(feature = "bittorrent")]
         if let Some(catalog) = self.public_tracker_catalog.clone() {
             bt_cmd.set_public_tracker_catalog(catalog);

@@ -20,6 +20,7 @@ use tracing::debug;
 use crate::engine::bt_tracker_comm::AnnounceEvent;
 use crate::http::socks_connector::NoProxyMatcher;
 use crate::http::{HttpConnectProxyTunnel, HttpProxyConfig, ProxyType};
+use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 
 /// Announce a magnet lookup to a WebSocket tracker.
@@ -48,9 +49,18 @@ pub(crate) struct AnnounceResponse {
     pub(crate) leechers: Option<i64>,
 }
 
+#[allow(dead_code)]
 pub(crate) async fn announce(
     tracker_url: &str,
     announce: AnnounceRequest<'_>,
+) -> Result<AnnounceResponse, String> {
+    announce_with_policy(tracker_url, announce, &OutboundNetworkPolicy::direct()).await
+}
+
+pub(crate) async fn announce_with_policy(
+    tracker_url: &str,
+    announce: AnnounceRequest<'_>,
+    policy: &OutboundNetworkPolicy,
 ) -> Result<AnnounceResponse, String> {
     let url = reqwest::Url::parse(tracker_url)
         .map_err(|error| format!("invalid WebSocket tracker URL: {error}"))?;
@@ -73,7 +83,7 @@ pub(crate) async fn announce(
     );
 
     crate::http::client_pool::ensure_rustls_provider();
-    let stream = connect_socket(&url, host, port, announce.options, timeout).await?;
+    let stream = connect_socket(&url, host, port, announce.options, timeout, policy).await?;
     let ws_request = tracker_url
         .into_client_request()
         .map_err(|error| format!("invalid WebSocket tracker request: {error}"))?;
@@ -167,6 +177,7 @@ async fn connect_socket(
     target_port: u16,
     options: &DownloadOptions,
     timeout: Duration,
+    policy: &OutboundNetworkPolicy,
 ) -> Result<TcpStream, String> {
     let no_proxy = options
         .no_proxy
@@ -201,7 +212,7 @@ async fn connect_socket(
     };
 
     let Some(proxy_url) = proxy else {
-        return tokio::time::timeout(timeout, TcpStream::connect((target_host, target_port)))
+        return tokio::time::timeout(timeout, policy.connect_host(target_host, target_port))
             .await
             .map_err(|_| "WebSocket tracker TCP connection timed out".to_string())?
             .map_err(|error| format!("WebSocket tracker TCP connection failed: {error}"));
@@ -235,10 +246,13 @@ async fn connect_socket(
     config.read_timeout = timeout;
     config.write_timeout = timeout;
 
-    tokio::time::timeout(timeout, HttpConnectProxyTunnel::new(config).connect())
-        .await
-        .map_err(|_| "WebSocket tracker proxy connection timed out".to_string())?
-        .map_err(|error| format!("WebSocket tracker proxy connection failed: {error}"))
+    tokio::time::timeout(
+        timeout,
+        HttpConnectProxyTunnel::new(config).connect_with_policy(policy),
+    )
+    .await
+    .map_err(|_| "WebSocket tracker proxy connection timed out".to_string())?
+    .map_err(|error| format!("WebSocket tracker proxy connection failed: {error}"))
 }
 
 fn parse_peers(value: &Value) -> Vec<SocketAddr> {

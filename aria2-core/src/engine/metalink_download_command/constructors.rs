@@ -107,6 +107,7 @@ impl MetalinkDownloadCommand {
             grouped_file_infos: Vec::new(),
             checkpoint: None,
             global_limiter: None,
+            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -251,6 +252,9 @@ impl MetalinkDownloadCommand {
                     grouped_file_infos: Vec::new(),
                     checkpoint: None,
                     global_limiter: None,
+                    outbound_network_policy: Arc::new(
+                        crate::network::OutboundNetworkPolicy::direct(),
+                    ),
                     #[cfg(feature = "bittorrent")]
                     public_tracker_catalog: None,
                     #[cfg(feature = "bittorrent")]
@@ -363,6 +367,7 @@ impl MetalinkDownloadCommand {
                 grouped_file_infos: Vec::new(),
                 checkpoint: None,
                 global_limiter: None,
+                outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
                 #[cfg(feature = "bittorrent")]
                 public_tracker_catalog: None,
                 #[cfg(feature = "bittorrent")]
@@ -482,6 +487,7 @@ impl MetalinkDownloadCommand {
             grouped_file_infos,
             checkpoint: None,
             global_limiter: None,
+            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -549,6 +555,7 @@ impl MetalinkDownloadCommand {
             grouped_file_infos: Vec::new(),
             checkpoint: None,
             global_limiter: None,
+            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: None,
             #[cfg(feature = "bittorrent")]
@@ -558,5 +565,21 @@ impl MetalinkDownloadCommand {
             #[cfg(feature = "bittorrent")]
             lpd_manager: None,
         })
+    }
+
+    pub(crate) fn new_with_group_source_policy(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        metalink_data: &[u8],
+        file_index: usize,
+        options: &DownloadOptions,
+        base_uri: Option<&str>,
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        let mut command =
+            Self::new_with_group_source(group, metalink_data, file_index, options, base_uri)?;
+        command.client =
+            super::build_http_client_with_source(options, policy.addresses().into_iter().next())?;
+        command.outbound_network_policy = Arc::new(policy.clone());
+        Ok(command)
     }
 }

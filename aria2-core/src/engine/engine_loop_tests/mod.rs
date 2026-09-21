@@ -7,6 +7,7 @@ fn test_ctx(keep_alive: bool) -> EngineLoopContext {
     EngineLoopContext {
         group_man: Arc::new(RequestGroupMan::new()),
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         auto_save: None,
         auto_save_dirty_signal: None,
         event_hooks: Arc::new(DownloadEventHooks::new()),

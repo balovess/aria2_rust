@@ -223,6 +223,8 @@ pub struct BtDownloadCommand {
     /// piece writes share a single bandwidth ceiling with all concurrent
     /// downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
+    /// Process-wide outbound TCP policy for tracker/peer protocol adapters.
+    pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
 
     /// Shared rejection state for verified bad piece sources.
     pub(crate) peer_rejection: crate::engine::bt_peer_storage::SharedPeerRejection,

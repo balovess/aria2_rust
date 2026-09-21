@@ -5,6 +5,7 @@ use crate::engine::command::{Command, ProgressUpdate};
 use crate::engine::download_command::DownloadCommand;
 use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, RecoverableError};
+use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -52,6 +53,245 @@ fn command_timeout_comes_from_download_options() {
         Some(Duration::from_secs(7)),
         "timeout must be the configured I/O inactivity duration"
     );
+}
+
+#[test]
+fn inferred_http_output_name_uses_the_safe_decoded_url_segment() {
+    let options = DownloadOptions::default();
+    let command = DownloadCommand::new(
+        GroupId::new(1003),
+        "https://example.com/releases/my%20file.zip?token=ignored#fragment",
+        &options,
+        None,
+        None,
+    )
+    .expect("HTTP command should accept a valid URI");
+
+    assert_eq!(
+        command
+            .output_path
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("my file.zip")
+    );
+}
+
+#[tokio::test]
+async fn head_content_disposition_replaces_an_inferred_http_output_name() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind filename fixture");
+    let address = listener
+        .local_addr()
+        .expect("read filename fixture address");
+    let server = tokio::spawn(async move {
+        for request_index in 0..4 {
+            let (mut stream, _) = listener.accept().await.expect("accept filename request");
+            let mut request = [0u8; 4096];
+            let bytes = stream
+                .read(&mut request)
+                .await
+                .expect("read filename request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+
+            if request_index == 0 {
+                assert!(request.starts_with("HEAD /download HTTP/1.1\r\n"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write HEAD redirect response");
+            } else if request_index == 1 {
+                assert!(request.starts_with("HEAD /final HTTP/1.1\r\n"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename*=UTF-8''server%20name.txt\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write final HEAD response");
+            } else if request_index == 2 {
+                assert!(request.starts_with("GET /download HTTP/1.1\r\n"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write GET redirect response");
+            } else {
+                assert!(request.starts_with("GET /final HTTP/1.1\r\n"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\ndata",
+                    )
+                    .await
+                    .expect("write GET response");
+            }
+        }
+    });
+
+    let directory = tempfile::tempdir().expect("create filename output directory");
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        use_head: true,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("http://{address}/download");
+    let mut command = DownloadCommand::new(GroupId::new(1004), &uri, &options, None, None)
+        .expect("create inferred filename command");
+
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("filename download should not hang")
+        .expect("filename download should complete");
+
+    assert_eq!(
+        std::fs::read(directory.path().join("server name.txt")).expect("read server filename"),
+        b"data"
+    );
+    assert!(!directory.path().join("download").exists());
+    server.await.expect("filename fixture should finish");
+}
+
+#[tokio::test]
+async fn first_get_content_disposition_is_reused_for_sequential_download() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind filename fixture");
+    let address = listener
+        .local_addr()
+        .expect("read filename fixture address");
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept filename request");
+            let mut request = [0u8; 4096];
+            let bytes = stream
+                .read(&mut request)
+                .await
+                .expect("read filename request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+
+            if request_index == 0 {
+                assert!(request.starts_with("GET /download HTTP/1.1\r\n"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .expect("write GET redirect response");
+            } else {
+                assert!(request.starts_with("GET /final HTTP/1.1\r\n"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename=actual.txt\r\nConnection: close\r\n\r\ndata",
+                    )
+                    .await
+                    .expect("write GET response");
+            }
+        }
+    });
+
+    let directory = tempfile::tempdir().expect("create filename output directory");
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        force_sequential: true,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("http://{address}/download");
+    let mut command = DownloadCommand::new(GroupId::new(1005), &uri, &options, None, None)
+        .expect("create inferred filename command");
+
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("filename download should not hang")
+        .expect("filename download should complete");
+
+    assert_eq!(
+        std::fs::read(directory.path().join("actual.txt")).expect("read server filename"),
+        b"data"
+    );
+    assert!(!directory.path().join("download").exists());
+    server.await.expect("filename fixture should finish");
+}
+
+#[tokio::test]
+async fn prepared_get_uses_preemptive_credentials_for_filename_metadata() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind authenticated filename fixture");
+    let address = listener
+        .local_addr()
+        .expect("read authenticated filename fixture address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept authenticated filename request");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0u8; 1024];
+            let bytes = stream
+                .read(&mut chunk)
+                .await
+                .expect("read authenticated filename request");
+            assert!(bytes > 0, "authenticated request ended before its headers");
+            request.extend_from_slice(&chunk[..bytes]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        assert!(request.starts_with("GET /download HTTP/1.1\r\n"));
+        assert!(
+            request
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("authorization: Basic dXNlcjpwYXNz")),
+            "request did not contain preemptive credentials: {request}"
+        );
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename=auth.txt\r\nConnection: close\r\n\r\ndata",
+            )
+            .await
+            .expect("write authenticated GET response");
+    });
+
+    let directory = tempfile::tempdir().expect("create authenticated output directory");
+    let options = DownloadOptions {
+        allow_overwrite: true,
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        force_sequential: true,
+        http_user: Some("user".to_string()),
+        http_passwd: Some("pass".to_string()),
+        ..DownloadOptions::default()
+    };
+    let uri = format!("http://{address}/download");
+    let mut command = DownloadCommand::new(GroupId::new(1006), &uri, &options, None, None)
+        .expect("create authenticated filename command");
+
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("authenticated filename download should not hang")
+        .expect("authenticated filename download should complete");
+
+    assert_eq!(
+        std::fs::read(directory.path().join("auth.txt")).expect("read authenticated filename"),
+        b"data"
+    );
+    server
+        .await
+        .expect("authenticated filename fixture should finish");
 }
 
 #[test]
@@ -232,6 +472,63 @@ async fn in_memory_http_records_each_payload_chunk_for_timeout() {
     assert!(
         group.recover().last_network_activity() > first_activity,
         "each non-empty in-memory HTTP chunk must refresh the inactivity clock"
+    );
+}
+
+#[tokio::test]
+async fn interface_binding_reaches_the_http_socket() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("HTTP fixture should bind");
+    let address = listener.local_addr().expect("HTTP fixture address");
+    let server = tokio::spawn(async move {
+        let (mut stream, peer) = listener.accept().await.expect("HTTP client should connect");
+        let mut request = [0u8; 4096];
+        let bytes = stream.read(&mut request).await.expect("read HTTP request");
+        assert!(bytes > 0, "HTTP request should not be empty");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("write HTTP response");
+        peer.ip()
+    });
+
+    let url = format!("http://{address}/bound.bin");
+    let options = DownloadOptions {
+        use_head: false,
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(9101),
+        vec![url.clone()],
+        options.clone(),
+    )));
+    let command = DownloadCommand::new_with_group_and_resolved_addresses_and_policy(
+        group,
+        &url,
+        &options,
+        None,
+        None,
+        None,
+        Arc::new(OutboundNetworkPolicy::single(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        ))),
+    )
+    .expect("HTTP command should build with an interface binding");
+
+    let response = command
+        .client
+        .get(&url)
+        .send()
+        .await
+        .expect("bound HTTP client should connect");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        server.await.expect("HTTP fixture should finish"),
+        std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
     );
 }
 
@@ -594,7 +891,7 @@ async fn authentication_retry_follows_redirect_and_preserves_protection_space() 
                     );
                     stream
                         .write_all(
-                            b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nConnection: close\r\n\r\nauth-redirect\n",
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 14\r\nContent-Disposition: attachment; filename=authenticated.bin\r\nConnection: close\r\n\r\nauth-redirect\n",
                         )
                         .await
                         .expect("write final authenticated response");
@@ -615,13 +912,13 @@ async fn authentication_retry_follows_redirect_and_preserves_protection_space() 
         ..DownloadOptions::default()
     };
     let uri = format!("http://{address}/protected/file.bin");
-    let output = directory.path().join("auth-redirect.bin");
+    let output = directory.path().join("authenticated.bin");
     let mut command = DownloadCommand::new(
         GroupId::new(15),
         &uri,
         &options,
         Some(directory.path().to_string_lossy().as_ref()),
-        Some("auth-redirect.bin"),
+        None,
     )
     .expect("create auth redirect command");
 

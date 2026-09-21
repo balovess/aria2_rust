@@ -189,11 +189,12 @@ impl BtDownloadCommand {
                 ClientTlsConfig::from_download_options(group.options())
             };
             Some(
-                crate::engine::bt_web_seed::WebSeedManager::new_with_tls(
+                crate::engine::bt_web_seed::WebSeedManager::new_with_tls_and_policy(
                     web_seed_urls,
                     piece_length,
                     total_size,
                     &web_seed_tls,
+                    &self.outbound_network_policy,
                 )
                 .map_err(|error| {
                     Aria2Error::Fatal(FatalError::Config(format!(
@@ -204,7 +205,6 @@ impl BtDownloadCommand {
         } else {
             None
         };
-
         // Initialize PEX state only for peers whose BEP 10 handshake advertised
         // ut_pex. Private torrents keep this set empty per BEP 0027.
         let mut pex_enabled_peers: HashSet<PeerKey> = HashSet::new();

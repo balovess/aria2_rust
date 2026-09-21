@@ -39,5 +39,5 @@ pub use proxy_tunnel::{FtpProxyTunnel, FtpProxyTunnelConfig, FtpProxyTunnelResul
 // Re-export proxy GET types
 pub use proxy_get::{
     FtpProxyConfig, FtpProxyGetRequest, FtpProxyGetRequestBuilder, FtpProxyGetResponse,
-    ProxyMethod, execute_proxy_get, resolve_proxy_method,
+    ProxyMethod, execute_proxy_get, execute_proxy_get_with_policy, resolve_proxy_method,
 };

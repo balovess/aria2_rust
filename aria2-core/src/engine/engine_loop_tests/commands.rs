@@ -22,6 +22,7 @@ async fn state_changing_command_marks_dirty_and_persists() {
     let mut ctx = EngineLoopContext {
         group_man: man,
         dns_cache: Arc::new(tokio::sync::Mutex::new(DnsCache::new())),
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
         auto_save: Some(auto_save.clone()),
         auto_save_dirty_signal: Some(auto_save_dirty_signal),
         event_hooks: Arc::new(DownloadEventHooks::new()),

@@ -202,9 +202,10 @@ impl RawFtpControl {
         };
 
         let data_addr = std::net::SocketAddr::new(self.connection.peer_addr.ip(), port);
+        let connect = self.outbound_network_policy.connect(data_addr);
         tokio::time::timeout(
             Duration::from_secs(constants::FTP_DATA_CONNECTION_TIMEOUT_SECS),
-            tokio::net::TcpStream::connect(data_addr),
+            connect,
         )
         .await
         .map_err(|_| {

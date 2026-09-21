@@ -147,7 +147,7 @@ Upstream method responses must not contain extension fields. Runtime data such a
 | `aria2.getFiles` | `gid` | File object array |
 | `aria2.getServers` | `gid` | Server object array; normally active tasks only |
 | `aria2.getPeers` | `gid` | Peer object array; requires BitTorrent |
-| `aria2.getTrackers` | `gid` | Live tracker runtime array; requires BitTorrent |
+| `aria2.getTrackers` | `gid` | Per-URL tracker runtime snapshot; requires BitTorrent |
 | `aria2.getDhtStatus` | none | Aggregate DHT status for active BT/magnet tasks; requires BitTorrent |
 | `aria2.saveDhtState` | none | Immediately save routing tables and BEP 44 items for active DHT engines; requires BitTorrent |
 | `aria2.evictDhtNodes` | none | Immediately evict bad nodes and try cached replacements; returns `[evicted, replacement_attempts]`; requires BitTorrent |
@@ -172,7 +172,10 @@ BitTorrent status details: `bittorrent` is a nested torrent metadata object. It
 contains tiered `announceList` and, when present, `comment`, `creationDate`,
 `mode`, and `info.name`. Piece progress is exposed through `bitfield`,
 `pieceLength`, and `numPieces`; BT runtime statistics also include `seeder`,
-`numSeeders`, `verifiedLength`, and `verifyIntegrityPending`.
+`numSeeders`, `verifiedLength`, and `verifyIntegrityPending`. `numSeeders` is
+the number of currently connected seeder peers; it is not the Tracker swarm's
+`complete` count. `verifiedLength` and `verifyIntegrityPending` describe
+integrity-check progress and queued verification state, respectively.
 `completedPieces` and `missingPieces` are internal runtime statistics and are
 not part of the upstream `tellStatus` wire response. Lengths, speeds, and
 counters that belong to the aria2-compatible status contract are serialized as
@@ -186,7 +189,8 @@ first discovery source (`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
 `unknown`) is retained internally and is not emitted in the upstream response.
 Port, speed, boolean, and seeder values follow aria2's string wire format.
 
-`aria2.getTrackers` returns a live tracker snapshot for the specified GID. Each
+`aria2.getTrackers` returns a point-in-time runtime snapshot for the specified
+GID. It is not a claim that every tracker is currently live or online. Each
 entry contains `uri`, 1-based `tier`, `current`, `lastAttempt`, `announceReady`,
 `allFailed`, `inFlight`, `interval`, `minInterval`, `seeders`, `leechers`,
 `trackerId`, and optional `secondsSinceLastSuccess`. The snapshot is published
@@ -194,7 +198,10 @@ by the executing BitTorrent command and is removed when that command exits.
 `current` identifies the next tracker selected by the announce state machine;
 `lastAttempt` identifies the most recently attempted tracker. In this extension
 interface `interval` is serialized as a string; other tracker numbers and
-boolean state use native JSON types.
+boolean state use native JSON types. `seeders` and `leechers` are omitted when
+the tracker did not provide the corresponding valid `complete` or `incomplete`
+value; an explicit zero is preserved as zero. The scheduling flags describe
+announce state, not a universal realtime/online status for all URLs.
 
 `aria2.getDhtStatus` is process-wide. It aggregates the DHT engines registered
 by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
@@ -204,7 +211,9 @@ by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
 `persistenceMaxAgeSecs`, `cleanupIntervalSecs`, and `saveIntervalSecs` for
 the active DHT configuration. Numeric fields use aria2's string wire format;
 `persistenceEnabled` is a native JSON boolean. With no active DHT engine, the
-result is `stopped` with zero counters and persistence disabled.
+result is `stopped` with zero counters and persistence disabled. `totalNodes`/
+`goodNodes` are DHT routing-table node counts; they are not BitTorrent seeder
+counts.
 
 `aria2.saveDhtState` and `aria2.evictDhtNodes` take no parameters. The save
 operation reuses the automatic save chain's serialization lock, routing-table

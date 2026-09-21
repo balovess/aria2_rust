@@ -19,7 +19,7 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig, ThrottledWriter};
 use crate::request::request_group::{ActiveConnectionGuard, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
-use aria2_protocol::sftp::connection::SshConnection;
+use aria2_protocol::sftp::connection::{SshConnection, SshError};
 use aria2_protocol::sftp::file_ops::{FileOpError, OpenFlags, SftpFileOps};
 use aria2_protocol::sftp::session::SftpSession;
 
@@ -85,7 +85,31 @@ impl SftpDownloadCommand {
         // Phase 1: SSH Connection
         // -----------------------------------------------------------------
         let ssh_options = self.build_ssh_options();
-        let conn_result = SshConnection::connect(ssh_options.clone()).await;
+        let remote_address = tokio::net::lookup_host((self.host.as_str(), self.port))
+            .await
+            .map_err(|error| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!("SFTP host lookup failed: {error}"),
+                })
+            })?
+            .find(|address| {
+                self.outbound_network_policy.is_direct()
+                    || self.outbound_network_policy.source_for(*address).is_ok()
+            })
+            .ok_or_else(|| {
+                Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                    message: format!(
+                        "SFTP host has no address matching the outbound network policy: {}:{}",
+                        self.host, self.port
+                    ),
+                })
+            })?;
+        let conn_result = match self.outbound_network_policy.connect(remote_address).await {
+            Ok(stream) => SshConnection::connect_with_stream(ssh_options.clone(), stream).await,
+            Err(error) => Err(SshError::Handshake {
+                message: format!("SFTP TCP connection failed: {error}"),
+            }),
+        };
 
         let mut conn = match conn_result {
             Ok(c) => c,

@@ -29,6 +29,7 @@ pub(super) fn promote_reserved_groups(
             Arc::clone(group),
             CommandDependencies {
                 dns_cache: Arc::clone(&ctx.dns_cache),
+                outbound_network_policy: Arc::clone(&ctx.outbound_network_policy),
                 global_limiter: ctx.global_limiter.clone(),
                 #[cfg(feature = "bittorrent")]
                 public_tracker_catalog: Arc::clone(&ctx.public_tracker_catalog),

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::constants;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use crate::network::OutboundNetworkPolicy;
 
 /// uTP peer connection wrapper.
 ///
@@ -68,9 +69,49 @@ impl UtpPeerConnection {
         listen_port: Option<u16>,
         dht_enabled: bool,
     ) -> Result<Self> {
+        Self::connect_with_policy(
+            addr,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+            timeout,
+            listen_port,
+            dht_enabled,
+            &OutboundNetworkPolicy::direct(),
+        )
+        .await
+    }
+
+    /// Connect using a source-bound uTP socket when no shared socket exists.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn connect_with_policy(
+        addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        listen_port: Option<u16>,
+        dht_enabled: bool,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        let configured_source = policy.addresses().into_iter().next();
         let socket = match listen_port {
-            Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
-            None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
+            Some(port) => configured_source.map_or_else(
+                || aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+                |source| {
+                    aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                        std::net::SocketAddr::new(source, port),
+                    )
+                },
+            ),
+            None => configured_source.map_or_else(
+                aria2_protocol::bittorrent::utp::UtpSocket::bind_any,
+                |source| {
+                    aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                        std::net::SocketAddr::new(source, 0),
+                    )
+                },
+            ),
         }
         .map_err(|e| Aria2Error::Fatal(FatalError::Config(e.to_string())))?;
 

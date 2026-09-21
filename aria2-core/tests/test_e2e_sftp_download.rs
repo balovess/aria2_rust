@@ -129,6 +129,42 @@ async fn e2e_sftp_password_authentication_downloads_the_full_file() {
 }
 
 #[tokio::test]
+async fn e2e_sftp_interface_uses_the_real_configured_source_address() {
+    let server = MockSftpServer::start().await;
+    let output_dir = tempfile::tempdir().expect("temporary output directory should exist");
+    let uri = format!(
+        "sftp://{}:{}@127.0.0.1:{}{}",
+        server.username(),
+        server.password(),
+        server.addr().port(),
+        server.file_path()
+    );
+    let mut command = SftpDownloadCommand::new(
+        GroupId::new(899),
+        &uri,
+        &DownloadOptions::default(),
+        output_dir.path().to_str(),
+        Some("interface.bin"),
+    )
+    .expect("SFTP command should construct");
+    command.set_outbound_network_policy(Arc::new(
+        aria2_core::network::OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap()),
+    ));
+
+    execute_with_deadline(&mut command)
+        .await
+        .expect("SFTP interface-bound download should complete");
+    assert_eq!(
+        server.peer_addresses(),
+        vec!["127.0.0.1".parse::<std::net::IpAddr>().unwrap()]
+    );
+    assert!(
+        server.read_requests() > 1,
+        "the SFTP transfer should reuse its one SSH connection for multiple READ requests"
+    );
+}
+
+#[tokio::test]
 async fn e2e_sftp_rejects_an_invalid_password_before_subsystem_setup() {
     let server = MockSftpServer::start().await;
     let output_dir = tempfile::tempdir().expect("temporary output directory should exist");

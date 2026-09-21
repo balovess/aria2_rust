@@ -103,11 +103,34 @@ impl PeerConnection {
             .map_err(|error| format!("Invalid peer address {}:{}: {error}", addr.ip, addr.port))?;
         debug!("Connecting to peer: {}", socket_addr);
 
-        let mut stream =
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
-                .await
-                .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
-                .map_err(|e| format!("Peer connection failed: {}", e))?;
+        let stream = tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&socket_addr))
+            .await
+            .map_err(|_| format!("Peer connection timeout: {}", socket_addr))?
+            .map_err(|e| format!("Peer connection failed: {}", e))?;
+
+        Self::connect_with_stream(
+            stream,
+            socket_addr,
+            info_hash_v1,
+            info_hash_v2,
+            local_peer_id,
+            timeout,
+            dht_enabled,
+        )
+        .await
+    }
+
+    /// Complete a peer connection over a TCP stream selected by the caller.
+    pub async fn connect_with_stream(
+        mut stream: TcpStream,
+        socket_addr: std::net::SocketAddr,
+        info_hash_v1: &[u8; 20],
+        info_hash_v2: Option<&[u8; 32]>,
+        local_peer_id: &[u8; 20],
+        timeout: std::time::Duration,
+        dht_enabled: bool,
+    ) -> Result<Self, String> {
+        debug!("Connecting to peer over selected stream: {}", socket_addr);
 
         let mut handshake = Handshake::new(info_hash_v1, local_peer_id).with_dht(dht_enabled);
         handshake.set_bep52_enabled(info_hash_v2.is_some());

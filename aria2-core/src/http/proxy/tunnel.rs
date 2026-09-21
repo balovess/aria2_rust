@@ -4,10 +4,14 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, Result};
+use crate::network::OutboundNetworkPolicy;
 
 use super::auth::build_proxy_auth_header;
 use super::config::HttpProxyConfig;
-use super::io::{MAX_AUTH_RETRIES, connect_to_proxy, read_proxy_response, write_all_timeout};
+use super::io::{
+    MAX_AUTH_RETRIES, connect_to_proxy, connect_to_proxy_with_policy, read_proxy_response,
+    write_all_timeout,
+};
 use super::response::ProxyResponse;
 
 /// HTTP CONNECT tunnel through a proxy for HTTPS downloads.
@@ -48,8 +52,17 @@ impl HttpProxyTunnel {
     /// written to / read from it go directly to/from the target server.
     /// The caller should perform TLS handshake on this stream for HTTPS.
     pub async fn connect(&self) -> Result<TcpStream> {
-        let mut stream = connect_to_proxy(&self.config).await?;
+        let stream = connect_to_proxy(&self.config).await?;
+        self.finish_connect(stream).await
+    }
 
+    /// Establish the tunnel using the shared outbound source policy.
+    pub async fn connect_with_policy(&self, policy: &OutboundNetworkPolicy) -> Result<TcpStream> {
+        let stream = connect_to_proxy_with_policy(&self.config, policy).await?;
+        self.finish_connect(stream).await
+    }
+
+    async fn finish_connect(&self, mut stream: TcpStream) -> Result<TcpStream> {
         let target = self.config.target_host_port();
         let mut auth_nc = 1u32;
 

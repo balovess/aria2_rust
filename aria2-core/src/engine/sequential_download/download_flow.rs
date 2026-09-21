@@ -99,11 +99,24 @@ impl SequentialDownloader {
             .ok()
             .map(|url| url.scheme().to_owned())
             .unwrap_or_else(|| "http".to_string());
-        let (mut auth_factory, auth_options) = self.auth_context(&initial_scheme);
+        let options = self.group.recover().options_arc();
+        let auth_context = crate::engine::http_auth::from_options(&options, &initial_scheme);
+        let (mut auth_factory, auth_options) = (auth_context.factory, auth_context.options);
         let _has_preemptive_origin_auth = reqwest::Url::parse(uri)
             .ok()
             .and_then(|url| auth_factory.resolve_basic_authorization(&url, &auth_options))
             .is_some();
+
+        // Resume and conditional requests have path-dependent headers, so a
+        // prepared ordinary GET can only be reused for a fresh download.
+        let can_reuse_prepared_response = !Self::resume_requested(&effective_resume_state)
+            && !self.request_policy.has_header("If-Modified-Since")
+            && !self.request_policy.has_header("If-None-Match")
+            && !self.group.recover().options().conditional_get;
+        let mut prepared_response = self.prepared_response.take();
+        if !can_reuse_prepared_response {
+            prepared_response = None;
+        }
 
         #[cfg(not(target_os = "linux"))]
         let _ = total_length;
@@ -122,6 +135,7 @@ impl SequentialDownloader {
                 && !self.request_policy.has_custom_headers()
                 && self.cookie_helper.build_cookie_header(uri).is_none()
                 && !_has_preemptive_origin_auth
+                && prepared_response.is_none()
             {
                 match self.try_splice_sequential(uri, total_length).await {
                     Ok(()) => return Ok(()),
@@ -146,84 +160,96 @@ impl SequentialDownloader {
         let mut redirect_count: u32 = 0;
 
         loop {
-            let url_parsed = reqwest::Url::parse(&current_uri).ok();
-            let authorization = url_parsed
-                .as_ref()
-                .and_then(|url| auth_factory.resolve_basic_authorization(url, &auth_options));
-            let base_request = if let Some(range_header) =
-                ResumeHelper::build_range_header(&effective_resume_state)
+            let (response, conditional_request, authentication_used) = if let Some(prepared) =
+                prepared_response.take()
             {
-                tracing::debug!("Resume download: {}", range_header);
-                self.client.get(&current_uri).header("Range", range_header)
+                current_uri = prepared.effective_uri;
+                connection_guard.set(1);
+                (prepared.response, false, false)
             } else {
-                self.client.get(&current_uri)
-            };
-
-            // --- Conditional GET: If-Modified-Since header ---
-            // Matches C++ HttpRequestCommand L141-171:
-            // When `conditional_get` is enabled, protocol is HTTP/HTTPS,
-            // the control file does NOT exist, and the output file DOES exist,
-            // send the file's mtime as `If-Modified-Since`.
-            let mut extra_headers = Vec::new();
-            {
-                let g = self.group.recover();
-                let opts = g.options();
-                if opts.conditional_get
-                    && (current_uri.starts_with("http://") || current_uri.starts_with("https://"))
+                let url_parsed = reqwest::Url::parse(&current_uri).ok();
+                let authorization = url_parsed
+                    .as_ref()
+                    .and_then(|url| auth_factory.resolve_basic_authorization(url, &auth_options));
+                let base_request = if let Some(range_header) =
+                    ResumeHelper::build_range_header(&effective_resume_state)
                 {
-                    let ctrl_path = ControlFile::control_path_for(&self.output_path);
-                    if !ctrl_path.exists()
-                        && self.output_path.exists()
-                        && let Ok(metadata) = std::fs::metadata(&self.output_path)
-                        && let Ok(modified) = metadata.modified()
+                    tracing::debug!("Resume download: {}", range_header);
+                    self.client.get(&current_uri).header("Range", range_header)
+                } else {
+                    self.client.get(&current_uri)
+                };
+
+                // --- Conditional GET: If-Modified-Since header ---
+                // Matches C++ HttpRequestCommand L141-171:
+                // When `conditional_get` is enabled, protocol is HTTP/HTTPS,
+                // the control file does NOT exist, and the output file DOES exist,
+                // send the file's mtime as `If-Modified-Since`.
+                let mut extra_headers = Vec::new();
+                {
+                    let g = self.group.recover();
+                    let opts = g.options();
+                    if opts.conditional_get
+                        && (current_uri.starts_with("http://")
+                            || current_uri.starts_with("https://"))
                     {
-                        let mtime = modified
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        let dt = SimpleDateTime::from_timestamp(mtime);
-                        let http_date = dt.format_imf_fixdate();
-                        tracing::debug!(
-                            "Conditional GET: sending If-Modified-Since: {}",
-                            http_date
-                        );
-                        extra_headers.push(("If-Modified-Since".to_string(), http_date));
+                        let ctrl_path = ControlFile::control_path_for(&self.output_path);
+                        if !ctrl_path.exists()
+                            && self.output_path.exists()
+                            && let Ok(metadata) = std::fs::metadata(&self.output_path)
+                            && let Ok(modified) = metadata.modified()
+                        {
+                            let mtime = modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            let dt = SimpleDateTime::from_timestamp(mtime);
+                            let http_date = dt.format_imf_fixdate();
+                            tracing::debug!(
+                                "Conditional GET: sending If-Modified-Since: {}",
+                                http_date
+                            );
+                            extra_headers.push(("If-Modified-Since".to_string(), http_date));
+                        }
                     }
                 }
-            }
 
-            let cookie_header = url_parsed
-                .as_ref()
-                .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
-            let request = self.request_policy.apply_with_basic_auth(
-                base_request,
-                cookie_header.as_deref().filter(|value| !value.is_empty()),
-                &extra_headers,
-                authorization.as_deref(),
-            );
-            let conditional_request = self.request_policy.has_header("If-Modified-Since")
-                || self.request_policy.has_header("If-None-Match")
-                || extra_headers.iter().any(|(name, _)| {
-                    name.eq_ignore_ascii_case("If-Modified-Since")
-                        || name.eq_ignore_ascii_case("If-None-Match")
-                });
-            let authentication_used = authorization.is_some()
-                || self.request_policy.has_header("Authorization")
-                || extra_headers
-                    .iter()
-                    .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
+                let cookie_header = url_parsed
+                    .as_ref()
+                    .map(|url| self.cookie_helper.build_cookie_header_from_url(url));
+                let request = self.request_policy.apply_with_basic_auth(
+                    base_request,
+                    cookie_header.as_deref().filter(|value| !value.is_empty()),
+                    &extra_headers,
+                    authorization.as_deref(),
+                );
+                let conditional_request = self.request_policy.has_header("If-Modified-Since")
+                    || self.request_policy.has_header("If-None-Match")
+                    || extra_headers.iter().any(|(name, _)| {
+                        name.eq_ignore_ascii_case("If-Modified-Since")
+                            || name.eq_ignore_ascii_case("If-None-Match")
+                    });
+                let authentication_used = authorization.is_some()
+                    || self.request_policy.has_header("Authorization")
+                    || extra_headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"));
 
-            connection_guard.set(1);
-            let response = tokio::select! {
-                result = request.send() => result.map_err(|e| {
-                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
-                        message: format!("HTTP request failed: {}", e),
-                    })
-                })?,
-                cancellation = self.wait_for_cancellation() => {
-                    return Err(cancellation.expect_err("cancellation watcher must not complete successfully"));
-                }
+                connection_guard.set(1);
+                let response = tokio::select! {
+                    result = request.send() => result.map_err(|e| {
+                        Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                            message: format!("HTTP request failed: {}", e),
+                        })
+                    })?,
+                    cancellation = self.wait_for_cancellation() => {
+                        return Err(cancellation.expect_err("cancellation watcher must not complete successfully"));
+                    }
+                };
+                (response, conditional_request, authentication_used)
             };
+
+            let url_parsed = reqwest::Url::parse(&current_uri).ok();
             self.publish_connection_context(&current_uri, response.remote_addr());
 
             self.cookie_helper

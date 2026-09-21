@@ -12,7 +12,6 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::None,
             description: "Network interface to bind to".into(),
             category: OptionCategory::General,
-            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {

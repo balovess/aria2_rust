@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -29,6 +30,7 @@ struct FixtureData {
     read_delay: Option<Duration>,
     stat_requests: Arc<AtomicUsize>,
     read_requests: Arc<AtomicUsize>,
+    peer_addresses: Arc<Mutex<Vec<std::net::IpAddr>>>,
 }
 
 /// A deterministic, protocol-level SFTP server for command E2E tests.
@@ -44,6 +46,7 @@ pub struct MockSftpServer {
     accept_task: JoinHandle<()>,
     stat_requests: Arc<AtomicUsize>,
     read_requests: Arc<AtomicUsize>,
+    peer_addresses: Arc<Mutex<Vec<std::net::IpAddr>>>,
 }
 
 impl MockSftpServer {
@@ -75,6 +78,7 @@ impl MockSftpServer {
         let content: Arc<[u8]> = fixture_content().into();
         let stat_requests = Arc::new(AtomicUsize::new(0));
         let read_requests = Arc::new(AtomicUsize::new(0));
+        let peer_addresses = Arc::new(Mutex::new(Vec::new()));
 
         let mut rng = UnwrapErr(getrandom::SysRng);
         let host_key = PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
@@ -96,15 +100,21 @@ impl MockSftpServer {
             read_delay,
             stat_requests: Arc::clone(&stat_requests),
             read_requests: Arc::clone(&read_requests),
+            peer_addresses: Arc::clone(&peer_addresses),
         });
         let (shutdown, mut shutdown_rx) = oneshot::channel();
+        let peer_addresses_for_accept = Arc::clone(&peer_addresses);
         let accept_task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     accepted = listener.accept() => {
-                        let Ok((stream, _)) = accepted else {
+                        let Ok((stream, peer)) = accepted else {
                             break;
                         };
+                        peer_addresses_for_accept
+                            .lock()
+                            .expect("peer address lock should not be poisoned")
+                            .push(peer.ip());
                         let config = Arc::clone(&config);
                         let fixture = Arc::clone(&fixture);
                         tokio::spawn(async move {
@@ -127,6 +137,7 @@ impl MockSftpServer {
             accept_task,
             stat_requests,
             read_requests,
+            peer_addresses,
         }
     }
 
@@ -156,6 +167,13 @@ impl MockSftpServer {
 
     pub fn stat_requests(&self) -> usize {
         self.stat_requests.load(Ordering::Relaxed)
+    }
+
+    pub fn peer_addresses(&self) -> Vec<std::net::IpAddr> {
+        self.peer_addresses
+            .lock()
+            .expect("peer address lock should not be poisoned")
+            .clone()
     }
 
     /// Uses the `aria2_original` `--ssh-host-key-md` SHA-1 wire format.

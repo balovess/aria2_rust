@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use tracing::warn;
 
@@ -193,6 +194,7 @@ impl BtDownloadCommand {
         let lifecycle_notify = self.group.recover().lifecycle_notifier();
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
+        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
         let mut connect_future = Box::pin(BtPeerInteraction::connect_to_peers(
             &eligible_peers,
             info_hash_raw,
@@ -201,6 +203,7 @@ impl BtDownloadCommand {
             total_size,
             &connection_options,
             self.utp_socket.clone(),
+            &outbound_network_policy,
         ));
         let conn_result = loop {
             tokio::select! {

@@ -13,8 +13,17 @@ use crate::request::request_group::DownloadOptions;
 /// IPv4 and IPv6 use the corresponding address, bootstrap, and persistence
 /// fields. Hostname bootstrap entries are resolved before the UDP engine is
 /// started so invalid configuration is reported at the task boundary.
+#[cfg(test)]
 pub(crate) async fn build_dht_engine_config(
     options: &DownloadOptions,
+) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
+    build_dht_engine_config_with_policy(options, &crate::network::OutboundNetworkPolicy::direct())
+        .await
+}
+
+pub(crate) async fn build_dht_engine_config_with_policy(
+    options: &DownloadOptions,
+    policy: &crate::network::OutboundNetworkPolicy,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
     let use_ipv6 = options.enable_dht6;
     let port_range = options
@@ -31,7 +40,12 @@ pub(crate) async fn build_dht_engine_config(
         .transpose()
         .map_err(|error| config_error(format!("invalid dht-listen-port: {error}")))?;
 
-    let listen_addr = selected_listen_addr(options, use_ipv6)?;
+    let listen_addr = selected_listen_addr(options, use_ipv6)?.or_else(|| {
+        policy
+            .addresses()
+            .into_iter()
+            .find(|address| address.is_ipv6() == use_ipv6)
+    });
     let bootstrap_specs = selected_bootstrap_specs(options, use_ipv6)?;
     let bootstrap_nodes = resolve_bootstrap_nodes(&bootstrap_specs, use_ipv6).await?;
     let dht_file_path = selected_file_path(options, use_ipv6)

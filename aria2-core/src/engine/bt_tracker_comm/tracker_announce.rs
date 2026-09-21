@@ -24,6 +24,7 @@ use super::types::AnnounceEvent;
 use crate::engine::udp_tracker_client::SharedUdpClient;
 use crate::engine::udp_tracker_manager::UdpTrackerManager;
 use crate::http::client_identity::ClientTlsConfig;
+use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::DownloadOptions;
 use aria2_protocol::bittorrent::tracker::public_list::{PublicTrackerList, TrackerFailureKind};
 use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::UdpError;
@@ -189,6 +190,10 @@ pub struct TrackerAnnouncer {
     last_failure_kind: Option<TrackerFailureKind>,
     /// Existing download TLS settings used by HTTPS tracker announces.
     http_tls: ClientTlsConfig,
+    /// Shared source-selection policy for every tracker transport.
+    outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    /// Reusable HTTP clients keyed by the selected local source address.
+    http_clients: HashMap<Option<std::net::IpAddr>, reqwest::Client>,
     /// Download options used by WebSocket tracker announces for proxy and
     /// timeout selection.
     websocket_options: DownloadOptions,
@@ -218,6 +223,8 @@ impl TrackerAnnouncer {
             excluded_tracker_urls: Vec::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            http_clients: HashMap::new(),
             websocket_options: DownloadOptions::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
@@ -240,6 +247,8 @@ impl TrackerAnnouncer {
             excluded_tracker_urls: Vec::new(),
             last_failure_kind: None,
             http_tls: ClientTlsConfig::default(),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+            http_clients: HashMap::new(),
             websocket_options: DownloadOptions::default(),
             tracker_timeout_secs: 60,
             tracker_connect_timeout_secs: 60,
@@ -359,6 +368,13 @@ impl TrackerAnnouncer {
     /// Apply the existing aria2-compatible TLS options to HTTP tracker calls.
     pub(crate) fn set_http_tls_config(&mut self, config: ClientTlsConfig) {
         self.http_tls = config;
+        self.http_clients.clear();
+    }
+
+    /// Set the shared source policy used by HTTP, WebSocket, and UDP trackers.
+    pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
+        self.outbound_network_policy = policy;
+        self.http_clients.clear();
     }
 
     /// Apply per-download proxy and timeout options to WebSocket trackers.
@@ -563,7 +579,7 @@ impl TrackerAnnouncer {
         self.announce.announce_start();
         self.publish_runtime_snapshot();
 
-        let response = crate::engine::websocket_tracker::announce(
+        let response = crate::engine::websocket_tracker::announce_with_policy(
             tracker_url,
             crate::engine::websocket_tracker::AnnounceRequest {
                 info_hash,
@@ -576,6 +592,7 @@ impl TrackerAnnouncer {
                 event,
                 options: &self.websocket_options,
             },
+            &self.outbound_network_policy,
         )
         .await;
 
@@ -640,7 +657,12 @@ impl TrackerAnnouncer {
                 self.udp_manager = Some(mgr);
             } else {
                 // No UDP client configured — try to create one
-                match crate::engine::udp_tracker_client::UdpTrackerClient::new(0).await {
+                match crate::engine::udp_tracker_client::UdpTrackerClient::new_with_policy(
+                    0,
+                    &self.outbound_network_policy,
+                )
+                .await
+                {
                     Ok(client) => {
                         let shared = Arc::new(tokio::sync::Mutex::new(client));
                         self.udp_client = Some(Arc::clone(&shared));
@@ -771,88 +793,122 @@ impl TrackerAnnouncer {
         );
 
         // Send HTTP request
-        match crate::engine::http_tracker_client::build_tracker_client_with_tls_and_timeouts(
-            self.tracker_timeout_secs,
-            self.tracker_connect_timeout_secs,
-            &self.http_tls,
-        ) {
-            Ok(client) => {
-                match client.get(&url).send().await {
-                    Ok(resp) => {
-                        if !resp.status().is_success() {
-                            warn!(
-                                "[BT] HTTP tracker {} returned status {}",
-                                tracker_url,
-                                resp.status()
-                            );
-                            self.last_failure_kind = Some(
-                                if resp.status().is_server_error()
-                                    || matches!(resp.status().as_u16(), 408 | 425 | 429)
-                                {
-                                    TrackerFailureKind::RemoteTemporary
-                                } else {
-                                    TrackerFailureKind::TrackerRejected
-                                },
-                            );
-                            self.announce.announce_failure();
-                            return None;
-                        }
+        let parsed_url = reqwest::Url::parse(&url).ok();
+        let tracker_port = parsed_url
+            .as_ref()
+            .and_then(reqwest::Url::port_or_known_default)
+            .unwrap_or(80);
+        let local_address = match parsed_url.as_ref().and_then(reqwest::Url::host_str) {
+            Some(host) => {
+                match self
+                    .outbound_network_policy
+                    .source_for_host(host, tracker_port)
+                    .await
+                {
+                    Ok(address) => address,
+                    Err(error) => {
+                        warn!(tracker = %tracker_url, %error, "HTTP tracker has no compatible outbound source");
+                        self.last_failure_kind = Some(TrackerFailureKind::Network);
+                        self.announce.announce_failure();
+                        return None;
+                    }
+                }
+            }
+            None if self.outbound_network_policy.is_direct() => None,
+            None => {
+                warn!(tracker = %tracker_url, "HTTP tracker URL has no host");
+                self.last_failure_kind = Some(TrackerFailureKind::Network);
+                self.announce.announce_failure();
+                return None;
+            }
+        };
 
-                        match resp.bytes().await {
-                            Ok(body) => {
-                                match aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(&body) {
-                                    Ok(tracker_resp) => {
-                                        if tracker_resp.is_failure() {
-                                            let reason = tracker_resp.failure_reason
-                                                .unwrap_or_else(|| "tracker failure".to_string());
-                                            warn!("[BT] HTTP tracker {} failure: {}", tracker_url, reason);
-                                            self.last_failure_kind =
-                                                Some(TrackerFailureKind::TrackerRejected);
-                                            self.announce.announce_failure();
-                                            return None;
-                                        }
+        let client = if let Some(client) = self.http_clients.get(&local_address) {
+            client.clone()
+        } else {
+            let client = match crate::engine::http_tracker_client::build_tracker_client_with_source(
+                self.tracker_timeout_secs,
+                self.tracker_connect_timeout_secs,
+                &self.http_tls,
+                local_address,
+            ) {
+                Ok(client) => client,
+                Err(error) => {
+                    warn!(tracker = %tracker_url, %error, "Failed to build HTTP tracker client");
+                    self.last_failure_kind = Some(TrackerFailureKind::Network);
+                    self.announce.announce_failure();
+                    return None;
+                }
+            };
+            self.http_clients.insert(local_address, client.clone());
+            client
+        };
 
-                                        // Process through BtAnnounce state machine
-                                        match self.announce.process_announce_response(&tracker_resp) {
-                                            Ok(peers) => {
-                                                self.update_tracker_stats(
-                                                    tracker_url,
-                                                    tracker_resp.interval as u64,
-                                                    tracker_resp
-                                                        .min_interval
-                                                        .map_or(0, u64::from),
-                                                    tracker_resp.seeders.map(i64::from),
-                                                    tracker_resp.leechers.map(i64::from),
-                                                    tracker_resp.tracker_id.as_deref(),
-                                                );
-                                                self.announce.announce_success();
-                                                let interval = self.announce.interval();
-                                                let seeders = self.announce.complete();
-                                                let leechers = self.announce.incomplete();
-                                                Some(AnnounceResult {
-                                                    peers,
-                                                    interval,
-                                                    seeders,
-                                                    leechers,
-                                                    event,
-                                                    tracker_url: tracker_url.to_string(),
-                                                })
-                                            }
-                                            Err(e) => {
-                                                warn!(
-                                                    "[BT] HTTP tracker {} response processing failed: {}",
-                                                    tracker_url, e
-                                                );
-                                                self.last_failure_kind =
-                                                    Some(TrackerFailureKind::MalformedResponse);
-                                                self.announce.announce_failure();
-                                                None
-                                            }
-                                        }
+        match client.get(&url).send().await {
+            Ok(resp) => {
+                if !resp.status().is_success() {
+                    warn!(
+                        "[BT] HTTP tracker {} returned status {}",
+                        tracker_url,
+                        resp.status()
+                    );
+                    self.last_failure_kind = Some(
+                        if resp.status().is_server_error()
+                            || matches!(resp.status().as_u16(), 408 | 425 | 429)
+                        {
+                            TrackerFailureKind::RemoteTemporary
+                        } else {
+                            TrackerFailureKind::TrackerRejected
+                        },
+                    );
+                    self.announce.announce_failure();
+                    return None;
+                }
+
+                match resp.bytes().await {
+                    Ok(body) => {
+                        match aria2_protocol::bittorrent::tracker::response::TrackerResponse::parse(
+                            &body,
+                        ) {
+                            Ok(tracker_resp) => {
+                                if tracker_resp.is_failure() {
+                                    let reason = tracker_resp
+                                        .failure_reason
+                                        .unwrap_or_else(|| "tracker failure".to_string());
+                                    warn!("[BT] HTTP tracker {} failure: {}", tracker_url, reason);
+                                    self.last_failure_kind =
+                                        Some(TrackerFailureKind::TrackerRejected);
+                                    self.announce.announce_failure();
+                                    return None;
+                                }
+
+                                // Process through BtAnnounce state machine
+                                match self.announce.process_announce_response(&tracker_resp) {
+                                    Ok(peers) => {
+                                        self.update_tracker_stats(
+                                            tracker_url,
+                                            tracker_resp.interval as u64,
+                                            tracker_resp.min_interval.map_or(0, u64::from),
+                                            tracker_resp.seeders.map(i64::from),
+                                            tracker_resp.leechers.map(i64::from),
+                                            tracker_resp.tracker_id.as_deref(),
+                                        );
+                                        self.announce.announce_success();
+                                        let interval = self.announce.interval();
+                                        let seeders = self.announce.complete();
+                                        let leechers = self.announce.incomplete();
+                                        Some(AnnounceResult {
+                                            peers,
+                                            interval,
+                                            seeders,
+                                            leechers,
+                                            event,
+                                            tracker_url: tracker_url.to_string(),
+                                        })
                                     }
                                     Err(e) => {
                                         warn!(
-                                            "[BT] HTTP tracker {} response parse failed: {}",
+                                            "[BT] HTTP tracker {} response processing failed: {}",
                                             tracker_url, e
                                         );
                                         self.last_failure_kind =
@@ -863,19 +919,19 @@ impl TrackerAnnouncer {
                                 }
                             }
                             Err(e) => {
-                                warn!("[BT] HTTP tracker {} body read failed: {}", tracker_url, e);
-                                self.last_failure_kind = Some(if e.is_timeout() {
-                                    TrackerFailureKind::Timeout
-                                } else {
-                                    TrackerFailureKind::Network
-                                });
+                                warn!(
+                                    "[BT] HTTP tracker {} response parse failed: {}",
+                                    tracker_url, e
+                                );
+                                self.last_failure_kind =
+                                    Some(TrackerFailureKind::MalformedResponse);
                                 self.announce.announce_failure();
                                 None
                             }
                         }
                     }
                     Err(e) => {
-                        warn!("[BT] HTTP tracker {} request failed: {}", tracker_url, e);
+                        warn!("[BT] HTTP tracker {} body read failed: {}", tracker_url, e);
                         self.last_failure_kind = Some(if e.is_timeout() {
                             TrackerFailureKind::Timeout
                         } else {
@@ -887,11 +943,12 @@ impl TrackerAnnouncer {
                 }
             }
             Err(e) => {
-                warn!(
-                    "[BT] Failed to build HTTP tracker client for {}: {}",
-                    tracker_url, e
-                );
-                self.last_failure_kind = Some(TrackerFailureKind::Network);
+                warn!("[BT] HTTP tracker {} request failed: {}", tracker_url, e);
+                self.last_failure_kind = Some(if e.is_timeout() {
+                    TrackerFailureKind::Timeout
+                } else {
+                    TrackerFailureKind::Network
+                });
                 self.announce.announce_failure();
                 None
             }
@@ -1257,6 +1314,71 @@ mod tests {
         assert_eq!(announcer.announce.announce_list().tier_count(), 3);
 
         server.await.expect("HTTP tracker fixture should exit");
+    }
+
+    #[tokio::test]
+    async fn http_tracker_reuses_one_policy_bound_connection_for_stopped_announce() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tracker reuse fixture");
+        let address = listener
+            .local_addr()
+            .expect("tracker reuse fixture address");
+        let response_body = {
+            let mut response = BTreeMap::new();
+            response.insert(b"interval".to_vec(), BencodeValue::Int(1));
+            response.insert(b"peers".to_vec(), BencodeValue::Bytes(Vec::new()));
+            BencodeValue::Dict(response).encode()
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, peer) = listener.accept().await.expect("tracker should accept once");
+            for _ in 0..2 {
+                let mut request = Vec::new();
+                loop {
+                    let mut byte = [0u8; 1];
+                    socket
+                        .read_exact(&mut byte)
+                        .await
+                        .expect("read tracker request");
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    response_body.len()
+                );
+                socket
+                    .write_all(headers.as_bytes())
+                    .await
+                    .expect("write tracker response headers");
+                socket
+                    .write_all(&response_body)
+                    .await
+                    .expect("write tracker response body");
+            }
+            peer.ip()
+        });
+
+        let tracker_url = format!("http://{address}/announce");
+        let mut announcer = TrackerAnnouncer::new(&[vec![tracker_url]], &None);
+        announcer.set_outbound_network_policy(Arc::new(OutboundNetworkPolicy::single(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+        )));
+        announcer.set_timeouts(Duration::from_secs(2), Duration::from_secs(2));
+        announcer
+            .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await
+            .expect("initial tracker announce should succeed");
+        announcer
+            .announce_stopped(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await;
+
+        assert_eq!(
+            server.await.expect("tracker reuse fixture should finish"),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+        );
     }
 
     #[tokio::test]

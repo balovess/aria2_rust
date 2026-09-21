@@ -8,6 +8,7 @@ use tracing::{debug, warn};
 
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
+use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::AtomicProgress;
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
@@ -50,7 +51,7 @@ impl WebSeedClient {
         crate::http::client_pool::ensure_rustls_provider();
 
         // Build client with sensible defaults for large file downloads
-        let client = build_client(tls)?;
+        let client = build_client(tls, None)?;
 
         Ok(Self {
             base_url: base_url.to_string(),
@@ -71,10 +72,43 @@ impl WebSeedClient {
         stats: Arc<WebSeedStats>,
         tls: &ClientTlsConfig,
     ) -> Result<Self, String> {
+        Self::with_shared_stats_and_tls_and_policy(
+            base_url,
+            stats,
+            tls,
+            &OutboundNetworkPolicy::direct(),
+        )
+    }
+
+    pub(crate) fn with_shared_stats_and_tls_and_policy(
+        base_url: &str,
+        stats: Arc<WebSeedStats>,
+        tls: &ClientTlsConfig,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self, String> {
         debug!(url = base_url, "Creating WebSeedClient with shared stats");
         crate::http::client_pool::ensure_rustls_provider();
 
-        let client = build_client(tls)?;
+        let local_address = if policy.is_direct() {
+            None
+        } else {
+            let url = reqwest::Url::parse(base_url)
+                .map_err(|error| format!("invalid web-seed URL: {error}"))?;
+            let host = url
+                .host_str()
+                .ok_or_else(|| "web-seed URL has no host".to_string())?;
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| "web-seed URL has no port".to_string())?;
+            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+                policy
+                    .source_for(std::net::SocketAddr::new(ip, port))
+                    .map_err(|error| format!("web-seed source selection failed: {error}"))?
+            } else {
+                policy.addresses().into_iter().next()
+            }
+        };
+        let client = build_client(tls, local_address)?;
 
         Ok(Self {
             base_url: base_url.to_string(),
@@ -294,11 +328,17 @@ impl WebSeedClient {
     }
 }
 
-fn build_client(tls: &ClientTlsConfig) -> Result<reqwest::Client, String> {
-    let builder = reqwest::Client::builder()
+fn build_client(
+    tls: &ClientTlsConfig,
+    local_address: Option<std::net::IpAddr>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_max_idle_per_host(4)
         .gzip(false);
+    if let Some(address) = local_address {
+        builder = builder.local_address(address);
+    }
     crate::http::client_identity::apply(builder, tls)
         .map_err(|error| error.to_string())?
         .build()

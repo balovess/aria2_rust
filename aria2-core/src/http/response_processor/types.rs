@@ -99,7 +99,8 @@ pub enum ResponseProcessResult {
 /// mirroring the C++ options accessed via `getOption()`.
 #[derive(Debug, Clone)]
 pub struct ResponseProcessorConfig {
-    /// Whether to derive filename from Content-Disposition header.
+    /// Whether plain `Content-Disposition: filename=` values default to UTF-8.
+    /// `filename*=` uses its declared charset independently.
     pub content_disposition_default_utf8: bool,
     /// Whether the original request accepted gzip encoding (Accept-Encoding: gzip).
     pub accept_gzip: bool,

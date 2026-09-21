@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
@@ -136,6 +137,7 @@ impl BtDownloadCommand {
 
         tracker_tiers = super::super::deduplicate_tracker_tiers(tracker_tiers);
         let mut announcer = TrackerAnnouncer::new(&tracker_tiers, &None);
+        announcer.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
         announcer.set_excluded_tracker_urls(excluded_trackers.clone());
         announcer.set_http_tls_config(tracker_tls);
         announcer.set_websocket_options(&websocket_options);
@@ -151,7 +153,7 @@ impl BtDownloadCommand {
         }
 
         // Set up UDP client for UDP tracker support
-        if let Ok(udp) = UdpTrackerClient::new(0).await {
+        if let Ok(udp) = UdpTrackerClient::new_with_policy(0, &self.outbound_network_policy).await {
             let shared = std::sync::Arc::new(tokio::sync::Mutex::new(udp));
             self.udp_client = Some(std::sync::Arc::clone(&shared));
             announcer.set_udp_client(shared);
@@ -288,8 +290,11 @@ impl BtDownloadCommand {
                 self.register_dht_engine();
             } else {
                 let options = { self.group.recover().options().clone() };
-                let dht_config =
-                    crate::engine::dht_config::build_dht_engine_config(&options).await?;
+                let dht_config = crate::engine::dht_config::build_dht_engine_config_with_policy(
+                    &options,
+                    &self.outbound_network_policy,
+                )
+                .await?;
 
                 match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                     Ok(engine) => {

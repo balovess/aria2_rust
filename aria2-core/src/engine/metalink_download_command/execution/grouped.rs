@@ -1,5 +1,6 @@
 //! Grouped multi-file Metalink and torrent-metaurl execution.
 
+use std::sync::Arc;
 use tracing::{info, warn};
 
 use super::MetalinkDownloadCommand;
@@ -28,6 +29,7 @@ impl MetalinkDownloadCommand {
                 grouped_file_infos: Vec::new(),
                 checkpoint: None,
                 global_limiter: self.global_limiter.clone(),
+                outbound_network_policy: std::sync::Arc::clone(&self.outbound_network_policy),
                 #[cfg(feature = "bittorrent")]
                 public_tracker_catalog: self.public_tracker_catalog.clone(),
                 #[cfg(feature = "bittorrent")]
@@ -267,6 +269,7 @@ impl MetalinkDownloadCommand {
                     if let Some(global_limiter) = self.global_limiter.clone() {
                         bt_cmd.set_global_limiter(global_limiter);
                     }
+                    bt_cmd.set_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
                     #[cfg(feature = "bittorrent")]
                     if let Some(catalog) = self.public_tracker_catalog.clone() {
                         bt_cmd.set_public_tracker_catalog(catalog);

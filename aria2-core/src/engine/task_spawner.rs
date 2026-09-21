@@ -14,6 +14,7 @@ use super::engine_command::TaskResult;
 use crate::dns::dns_cache::DnsCache;
 use crate::error::Aria2Error;
 use crate::network::ConnectionContext;
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -22,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 /// Shared services required while constructing a command.
 pub(crate) struct CommandDependencies {
     pub(crate) dns_cache: Arc<tokio::sync::Mutex<DnsCache>>,
+    pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     pub(crate) global_limiter: Option<RateLimiter>,
     #[cfg(feature = "bittorrent")]
     pub(crate) public_tracker_catalog:
@@ -177,12 +179,13 @@ async fn create_command_for_group(
     #[cfg(feature = "metalink")]
     if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
         let base_uri = group.recover().metalink_base_uri();
-        let mut command = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source(
+        let mut command = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source_policy(
             Arc::clone(&group),
             &metalink_data,
             file_index,
             &options,
             base_uri.as_deref(),
+            &dependencies.outbound_network_policy,
         )?;
         if let Some(limiter) = dependencies.global_limiter.clone() {
             command.set_global_limiter(limiter);
@@ -228,6 +231,7 @@ async fn create_command_for_uri(
             options.dir.as_deref(),
             options.out.as_deref(),
         )?;
+        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
@@ -252,15 +256,18 @@ async fn create_command_for_uri(
                     "Resolved BitTorrent payload has no metadata source".to_string(),
                 ))
             })?;
-        let mut cmd = crate::engine::bt_download_command::BtDownloadCommand::new_with_group(
+        let mut cmd = crate::engine::bt_download_command::BtDownloadCommand::new_with_group_and_mappings_with_policy(
             group,
             &torrent_bytes,
             options,
             output_dir,
+            &[],
+            &dependencies.outbound_network_policy,
         )?;
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
         cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
+        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
@@ -279,6 +286,7 @@ async fn create_command_for_uri(
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
         cmd.set_bt_registry(Arc::clone(&dependencies.bt_registry));
         cmd.set_lpd_manager(Arc::clone(&dependencies.lpd_manager));
+        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
@@ -298,6 +306,7 @@ async fn create_command_for_uri(
         if let Some(limiter) = dependencies.global_limiter.clone() {
             cmd.set_global_limiter(limiter);
         }
+        cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
         if use_async_dns {
             cmd.set_dns_cache(Arc::clone(dns_cache));
             if let Some((hostname, port)) = direct_origin(uri)
@@ -332,13 +341,14 @@ async fn create_command_for_uri(
         None
     };
     let mut cmd =
-        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_addresses(
+        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_addresses_and_policy(
             group,
             uri,
             options,
             output_dir,
             output_name,
             resolved_addresses,
+            Arc::clone(&dependencies.outbound_network_policy),
         )?;
     if let Some(limiter) = dependencies.global_limiter {
         cmd.set_global_limiter(limiter);
@@ -354,6 +364,7 @@ mod tests {
     fn dependencies(dns_cache: Arc<tokio::sync::Mutex<DnsCache>>) -> CommandDependencies {
         CommandDependencies {
             dns_cache,
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             global_limiter: None,
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: Arc::new(

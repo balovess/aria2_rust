@@ -2,10 +2,13 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 
 use tracing::debug;
+
+use crate::network::OutboundNetworkPolicy;
 
 pub struct ReadyConnection {
     pub stream: TcpStream,
@@ -35,6 +38,7 @@ pub struct BtConnectionPool {
     max_idle: usize,
     connect_timeout: Duration,
     stale_threshold: Duration,
+    outbound_network_policy: Arc<OutboundNetworkPolicy>,
 }
 
 impl BtConnectionPool {
@@ -44,6 +48,7 @@ impl BtConnectionPool {
             max_idle: 20,
             connect_timeout: Duration::from_secs(5),
             stale_threshold: Duration::from_secs(30),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
         }
     }
 
@@ -60,12 +65,22 @@ impl BtConnectionPool {
         self
     }
 
+    pub fn with_outbound_network_policy(mut self, policy: Arc<OutboundNetworkPolicy>) -> Self {
+        self.outbound_network_policy = policy;
+        self
+    }
+
     pub async fn prewarm(&mut self, addr: SocketAddr) -> Result<bool, String> {
         if self.contains_addr(&addr) {
             return Ok(false);
         }
 
-        match tokio::time::timeout(self.connect_timeout, TcpStream::connect(addr)).await {
+        match tokio::time::timeout(
+            self.connect_timeout,
+            self.outbound_network_policy.connect(addr),
+        )
+        .await
+        {
             Ok(Ok(stream)) => {
                 self.evict_if_full();
                 self.connections
@@ -178,6 +193,27 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap());
         assert_eq!(pool.len(), 1);
+        assert!(pool.contains_addr(&addr));
+    }
+
+    #[tokio::test]
+    async fn prewarm_uses_policy_source_and_pool_reuses_the_stream() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let policy = Arc::new(OutboundNetworkPolicy::single("127.0.0.1".parse().unwrap()));
+        let accepted = tokio::spawn(async move {
+            let (_, peer) = listener.accept().await.unwrap();
+            peer
+        });
+
+        let mut pool = BtConnectionPool::new().with_outbound_network_policy(policy);
+        assert!(pool.prewarm(addr).await.unwrap());
+        let connection = pool.try_take(&addr).unwrap();
+        assert_eq!(
+            accepted.await.unwrap().ip(),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        pool.return_connection(connection);
         assert!(pool.contains_addr(&addr));
     }
 

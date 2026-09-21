@@ -50,6 +50,8 @@ mod tests;
 // internal file layout.
 pub use connection::{should_inflate_content_encoding, supports_persistent_connection};
 pub use filename::determine_filename;
+pub(crate) use filename::determine_filename_from_response;
+pub(crate) use filename::extract_filename_from_url;
 pub use processor::HttpResponseProcessor;
 pub use range::validate_response_range;
 pub use types::{ResponseProcessResult, ResponseProcessorConfig};

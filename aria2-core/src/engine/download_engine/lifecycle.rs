@@ -51,6 +51,7 @@ impl DownloadEngine {
         let ctx = super::super::engine_loop::EngineLoopContext {
             group_man,
             dns_cache: Arc::clone(&self.dns_cache),
+            outbound_network_policy: Arc::clone(&self.outbound_network_policy),
             auto_save: self.auto_save.take(),
             auto_save_dirty_signal: self.auto_save_dirty_signal.take(),
             // Share the engine's bus so listeners registered before the loop are reached.

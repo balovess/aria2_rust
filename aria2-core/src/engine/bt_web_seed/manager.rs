@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 use super::client::WebSeedClient;
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
+use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::AtomicProgress;
 
 /// Manages multiple web-seed endpoints with automatic fallback.
@@ -62,6 +63,22 @@ impl WebSeedManager {
         total_length: u64,
         tls: &ClientTlsConfig,
     ) -> Result<Self, String> {
+        Self::new_with_tls_and_policy(
+            urls,
+            piece_length,
+            total_length,
+            tls,
+            &OutboundNetworkPolicy::direct(),
+        )
+    }
+
+    pub(crate) fn new_with_tls_and_policy(
+        urls: Vec<String>,
+        piece_length: u32,
+        total_length: u64,
+        tls: &ClientTlsConfig,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self, String> {
         debug!(
             count = urls.len(),
             "Creating WebSeedManager with {} seed(s)",
@@ -72,7 +89,14 @@ impl WebSeedManager {
 
         let clients = urls
             .into_iter()
-            .map(|url| WebSeedClient::with_shared_stats_and_tls(&url, stats.clone(), tls))
+            .map(|url| {
+                WebSeedClient::with_shared_stats_and_tls_and_policy(
+                    &url,
+                    stats.clone(),
+                    tls,
+                    policy,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Self {

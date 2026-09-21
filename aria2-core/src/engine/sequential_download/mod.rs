@@ -26,6 +26,14 @@ pub struct GapDownloadResult {
     pub error: Option<Aria2Error>,
 }
 
+/// A response whose headers have been inspected before the output path was
+/// finalized. The sequential downloader can consume its body without
+/// issuing a second GET request.
+pub(crate) struct PreparedHttpResponse {
+    pub response: reqwest::Response,
+    pub effective_uri: String,
+}
+
 pub struct SequentialDownloader {
     pub(crate) client: Arc<reqwest::Client>,
     pub(crate) output_path: std::path::PathBuf,
@@ -39,6 +47,9 @@ pub struct SequentialDownloader {
     /// When `Some`, tokens are acquired after the per-download limiter
     /// in `download_flow.rs` and `gap_download.rs`.
     pub(crate) global_limiter: Option<RateLimiter>,
+    /// The first GET response, when filename metadata had to be read before
+    /// collision resolution and resume inspection.
+    pub(crate) prepared_response: Option<PreparedHttpResponse>,
 }
 
 impl SequentialDownloader {
@@ -62,7 +73,13 @@ impl SequentialDownloader {
             group,
             progress,
             global_limiter,
+            prepared_response: None,
         }
+    }
+
+    pub(crate) fn with_prepared_response(mut self, response: PreparedHttpResponse) -> Self {
+        self.prepared_response = Some(response);
+        self
     }
 
     /// Non-blocking cancellation check.

@@ -13,17 +13,216 @@ use crate::engine::concurrent_download::{ConcurrentDownloadResult, ConcurrentDow
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::range_prober::RangeProber;
 use crate::engine::retry_policy::RetryPolicy;
-use crate::engine::sequential_download::SequentialDownloader;
+use crate::engine::sequential_download::{PreparedHttpResponse, SequentialDownloader};
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::file_allocation;
 use crate::filesystem::file_allocation_man;
 use crate::filesystem::resume_helper::ResumeHelper;
+use crate::http::digest_auth::DigestAuthChallenge;
+use crate::http::request::HttpMethod;
+use crate::http::response_processor::determine_filename_from_response;
+use crate::http::{
+    AuthChallengeResult, AuthConfigFactory, AuthResolveOptions, AuthScheme, HttpAuthChallenge,
+    HttpSkipResponseHandler,
+};
 use crate::request::request_group::{DownloadResultCode, GroupId};
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::DownloadCommand;
 
 impl DownloadCommand {
+    async fn retry_get_after_auth_challenge(
+        &self,
+        response: reqwest::Response,
+        current_url: &reqwest::Url,
+        cookie_helper: &CookieHelper,
+        auth_factory: &mut AuthConfigFactory,
+        auth_options: &AuthResolveOptions,
+        authentication_used: bool,
+    ) -> reqwest::Response {
+        let status_code = response.status().as_u16();
+        if status_code != 401 && status_code != 407 {
+            return response;
+        }
+
+        let is_proxy = status_code == 407;
+        let header_name = if is_proxy {
+            "proxy-authenticate"
+        } else {
+            "www-authenticate"
+        };
+        let auth_header = response
+            .headers()
+            .get(header_name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let scheme = auth_header
+            .as_deref()
+            .and_then(AuthScheme::from_header)
+            .or((!authentication_used).then_some(AuthScheme::Basic));
+        let Some(scheme) = scheme else {
+            return response;
+        };
+
+        let challenge = HttpAuthChallenge {
+            scheme: scheme.clone(),
+            realm: auth_header
+                .as_deref()
+                .map(HttpSkipResponseHandler::extract_realm)
+                .unwrap_or_default(),
+            is_proxy,
+            digest_challenge: (scheme == AuthScheme::Digest)
+                .then(|| {
+                    auth_header
+                        .as_deref()
+                        .and_then(|header| DigestAuthChallenge::parse(header).ok())
+                })
+                .flatten(),
+        };
+
+        let AuthChallengeResult::RetryWithAuth {
+            authorization_header,
+            is_proxy,
+        } = crate::http::handle_auth_challenge(
+            &challenge,
+            auth_factory,
+            current_url,
+            auth_options,
+            HttpMethod::Get,
+            authentication_used,
+            1,
+        )
+        else {
+            return response;
+        };
+
+        let header_name = if is_proxy {
+            "Proxy-Authorization"
+        } else {
+            "Authorization"
+        };
+        let cookie_header = cookie_helper.build_cookie_header_from_url(current_url);
+        let request = self.request_policy.apply(
+            self.client.get(current_url.as_str()),
+            (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
+            &[(header_name.to_string(), authorization_header)],
+        );
+        let Ok(retry_response) = request.send().await else {
+            return response;
+        };
+        cookie_helper.extract_and_store_cookies(current_url.as_str(), &retry_response);
+
+        // Let the normal response loop handle redirects and HTTP errors. A
+        // second auth challenge remains owned by the established downloader.
+        if retry_response.status().as_u16() == 401 || retry_response.status().as_u16() == 407 {
+            response
+        } else {
+            retry_response
+        }
+    }
+
+    async fn send_head_with_redirects(&self, uri: &str) -> Option<reqwest::Response> {
+        let mut current_url = reqwest::Url::parse(uri).ok()?;
+        let cookie_helper = self.create_cookie_helper();
+        let initial_scheme = current_url.scheme().to_owned();
+        let options = self.group.recover().options_arc();
+        let auth_context = crate::engine::http_auth::from_options(&options, &initial_scheme);
+        let (mut auth_factory, auth_options) = (auth_context.factory, auth_context.options);
+
+        for _ in 0..=crate::http::skip_response::MAX_REDIRECT_COUNT {
+            let cookie_header = cookie_helper.build_cookie_header_from_url(&current_url);
+            let authorization =
+                auth_factory.resolve_basic_authorization(&current_url, &auth_options);
+            let request = self.request_policy.apply_with_basic_auth(
+                self.client.head(current_url.as_str()),
+                (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
+                &[],
+                authorization.as_deref(),
+            );
+            let response = request.send().await.ok()?;
+            cookie_helper.extract_and_store_cookies(current_url.as_str(), &response);
+
+            let status_code = response.status().as_u16();
+            if !matches!(status_code, 300..=303 | 307 | 308) {
+                return Some(response);
+            }
+
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())?;
+            current_url = current_url.join(location).ok()?;
+        }
+
+        None
+    }
+
+    /// Read the first ordinary GET response before finalizing an inferred
+    /// output path. The sequential downloader can reuse this response body;
+    /// a later concurrent decision may deliberately discard it and issue
+    /// range requests instead.
+    async fn send_get_with_redirects(&self, uri: &str) -> Option<PreparedHttpResponse> {
+        let mut current_url = reqwest::Url::parse(uri).ok()?;
+        let cookie_helper = self.create_cookie_helper();
+        let initial_scheme = current_url.scheme().to_owned();
+        let options = self.group.recover().options_arc();
+        let auth_context = crate::engine::http_auth::from_options(&options, &initial_scheme);
+        let (mut auth_factory, auth_options) = (auth_context.factory, auth_context.options);
+
+        for _ in 0..=crate::http::skip_response::MAX_REDIRECT_COUNT {
+            let cookie_header = cookie_helper.build_cookie_header_from_url(&current_url);
+            let authorization =
+                auth_factory.resolve_basic_authorization(&current_url, &auth_options);
+            let request = self.request_policy.apply_with_basic_auth(
+                self.client.get(current_url.as_str()),
+                (!cookie_header.is_empty()).then_some(cookie_header.as_str()),
+                &[],
+                authorization.as_deref(),
+            );
+            let mut response = request.send().await.ok()?;
+            cookie_helper.extract_and_store_cookies(current_url.as_str(), &response);
+            response = self
+                .retry_get_after_auth_challenge(
+                    response,
+                    &current_url,
+                    &cookie_helper,
+                    &mut auth_factory,
+                    &auth_options,
+                    authorization.is_some(),
+                )
+                .await;
+
+            if !crate::http::response::is_redirect_status(response.status().as_u16()) {
+                return Some(PreparedHttpResponse {
+                    response,
+                    effective_uri: current_url.to_string(),
+                });
+            }
+
+            let Some(location) = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+            else {
+                return Some(PreparedHttpResponse {
+                    response,
+                    effective_uri: current_url.to_string(),
+                });
+            };
+
+            let Ok(next_url) = current_url.join(location) else {
+                return Some(PreparedHttpResponse {
+                    response,
+                    effective_uri: current_url.to_string(),
+                });
+            };
+            self.group.recover_mut().add_redirect_uri(next_url.as_str());
+            current_url = next_url;
+        }
+
+        None
+    }
+
     async fn execute_attempt(&mut self, uri: &str) -> Result<()> {
         debug!(
             "Starting download: {} -> {}",
@@ -43,12 +242,6 @@ impl DownloadCommand {
         };
 
         let url_for_head = reqwest::Url::parse(uri).ok();
-        let cookie_hdr_head = if let Some(ref url) = url_for_head {
-            CookieHelper::new(Arc::clone(&self.cookie_storage), self.cookie_file.clone())
-                .build_cookie_header_from_url(url)
-        } else {
-            String::new()
-        };
         let options = self.group.recover().options_arc();
         let known_total_length = self.group.recover().total_length();
         let needs_metadata_probe =
@@ -57,16 +250,43 @@ impl DownloadCommand {
             || (options.use_head && known_total_length == 0)
             || needs_metadata_probe;
         let head_resp = if should_head {
-            let head_req = self.request_policy.apply(
-                self.client.head(uri),
-                (!cookie_hdr_head.is_empty()).then_some(cookie_hdr_head.as_str()),
-                &[],
-            );
-            head_req.send().await.ok()
+            self.send_head_with_redirects(uri).await
         } else {
             None
         };
-        let head_content_type = head_resp.as_ref().and_then(|response| {
+        let mut prepared_get = if !should_head
+            && !options.uses_memory_download()
+            && !self.output_name_explicit
+            && !self.output_path_resolved
+        {
+            self.send_get_with_redirects(uri).await
+        } else {
+            None
+        };
+        let response_for_metadata = prepared_get
+            .as_ref()
+            .map(|prepared| &prepared.response)
+            .or(head_resp.as_ref());
+
+        // An explicit output name is authoritative. For an inferred HTTP
+        // name, the first successful response is the metadata seam at which
+        // Content-Disposition can replace the URL-derived basename, before
+        // collision resolution, resume inspection, or allocation.
+        if !self.output_name_explicit
+            && !self.output_path_resolved
+            && let Some(response) = response_for_metadata
+            && response.status().is_success()
+        {
+            let filename = determine_filename_from_response(
+                response,
+                options.content_disposition_default_utf8,
+            );
+            if let Some(parent) = self.output_path.parent() {
+                self.output_path = parent.join(filename);
+            }
+        }
+
+        let head_content_type = response_for_metadata.and_then(|response| {
             response
                 .headers()
                 .get(reqwest::header::CONTENT_TYPE)
@@ -80,7 +300,7 @@ impl DownloadCommand {
             }
         }
 
-        let (total_length, head_supports_range) = if let Some(ref resp) = head_resp {
+        let (total_length, head_supports_range) = if let Some(resp) = response_for_metadata {
             let tl = resp
                 .headers()
                 .get(reqwest::header::CONTENT_LENGTH)
@@ -377,6 +597,9 @@ impl DownloadCommand {
             if self.should_use_concurrent(total_length, supports_range, split)
                 && !options.http_accept_gzip
             {
+                // A full prepared response cannot satisfy segmented range
+                // requests. Drop it before entering the concurrent adapter.
+                let _ = prepared_get.take();
                 if resume_state.should_resume {
                     info!(
                         "Concurrent mode + resume: existing {} bytes, continuing from offset {}",
@@ -463,6 +686,9 @@ impl DownloadCommand {
                 Arc::clone(&self.progress),
                 self.global_limiter.clone(),
             );
+            if let Some(prepared) = prepared_get.take() {
+                sequential_downloader = sequential_downloader.with_prepared_response(prepared);
+            }
             let result = sequential_downloader.execute_with_retry(
                 uri,
                 &resume_state,

@@ -304,6 +304,26 @@ impl BtDownloadCommand {
         Self::new_with_group_and_mappings(group, torrent_bytes, options, output_dir, &[])
     }
 
+    /// Construct a command with the engine's outbound source policy already
+    /// installed, so the shared uTP socket is bound correctly at creation.
+    pub(crate) fn new_with_group_and_mappings_with_policy(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        Self::new_with_group_and_mappings_inner(
+            group,
+            torrent_bytes,
+            options,
+            output_dir,
+            file_mappings,
+            policy,
+        )
+    }
+
     /// Construct a command for an externally owned group and remap selected
     /// torrent entries to Metalink output paths and mirrors.
     pub(crate) fn new_with_group_and_mappings(
@@ -313,8 +333,26 @@ impl BtDownloadCommand {
         output_dir: Option<&str>,
         file_mappings: &[BtFileMapping],
     ) -> Result<Self> {
+        Self::new_with_group_and_mappings_inner(
+            group,
+            torrent_bytes,
+            options,
+            output_dir,
+            file_mappings,
+            &crate::network::OutboundNetworkPolicy::direct(),
+        )
+    }
+
+    fn new_with_group_and_mappings_inner(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
         let gid = group.recover().gid();
-        let mut command = Self::new(gid, torrent_bytes, options, output_dir)?;
+        let mut command = Self::new_with_policy(gid, torrent_bytes, options, output_dir, policy)?;
         let current_info_hash = command.group.recover().get_bt_info_hash_hex();
         let existing_context = group.recover().get_download_context();
         let parsed_context = if existing_context.as_ref().is_some_and(|context| {
@@ -419,6 +457,22 @@ impl BtDownloadCommand {
         torrent_bytes: &[u8],
         options: &DownloadOptions,
         output_dir: Option<&str>,
+    ) -> Result<Self> {
+        Self::new_with_policy(
+            gid,
+            torrent_bytes,
+            options,
+            output_dir,
+            &crate::network::OutboundNetworkPolicy::direct(),
+        )
+    }
+
+    pub(crate) fn new_with_policy(
+        gid: GroupId,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        policy: &crate::network::OutboundNetworkPolicy,
     ) -> Result<Self> {
         let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
             .map_err(|e| {
@@ -563,9 +617,24 @@ impl BtDownloadCommand {
             Arc::new(std::sync::Mutex::new(storage))
         };
         let utp_socket = if options.enable_utp {
+            let configured_source = policy.addresses().into_iter().next();
             let socket = match options.utp_listen_port {
-                Some(port) => aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
-                None => aria2_protocol::bittorrent::utp::UtpSocket::bind_any(),
+                Some(port) => configured_source.map_or_else(
+                    || aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+                    |source| {
+                        aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                            std::net::SocketAddr::new(source, port),
+                        )
+                    },
+                ),
+                None => configured_source.map_or_else(
+                    aria2_protocol::bittorrent::utp::UtpSocket::bind_any,
+                    |source| {
+                        aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                            std::net::SocketAddr::new(source, 0),
+                        )
+                    },
+                ),
             }
             .map_err(|error| {
                 Aria2Error::Fatal(FatalError::Config(format!(
@@ -660,6 +729,7 @@ impl BtDownloadCommand {
 
             // Process-wide rate limiter (set via set_global_limiter after construction)
             global_limiter: None,
+            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
 
             peer_rejection: crate::engine::bt_peer_storage::PeerRejectionState::shared(),
             peer_storage,

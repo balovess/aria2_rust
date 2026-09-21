@@ -10,7 +10,6 @@ use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
 use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
 use crate::http::response::is_redirect_status;
 use crate::http::skip_response::AuthScheme;
-use crate::util::rwlock_ext::RwLockRecover;
 
 use super::SequentialDownloader;
 
@@ -41,35 +40,6 @@ pub(super) struct AuthRetryRequest<'a> {
 }
 
 impl SequentialDownloader {
-    pub(super) fn auth_context(&self, scheme: &str) -> (AuthConfigFactory, AuthResolveOptions) {
-        let (auth_opts, netrc_path) = {
-            let group = self.group.recover();
-            let options = group.options();
-            let (proxy_user, proxy_passwd) = options.proxy_credentials_for_scheme(scheme);
-            (
-                AuthResolveOptions {
-                    http_auth_challenge: options.http_auth_challenge,
-                    no_netrc: options.no_netrc,
-                    http_user: options.http_user.clone(),
-                    http_passwd: options.http_passwd.clone(),
-                    ftp_user: options.ftp_user.clone(),
-                    ftp_passwd: options.ftp_passwd.clone(),
-                    proxy_user,
-                    proxy_passwd,
-                },
-                options.netrc_path.clone(),
-            )
-        };
-
-        let mut auth_factory = AuthConfigFactory::new();
-        if let Some(netrc_path) = netrc_path
-            && let Err(error) = auth_factory.load_netrc_file(std::path::Path::new(&netrc_path))
-        {
-            tracing::debug!("Failed to load netrc file {}: {}", netrc_path, error);
-        }
-        (auth_factory, auth_opts)
-    }
-
     /// Attempt an authentication retry when a 401/407 response is received.
     ///
     /// Returns a completed result or a redirect target after the auth retry.

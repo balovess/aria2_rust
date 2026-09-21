@@ -21,6 +21,7 @@
 //! ```
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, trace, warn};
 
@@ -196,6 +197,7 @@ impl BtDownloadCommand {
         let lifecycle_notify = self.group.recover().lifecycle_notifier();
         let lifecycle_wait = lifecycle_notify.notified();
         tokio::pin!(lifecycle_wait);
+        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
         let mut connect_future = Box::pin(BtPeerInteraction::connect_peer_ready(
             peer,
             info_hash_raw,
@@ -204,6 +206,7 @@ impl BtDownloadCommand {
             piece_length,
             total_size,
             self.utp_socket.clone(),
+            &outbound_network_policy,
         ));
 
         loop {

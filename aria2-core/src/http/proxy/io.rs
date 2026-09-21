@@ -11,6 +11,7 @@ use tracing::{debug, info};
 
 use crate::error::{Aria2Error, Result};
 use crate::http::header_processor::{HttpHeaderProcessor, HttpResponseHead};
+use crate::network::OutboundNetworkPolicy;
 
 use super::config::HttpProxyConfig;
 
@@ -86,6 +87,30 @@ pub(crate) async fn connect_to_proxy(config: &HttpProxyConfig) -> Result<TcpStre
             Aria2Error::Network(format!("Failed to connect to proxy '{}': {}", addr, e))
         })?;
 
+    info!("Connected to proxy at {}", addr);
+    Ok(stream)
+}
+
+/// Connect to a proxy through the shared outbound source policy.
+pub(crate) async fn connect_to_proxy_with_policy(
+    config: &HttpProxyConfig,
+    policy: &OutboundNetworkPolicy,
+) -> Result<TcpStream> {
+    let addr = format!("{}:{}", config.proxy_host, config.proxy_port);
+    debug!("Connecting to proxy at {} through outbound policy", addr);
+    let stream = tokio::time::timeout(
+        config.connect_timeout,
+        policy.connect_host(&config.proxy_host, config.proxy_port),
+    )
+    .await
+    .map_err(|_| {
+        Aria2Error::Network(format!(
+            "Timeout connecting to proxy {} ({}s)",
+            addr,
+            config.connect_timeout.as_secs()
+        ))
+    })?
+    .map_err(|e| Aria2Error::Network(format!("Failed to connect to proxy '{}': {}", addr, e)))?;
     info!("Connected to proxy at {}", addr);
     Ok(stream)
 }

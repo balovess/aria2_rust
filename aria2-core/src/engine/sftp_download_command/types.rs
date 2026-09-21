@@ -14,6 +14,7 @@ use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
 use crate::http::auth::netrc::find_netrc_file;
 use crate::http::auth::{AuthConfigFactory, AuthResolveOptions};
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -56,6 +57,8 @@ pub struct SftpDownloadCommand {
     /// When `Some`, passed down to `ThrottledWriter` for this download.
     pub(super) global_limiter: Option<RateLimiter>,
     pub(super) checkpoint: Option<ProgressCheckpoint>,
+    /// Process-wide policy used to create the SSH TCP stream.
+    pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
 }
 
 /// Source-compatible SFTP URI fields before credential resolution.
@@ -160,6 +163,7 @@ impl SftpDownloadCommand {
             remote_path: parsed.remote_path,
             global_limiter: None,
             checkpoint: None,
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
         })
     }
 
@@ -202,7 +206,12 @@ impl SftpDownloadCommand {
             remote_path: parsed.remote_path,
             global_limiter: None,
             checkpoint: None,
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
         })
+    }
+
+    pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
+        self.outbound_network_policy = policy;
     }
 
     /// Parse an sftp:// URI into its component parts.

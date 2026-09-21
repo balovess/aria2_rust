@@ -14,6 +14,7 @@ use super::engine_command::{
 };
 use crate::dns::dns_cache::DnsCache;
 use crate::engine::retry_policy::RetryPolicy;
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group_man::RequestGroupMan;
 use crate::retry::RetryStats;
@@ -47,6 +48,8 @@ pub struct DownloadEngine {
     /// DNS resolution cache for avoiding repeated lookups.
     /// Created during engine initialization and passed down via dependency injection.
     pub(crate) dns_cache: Arc<Mutex<DnsCache>>,
+    /// Process-wide source-address policy for outgoing sockets.
+    pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     /// When true, the engine stays alive even with no pending/running commands
     /// (used for RPC listen mode). The loop only exits on shutdown signal.
     pub(crate) keep_alive: bool,
@@ -134,6 +137,7 @@ impl DownloadEngine {
             auto_save: None,
             auto_save_dirty_signal: None,
             dns_cache: Arc::new(Mutex::new(DnsCache::new())),
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             keep_alive: false,
             #[cfg(feature = "bittorrent")]
             bt_registry: Arc::new(std::sync::RwLock::new(BtRegistry::new())),
@@ -290,6 +294,15 @@ impl DownloadEngine {
             |servers| DnsCache::with_dns_servers(timeout, servers),
         );
         self.dns_cache = Arc::new(Mutex::new(cache));
+    }
+
+    /// Configure the process-wide policy used by all outbound protocol adapters.
+    pub fn set_outbound_network_policy(&mut self, policy: Arc<OutboundNetworkPolicy>) {
+        self.outbound_network_policy = policy;
+    }
+
+    pub fn outbound_network_policy(&self) -> Arc<OutboundNetworkPolicy> {
+        Arc::clone(&self.outbound_network_policy)
     }
 
     /// Mark one connected address as bad while retaining other resolved
