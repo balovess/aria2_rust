@@ -237,6 +237,48 @@ impl BtRegistry {
         self.dht_engine = Some(engine);
     }
 
+    /// Set the process-wide DHT engine shared by all BT downloads.
+    pub fn set_global_dht_engine(
+        &mut self,
+        engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) {
+        trace!("BtRegistry::set_global_dht_engine");
+        self.global_dht_engine = Some(Arc::clone(&engine));
+        self.dht_engine = Some(engine);
+    }
+
+    /// Get the process-wide DHT engine, if the BT session has started it.
+    pub fn get_global_dht_engine(
+        &self,
+    ) -> Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        self.global_dht_engine.as_ref().map(Arc::clone)
+    }
+
+    /// Return whether a command handle refers to the process-wide engine.
+    pub fn is_global_dht_engine(
+        &self,
+        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) -> bool {
+        self.global_dht_engine
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, engine))
+    }
+
+    /// Take the process-wide engine during final session shutdown.
+    pub fn take_global_dht_engine(
+        &mut self,
+    ) -> Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        let engine = self.global_dht_engine.take();
+        if engine.as_ref().is_some_and(|current| {
+            self.dht_engine
+                .as_ref()
+                .is_some_and(|alias| Arc::ptr_eq(alias, current))
+        }) {
+            self.dht_engine = None;
+        }
+        engine
+    }
+
     /// Register the DHT engine owned by one active download.
     pub fn set_dht_engine_for_gid(
         &mut self,
@@ -302,14 +344,27 @@ impl BtRegistry {
 
     /// Clone all currently registered DHT engines for a status snapshot.
     pub fn get_dht_engines(&self) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
-        if self.dht_engines.is_empty() {
-            return self.dht_engine.iter().cloned().collect();
+        let mut engines = Vec::with_capacity(self.dht_engines.len() + 1);
+        if let Some(engine) = self.global_dht_engine.as_ref() {
+            engines.push(Arc::clone(engine));
         }
-        self.dht_engines.values().cloned().collect()
+        for engine in self.dht_engines.values() {
+            if !engines.iter().any(|current| Arc::ptr_eq(current, engine)) {
+                engines.push(Arc::clone(engine));
+            }
+        }
+        if engines.is_empty() {
+            self.dht_engine.iter().cloned().collect()
+        } else {
+            engines
+        }
     }
 
     fn refresh_dht_engine_alias(&mut self) {
-        self.dht_engine = self.dht_engines.values().next().cloned();
+        self.dht_engine = self
+            .global_dht_engine
+            .clone()
+            .or_else(|| self.dht_engines.values().next().cloned());
     }
 
     // -----------------------------------------------------------------------

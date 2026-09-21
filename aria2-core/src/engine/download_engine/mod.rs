@@ -53,8 +53,8 @@ pub struct DownloadEngine {
     /// BitTorrent registry -- maps GID to BtObject (DownloadContext,
     /// etc.). In C++ aria2, this is a global singleton in DownloadEngine.
     /// Here it is owned by the engine and accessible via `bt_registry()`.
-    /// Used for info-hash reverse lookup, peer blocklist, and BT component
-    /// coordination across all active downloads.
+    /// Used for info-hash reverse lookup, peer blocklist, shared DHT status,
+    /// and BT component coordination across all active downloads.
     #[cfg(feature = "bittorrent")]
     pub(crate) bt_registry: Arc<std::sync::RwLock<BtRegistry>>,
     /// Process-wide public tracker catalog shared by all BT downloads.
@@ -272,6 +272,24 @@ impl DownloadEngine {
     /// Get a reference to the DNS cache for dependency injection.
     pub fn dns_cache(&self) -> &Arc<Mutex<DnsCache>> {
         &self.dns_cache
+    }
+
+    /// Configure the process-wide DNS lookup timeout before the engine starts.
+    pub fn set_dns_timeout(&mut self, timeout: Duration) {
+        self.set_dns_config(timeout, None);
+    }
+
+    /// Configure the process-wide DNS timeout and optional explicit nameservers.
+    pub fn set_dns_config(
+        &mut self,
+        timeout: Duration,
+        servers: Option<Vec<std::net::SocketAddr>>,
+    ) {
+        let cache = servers.map_or_else(
+            || DnsCache::with_dns_timeout(timeout),
+            |servers| DnsCache::with_dns_servers(timeout, servers),
+        );
+        self.dns_cache = Arc::new(Mutex::new(cache));
     }
 
     /// Mark one connected address as bad while retaining other resolved

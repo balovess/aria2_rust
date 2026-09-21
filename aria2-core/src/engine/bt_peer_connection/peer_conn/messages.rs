@@ -2,10 +2,34 @@
 //! and low-level write helpers for [`BtPeerConn`].
 
 use crate::error::{Aria2Error, FatalError, RecoverableError, Result};
+use aria2_protocol::bittorrent::message::types::BtMessage;
 
 use super::{BtPeerConn, InnerConnection};
 
 impl BtPeerConn {
+    pub(crate) async fn send_bt_message(&mut self, message: &BtMessage) -> Result<()> {
+        match &mut self.inner {
+            InnerConnection::Plain(connection) => {
+                connection.send_message(message).await.map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e,
+                    })
+                })
+            }
+            InnerConnection::Encrypted(connection) => {
+                connection.send_message(message).await.map_err(|e| {
+                    Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+                        message: e,
+                    })
+                })
+            }
+            InnerConnection::Utp(connection) => {
+                use aria2_protocol::bittorrent::message::serializer::serialize;
+                connection.send_message(&serialize(message)).await
+            }
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Keep-alive send (uses write_raw, kept here with other senders)
     // -----------------------------------------------------------------------
@@ -444,5 +468,25 @@ impl BtPeerConn {
             }
         }
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::engine::bt_upload_session::BtUploadTransport for BtPeerConn {
+    async fn send_upload_message(
+        &mut self,
+        message: &BtMessage,
+    ) -> std::result::Result<(), String> {
+        self.send_bt_message(message)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn send_upload_choke(&mut self) -> std::result::Result<(), String> {
+        self.send_choke().await.map_err(|error| error.to_string())
+    }
+
+    async fn send_upload_unchoke(&mut self) -> std::result::Result<(), String> {
+        self.send_unchoke().await.map_err(|error| error.to_string())
     }
 }

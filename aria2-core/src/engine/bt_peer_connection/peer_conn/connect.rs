@@ -102,6 +102,8 @@ impl BtPeerConn {
                     ),
                     pending_pex_peers: Vec::new(),
                     pex_enabled: true,
+                    upload_state: None,
+                    upload_progress: None,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -182,6 +184,8 @@ impl BtPeerConn {
                     ),
                     pending_pex_peers: Vec::new(),
                     pex_enabled: true,
+                    upload_state: None,
+                    upload_progress: None,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -218,6 +222,8 @@ impl BtPeerConn {
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            upload_state: None,
+            upload_progress: None,
         }
     }
 
@@ -251,6 +257,8 @@ impl BtPeerConn {
             stats: PeerStats::new(peer_id.unwrap_or([0u8; 20]), endpoint),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            upload_state: None,
+            upload_progress: None,
         }
     }
 
@@ -305,6 +313,8 @@ impl BtPeerConn {
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            upload_state: None,
+            upload_progress: None,
         }
     }
 
@@ -375,6 +385,8 @@ impl BtPeerConn {
             stats: PeerStats::new([0u8; 20], addr),
             pending_pex_peers: Vec::new(),
             pex_enabled: true,
+            upload_state: None,
+            upload_progress: None,
         })
     }
 }

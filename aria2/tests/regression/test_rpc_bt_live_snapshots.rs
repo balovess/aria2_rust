@@ -219,7 +219,7 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_success(&peers_resp);
     let peers = peers_resp.result.unwrap();
     assert_eq!(peers.as_array().unwrap().len(), 1);
-    assert_eq!(peers[0]["peerId"], "72".repeat(20));
+    assert_eq!(peers[0]["peerId"], "r".repeat(20));
     assert_eq!(peers[0]["ip"], "127.0.0.1");
     assert_eq!(peers[0]["port"], "0");
     assert_eq!(peers[0]["bitfield"], "80");

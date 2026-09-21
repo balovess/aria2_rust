@@ -45,6 +45,8 @@ pub struct TorrentMeta {
     pub encoding: Option<String>,
     /// Web seed URLs from url-list field (BEP 19)
     pub web_seeds: Vec<String>,
+    /// DHT bootstrap nodes from the optional top-level nodes field.
+    pub nodes: Vec<(String, u16)>,
 }
 
 impl TorrentMeta {
@@ -103,6 +105,7 @@ impl TorrentMeta {
 
         // Parse url-list (BEP 19 Web Seeds)
         let web_seeds = Self::parse_url_list(&root);
+        let nodes = Self::parse_nodes(&root);
 
         let total_size = Self::compute_total_size(&info_dict);
         info!(
@@ -125,6 +128,7 @@ impl TorrentMeta {
             created_by,
             encoding,
             web_seeds,
+            nodes,
         })
     }
 
@@ -167,6 +171,26 @@ impl TorrentMeta {
             }
             _ => Vec::new(), // Missing or wrong type
         }
+    }
+
+    fn parse_nodes(root: &BencodeValue) -> Vec<(String, u16)> {
+        root.dict_get(b"nodes")
+            .and_then(BencodeValue::as_list)
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let pair = entry.as_list()?;
+                if pair.len() != 2 {
+                    return None;
+                }
+                let host = pair[0].as_str()?.trim();
+                let port = pair[1].as_int()?.try_into().ok()?;
+                if port == 0 {
+                    return None;
+                }
+                (!host.is_empty()).then(|| (host.to_owned(), port))
+            })
+            .collect()
     }
 
     fn parse_info_dict(info: &BencodeValue) -> Result<InfoDict, String> {
@@ -810,6 +834,19 @@ mod tests {
             BencodeValue::Bytes(b"aria2-rust-tester".to_vec()),
         );
         root.insert(b"creation date".to_vec(), BencodeValue::Int(1700000000));
+        root.insert(
+            b"nodes".to_vec(),
+            BencodeValue::List(vec![
+                BencodeValue::List(vec![
+                    BencodeValue::Bytes(b" router.example ".to_vec()),
+                    BencodeValue::Int(6881),
+                ]),
+                BencodeValue::List(vec![
+                    BencodeValue::Bytes(b"invalid-port".to_vec()),
+                    BencodeValue::Int(0),
+                ]),
+            ]),
+        );
 
         let mut info = BTreeMap::new();
         info.insert(b"name".to_vec(), BencodeValue::Bytes(b"test.bin".to_vec()));
@@ -825,6 +862,7 @@ mod tests {
         assert_eq!(t.comment.as_deref(), Some("A test torrent"));
         assert_eq!(t.created_by.as_deref(), Some("aria2-rust-tester"));
         assert_eq!(t.creation_date, Some(1700000000));
+        assert_eq!(t.nodes, vec![("router.example".to_string(), 6881)]);
         assert!(t.is_private());
     }
 

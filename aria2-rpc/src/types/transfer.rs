@@ -143,8 +143,10 @@ pub struct TrackerInfo {
     )]
     pub interval: u64,
     pub min_interval: u64,
-    pub seeders: i64,
-    pub leechers: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seeders: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub leechers: Option<i64>,
     pub tracker_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seconds_since_last_success: Option<u64>,

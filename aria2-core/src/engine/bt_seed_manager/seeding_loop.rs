@@ -83,7 +83,7 @@ impl BtSeedManager {
                     .await
             {
                 debug!(
-                    "[Seed] Re-announced to {} ({} seeders, {} leechers)",
+                    "[Seed] Re-announced to {} ({:?} seeders, {:?} leechers)",
                     result.tracker_url, result.seeders, result.leechers
                 );
             }

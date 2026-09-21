@@ -156,7 +156,7 @@ impl Command for BtDownloadCommand {
         }
 
         // P1 integration: use the C++-compatible progress file only as a
-        // fallback when the Rust-owned A2CF has no progress. Integrity checks
+        // fallback when the project extension has no progress. Integrity checks
         // remain authoritative because a progress file records trust, not
         // fresh hash evidence.
         if let Some(ref mgr) = self.progress_manager {

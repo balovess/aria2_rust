@@ -153,11 +153,6 @@ impl App {
                 _ => None,
             });
         let tui_enabled = cli.general.tui || matches!(cli.command, Some(Commands::Tui { .. }));
-        let tui_options = if tui_enabled {
-            Some(self.download_options_with_snapshot().await.0)
-        } else {
-            None
-        };
 
         // Apply --no-color flag + TTY detection: disable colored output when
         // the user requests it OR when stdout is not a terminal (e.g. piped).
@@ -195,6 +190,16 @@ impl App {
             eprintln!("{}", format!("Argument parsing error: {}", e).red());
             return 1;
         }
+
+        // The local TUI must observe the same merged configuration as the
+        // download engine.  Capturing this before startup config and CLI
+        // options are loaded silently discarded --dir/--split/etc. for the
+        // TUI while ordinary downloads used them correctly.
+        let tui_options = if tui_enabled {
+            Some(self.download_options_with_snapshot().await.0)
+        } else {
+            None
+        };
 
         if self.get_opt_bool("show-files").await.unwrap_or(false) {
             return match metadata::show_files(&self.detected_inputs) {

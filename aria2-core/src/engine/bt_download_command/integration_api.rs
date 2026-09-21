@@ -71,6 +71,7 @@ impl BtDownloadCommand {
             return;
         };
         if let Ok(mut registry) = registry.write() {
+            registry.set_global_dht_engine(Arc::clone(engine));
             registry.set_dht_engine_for_gid(self.group.recover().gid().value(), Arc::clone(engine));
         }
     }

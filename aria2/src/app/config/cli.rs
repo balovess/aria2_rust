@@ -1,4 +1,5 @@
 use aria2_core::config::{OptionValue, UriListFile};
+use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::validation::protocol_detector::detect;
 use tracing::warn;
 
@@ -121,6 +122,18 @@ impl App {
         let r = cli.rpc;
         let a = cli.advanced;
 
+        // `--verbose` is a Rust-only process flag, but it must still cross
+        // the same configuration seam as the original logging options.  Do
+        // this after config/env loading so an explicit CLI value wins, and
+        // map both states so `--verbose=false` can disable a verbose config
+        // value instead of becoming a no-op.
+        if let Some(verbose) = cli.verbose {
+            let level = if verbose { "debug" } else { "notice" };
+            conf.set_global_option("console-log-level", OptionValue::Str(level.into()))
+                .await
+                .map_err(|e| format!("--verbose: {}", e))?;
+        }
+
         // --- General options ---
         set_path!("dir", g.dir);
         set_str!("out", g.out);
@@ -182,6 +195,10 @@ impl App {
         set_str!("gid", g.gid);
         set_bool_true!("async-dns", g.async_dns);
         set_u64!("dns-timeout", g.dns_timeout);
+        if let Some(value) = g.async_dns_server.as_deref() {
+            DnsCache::parse_dns_server_list(value)
+                .map_err(|error| format!("--async-dns-server: {error}"))?;
+        }
         set_str!("async-dns-server", g.async_dns_server);
         set_bool_true!("enable-async-dns6", g.enable_async_dns6);
         set_str!("event-poll", g.event_poll);

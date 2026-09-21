@@ -92,6 +92,16 @@ impl DownloadEngine {
         #[cfg(feature = "bittorrent")]
         self.public_tracker_catalog.shutdown();
 
+        #[cfg(feature = "bittorrent")]
+        if let Some(engine) = self
+            .bt_registry
+            .write()
+            .ok()
+            .and_then(|mut registry| registry.take_global_dht_engine())
+        {
+            engine.shutdown_async().await;
+        }
+
         Ok(())
     }
 

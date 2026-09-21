@@ -32,9 +32,22 @@ impl CoreRpcBackend {
             .with_dir(group.options().dir.clone().unwrap_or_default())
             .with_files(build_file_infos(group, snapshot.completed_length));
 
+        let integrity_man = aria2_core::checksum::check_integrity::man::shared();
+        if let Ok(man) = integrity_man.try_read() {
+            let (verified_length, pending) = man.status_for_gid(group.gid().value());
+            if let Some(length) = verified_length {
+                info = info.with_verified_length(length);
+            }
+            if pending {
+                info = info.with_verify_integrity_pending("true");
+            }
+        }
+
         if let Some(bt) = bt {
             info = info
                 .with_info_hash(bt.info_hash.clone())
+                // `numSeeders` is the number of connected seeder peers, not
+                // the swarm count reported by a Tracker.
                 .with_num_seeders(bt.seeder_count() as u32)
                 .with_num_pieces(bt.num_pieces)
                 .with_piece_length(bt.piece_length as u64)
@@ -295,22 +308,20 @@ impl CoreRpcBackend {
             .unwrap_or_default()
             .into_iter()
             .map(|peer| PeerInfo {
-                peer_id: peer
-                    .peer_id
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect(),
+                peer_id: super::rpc_peer_id(&peer.peer_id),
                 ip: peer.addr.ip().to_string(),
                 source: peer.source.as_str().to_string(),
                 port: rpc_peer_port(peer.addr, peer.is_incoming),
-                bitfield: peer
-                    .bitfield
-                    .map(|bitfield| bitfield.iter().map(|byte| format!("{byte:02x}")).collect()),
+                bitfield: Some(
+                    peer.bitfield
+                        .map(|bitfield| bitfield.iter().map(|byte| format!("{byte:02x}")).collect())
+                        .unwrap_or_default(),
+                ),
                 am_choking: peer.am_choking,
                 peer_choking: peer.peer_choking,
                 download_speed: peer.download_speed.max(0.0) as u64,
                 upload_speed: peer.upload_speed.max(0.0) as u64,
-                seeder: peer.seeder.map(|value| value.to_string()),
+                seeder: Some(peer.seeder.unwrap_or(false).to_string()),
             })
             .collect();
         Ok(BackendResult::response(BackendResponse::Peers(peers)))
@@ -359,15 +370,36 @@ impl CoreRpcBackend {
                     tier: tier + 1,
                     current: current.as_deref() == Some(uri.as_str()),
                     last_attempt: false,
-                    announce_ready: announce.is_announce_ready(),
-                    all_failed: announce.is_all_announce_failed(),
-                    in_flight: current_announce.in_flight_announces(),
-                    interval: announce.interval().as_secs(),
-                    min_interval: announce.min_interval().as_secs(),
-                    seeders: current_announce.complete(),
-                    leechers: current_announce.incomplete(),
-                    tracker_id: current_announce.tracker_id().to_string(),
-                    seconds_since_last_success: current_announce.seconds_since_last_success(),
+                    announce_ready: current.as_deref() == Some(uri.as_str())
+                        && announce.is_announce_ready(),
+                    all_failed: false,
+                    in_flight: if current.as_deref() == Some(uri.as_str()) {
+                        current_announce.in_flight_announces()
+                    } else {
+                        0
+                    },
+                    interval: if current.as_deref() == Some(uri.as_str()) {
+                        announce.interval().as_secs()
+                    } else {
+                        0
+                    },
+                    min_interval: if current.as_deref() == Some(uri.as_str()) {
+                        announce.min_interval().as_secs()
+                    } else {
+                        0
+                    },
+                    seeders: None,
+                    leechers: None,
+                    tracker_id: if current.as_deref() == Some(uri.as_str()) {
+                        current_announce.tracker_id().to_string()
+                    } else {
+                        String::new()
+                    },
+                    seconds_since_last_success: if current.as_deref() == Some(uri.as_str()) {
+                        current_announce.seconds_since_last_success()
+                    } else {
+                        None
+                    },
                 });
                 entry += 1;
             }
@@ -447,7 +479,10 @@ impl CoreRpcBackend {
             return Err(Self::execution("DHT engine is not running"));
         }
         for engine in engines {
-            engine.save_state().await;
+            engine
+                .save_state()
+                .await
+                .map_err(|error| Self::execution(format!("Failed to save DHT state: {error}")))?;
         }
         Ok(BackendResult::response(BackendResponse::Text("OK".into())))
     }
@@ -555,6 +590,28 @@ impl CoreRpcBackend {
 
 #[cfg(feature = "bittorrent")]
 fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rpc::TrackerInfo> {
+    if !snapshot.trackers.is_empty() {
+        return snapshot
+            .trackers
+            .iter()
+            .map(|tracker| aria2_rpc::TrackerInfo {
+                uri: tracker.uri.clone(),
+                tier: tracker.tier,
+                current: tracker.current,
+                last_attempt: tracker.last_attempt,
+                announce_ready: tracker.announce_ready,
+                all_failed: tracker.all_failed,
+                in_flight: tracker.in_flight,
+                interval: tracker.interval_secs,
+                min_interval: tracker.min_interval_secs,
+                seeders: tracker.seeders,
+                leechers: tracker.leechers,
+                tracker_id: tracker.tracker_id.clone(),
+                seconds_since_last_success: tracker.seconds_since_last_success,
+            })
+            .collect();
+    }
+
     snapshot
         .tracker_tiers
         .iter()
@@ -565,15 +622,37 @@ fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rp
                 tier: tier + 1,
                 current: snapshot.current_url.as_deref() == Some(uri.as_str()),
                 last_attempt: snapshot.last_attempt_url.as_deref() == Some(uri.as_str()),
-                announce_ready: snapshot.announce_ready,
-                all_failed: snapshot.all_failed,
-                in_flight: snapshot.in_flight,
-                interval: snapshot.interval_secs,
-                min_interval: snapshot.min_interval_secs,
-                seeders: snapshot.seeders,
-                leechers: snapshot.leechers,
-                tracker_id: snapshot.tracker_id.clone(),
-                seconds_since_last_success: snapshot.seconds_since_last_success,
+                announce_ready: snapshot.announce_ready
+                    && snapshot.current_url.as_deref() == Some(uri.as_str()),
+                all_failed: false,
+                in_flight: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.in_flight
+                } else {
+                    0
+                },
+                interval: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.interval_secs
+                } else {
+                    0
+                },
+                min_interval: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.min_interval_secs
+                } else {
+                    0
+                },
+                seeders: None,
+                leechers: None,
+                tracker_id: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
+                    snapshot.tracker_id.clone()
+                } else {
+                    String::new()
+                },
+                seconds_since_last_success: if snapshot.current_url.as_deref() == Some(uri.as_str())
+                {
+                    snapshot.seconds_since_last_success
+                } else {
+                    None
+                },
             })
         })
         .collect()

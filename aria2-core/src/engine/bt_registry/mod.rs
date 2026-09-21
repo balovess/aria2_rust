@@ -73,11 +73,13 @@ pub struct BtRegistry {
     /// owned by the registry.
     dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
 
-    /// Live DHT engines keyed by the owning download GID.
+    /// Process-wide DHT engine shared by all BitTorrent downloads.
+    global_dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+
+    /// Download handles referencing the shared DHT engine, keyed by GID.
     ///
-    /// Commands currently own their engines because DHT options are
-    /// task-scoped. Keeping all live handles here lets RPC aggregate their
-    /// runtime counters without exposing a stale last-writer singleton.
+    /// Keeping these references lets lifecycle cleanup remove a task without
+    /// stopping the process-wide engine used by the remaining BT session.
     dht_engines: HashMap<u64, Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
 
     /// TCP listen port for incoming BitTorrent connections.
@@ -103,6 +105,7 @@ impl BtRegistry {
             pool: HashMap::new(),
             info_hash_index: HashMap::new(),
             dht_engine: None,
+            global_dht_engine: None,
             dht_engines: HashMap::new(),
             tcp_port: 0,
             udp_port: 0,

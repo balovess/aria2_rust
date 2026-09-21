@@ -836,6 +836,97 @@ async fn test_original_cli_options_reach_config_registry() {
 }
 
 #[tokio::test]
+async fn test_verbose_cli_option_reaches_logging_configuration() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--verbose"])
+            .expect("--verbose should parse through the CLI seam"),
+    )
+    .await
+    .expect("--verbose should update the logging configuration");
+    assert_eq!(
+        app.get_opt_str("console-log-level").await.as_deref(),
+        Some("debug")
+    );
+
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--verbose=false"])
+            .expect("--verbose=false should parse through the CLI seam"),
+    )
+    .await
+    .expect("--verbose=false should update the logging configuration");
+    assert_eq!(
+        app.get_opt_str("console-log-level").await.as_deref(),
+        Some("notice")
+    );
+}
+
+#[tokio::test]
+async fn test_original_async_dns_options_reach_the_engine_resolver() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from([
+            "aria2",
+            "--async-dns=false",
+            "--dns-timeout=17",
+            "--async-dns-server=127.0.0.1,::1",
+        ])
+        .expect("original async DNS options should parse through the CLI seam"),
+    )
+    .await
+    .expect("original async DNS options should update the configuration");
+
+    assert_eq!(
+        app.get_opt_bool("async-dns").await,
+        Some(false),
+        "--async-dns=false must remain a task option"
+    );
+    assert_eq!(
+        app.get_opt_i64("dns-timeout").await,
+        Some(17),
+        "--dns-timeout must remain a process option"
+    );
+    assert_eq!(
+        app.get_opt_str("async-dns-server").await.as_deref(),
+        Some("127.0.0.1,::1"),
+        "--async-dns-server must remain a process option"
+    );
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for the resolver path");
+    assert_eq!(
+        engine.dns_cache().lock().await.dns_timeout(),
+        std::time::Duration::from_secs(17),
+        "dns-timeout must configure the resolver used by download commands"
+    );
+    assert_eq!(
+        engine.dns_cache().lock().await.dns_server_addresses(),
+        ["127.0.0.1:53".parse().unwrap(), "[::1]:53".parse().unwrap(),],
+        "async-dns-server must configure the resolver nameservers"
+    );
+}
+
+#[tokio::test]
+async fn test_async_dns_server_rejects_non_ip_addresses() {
+    let mut app = App::new();
+    let cli = CliArgs::try_parse_from(["aria2", "--async-dns-server=not-an-ip"])
+        .expect("the CLI parser should defer DNS server validation to the config seam");
+
+    let error = app
+        .load_cli_args(cli)
+        .await
+        .expect_err("async-dns-server must reject values that are not IP addresses");
+    assert!(
+        error.contains("--async-dns-server"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn test_torrent_and_metalink_file_options_enter_input_detection() {
     let temp_dir = TempDir::new().expect("temporary input directory");
     let torrent_path = temp_dir.path().join("input.torrent");

@@ -323,7 +323,7 @@ pub const INITIAL_IDENTITY_OPTIONS: &[&str] = &["gid"];
 
 /// Returns whether an option belongs to a request-group's initial state.
 pub fn is_initial_option(option_name: &str) -> bool {
-    INITIAL_REQUEST_OPTIONS.contains(&option_name)
+    is_option_available(option_name) && INITIAL_REQUEST_OPTIONS.contains(&option_name)
 }
 
 /// Keep only the options that may be stored and reported by a request group.
@@ -350,7 +350,7 @@ where
 
 /// Returns whether a name is accepted by `changeGlobalOption`.
 pub fn is_global_option_changeable(option_name: &str) -> bool {
-    RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&option_name)
+    is_option_available(option_name) && RUNTIME_GLOBAL_CHANGEABLE_OPTIONS.contains(&option_name)
 }
 
 /// Options that `aria2.changeOption` applies immediately to active downloads.
@@ -512,8 +512,50 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "seed-ratio",
 ];
 
+/// Return whether an option belongs to a feature available in this build.
+/// The policy tables retain the complete aria2 wire vocabulary, but a build
+/// without BitTorrent must not expose those names as usable runtime options.
+pub fn is_option_available(option_name: &str) -> bool {
+    #[cfg(feature = "bittorrent")]
+    {
+        let _ = option_name;
+        true
+    }
+
+    #[cfg(not(feature = "bittorrent"))]
+    {
+        !is_bittorrent_option(option_name)
+    }
+}
+
+#[cfg(not(feature = "bittorrent"))]
+fn is_bittorrent_option(option_name: &str) -> bool {
+    option_name.starts_with("bt-")
+        || option_name.starts_with("dht-")
+        || matches!(
+            option_name,
+            "enable-dht"
+                | "enable-dht6"
+                | "enable-peer-exchange"
+                | "follow-torrent"
+                | "index-out"
+                | "listen-port"
+                | "lpd-listen-port"
+                | "bt-lpd-interface"
+                | "seed-ratio"
+                | "seed-time"
+                | "select-file"
+                | "enable-public-trackers"
+                | "enable-utp"
+                | "utp-listen-port"
+        )
+}
+
 /// Classifies how `aria2.changeOption` applies an option for a download.
 pub fn is_option_changeable(option_name: &str, is_active: bool) -> ChangeableKind {
+    if !is_option_available(option_name) {
+        return ChangeableKind::NotChangeable;
+    }
     if RUNTIME_CHANGEABLE_OPTIONS.contains(&option_name) {
         ChangeableKind::Immediate
     } else if RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.contains(&option_name) {
@@ -549,7 +591,10 @@ mod tests {
     fn policy_matches_original_wire_names() {
         assert!(is_global_option_changeable("dir"));
         assert!(is_global_option_changeable("save-session"));
+        #[cfg(feature = "bittorrent")]
         assert!(is_global_option_changeable("bt-force-encryption"));
+        #[cfg(not(feature = "bittorrent"))]
+        assert!(!is_global_option_changeable("bt-force-encryption"));
         assert!(!is_global_option_changeable("no-conf"));
         assert!(!is_global_option_changeable("show-files"));
     }

@@ -55,10 +55,10 @@ pub struct BtAnnounce {
     pub(crate) min_interval: Duration,
     /// User-defined interval override (0 = use tracker interval)
     user_defined_interval: Duration,
-    /// Number of complete seeders from tracker
-    complete: i64,
-    /// Number of incomplete leechers from tracker
-    incomplete: i64,
+    /// Number of complete seeders from tracker, if supplied by the response.
+    complete: Option<i64>,
+    /// Number of incomplete leechers from tracker, if supplied by the response.
+    incomplete: Option<i64>,
     /// Tracker ID from tracker response (sent back in subsequent announces)
     tracker_id: String,
     /// The announce list with tier management
@@ -89,8 +89,8 @@ impl BtAnnounce {
             interval: Duration::from_secs(DEFAULT_ANNOUNCE_INTERVAL_SECS),
             min_interval: Duration::from_secs(DEFAULT_ANNOUNCE_INTERVAL_SECS),
             user_defined_interval: Duration::ZERO,
-            complete: 0,
-            incomplete: 0,
+            complete: None,
+            incomplete: None,
             tracker_id: String::new(),
             announce_list: AnnounceList::new(announce_list, announce),
             download_complete: false,
@@ -376,13 +376,13 @@ impl BtAnnounce {
         }
 
         if let Some(seeders) = seeders {
-            self.complete = seeders;
+            self.complete = Some(seeders);
         }
         if let Some(leechers) = leechers {
-            self.incomplete = leechers;
+            self.incomplete = Some(leechers);
         }
         debug!(
-            "[BT] Tracker stats: complete={}, incomplete={}",
+            "[BT] Tracker stats: complete={:?}, incomplete={:?}",
             self.complete, self.incomplete
         );
     }
@@ -431,8 +431,8 @@ impl BtAnnounce {
         self.process_announce_stats(
             Some(response.interval as u64),
             response.min_interval.map(u64::from),
-            Some(i64::from(response.seeders)),
-            Some(i64::from(response.leechers)),
+            response.seeders.map(i64::from),
+            response.leechers.map(i64::from),
         );
 
         // Some tracker services return a fresh announce-list in the
@@ -597,8 +597,8 @@ impl BtAnnounce {
         }
 
         // Update complete/incomplete counts
-        self.complete = response.seeders as i64;
-        self.incomplete = response.leechers as i64;
+        self.complete = Some(response.seeders as i64);
+        self.incomplete = Some(response.leechers as i64);
         debug!(
             "[BT] UDP tracker stats: seeders={}, leechers={}",
             response.seeders, response.leechers
@@ -626,12 +626,12 @@ impl BtAnnounce {
     }
 
     /// Get the number of complete seeders.
-    pub fn complete(&self) -> i64 {
+    pub fn complete(&self) -> Option<i64> {
         self.complete
     }
 
     /// Get the number of incomplete leechers.
-    pub fn incomplete(&self) -> i64 {
+    pub fn incomplete(&self) -> Option<i64> {
         self.incomplete
     }
 

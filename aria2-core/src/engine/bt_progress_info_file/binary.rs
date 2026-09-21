@@ -210,16 +210,61 @@ pub fn deserialize_binary(data: &[u8], expected_info_hash: &[u8; 20]) -> Result<
     let bitfield = data[pos..pos + bf_len].to_vec();
     pos += bf_len;
 
-    // Compute num_pieces from bitfield
+    // Compute num_pieces from the authoritative total and piece lengths.
+    // A file can contain a short final piece, so the bitfield length must be
+    // checked against ceil(total / piece), not merely accepted as opaque data.
     let num_pieces = total_size.div_ceil(piece_length as u64);
+    let expected_bf_len = usize::try_from(num_pieces)
+        .ok()
+        .map_or(usize::MAX, |pieces| pieces.div_ceil(8));
+    if bf_len != expected_bf_len {
+        return Err(Aria2Error::InvalidArgument(format!(
+            "Binary progress bitfield length mismatch: expected {}, got {}",
+            expected_bf_len, bf_len
+        )));
+    }
+    if num_pieces > u32::MAX as u64 {
+        return Err(Aria2Error::InvalidArgument(
+            "Binary progress file contains too many pieces".to_string(),
+        ));
+    }
 
     // numInFlightPiece: 4 bytes BE
     let num_in_flight = read_u32_be(data, &mut pos)?;
+    let minimum_in_flight_bytes = (num_in_flight as usize).checked_mul(12).ok_or_else(|| {
+        Aria2Error::InvalidArgument(
+            "Binary progress file in-flight piece count is too large".to_string(),
+        )
+    })?;
+    if minimum_in_flight_bytes > data.len().saturating_sub(pos) {
+        return Err(Aria2Error::InvalidArgument(
+            "Binary progress file has too many in-flight pieces".to_string(),
+        ));
+    }
     let mut in_flight_pieces = Vec::with_capacity(num_in_flight as usize);
     for _ in 0..num_in_flight {
         let index = read_u32_be(data, &mut pos)?;
+        if index as u64 >= num_pieces {
+            return Err(Aria2Error::InvalidArgument(format!(
+                "Binary progress piece index out of range: {}",
+                index
+            )));
+        }
         let length = read_u32_be(data, &mut pos)?;
+        if length == 0 || length > piece_length {
+            return Err(Aria2Error::InvalidArgument(format!(
+                "Binary progress in-flight piece length out of range: {}",
+                length
+            )));
+        }
         let inner_bf_len = read_u32_be(data, &mut pos)? as usize;
+        let expected_inner_bf_len = (length as usize).div_ceil(16 * 1024).div_ceil(8);
+        if inner_bf_len != expected_inner_bf_len {
+            return Err(Aria2Error::InvalidArgument(format!(
+                "Binary progress in-flight bitfield length mismatch: expected {}, got {}",
+                expected_inner_bf_len, inner_bf_len
+            )));
+        }
         if pos + inner_bf_len > data.len() {
             return Err(Aria2Error::InvalidArgument(
                 "Binary progress file truncated (in-flight bitfield)".to_string(),
@@ -299,7 +344,7 @@ mod tests {
         let info_hash = [0xAA; 20];
         let progress = BtProgress {
             info_hash,
-            bitfield: vec![0xFF, 0x0F],
+            bitfield: vec![0xC0],
             peers: Vec::new(),
             stats: DownloadStats::default(),
             piece_length: 262144,

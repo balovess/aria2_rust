@@ -13,7 +13,9 @@ use super::{PieceDownloadSession, PieceLoopAction};
 
 impl PieceDownloadSession<'_> {
     pub(super) async fn run(mut self) -> Result<()> {
+        self.announce_available_pieces().await;
         loop {
+            self.refresh_upload_stats();
             self.command.drain_incoming_peers(
                 self.active_connections,
                 self.piece_length,
@@ -151,6 +153,7 @@ impl PieceDownloadSession<'_> {
                     .await;
                 let connected = self.append_new_connections(new_connections);
                 if connected > 0 {
+                    self.announce_available_pieces().await;
                     info!("[PEX] Successfully connected to {} new peers", connected);
                     let group = self.command.group.recover();
                     super::super::sync_peer_snapshots(&group, self.active_connections);
@@ -194,6 +197,7 @@ impl PieceDownloadSession<'_> {
                         .await;
                     let connected = self.append_new_connections(new_connections);
                     if connected > 0 {
+                        self.announce_available_pieces().await;
                         info!("[BT] Connected to {} new peers", connected);
                         let group = self.command.group.recover();
                         super::super::sync_peer_snapshots(&group, self.active_connections);
@@ -237,6 +241,7 @@ impl PieceDownloadSession<'_> {
                     .await;
                 let connected = self.append_new_connections(new_connections);
                 if connected > 0 {
+                    self.announce_available_pieces().await;
                     info!("[BT] Connected to {} DHT-discovered peers", connected);
                     let group = self.command.group.recover();
                     super::super::sync_peer_snapshots(&group, self.active_connections);
@@ -264,7 +269,11 @@ impl PieceDownloadSession<'_> {
                 );
                 let event = self
                     .command
-                    .wait_for_peer_event(self.active_connections, deadline)
+                    .wait_for_peer_event(
+                        self.active_connections,
+                        deadline,
+                        Some(std::sync::Arc::clone(&self.upload_provider)),
+                    )
                     .await;
                 let incoming = BtDownloadCommand::apply_peer_wait_event(
                     event,
@@ -286,6 +295,7 @@ impl PieceDownloadSession<'_> {
                         self.num_pieces,
                         self.total_size,
                     );
+                    self.announce_available_pieces().await;
                 }
                 BtDownloadCommand::send_due_keepalives(self.active_connections).await;
                 continue;
@@ -306,7 +316,11 @@ impl PieceDownloadSession<'_> {
                     );
                     let event = self
                         .command
-                        .wait_for_peer_event(self.active_connections, deadline)
+                        .wait_for_peer_event(
+                            self.active_connections,
+                            deadline,
+                            Some(std::sync::Arc::clone(&self.upload_provider)),
+                        )
                         .await;
                     let incoming = BtDownloadCommand::apply_peer_wait_event(
                         event,
@@ -328,6 +342,7 @@ impl PieceDownloadSession<'_> {
                             self.num_pieces,
                             self.total_size,
                         );
+                        self.announce_available_pieces().await;
                     }
                     BtDownloadCommand::send_due_keepalives(self.active_connections).await;
                     continue;
@@ -348,10 +363,10 @@ impl PieceDownloadSession<'_> {
                         let delta = self.command.completed_bytes - self.last_completed;
                         let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
                         self.command.progress.set_download_speed(speed);
-                        self.command.progress.set_upload_speed(0);
                         self.last_speed_update = Instant::now();
                         self.last_completed = self.command.completed_bytes;
                     }
+                    self.refresh_upload_stats();
                 }
             }
         }
@@ -376,13 +391,42 @@ impl PieceDownloadSession<'_> {
 
         Ok(())
     }
+
+    fn refresh_upload_stats(&mut self) {
+        let uploaded_by_peers = self
+            .upload_counter
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let delta = uploaded_by_peers.saturating_sub(self.last_uploaded);
+        if delta > 0 {
+            self.command.total_uploaded = self.command.total_uploaded.saturating_add(delta);
+            self.command
+                .progress
+                .set_upload_length(self.command.total_uploaded);
+            self.last_uploaded = uploaded_by_peers;
+        }
+
+        let elapsed = self.last_upload_speed_update.elapsed();
+        if elapsed.as_millis() >= 500 {
+            let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
+            self.command.progress.set_upload_speed(speed);
+            self.last_upload_speed_update = Instant::now();
+        }
+    }
 }
 
 impl PieceDownloadSession<'_> {
     fn append_new_connections(&mut self, new_connections: Vec<BtPeerConn>) -> usize {
+        let mut new_connections = new_connections;
         let max_peers = self.command.group.recover().options().bt_max_peers;
         let caretaker_id = self.command.group.recover().gid().value();
         let is_private = self.command.is_private;
+        for connection in &mut new_connections {
+            self.command.configure_upload_connection(
+                connection,
+                self.piece_length,
+                self.num_pieces,
+            );
+        }
         let mut context = NewPeerConnectionsContext {
             peer_last_data_time: &mut self.peer_last_data_time,
             pex_enabled_peers: self.pex_enabled_peers,
@@ -400,5 +444,20 @@ impl PieceDownloadSession<'_> {
             &self.command.peer_storage,
             caretaker_id,
         )
+    }
+
+    async fn announce_available_pieces(&mut self) {
+        let bitfield = self
+            .completed_bitfield
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for connection in self.active_connections.iter_mut() {
+            connection.set_upload_counter(std::sync::Arc::clone(&self.upload_counter));
+            connection.set_upload_progress(std::sync::Arc::clone(&self.command.progress));
+            if let Err(error) = connection.send_bitfield(bitfield.clone()).await {
+                tracing::debug!(%error, "Failed to announce BT upload availability");
+            }
+        }
     }
 }

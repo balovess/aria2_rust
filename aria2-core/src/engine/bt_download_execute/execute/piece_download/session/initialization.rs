@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
@@ -230,6 +231,28 @@ impl<'a> PieceDownloadSession<'a> {
             .group
             .recover()
             .set_bt_bitfield_shared(std::sync::Arc::clone(&completed_bitfield));
+
+        let upload_provider: Arc<dyn crate::engine::bt_upload_session::PieceDataProvider> =
+            Arc::new(
+                crate::engine::bt_piece_downloader::FileBackedPieceProvider::with_shared_bitfield(
+                    command.output_path.clone(),
+                    piece_length,
+                    num_pieces,
+                    command.multi_file_layout.clone(),
+                    Arc::clone(&completed_bitfield),
+                ),
+            );
+        let upload_config = crate::engine::bt_upload_session::BtSeedingConfig {
+            max_upload_bytes_per_sec: command.group.recover().options().max_upload_limit,
+            global_limiter: command.global_limiter.clone(),
+            max_peers_to_unchoke: 4,
+            optimistic_unchoke_interval_secs: 30,
+        };
+        let upload_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        for connection in active_connections.iter_mut() {
+            connection.configure_upload(&upload_config, num_pieces, piece_length);
+            connection.set_upload_counter(Arc::clone(&upload_counter));
+        }
         piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
 
         tracing::info!(
@@ -272,12 +295,16 @@ impl<'a> PieceDownloadSession<'a> {
             start_time,
             last_speed_update,
             last_completed,
+            last_upload_speed_update: Instant::now(),
+            last_uploaded: 0,
+            upload_counter,
             last_progress_save,
             piece_selector,
             has_v1_piece_hashes,
             piece_manager,
             piece_picker,
             completed_bitfield,
+            upload_provider,
             peer_tracker,
             endgame_state,
             request_timeout,

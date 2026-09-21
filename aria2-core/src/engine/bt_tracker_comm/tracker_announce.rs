@@ -14,7 +14,7 @@
 //! uses the `BtAnnounce` state machine to decide *when* and *what* to
 //! announce, then routes to the correct backend based on URL scheme.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
@@ -35,10 +35,10 @@ pub struct AnnounceResult {
     pub peers: Vec<(String, u16)>,
     /// Recommended announce interval from the tracker response.
     pub interval: Duration,
-    /// Number of seeders reported by the tracker.
-    pub seeders: i64,
-    /// Number of leechers reported by the tracker.
-    pub leechers: i64,
+    /// Number of seeders reported by the tracker, when supplied.
+    pub seeders: Option<i64>,
+    /// Number of leechers reported by the tracker, when supplied.
+    pub leechers: Option<i64>,
     /// The announce event that was sent.
     pub event: AnnounceEvent,
     /// The tracker URL that was used for this announce.
@@ -65,10 +65,42 @@ pub struct TrackerRuntimeSnapshot {
     pub in_flight: u32,
     pub interval_secs: u64,
     pub min_interval_secs: u64,
-    pub seeders: i64,
-    pub leechers: i64,
+    pub seeders: Option<i64>,
+    pub leechers: Option<i64>,
     pub tracker_id: String,
     pub seconds_since_last_success: Option<u64>,
+    /// Live state for each tracker URL, in announce-list order.
+    pub trackers: Vec<TrackerRuntimeInfo>,
+}
+
+/// Live state for one tracker URL returned by `aria2.getTrackers`.
+#[derive(Debug, Clone, Default)]
+pub struct TrackerRuntimeInfo {
+    pub uri: String,
+    pub tier: usize,
+    pub current: bool,
+    pub last_attempt: bool,
+    pub announce_ready: bool,
+    pub all_failed: bool,
+    pub in_flight: u32,
+    pub interval_secs: u64,
+    pub min_interval_secs: u64,
+    pub seeders: Option<i64>,
+    pub leechers: Option<i64>,
+    pub tracker_id: String,
+    pub seconds_since_last_success: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrackerState {
+    in_flight: bool,
+    interval_secs: u64,
+    min_interval_secs: u64,
+    seeders: Option<i64>,
+    leechers: Option<i64>,
+    tracker_id: String,
+    last_success_at: Option<Instant>,
+    last_failure_kind: Option<TrackerFailureKind>,
 }
 
 /// Registry-safe handle for the live tracker snapshot.
@@ -78,7 +110,7 @@ impl TrackerRuntimeSnapshot {
     /// Build an initial snapshot from the compatibility announce state.
     pub fn from_bt_announce(announce: &BtAnnounce) -> Self {
         let announce_list = announce.announce_list();
-        let tracker_tiers = (0..announce_list.tier_count())
+        let tracker_tiers: Vec<Vec<String>> = (0..announce_list.tier_count())
             .map(|tier| {
                 let mut urls = Vec::new();
                 let mut entry = 0;
@@ -87,6 +119,22 @@ impl TrackerRuntimeSnapshot {
                     entry += 1;
                 }
                 urls
+            })
+            .collect();
+
+        let trackers = tracker_tiers
+            .iter()
+            .enumerate()
+            .flat_map(|(tier, uris)| {
+                uris.iter().map(move |uri| TrackerRuntimeInfo {
+                    uri: uri.clone(),
+                    tier: tier + 1,
+                    current: announce
+                        .announce_list()
+                        .get_announce()
+                        .is_some_and(|current| current == uri),
+                    ..TrackerRuntimeInfo::default()
+                })
             })
             .collect();
 
@@ -104,6 +152,7 @@ impl TrackerRuntimeSnapshot {
             leechers: announce.incomplete(),
             tracker_id: announce.tracker_id().to_string(),
             seconds_since_last_success: announce.seconds_since_last_success(),
+            trackers,
         }
     }
 }
@@ -151,6 +200,8 @@ pub struct TrackerAnnouncer {
     stopped_timeout: Duration,
     /// Optional registry-visible mirror of the live announcer state.
     runtime_state: Option<SharedTrackerRuntime>,
+    /// Per-URL state retained independently of the task-level announce state.
+    tracker_states: HashMap<String, TrackerState>,
 }
 
 impl TrackerAnnouncer {
@@ -172,6 +223,7 @@ impl TrackerAnnouncer {
             tracker_connect_timeout_secs: 60,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
             runtime_state: None,
+            tracker_states: HashMap::new(),
         }
     }
 
@@ -193,6 +245,7 @@ impl TrackerAnnouncer {
             tracker_connect_timeout_secs: 60,
             stopped_timeout: Duration::from_secs(crate::constants::BT_TRACKER_STOPPED_TIMEOUT_SECS),
             runtime_state: None,
+            tracker_states: HashMap::new(),
         }
     }
 
@@ -207,7 +260,84 @@ impl TrackerAnnouncer {
         let mut snapshot = TrackerRuntimeSnapshot::from_bt_announce(&self.announce);
         snapshot.last_attempt_url = self.last_attempt_tracker_url.clone();
         snapshot.last_failure_kind = self.last_failure_kind;
+        snapshot.trackers = self.tracker_runtime_infos();
         snapshot
+    }
+
+    fn tracker_runtime_infos(&self) -> Vec<TrackerRuntimeInfo> {
+        let current = self.announce.announce_list().get_announce();
+        let last_attempt = self.last_attempt_tracker_url.as_deref();
+        let ready = self.announce.is_announce_ready();
+        let mut trackers = Vec::new();
+
+        for tier in 0..self.announce.announce_list().tier_count() {
+            let mut entry = 0;
+            while let Some(uri) = self.announce.announce_list().get_tracker_url(tier, entry) {
+                let state = self.tracker_states.get(uri);
+                trackers.push(TrackerRuntimeInfo {
+                    uri: uri.clone(),
+                    tier: tier + 1,
+                    current: current == Some(uri.as_str()),
+                    last_attempt: last_attempt == Some(uri.as_str()),
+                    announce_ready: ready && current == Some(uri.as_str()),
+                    all_failed: state.is_some_and(|state| state.last_failure_kind.is_some()),
+                    in_flight: state.map_or(0, |state| u32::from(state.in_flight)),
+                    interval_secs: state.map_or(0, |state| state.interval_secs),
+                    min_interval_secs: state.map_or(0, |state| state.min_interval_secs),
+                    seeders: state.and_then(|state| state.seeders),
+                    leechers: state.and_then(|state| state.leechers),
+                    tracker_id: state.map_or_else(String::new, |state| state.tracker_id.clone()),
+                    seconds_since_last_success: state.and_then(|state| {
+                        state.last_success_at.map(|time| time.elapsed().as_secs())
+                    }),
+                });
+                entry += 1;
+            }
+        }
+        trackers
+    }
+
+    fn tracker_attempt_started(&mut self, tracker_url: &str) {
+        self.tracker_states
+            .entry(tracker_url.to_string())
+            .or_default()
+            .in_flight = true;
+    }
+
+    fn tracker_attempt_finished(&mut self, tracker_url: &str, succeeded: bool) {
+        let state = self
+            .tracker_states
+            .entry(tracker_url.to_string())
+            .or_default();
+        state.in_flight = false;
+        if succeeded {
+            state.last_failure_kind = None;
+            state.last_success_at = Some(Instant::now());
+        } else {
+            state.last_failure_kind = self.last_failure_kind;
+        }
+    }
+
+    fn update_tracker_stats(
+        &mut self,
+        tracker_url: &str,
+        interval_secs: u64,
+        min_interval_secs: u64,
+        seeders: Option<i64>,
+        leechers: Option<i64>,
+        tracker_id: Option<&str>,
+    ) {
+        let state = self
+            .tracker_states
+            .entry(tracker_url.to_string())
+            .or_default();
+        state.interval_secs = interval_secs;
+        state.min_interval_secs = min_interval_secs;
+        state.seeders = seeders;
+        state.leechers = leechers;
+        if let Some(tracker_id) = tracker_id {
+            state.tracker_id = tracker_id.to_string();
+        }
     }
 
     /// Publish the current live state without holding a lock across callers.
@@ -368,6 +498,7 @@ impl TrackerAnnouncer {
         let tracker_url = self.announce.announce_list().get_announce()?.to_string();
         self.last_attempt_tracker_url = Some(tracker_url.clone());
         self.last_failure_kind = None;
+        self.tracker_attempt_started(&tracker_url);
         self.publish_runtime_snapshot();
         let is_udp = is_udp_tracker(&tracker_url);
         let is_websocket = reqwest::Url::parse(&tracker_url)
@@ -396,6 +527,7 @@ impl TrackerAnnouncer {
             .await
         };
 
+        self.tracker_attempt_finished(&tracker_url, result.is_some());
         self.publish_runtime_snapshot();
 
         if self.public_tracker_urls.contains(&tracker_url)
@@ -462,6 +594,14 @@ impl TrackerAnnouncer {
             response.min_interval,
             response.seeders,
             response.leechers,
+        );
+        self.update_tracker_stats(
+            tracker_url,
+            response.interval.unwrap_or_default(),
+            response.min_interval.unwrap_or_default(),
+            response.seeders,
+            response.leechers,
+            None,
         );
         self.announce.announce_success();
 
@@ -572,6 +712,14 @@ impl TrackerAnnouncer {
         // Process the first response through the state machine
         let response = &responses[0];
         let peers = self.announce.process_udp_announce_response(response);
+        self.update_tracker_stats(
+            tracker_url,
+            response.interval as u64,
+            response.interval as u64,
+            Some(response.seeders as i64),
+            Some(response.leechers as i64),
+            None,
+        );
         self.announce.announce_success();
 
         // Collect additional peers from subsequent responses
@@ -667,6 +815,16 @@ impl TrackerAnnouncer {
                                         // Process through BtAnnounce state machine
                                         match self.announce.process_announce_response(&tracker_resp) {
                                             Ok(peers) => {
+                                                self.update_tracker_stats(
+                                                    tracker_url,
+                                                    tracker_resp.interval as u64,
+                                                    tracker_resp
+                                                        .min_interval
+                                                        .map_or(0, u64::from),
+                                                    tracker_resp.seeders.map(i64::from),
+                                                    tracker_resp.leechers.map(i64::from),
+                                                    tracker_resp.tracker_id.as_deref(),
+                                                );
                                                 self.announce.announce_success();
                                                 let interval = self.announce.interval();
                                                 let seeders = self.announce.complete();
@@ -819,7 +977,7 @@ impl TrackerAnnouncer {
             .await
         {
             info!(
-                "[BT] Sent completed event to {} ({} seeders, {} leechers)",
+                "[BT] Sent completed event to {} ({:?} seeders, {:?} leechers)",
                 result.tracker_url, result.seeders, result.leechers
             );
         }
@@ -907,7 +1065,10 @@ mod tests {
 
         {
             let snapshot = shared.read().expect("tracker runtime snapshot lock");
-            assert_eq!(snapshot.tracker_tiers, vec![vec![first, second.clone()]]);
+            assert_eq!(
+                snapshot.tracker_tiers,
+                vec![vec![first.clone(), second.clone()]]
+            );
             assert_eq!(
                 snapshot.current_url.as_deref(),
                 Some("http://tracker.example.com/one")
@@ -916,17 +1077,34 @@ mod tests {
             assert!(snapshot.announce_ready);
             assert!(!snapshot.all_failed);
             assert_eq!(snapshot.last_failure_kind, None);
+            assert_eq!(snapshot.trackers.len(), 2);
+            assert!(!snapshot.trackers[0].last_attempt);
+            assert!(snapshot.trackers[1].last_attempt);
+            assert_eq!(snapshot.trackers[0].seeders, None);
+            assert_eq!(snapshot.trackers[1].seeders, None);
         }
 
+        announcer
+            .tracker_states
+            .entry(first.clone())
+            .or_default()
+            .seeders = Some(11);
         announcer.last_failure_kind = Some(TrackerFailureKind::Timeout);
+        announcer
+            .tracker_states
+            .entry(second.clone())
+            .or_default()
+            .last_failure_kind = Some(TrackerFailureKind::Timeout);
         announcer.publish_runtime_snapshot();
+        let snapshot = shared.read().expect("tracker runtime snapshot lock");
         assert_eq!(
-            shared
-                .read()
-                .expect("tracker runtime snapshot lock")
-                .last_failure_kind,
+            snapshot.last_failure_kind,
             Some(TrackerFailureKind::Timeout)
         );
+        assert_eq!(snapshot.trackers[0].seeders, Some(11));
+        assert!(!snapshot.trackers[0].all_failed);
+        assert_eq!(snapshot.trackers[1].seeders, None);
+        assert!(snapshot.trackers[1].all_failed);
     }
 
     #[test]
@@ -1071,8 +1249,8 @@ mod tests {
             .await
             .expect("HTTP tracker fixture should return an announce result");
         assert_eq!(result.peers, vec![("192.0.2.10".to_string(), 6881)]);
-        assert_eq!(result.seeders, 7);
-        assert_eq!(result.leechers, 3);
+        assert_eq!(result.seeders, Some(7));
+        assert_eq!(result.leechers, Some(3));
         assert!(announcer.announce.announce_list().contains_url(&initial));
         assert!(announcer.announce.announce_list().contains_url(&dynamic_a));
         assert!(announcer.announce.announce_list().contains_url(&dynamic_b));
@@ -1138,8 +1316,8 @@ mod tests {
 
         assert_eq!(result.peers, vec![("192.0.2.11".to_string(), 6881)]);
         assert_eq!(result.interval, Duration::from_secs(60));
-        assert_eq!(result.seeders, 7);
-        assert_eq!(result.leechers, 3);
+        assert_eq!(result.seeders, Some(7));
+        assert_eq!(result.leechers, Some(3));
         server.await.expect("UDP tracker fixture should exit");
     }
 
@@ -1234,8 +1412,8 @@ mod tests {
         assert_eq!(result.event, AnnounceEvent::Started);
         assert_eq!(result.peers, vec![("192.0.2.20".to_string(), 6881)]);
         assert_eq!(result.interval, Duration::from_secs(60));
-        assert_eq!(result.seeders, 2);
-        assert_eq!(result.leechers, 3);
+        assert_eq!(result.seeders, Some(2));
+        assert_eq!(result.leechers, Some(3));
 
         announcer
             .announce_stopped(&[0u8; 20], &[1u8; 20], 0, 1, 0)
@@ -1276,13 +1454,13 @@ mod tests {
         let result = AnnounceResult {
             peers: vec![("10.0.0.1".to_string(), 6881)],
             interval: Duration::from_secs(300),
-            seeders: 5,
-            leechers: 10,
+            seeders: Some(5),
+            leechers: Some(10),
             event: AnnounceEvent::Started,
             tracker_url: "udp://tracker.example.com:6969/announce".to_string(),
         };
         assert_eq!(result.peers.len(), 1);
-        assert_eq!(result.seeders, 5);
-        assert_eq!(result.leechers, 10);
+        assert_eq!(result.seeders, Some(5));
+        assert_eq!(result.leechers, Some(10));
     }
 }

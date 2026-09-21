@@ -91,6 +91,9 @@ impl BtDownloadCommand {
         &mut self,
         active_connections: &mut [BtPeerConn],
         deadline: Instant,
+        upload_provider: Option<
+            std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+        >,
     ) -> PeerWaitEvent {
         let completion_notify = self.dht_periodic_lookup.completion_notifier();
         let completion_wait = completion_notify.notified();
@@ -106,7 +109,7 @@ impl BtDownloadCommand {
             .map(|(index, connection)| async move { (index, connection.read_message().await) })
             .collect::<futures::stream::FuturesUnordered<_>>();
 
-        let event = tokio::select! {
+        let mut event = tokio::select! {
             incoming = async {
                 match incoming_receiver.as_mut() {
                     Some(receiver) => receiver.recv().await,
@@ -130,6 +133,27 @@ impl BtDownloadCommand {
         };
 
         drop(peer_reads);
+        if let PeerWaitEvent::PeerMessage { index, result } = &mut event
+            && let Ok(Some(message)) = result
+            && matches!(
+                message,
+                aria2_protocol::bittorrent::message::types::BtMessage::Request { .. }
+                    | aria2_protocol::bittorrent::message::types::BtMessage::Interested
+                    | aria2_protocol::bittorrent::message::types::BtMessage::NotInterested
+                    | aria2_protocol::bittorrent::message::types::BtMessage::Cancel { .. }
+            )
+            && let Some(provider) = upload_provider.as_deref()
+            && let Some(connection) = active_connections.get_mut(*index)
+        {
+            let upload_message = message.clone();
+            match connection
+                .handle_upload_message(upload_message, provider)
+                .await
+            {
+                Ok(_) => *result = Ok(None),
+                Err(error) => *result = Err(error),
+            }
+        }
         self.incoming_peers = incoming_receiver;
         event
     }

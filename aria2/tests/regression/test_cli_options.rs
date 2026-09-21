@@ -992,6 +992,14 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "bt-tracker-source",
         "bt-tracker-stopped-timeout",
         "bt-tracker-update-interval",
+        "dht-bootstrap-timeout",
+        "dht-cleanup-interval",
+        "dht-max-concurrent-lookups",
+        "dht-node-contact-interval",
+        "dht-persistence-max-age",
+        "dht-refresh-check-interval",
+        "dht-save-interval",
+        "dht-token-rotation-interval",
         "enable-public-trackers",
         "enable-utp",
         "log-backup-count",
@@ -1031,7 +1039,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        233,
+        241,
         "all-features registry inventory changed"
     );
     assert_eq!(

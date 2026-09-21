@@ -9,6 +9,7 @@ use super::App;
 use super::startup::StartupPlan;
 #[cfg(feature = "bittorrent")]
 use aria2_core::config::TrackerCatalogConfig;
+use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
@@ -169,6 +170,24 @@ impl App {
 
         #[cfg(not(feature = "bittorrent"))]
         let mut engine = DownloadEngine::new();
+
+        let dns_timeout = self
+            .get_opt_i64("dns-timeout")
+            .await
+            .filter(|value| *value > 0)
+            .map(|value| std::time::Duration::from_secs(value as u64))
+            .unwrap_or_else(|| std::time::Duration::from_secs(30));
+        let dns_servers = self
+            .get_opt_str("async-dns-server")
+            .await
+            .and_then(|value| match DnsCache::parse_dns_server_list(&value) {
+                Ok(servers) => Some(servers),
+                Err(error) => {
+                    tracing::warn!(%error, "Ignoring invalid async-dns-server configuration");
+                    None
+                }
+            });
+        engine.set_dns_config(dns_timeout, dns_servers);
 
         let server_stat_timeout = self
             .get_opt_i64("server-stat-timeout")

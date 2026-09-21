@@ -141,6 +141,64 @@ pub struct BtPeerConn {
     pub(crate) pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     /// Whether this connection may receive and accumulate BEP 11 peers.
     pub(crate) pex_enabled: bool,
+
+    /// Upload state for pieces already verified during an active download.
+    /// This is intentionally kept on the duplex peer connection so upload
+    /// requests can be served while the same socket is downloading blocks.
+    pub(crate) upload_state: Option<crate::engine::bt_upload_session::BtUploadState>,
+    pub(crate) upload_progress:
+        Option<std::sync::Arc<crate::request::request_group::AtomicProgress>>,
+}
+
+impl BtPeerConn {
+    pub(crate) fn configure_upload(
+        &mut self,
+        config: &crate::engine::bt_upload_session::BtSeedingConfig,
+        num_pieces: u32,
+        piece_length: u32,
+    ) {
+        let mut state = crate::engine::bt_upload_session::BtUploadState::new(config);
+        state.configure_message_validator(num_pieces, piece_length);
+        self.upload_state = Some(state);
+    }
+
+    pub(crate) async fn handle_upload_message(
+        &mut self,
+        message: aria2_protocol::bittorrent::message::types::BtMessage,
+        provider: &dyn crate::engine::bt_upload_session::PieceDataProvider,
+    ) -> crate::error::Result<u64> {
+        let Some(mut state) = self.upload_state.take() else {
+            return Ok(0);
+        };
+        let result = state.handle_message(self, message, provider).await;
+        self.upload_state = Some(state);
+        if let Ok(bytes) = result {
+            self.stats.on_data_sent(bytes);
+            if bytes > 0
+                && let Some(progress) = self.upload_progress.as_ref()
+            {
+                progress.add_upload_length(bytes);
+                progress.set_upload_speed(self.stats.upload_speed.max(0.0) as u64);
+            }
+        }
+        result
+    }
+
+    pub(crate) fn set_upload_counter(
+        &mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        if let Some(state) = self.upload_state.as_mut() {
+            state.set_upload_counter(counter);
+        }
+    }
+
+    pub(crate) fn set_upload_progress(
+        &mut self,
+        progress: std::sync::Arc<crate::request::request_group::AtomicProgress>,
+    ) {
+        self.upload_progress = Some(progress);
+    }
 }
 
 impl BtPeerConn {

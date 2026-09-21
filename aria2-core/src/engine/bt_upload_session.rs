@@ -90,14 +90,254 @@ impl Default for BtSeedingConfig {
     }
 }
 
-pub struct BtUploadSession {
-    conn: BtUploadConnection,
+/// The per-peer upload state shared by downloading and seeding sessions.
+///
+/// A peer connection is duplex: while its download side is waiting for
+/// `Piece` messages, the remote side may send `Interested` and `Request` for
+/// pieces we already have. Keeping this state independent from the transport
+/// lets the same request handling run on an active download connection.
+pub(crate) struct BtUploadState {
     am_choke_state: bool,
     peer_interested: bool,
     uploaded_bytes: u64,
     upload_limiter: Option<RateLimiter>,
     global_upload_limiter: Option<RateLimiter>,
     message_validator: Option<BtMessageValidator>,
+    upload_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+}
+
+#[async_trait]
+pub(crate) trait BtUploadTransport {
+    async fn send_upload_message(&mut self, message: &BtMessage)
+    -> std::result::Result<(), String>;
+    async fn send_upload_choke(&mut self) -> std::result::Result<(), String>;
+    async fn send_upload_unchoke(&mut self) -> std::result::Result<(), String>;
+}
+
+#[async_trait]
+impl BtUploadTransport for BtUploadConnection {
+    async fn send_upload_message(
+        &mut self,
+        message: &BtMessage,
+    ) -> std::result::Result<(), String> {
+        self.send_message(message).await
+    }
+
+    async fn send_upload_choke(&mut self) -> std::result::Result<(), String> {
+        self.send_choke().await
+    }
+
+    async fn send_upload_unchoke(&mut self) -> std::result::Result<(), String> {
+        self.send_unchoke().await
+    }
+}
+
+impl BtUploadState {
+    pub(crate) fn new(config: &BtSeedingConfig) -> Self {
+        let upload_limiter = config
+            .max_upload_bytes_per_sec
+            .filter(|&rate| rate > 0)
+            .map(|rate| RateLimiter::new(&RateLimiterConfig::new(None, Some(rate))));
+
+        Self {
+            am_choke_state: false,
+            peer_interested: false,
+            uploaded_bytes: 0,
+            upload_limiter,
+            global_upload_limiter: config.global_limiter.clone(),
+            message_validator: None,
+            upload_counter: None,
+        }
+    }
+
+    pub(crate) fn set_upload_counter(
+        &mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) {
+        self.upload_counter = Some(counter);
+    }
+
+    pub(crate) fn configure_message_validator(&mut self, num_pieces: u32, piece_length: u32) {
+        self.message_validator = Some(BtMessageValidator::new(num_pieces, piece_length));
+    }
+
+    pub(crate) async fn send_piece_availability<T: BtUploadTransport>(
+        &mut self,
+        transport: &mut T,
+        provider: &dyn PieceDataProvider,
+    ) -> Result<()> {
+        let num_pieces = provider.num_pieces();
+        let message = if num_pieces == 0 {
+            BtMessage::HaveNone
+        } else {
+            let mut bitfield = vec![0u8; (num_pieces as usize).div_ceil(8)];
+            for piece_index in 0..num_pieces {
+                if provider.has_piece(piece_index) {
+                    bitfield[piece_index as usize / 8] |= 1 << (7 - piece_index % 8);
+                }
+            }
+            BtMessage::Bitfield { data: bitfield }
+        };
+        transport
+            .send_upload_message(&message)
+            .await
+            .map_err(|error| {
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
+                )
+            })
+    }
+
+    pub(crate) async fn handle_message<T: BtUploadTransport>(
+        &mut self,
+        transport: &mut T,
+        message: BtMessage,
+        provider: &dyn PieceDataProvider,
+    ) -> Result<u64> {
+        let round_uploaded = self.uploaded_bytes;
+        if let Some(validator) = &self.message_validator {
+            validator.validate(&message).map_err(|error| {
+                crate::error::Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                    "invalid BitTorrent upload message: {error}"
+                )))
+            })?;
+        }
+
+        match message {
+            BtMessage::Request { request } => {
+                if !self.am_choke_state && self.peer_interested {
+                    debug!(
+                        "Upload request: piece={}, offset={}, len={}",
+                        request.index, request.begin, request.length
+                    );
+                    if let Some(piece_data) = provider.has_piece(request.index).then(|| {
+                        provider.get_piece_data(request.index, request.begin, request.length)
+                    }) {
+                        if let Some(piece_data) = piece_data.await {
+                            let data_len = piece_data.len() as u64;
+                            if data_len != request.length as u64 {
+                                warn!(
+                                    "Piece provider returned {} bytes for a {}-byte request (piece={}, offset={})",
+                                    data_len, request.length, request.index, request.begin
+                                );
+                            } else {
+                                if let Some(ref limiter) = self.upload_limiter {
+                                    limiter.acquire_upload(data_len).await;
+                                }
+                                if let Some(ref limiter) = self.global_upload_limiter
+                                    && limiter.is_upload_limited()
+                                {
+                                    limiter.acquire_upload(data_len).await;
+                                }
+                                transport
+                                    .send_upload_message(&BtMessage::Piece {
+                                        index: request.index,
+                                        begin: request.begin,
+                                        data: piece_data.into(),
+                                    })
+                                    .await
+                                    .map_err(|error| {
+                                        crate::error::Aria2Error::Recoverable(
+                                            crate::error::RecoverableError::TemporaryNetworkFailure {
+                                                message: error,
+                                            },
+                                        )
+                                    })?;
+                                self.uploaded_bytes += data_len;
+                                if let Some(counter) = &self.upload_counter {
+                                    counter
+                                        .fetch_add(data_len, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                        }
+                    } else {
+                        warn!(
+                            "No data for piece {} at offset {}",
+                            request.index, request.begin
+                        );
+                    }
+                } else {
+                    debug!(
+                        "Ignoring request: choked={} interested={}",
+                        self.am_choke_state, self.peer_interested
+                    );
+                }
+            }
+            BtMessage::Interested => {
+                self.peer_interested = true;
+                if !self.am_choke_state {
+                    transport.send_upload_unchoke().await.ok();
+                }
+            }
+            BtMessage::NotInterested => self.peer_interested = false,
+            BtMessage::Choke => debug!("Peer choked us"),
+            BtMessage::Unchoke => debug!("Peer unchoked us"),
+            BtMessage::Have { piece_index } => debug!("Peer has piece {}", piece_index),
+            BtMessage::Cancel { request } => debug!(
+                "Peer cancelled request for piece {} offset {}",
+                request.index, request.begin
+            ),
+            BtMessage::Piece { .. } => debug!("Unexpected Piece from peer during upload"),
+            BtMessage::Bitfield { .. }
+            | BtMessage::KeepAlive
+            | BtMessage::Port { .. }
+            | BtMessage::AllowedFast { .. }
+            | BtMessage::Reject { .. }
+            | BtMessage::Suggest { .. }
+            | BtMessage::HaveAll
+            | BtMessage::HaveNone
+            | BtMessage::Extended { .. } => {}
+        }
+
+        Ok(self.uploaded_bytes - round_uploaded)
+    }
+
+    pub(crate) async fn unchoke_peer<T: BtUploadTransport>(
+        &mut self,
+        transport: &mut T,
+    ) -> Result<()> {
+        if self.am_choke_state {
+            transport.send_upload_unchoke().await.map_err(|error| {
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
+                )
+            })?;
+            self.am_choke_state = false;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn choke_peer<T: BtUploadTransport>(
+        &mut self,
+        transport: &mut T,
+    ) -> Result<()> {
+        if !self.am_choke_state {
+            transport.send_upload_choke().await.map_err(|error| {
+                crate::error::Aria2Error::Recoverable(
+                    crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
+                )
+            })?;
+            self.am_choke_state = true;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_peer_choked(&self) -> bool {
+        self.am_choke_state
+    }
+
+    pub(crate) fn is_peer_interested(&self) -> bool {
+        self.peer_interested
+    }
+
+    pub(crate) fn uploaded_bytes(&self) -> u64 {
+        self.uploaded_bytes
+    }
+}
+
+pub struct BtUploadSession {
+    conn: BtUploadConnection,
+    state: BtUploadState,
     pub(crate) is_dead: bool,
 }
 
@@ -107,25 +347,16 @@ impl BtUploadSession {
     }
 
     pub(crate) fn new_with_connection(conn: BtUploadConnection, config: &BtSeedingConfig) -> Self {
-        let upload_limiter = config
-            .max_upload_bytes_per_sec
-            .filter(|&r| r > 0)
-            .map(|r| RateLimiter::new(&RateLimiterConfig::new(None, Some(r))));
-
         Self {
             conn,
-            am_choke_state: false,
-            peer_interested: false,
-            uploaded_bytes: 0,
-            upload_limiter,
-            global_upload_limiter: config.global_limiter.clone(),
-            message_validator: None,
+            state: BtUploadState::new(config),
             is_dead: false,
         }
     }
 
     pub fn configure_message_validator(&mut self, num_pieces: u32, piece_length: u32) {
-        self.message_validator = Some(BtMessageValidator::new(num_pieces, piece_length));
+        self.state
+            .configure_message_validator(num_pieces, piece_length);
     }
 
     /// Announce the pieces currently available from this upload peer.
@@ -138,34 +369,9 @@ impl BtUploadSession {
         &mut self,
         provider: &dyn PieceDataProvider,
     ) -> Result<()> {
-        let num_pieces = provider.num_pieces();
-        if num_pieces == 0 {
-            self.conn
-                .send_message(&BtMessage::HaveNone)
-                .await
-                .map_err(|error| {
-                    crate::error::Aria2Error::Recoverable(
-                        crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
-                    )
-                })?;
-            return Ok(());
-        }
-
-        let mut bitfield = vec![0u8; (num_pieces as usize).div_ceil(8)];
-        for piece_index in 0..num_pieces {
-            if provider.has_piece(piece_index) {
-                bitfield[piece_index as usize / 8] |= 1 << (7 - piece_index % 8);
-            }
-        }
-        self.conn
-            .send_message(&BtMessage::Bitfield { data: bitfield })
+        self.state
+            .send_piece_availability(&mut self.conn, provider)
             .await
-            .map_err(|error| {
-                crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure { message: error },
-                )
-            })?;
-        Ok(())
     }
 
     pub async fn handle_incoming_messages(
@@ -176,180 +382,47 @@ impl BtUploadSession {
             return Ok(0);
         }
 
-        let round_uploaded = self.uploaded_bytes;
-
+        let round_uploaded = self.state.uploaded_bytes();
         match self.conn.read_message().await {
             Ok(Some(msg)) => {
-                if let Some(validator) = &self.message_validator
-                    && let Err(error) = validator.validate(&msg)
+                if let Err(error) = self
+                    .state
+                    .handle_message(&mut self.conn, msg, provider)
+                    .await
                 {
                     warn!("Invalid BitTorrent upload message: {}", error);
                     self.is_dead = true;
-                    return Ok(self.uploaded_bytes - round_uploaded);
+                    return Ok(0);
                 }
-                match msg {
-                    BtMessage::Request { request } => {
-                        if !self.am_choke_state && self.peer_interested {
-                            debug!(
-                                "Upload request: piece={}, offset={}, len={}",
-                                request.index, request.begin, request.length
-                            );
-
-                            let data = if provider.has_piece(request.index) {
-                                provider
-                                    .get_piece_data(request.index, request.begin, request.length)
-                                    .await
-                            } else {
-                                None
-                            };
-                            if let Some(piece_data) = data {
-                                let data_len = piece_data.len() as u64;
-                                if data_len != request.length as u64 {
-                                    warn!(
-                                        "Piece provider returned {} bytes for a {}-byte request (piece={}, offset={})",
-                                        data_len, request.length, request.index, request.begin
-                                    );
-                                } else {
-                                    if let Some(ref lim) = self.upload_limiter {
-                                        lim.acquire_upload(data_len).await;
-                                    }
-                                    if let Some(ref lim) = self.global_upload_limiter
-                                        && lim.is_upload_limited()
-                                    {
-                                        lim.acquire_upload(data_len).await;
-                                    }
-                                    self.conn.send_message(&BtMessage::Piece {
-                                        index: request.index,
-                                        begin: request.begin,
-                                        data: piece_data.into(),
-                                    }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
-                                        crate::error::RecoverableError::TemporaryNetworkFailure { message: e.to_string() }
-                                    ))?;
-                                    self.uploaded_bytes += data_len;
-                                }
-                            } else {
-                                warn!(
-                                    "No data for piece {} at offset {}",
-                                    request.index, request.begin
-                                );
-                            }
-                        } else {
-                            debug!(
-                                "Ignoring request: choked={} interested={}",
-                                self.am_choke_state, self.peer_interested
-                            );
-                        }
-                    }
-                    BtMessage::Interested => {
-                        self.peer_interested = true;
-                        if !self.am_choke_state {
-                            self.conn.send_unchoke().await.ok();
-                        }
-                    }
-                    BtMessage::NotInterested => {
-                        self.peer_interested = false;
-                    }
-                    BtMessage::Choke => {
-                        debug!("Peer choked us");
-                    }
-                    BtMessage::Unchoke => {
-                        debug!("Peer unchoked us");
-                    }
-                    BtMessage::Have { piece_index } => {
-                        debug!("Peer has piece {}", piece_index);
-                    }
-                    BtMessage::Cancel { request } => {
-                        debug!(
-                            "Peer cancelled request for piece {} offset {}",
-                            request.index, request.begin
-                        );
-                    }
-                    BtMessage::Piece { .. } => {
-                        debug!("Unexpected Piece from peer during seeding");
-                    }
-                    BtMessage::Bitfield { .. } => {}
-                    BtMessage::KeepAlive => {}
-                    BtMessage::Port { port: _ } => {}
-                    BtMessage::AllowedFast { index } => {
-                        debug!("Received AllowedFast for piece {}", index);
-                    }
-                    BtMessage::Reject {
-                        index,
-                        offset,
-                        length,
-                    } => {
-                        debug!(
-                            "Received Reject for piece {} offset {} len {}",
-                            index, offset, length
-                        );
-                    }
-                    BtMessage::Suggest { index } => {
-                        debug!("Received Suggest for piece {}", index);
-                    }
-                    BtMessage::HaveAll => {
-                        debug!("Received HaveAll");
-                    }
-                    BtMessage::HaveNone => {
-                        debug!("Received HaveNone");
-                    }
-                    BtMessage::Extended { ext_id, payload } => {
-                        debug!(
-                            "Received Extended message: ext_id={}, payload_len={}",
-                            ext_id,
-                            payload.len()
-                        );
-                    }
-                }
+                Ok(self.state.uploaded_bytes() - round_uploaded)
             }
             Ok(None) => {
                 debug!("EOF from peer, marking session as dead");
                 self.is_dead = true;
-                return Ok(self.uploaded_bytes - round_uploaded);
+                Ok(0)
             }
             Err(e) => {
                 warn!("Read error from upload peer: {}, marking dead", e);
                 self.is_dead = true;
-                return Ok(self.uploaded_bytes - round_uploaded);
+                Ok(0)
             }
         }
-
-        Ok(self.uploaded_bytes - round_uploaded)
     }
 
     pub async fn unchoke_peer(&mut self) -> Result<()> {
-        if self.am_choke_state {
-            self.conn.send_unchoke().await.map_err(|e| {
-                crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure {
-                        message: e.to_string(),
-                    },
-                )
-            })?;
-            self.am_choke_state = false;
-        }
-        Ok(())
+        self.state.unchoke_peer(&mut self.conn).await
     }
 
     pub async fn choke_peer(&mut self) -> Result<()> {
-        if !self.am_choke_state {
-            self.conn.send_choke().await.map_err(|e| {
-                crate::error::Aria2Error::Recoverable(
-                    crate::error::RecoverableError::TemporaryNetworkFailure {
-                        message: e.to_string(),
-                    },
-                )
-            })?;
-            self.am_choke_state = true;
-        }
-        Ok(())
+        self.state.choke_peer(&mut self.conn).await
     }
 
     pub fn is_peer_choked(&self) -> bool {
-        self.am_choke_state
+        self.state.is_peer_choked()
     }
 
     pub fn is_peer_interested(&self) -> bool {
-        self.peer_interested
+        self.state.is_peer_interested()
     }
 
     pub fn is_dead(&self) -> bool {
@@ -371,7 +444,7 @@ impl BtUploadSession {
     }
 
     pub fn uploaded_bytes(&self) -> u64 {
-        self.uploaded_bytes
+        self.state.uploaded_bytes()
     }
 
     pub fn connection_mut(&mut self) -> Option<&mut PeerConnection> {
@@ -456,6 +529,31 @@ impl PieceDataProvider for InMemoryPieceProvider {
 mod tests {
     use super::*;
 
+    struct TestUploadTransport {
+        sent: Vec<BtMessage>,
+    }
+
+    #[async_trait]
+    impl BtUploadTransport for TestUploadTransport {
+        async fn send_upload_message(
+            &mut self,
+            message: &BtMessage,
+        ) -> std::result::Result<(), String> {
+            self.sent.push(message.clone());
+            Ok(())
+        }
+
+        async fn send_upload_choke(&mut self) -> std::result::Result<(), String> {
+            self.sent.push(BtMessage::Choke);
+            Ok(())
+        }
+
+        async fn send_upload_unchoke(&mut self) -> std::result::Result<(), String> {
+            self.sent.push(BtMessage::Unchoke);
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_seeding_config_default() {
         let cfg = BtSeedingConfig::default();
@@ -534,5 +632,40 @@ mod tests {
 
         let last_piece = provider.get_piece_data(2, 0, 60).await.unwrap();
         assert_eq!(last_piece.len(), 60);
+    }
+
+    #[tokio::test]
+    async fn upload_state_serves_a_verified_piece_while_download_is_active() {
+        let mut provider = InMemoryPieceProvider::new(32, 2);
+        provider.set_piece_data(0, vec![0x5a; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        let mut transport = TestUploadTransport { sent: Vec::new() };
+
+        state
+            .handle_message(&mut transport, BtMessage::Interested, &provider)
+            .await
+            .unwrap();
+        let uploaded = state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+                        index: 0,
+                        begin: 4,
+                        length: 8,
+                    },
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(uploaded, 8);
+        assert!(matches!(transport.sent.first(), Some(BtMessage::Unchoke)));
+        assert!(matches!(
+            transport.sent.get(1),
+            Some(BtMessage::Piece { index: 0, begin: 4, data }) if data.as_ref() == &[0x5a; 8]
+        ));
+        assert_eq!(state.uploaded_bytes(), 8);
     }
 }

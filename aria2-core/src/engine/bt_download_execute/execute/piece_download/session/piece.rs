@@ -87,25 +87,27 @@ impl PieceDownloadSession<'_> {
                     next_piece_idx,
                     self.active_connections.len()
                 );
-                BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts(
+                BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts_and_provider(
                                 self.active_connections,
                                 next_piece_idx as u32,
                                 actual_piece_len,
                                 num_blocks,
                                 &mut self.endgame_state,
                                 self.command.dht_engine.clone(),
+                                Some(std::sync::Arc::clone(&self.upload_provider)),
                                 Some(self.command.progress.as_ref()),
                                 self.request_timeout,
                                 max_attempts,
                             )
                             .await
             } else {
-                BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts(
+                BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts_and_provider(
                                 self.active_connections,
                                 next_piece_idx as u32,
                                 actual_piece_len,
                                 num_blocks,
                                 self.command.dht_engine.clone(),
+                                Some(std::sync::Arc::clone(&self.upload_provider)),
                                 Some(self.command.progress.as_ref()),
                                 self.request_timeout,
                                 max_attempts,

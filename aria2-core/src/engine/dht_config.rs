@@ -1,6 +1,7 @@
 //! Build the protocol DHT configuration from one download option snapshot.
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::config::parse_integer_segments;
@@ -33,7 +34,9 @@ pub(crate) async fn build_dht_engine_config(
     let listen_addr = selected_listen_addr(options, use_ipv6)?;
     let bootstrap_specs = selected_bootstrap_specs(options, use_ipv6)?;
     let bootstrap_nodes = resolve_bootstrap_nodes(&bootstrap_specs, use_ipv6).await?;
-    let dht_file_path = selected_file_path(options, use_ipv6);
+    let dht_file_path = selected_file_path(options, use_ipv6)
+        .map(|path| expand_home_path(path, home_dir().as_deref()))
+        .or_else(|| Some(default_dht_file_path(use_ipv6)));
 
     Ok(aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
         port: port_range
@@ -43,7 +46,7 @@ pub(crate) async fn build_dht_engine_config(
         port_range,
         listen_addr,
         bootstrap_nodes,
-        dht_file_path: dht_file_path.map(std::path::PathBuf::from),
+        dht_file_path,
         query_timeout: Duration::from_secs(options.dht_message_timeout.max(1)),
         refresh_check_interval: Duration::from_secs(options.dht_refresh_check_interval.max(1)),
         token_rotation_interval: Duration::from_secs(options.dht_token_rotation_interval.max(1)),
@@ -81,13 +84,48 @@ fn selected_listen_addr(options: &DownloadOptions, use_ipv6: bool) -> Result<Opt
 
 fn selected_file_path(options: &DownloadOptions, use_ipv6: bool) -> Option<&str> {
     if use_ipv6 {
-        options
-            .dht_file_path6
-            .as_deref()
-            .or(options.dht_file_path.as_deref())
+        options.dht_file_path6.as_deref()
     } else {
         options.dht_file_path.as_deref()
     }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        return Some(PathBuf::from(home));
+    }
+
+    match (std::env::var_os("HOMEDRIVE"), std::env::var_os("HOMEPATH")) {
+        (Some(drive), Some(path)) => Some(Path::new(&drive).join(path)),
+        _ => None,
+    }
+}
+
+fn expand_home_path(value: &str, home: Option<&Path>) -> PathBuf {
+    let Some(home) = home else {
+        return PathBuf::from(value);
+    };
+    let home = home.to_string_lossy();
+    PathBuf::from(value.replace("${HOME}", &home))
+}
+
+fn default_dht_file_path(use_ipv6: bool) -> PathBuf {
+    let filename = if use_ipv6 { "dht6.dat" } else { "dht.dat" };
+    let Some(home) = home_dir() else {
+        return PathBuf::from(filename);
+    };
+
+    // Match aria2's migration behavior: retain the legacy file when it is
+    // already present, otherwise use the XDG cache location.
+    let legacy = home.join(".aria2").join(filename);
+    if legacy.is_file() {
+        return legacy;
+    }
+
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cache"));
+    cache.join("aria2").join(filename)
 }
 
 fn selected_bootstrap_specs(options: &DownloadOptions, use_ipv6: bool) -> Result<Vec<String>> {
@@ -204,5 +242,22 @@ mod tests {
             config.bootstrap_nodes,
             vec!["127.0.0.1:49004".parse::<SocketAddr>().unwrap()]
         );
+    }
+
+    #[test]
+    fn ipv6_path_does_not_fall_back_to_ipv4_path() {
+        let options = DownloadOptions {
+            dht_file_path: Some("v4.dat".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(selected_file_path(&options, true), None);
+        assert_eq!(selected_file_path(&options, false), Some("v4.dat"));
+    }
+
+    #[test]
+    fn home_placeholder_expands_in_dht_paths() {
+        let expanded = expand_home_path("${HOME}/.aria2/dht.dat", Some(Path::new("/srv/user")));
+        assert_eq!(expanded, PathBuf::from("/srv/user/.aria2/dht.dat"));
     }
 }

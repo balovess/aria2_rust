@@ -114,7 +114,7 @@ pub(crate) fn build_download_context_from_meta(
             BtFileMode::Multi
         },
         announce_list: normalized_announce_list(&meta.announce_list, &meta.announce),
-        nodes: Vec::new(),
+        nodes: meta.nodes.clone(),
         info_hash: meta.info_hash.as_hex(),
         metadata: Vec::new(),
         metadata_size: 0,

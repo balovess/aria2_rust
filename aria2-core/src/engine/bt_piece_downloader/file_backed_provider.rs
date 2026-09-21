@@ -13,6 +13,12 @@ pub struct FileBackedPieceProvider {
     multi_file_layout: Option<MultiFileLayout>,
     /// Per-piece availability, stored as one bit per piece.
     pieces: Bitfield,
+    /// Optional live availability shared with an in-progress download.
+    ///
+    /// The backing file may contain pieces that are still being downloaded,
+    /// so upload eligibility must follow the verified piece bitfield rather
+    /// than assuming that the file is a complete seed.
+    shared_pieces: Option<std::sync::Arc<std::sync::RwLock<Vec<u8>>>>,
 }
 
 impl FileBackedPieceProvider {
@@ -31,6 +37,7 @@ impl FileBackedPieceProvider {
             num_pieces,
             multi_file_layout,
             pieces,
+            shared_pieces: None,
         }
     }
 
@@ -57,6 +64,27 @@ impl FileBackedPieceProvider {
             num_pieces,
             multi_file_layout,
             pieces: available,
+            shared_pieces: None,
+        }
+    }
+
+    /// Create a provider whose availability follows a live BT download
+    /// bitfield. The file is read only after the corresponding piece has been
+    /// verified and published in `shared_pieces`.
+    pub fn with_shared_bitfield(
+        file_path: std::path::PathBuf,
+        piece_length: u32,
+        num_pieces: u32,
+        multi_file_layout: Option<MultiFileLayout>,
+        shared_pieces: std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
+    ) -> Self {
+        Self {
+            file_path,
+            piece_length,
+            num_pieces,
+            multi_file_layout,
+            pieces: Bitfield::new(num_pieces as usize),
+            shared_pieces: Some(shared_pieces),
         }
     }
 
@@ -144,6 +172,13 @@ impl PieceDataProvider for FileBackedPieceProvider {
     }
 
     fn has_piece(&self, piece_index: u32) -> bool {
+        if let Some(shared_pieces) = &self.shared_pieces {
+            return shared_pieces
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(piece_index as usize / 8)
+                .is_some_and(|byte| byte & (1 << (7 - piece_index % 8)) != 0);
+        }
         self.pieces.test(piece_index as usize)
     }
 

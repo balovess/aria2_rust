@@ -237,8 +237,8 @@ fn test_process_announce_response_updates_interval() {
     let response = TrackerResponse {
         interval: 900,
         min_interval: Some(300),
-        seeders: 10,
-        leechers: 5,
+        seeders: Some(10),
+        leechers: Some(5),
         peers: vec![PeerInfo {
             ip: "1.2.3.4".to_string(),
             port: 6881,
@@ -255,8 +255,8 @@ fn test_process_announce_response_updates_interval() {
     assert!(result.is_ok());
     assert_eq!(bt.interval(), Duration::from_secs(900));
     assert_eq!(bt.min_interval(), Duration::from_secs(300));
-    assert_eq!(bt.complete(), 10);
-    assert_eq!(bt.incomplete(), 5);
+    assert_eq!(bt.complete(), Some(10));
+    assert_eq!(bt.incomplete(), Some(5));
     assert_eq!(result.unwrap().len(), 1);
 }
 
@@ -269,8 +269,8 @@ fn test_process_announce_response_failure() {
     let response = TrackerResponse {
         interval: 300,
         min_interval: None,
-        seeders: 0,
-        leechers: 0,
+        seeders: Some(0),
+        leechers: Some(0),
         peers: vec![],
         peers6: vec![],
         tracker_id: None,
@@ -294,8 +294,8 @@ fn test_process_announce_response_min_interval_capped() {
     let response = TrackerResponse {
         interval: 300,
         min_interval: Some(600),
-        seeders: 0,
-        leechers: 0,
+        seeders: Some(0),
+        leechers: Some(0),
         peers: vec![],
         peers6: vec![],
         tracker_id: None,
@@ -319,8 +319,8 @@ fn test_process_announce_response_uses_interval_as_min() {
     let response = TrackerResponse {
         interval: 600,
         min_interval: None,
-        seeders: 0,
-        leechers: 0,
+        seeders: Some(0),
+        leechers: Some(0),
         peers: vec![],
         peers6: vec![],
         tracker_id: None,
@@ -344,8 +344,8 @@ fn test_process_announce_response_stores_tracker_id() {
     let response = TrackerResponse {
         interval: 300,
         min_interval: None,
-        seeders: 0,
-        leechers: 0,
+        seeders: Some(0),
+        leechers: Some(0),
         peers: vec![PeerInfo {
             ip: "1.2.3.4".to_string(),
             port: 6881,
@@ -382,8 +382,8 @@ fn test_process_announce_response_appends_dynamic_trackers() {
     let response = TrackerResponse {
         interval: 300,
         min_interval: None,
-        seeders: 0,
-        leechers: 0,
+        seeders: Some(0),
+        leechers: Some(0),
         peers: vec![],
         peers6: vec![],
         tracker_id: None,

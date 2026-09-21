@@ -77,11 +77,28 @@ impl BtDownloadCommand {
             return;
         }
         conn.allocate_session_resource(piece_length, num_pieces, total_size);
+        self.configure_upload_connection(&mut conn, piece_length, num_pieces);
         active_connections.push(conn);
         self.bt_runtime.set_connections(active_connections.len());
         self.group
             .recover()
             .set_bt_connection_count(active_connections.len());
         info!("[BT] Admitted incoming peer {}", endpoint);
+    }
+
+    pub(in crate::engine::bt_download_execute::execute) fn configure_upload_connection(
+        &self,
+        connection: &mut crate::engine::bt_peer_connection::BtPeerConn,
+        piece_length: u32,
+        num_pieces: u32,
+    ) {
+        let max_upload_bytes_per_sec = self.group.recover().options().max_upload_limit;
+        let config = crate::engine::bt_upload_session::BtSeedingConfig {
+            max_upload_bytes_per_sec,
+            global_limiter: self.global_limiter.clone(),
+            max_peers_to_unchoke: 4,
+            optimistic_unchoke_interval_secs: 30,
+        };
+        connection.configure_upload(&config, num_pieces, piece_length);
     }
 }

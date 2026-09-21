@@ -130,6 +130,7 @@ impl<'a> PeerWorkers<'a> {
         connections: &'a mut [BtPeerConn],
         event_tx: mpsc::Sender<PeerEvent>,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
     ) -> Self {
         let mut senders = Vec::with_capacity(connections.len());
         let workers = FuturesUnordered::new();
@@ -144,6 +145,7 @@ impl<'a> PeerWorkers<'a> {
                 command_rx,
                 event_tx.clone(),
                 dht_engine.clone(),
+                upload_provider.clone(),
             ));
             workers.push(worker);
         }
@@ -192,6 +194,7 @@ async fn peer_worker(
     mut command_rx: mpsc::Receiver<PeerCommand>,
     event_tx: mpsc::Sender<PeerEvent>,
     dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
 ) -> usize {
     loop {
         tokio::select! {
@@ -217,13 +220,20 @@ async fn peer_worker(
             message = connection.read_message() => {
                 match message {
                     Ok(Some(message)) => {
-                        let Some(message) = process_peer_message(
+                        let message = match process_peer_message(
                             connection,
                             message,
                             dht_engine.clone(),
-                        ) else {
-                            continue;
+                            upload_provider.as_deref(),
+                        ).await {
+                            Ok(message) => message,
+                            Err(error) => {
+                                tracing::debug!(peer_index, %error, "BT upload request handling failed");
+                                let _ = event_tx.send(PeerEvent::Disconnected { peer_index }).await;
+                                break;
+                            }
                         };
+                        let Some(message) = message else { continue; };
                         if event_tx.send(PeerEvent::Message { peer_index, message }).await.is_err() {
                             break;
                         }
@@ -243,18 +253,28 @@ async fn peer_worker(
 /// Apply connection-local protocol state while the worker owns the mutable
 /// connection. Only messages that belong to the current piece pipeline are
 /// returned to the scheduler.
-fn process_peer_message(
+async fn process_peer_message(
     connection: &mut BtPeerConn,
     message: aria2_protocol::bittorrent::message::types::BtMessage,
     dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
-) -> Option<aria2_protocol::bittorrent::message::types::BtMessage> {
+    upload_provider: Option<&dyn crate::engine::bt_upload_session::PieceDataProvider>,
+) -> Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>> {
     use aria2_protocol::bittorrent::message::types::BtMessage;
 
+    if !matches!(message, BtMessage::Piece { .. } | BtMessage::Reject { .. })
+        && let Some(provider) = upload_provider
+        && connection.upload_state.is_some()
+    {
+        connection
+            .handle_upload_message(message.clone(), provider)
+            .await?;
+    }
+
     match message {
-        BtMessage::Piece { .. } | BtMessage::Reject { .. } => Some(message),
+        BtMessage::Piece { .. } | BtMessage::Reject { .. } => Ok(Some(message)),
         BtMessage::AllowedFast { index } => {
             connection.add_allowed_fast(index);
-            None
+            Ok(None)
         }
         BtMessage::Port { port } => {
             if port != 0
@@ -267,7 +287,7 @@ fn process_peer_message(
                     engine.add_node(address).await;
                 });
             }
-            None
+            Ok(None)
         }
         BtMessage::Extended { ext_id, payload } => {
             if connection.is_pex_enabled()
@@ -276,34 +296,34 @@ fn process_peer_message(
             {
                 BtMessageHandler::try_process_pex_during_read(connection, ext_id, &payload);
             }
-            None
+            Ok(None)
         }
         BtMessage::Have { piece_index } => {
             connection.update_peer_bitfield(piece_index as usize, 1);
-            None
+            Ok(None)
         }
         BtMessage::Bitfield { data } => {
             connection.set_peer_bitfield(&data);
-            None
+            Ok(None)
         }
         BtMessage::HaveAll => {
             connection.mark_seeder();
-            None
+            Ok(None)
         }
         BtMessage::HaveNone => {
             connection.seeder = false;
             connection.set_peer_bitfield(&[]);
-            None
+            Ok(None)
         }
         BtMessage::Choke => {
             connection.stats.peer_choking = true;
-            None
+            Ok(None)
         }
         BtMessage::Unchoke => {
             connection.stats.peer_choking = false;
-            None
+            Ok(None)
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -692,6 +712,7 @@ impl BtMessageHandler {
         piece_length: u32,
         num_blocks: u32,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
         network_activity: Option<&AtomicProgress>,
         request_timeout: Duration,
         max_attempts: u32,
@@ -722,7 +743,12 @@ impl BtMessageHandler {
                 .saturating_mul(DEFAULT_MAX_OUTSTANDING_REQUEST + 4)
                 .max(64);
             let (event_tx, mut event_rx) = mpsc::channel(channel_capacity);
-            let mut workers = PeerWorkers::new(connections, event_tx, dht_engine.clone());
+            let mut workers = PeerWorkers::new(
+                connections,
+                event_tx,
+                dht_engine.clone(),
+                upload_provider.clone(),
+            );
             let outcome = run_attempt(
                 &mut workers,
                 &mut event_rx,

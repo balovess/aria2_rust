@@ -1,9 +1,9 @@
 //! Rust-owned BitTorrent piece checkpoints.
 //!
-//! The public sidecar path remains the familiar `.aria2` location, but the
-//! bytes are deliberately owned by aria2-rust's `A2CF` format.  This keeps
-//! the persistence seam small and prevents a generic HTTP/FTP checkpoint from
-//! being interpreted as verified torrent pieces.
+//! The public sidecar path remains the familiar `.aria2` location. New bytes
+//! use aria2's native control-file layout plus the small project extension
+//! needed for verified-piece metadata; the retired A2CF reader is migration
+//! compatibility only.
 
 use std::path::{Path, PathBuf};
 
@@ -42,10 +42,11 @@ impl BtCheckpoint {
                         .torrent_piece_length()
                         .is_none_or(|stored| stored == piece_length) =>
             {
-                // A2CF checkpoints written before piece-length persistence are
-                // still safe to restore because the torrent info hash identifies
-                // the complete info dictionary. Stamp the field on the next
-                // durable save so the invariant becomes explicit thereafter.
+                // Legacy checkpoints written before piece-length persistence
+                // are still safe to restore because the torrent info hash
+                // identifies the complete info dictionary. Normalize their
+                // byte-only bitfield before the next native-format save.
+                control_file.normalize_legacy_piece_layout(num_pieces)?;
                 control_file.set_torrent_piece_length(piece_length);
                 Some(control_file)
             }
@@ -242,7 +243,7 @@ mod tests {
 
         checkpoint.save(&[0xC0], 8).await.unwrap();
 
-        let sidecar = dir.path().join(".aria2");
+        let sidecar = ControlFile::control_path_for(dir.path());
         assert!(sidecar.is_file());
         let restored = BtCheckpoint::open(dir.path(), true, 8, 4, 2, info_hash)
             .await
@@ -276,12 +277,19 @@ mod tests {
         let info_hash = [0x66; 20];
         let path = ControlFile::control_path_for(&output);
 
-        let mut legacy = ControlFile::open_or_create(&path, 8, 2).await.unwrap();
-        legacy.mark_torrent_checkpoint();
-        legacy.set_torrent_info_hash(info_hash);
-        legacy.set_bitfield(vec![0xC0]);
-        legacy.update_completed_length(8);
-        legacy.save().await.unwrap();
+        // Retired A2CF bytes: torrent marker + info hash, but no persisted
+        // piece length. The next save must rewrite this as native v1.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(b"A2CF");
+        legacy.extend_from_slice(&1u16.to_le_bytes());
+        legacy.push(0x02 | 0x04);
+        legacy.extend_from_slice(&8u64.to_le_bytes());
+        legacy.extend_from_slice(&8u64.to_le_bytes());
+        legacy.extend_from_slice(&0u64.to_le_bytes());
+        legacy.extend_from_slice(&1u64.to_le_bytes());
+        legacy.extend_from_slice(&info_hash);
+        legacy.push(0xC0);
+        tokio::fs::write(&path, legacy).await.unwrap();
 
         let mut restored = BtCheckpoint::open(&output, true, 8, 4, 2, info_hash)
             .await

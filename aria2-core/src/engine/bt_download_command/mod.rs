@@ -243,7 +243,7 @@ pub struct BtDownloadCommand {
     pub(crate) bt_listener: Option<Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>>,
     /// RAII registration for this torrent's info-hash route.
     pub(crate) bt_peer_route: Option<crate::engine::bt_peer_listener::BtPeerRouteHandle>,
-    /// Rust-owned A2CF checkpoint for verified torrent pieces.
+    /// Project extension state for verified torrent pieces.
     pub(crate) checkpoint: Option<crate::engine::bt_checkpoint::BtCheckpoint>,
     /// Bytes verified since the last durable torrent checkpoint.
     pub(crate) checkpoint_bytes_since_save: u64,
@@ -278,7 +278,14 @@ impl BtDownloadCommand {
             registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
         }
         if let Some(engine) = self.dht_engine.take() {
-            engine.shutdown_async().await;
+            let is_global = self
+                .bt_registry
+                .as_ref()
+                .and_then(|registry| registry.read().ok())
+                .is_some_and(|registry| registry.is_global_dht_engine(&engine));
+            if !is_global {
+                engine.shutdown_async().await;
+            }
         }
         if let (Some(manager), Some(info_hash)) =
             (&self.lpd_manager, self.lpd_registered_info_hash.take())
@@ -357,6 +364,41 @@ mod tests {
             )
             .expect("command shutdown should persist dht.dat");
         assert_eq!(persisted.self_id, [0xA5; 20]);
+    }
+
+    #[tokio::test]
+    async fn task_shutdown_keeps_the_shared_dht_engine_alive() {
+        let torrent = crate::engine::bt_download_command_tests::build_test_torrent();
+        let options = crate::request::request_group::DownloadOptions::default();
+        let mut command = BtDownloadCommand::new(
+            crate::request::request_group::GroupId::new(778),
+            &torrent,
+            &options,
+            None,
+        )
+        .expect("test torrent should construct");
+        let registry = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::engine::bt_registry::BtRegistry::new(),
+        ));
+        command.set_bt_registry(std::sync::Arc::clone(&registry));
+        let dht = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+            aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+        )
+        .await
+        .expect("local DHT engine should start");
+        command.dht_engine = Some(std::sync::Arc::clone(&dht));
+        registry
+            .write()
+            .expect("BT registry should be writable")
+            .set_global_dht_engine(std::sync::Arc::clone(&dht));
+
+        command.shutdown().await;
+
+        assert!(!matches!(
+            dht.stats().await.state,
+            aria2_protocol::bittorrent::dht::engine::DhtEngineState::Stopped
+        ));
+        dht.shutdown_async().await;
     }
 
     #[test]

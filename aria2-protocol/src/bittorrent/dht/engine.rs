@@ -233,8 +233,8 @@ impl DhtEngine {
     ///
     /// This is the manual counterpart of the periodic save task and reuses
     /// the same serialized persistence path and lock.
-    pub async fn save_state(&self) {
-        self.context.save_routing_table().await;
+    pub async fn save_state(&self) -> Result<(), String> {
+        self.context.save_routing_table().await
     }
 
     /// Evict bad routing-table nodes and try cached replacements immediately.

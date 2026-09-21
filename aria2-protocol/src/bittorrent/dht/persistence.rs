@@ -1,12 +1,105 @@
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::node::DhtNode;
 use super::routing_table::RoutingTable;
+use tokio::io::AsyncWriteExt;
 
 static FILE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/// Cross-process lock for the complete read/merge/write transaction.
+///
+/// The lock file is intentionally retained on disk; the OS lock is tied to
+/// the open handle and is released automatically after a crash or normal
+/// drop, so stale marker cleanup is never required.
+struct ProcessFileLock {
+    _file: std::fs::File,
+}
+
+fn persistence_lock_path(path: &Path) -> PathBuf {
+    let mut lock_path = path.as_os_str().to_os_string();
+    lock_path.push(".lock");
+    PathBuf::from(lock_path)
+}
+
+fn ensure_parent_directory_sync(path: &Path) -> Result<(), String> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "Failed to create DHT directory {}: {}",
+            parent.display(),
+            error
+        )
+    })
+}
+
+fn acquire_process_file_lock(path: &Path) -> Result<ProcessFileLock, String> {
+    ensure_parent_directory_sync(path)?;
+    let lock_path = persistence_lock_path(path);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| {
+            format!(
+                "Failed to open DHT lock file {}: {}",
+                lock_path.display(),
+                e
+            )
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(format!(
+                "Failed to lock DHT file {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{LOCKFILE_EXCLUSIVE_LOCK, LockFileEx};
+        use windows_sys::Win32::System::IO::OVERLAPPED;
+
+        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            LockFileEx(
+                file.as_raw_handle(),
+                LOCKFILE_EXCLUSIVE_LOCK,
+                0,
+                u32::MAX,
+                u32::MAX,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            return Err(format!(
+                "Failed to lock DHT file {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
+
+    Ok(ProcessFileLock { _file: file })
+}
 
 fn persistence_file_key(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -30,7 +123,7 @@ fn persistence_file_lock(path: &Path) -> Arc<Mutex<()>> {
 const DHT_MAGIC: &[u8] = &[0xA1, 0xA2];
 const DHT_FORMAT_ID: u8 = 0x02;
 const DHT_VERSION_3: u8 = 0x03;
-const NODE_ENTRY_SIZE: usize = 48;
+const NODE_ENTRY_SIZE: usize = 56;
 
 #[derive(Debug, Clone)]
 pub struct PersistedNode {
@@ -88,6 +181,150 @@ fn compact_to_socket_addr(data: &[u8]) -> Option<std::net::SocketAddr> {
     }
 }
 
+fn sync_parent_directory(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|e| format!("Failed to sync DHT directory {}: {}", parent.display(), e))?;
+    }
+
+    #[cfg(not(unix))]
+    let _ = path;
+
+    Ok(())
+}
+
+async fn sync_parent_directory_async(path: &Path) -> Result<(), String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || sync_parent_directory(&path))
+        .await
+        .map_err(|e| format!("Failed to sync DHT directory: {}", e))??;
+    Ok(())
+}
+
+async fn write_serialized_to_file_async(path: &Path, data: &[u8]) -> Result<(), String> {
+    let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
+    let mut file = tokio::fs::File::create(&tmp_path)
+        .await
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    if let Err(error) = file.write_all(data).await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to write temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    if let Err(error) = file.sync_all().await {
+        drop(file);
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to sync temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    drop(file);
+
+    let replacement_path = tmp_path.clone();
+    let target_path = path.to_path_buf();
+    let replacement =
+        tokio::task::spawn_blocking(move || replace_file(&replacement_path, &target_path))
+            .await
+            .map_err(|e| format!("Failed to replace DHT file: {}", e))?;
+    if let Err(error) = replacement {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!(
+            "Failed to replace {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            error
+        ));
+    }
+
+    sync_parent_directory_async(path).await
+}
+
+fn write_serialized_to_file_sync(path: &Path, data: &[u8]) -> Result<(), String> {
+    let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
+    let mut file = std::fs::File::create(&tmp_path)
+        .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
+    if let Err(error) = file.write_all(data) {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to write temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to sync temp file {}: {}",
+            tmp_path.display(),
+            error
+        ));
+    }
+    drop(file);
+
+    if let Err(error) = replace_file(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!(
+            "Failed to replace {} -> {}: {}",
+            tmp_path.display(),
+            path.display(),
+            error
+        ));
+    }
+
+    sync_parent_directory(path)
+}
+
+fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+
+        let source: Vec<u16> = temp_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let target: Vec<u16> = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            MoveFileExW(
+                source.as_ptr(),
+                target.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(temp_path, path)
+    }
+}
+
 pub struct DhtPersistence;
 
 impl DhtPersistence {
@@ -96,7 +333,7 @@ impl DhtPersistence {
         current_epoch_secs().saturating_sub(saved_at_secs) <= max_age.as_secs()
     }
     pub fn serialize(self_id: &[u8; 20], nodes: &[DhtNode]) -> Result<Vec<u8>, String> {
-        let mut buf = Vec::with_capacity(256 + nodes.len() * NODE_ENTRY_SIZE);
+        let mut buf = Vec::with_capacity(56 + nodes.len() * NODE_ENTRY_SIZE);
 
         let mut header = [0u8; 8];
         header[0] = DHT_MAGIC[0];
@@ -199,8 +436,9 @@ impl DhtPersistence {
         ]) as usize;
         offset += 8;
 
-        let expected_end = offset + num_nodes * NODE_ENTRY_SIZE;
-        if expected_end > data.len() {
+        let available = data.len() - offset;
+        if num_nodes > available / NODE_ENTRY_SIZE {
+            let expected_end = offset.saturating_add(num_nodes.saturating_mul(NODE_ENTRY_SIZE));
             return Err(format!(
                 "dht.dat node data truncated: need {} bytes, got {}",
                 expected_end,
@@ -210,47 +448,28 @@ impl DhtPersistence {
 
         let mut nodes = Vec::with_capacity(num_nodes);
         for _ in 0..num_nodes {
+            let entry_end = offset + NODE_ENTRY_SIZE;
             let clen = data[offset] as usize;
-            offset += 1;
-            offset += 7;
 
             if clen != 6 && clen != 18 {
-                offset += NODE_ENTRY_SIZE - 8;
-                continue;
+                return Err(format!(
+                    "dht.dat invalid compact peer info length: {}",
+                    clen
+                ));
             }
 
-            if offset + clen > data.len() {
-                break;
-            }
-            let compact = &data[offset..offset + clen];
+            let compact_start = offset + 8;
+            let compact = &data[compact_start..compact_start + clen];
+            let addr = compact_to_socket_addr(compact)
+                .ok_or_else(|| "dht.dat compact peer info is malformed".to_string())?;
 
-            if compact.iter().all(|&b| b == 0) {
-                offset += NODE_ENTRY_SIZE - 8;
-                continue;
-            }
-
-            let addr = match compact_to_socket_addr(compact) {
-                Some(a) => a,
-                None => {
-                    offset += NODE_ENTRY_SIZE - 8;
-                    continue;
-                }
-            };
-            offset += clen;
-
-            let pad_remaining = 24 - clen;
-            offset += pad_remaining;
-
-            if offset + 20 > data.len() {
-                break;
-            }
-            let id: [u8; 20] = data[offset..offset + 20]
+            let id_start = offset + 8 + 24;
+            let id: [u8; 20] = data[id_start..id_start + 20]
                 .try_into()
                 .map_err(|_| "dht.dat node ID length error")?;
-            offset += 20;
-            offset += 4;
 
             nodes.push(PersistedNode { id, addr });
+            offset = entry_end;
         }
 
         Ok(DhtPersistedData {
@@ -271,22 +490,21 @@ impl DhtPersistence {
     ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes)?;
 
-        let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
-        tokio::fs::write(&tmp_path, &data)
-            .await
-            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-
-        #[cfg(windows)]
-        let _ = tokio::fs::remove_file(path).await;
-        if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(format!(
-                "Failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            ));
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                format!("Failed to create DHT directory {}: {}", parent.display(), e)
+            })?;
         }
+
+        let lock_path = path.to_path_buf();
+        let _process_lock =
+            tokio::task::spawn_blocking(move || acquire_process_file_lock(&lock_path))
+                .await
+                .map_err(|e| format!("Failed to acquire DHT file lock: {}", e))??;
+        write_serialized_to_file_async(path, &data).await?;
 
         Ok(nodes.len())
     }
@@ -297,22 +515,8 @@ impl DhtPersistence {
         nodes: &[DhtNode],
     ) -> Result<usize, String> {
         let data = Self::serialize(self_id, nodes)?;
-
-        let tmp_path = path.with_extension(format!("dat.tmp{}", rand::random::<u32>()));
-        std::fs::write(&tmp_path, &data)
-            .map_err(|e| format!("Failed to write temp file {}: {}", tmp_path.display(), e))?;
-
-        #[cfg(windows)]
-        let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp_path, path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp_path);
-            format!(
-                "Failed to rename {} -> {}: {}",
-                tmp_path.display(),
-                path.display(),
-                e
-            )
-        })?;
+        let _process_lock = acquire_process_file_lock(path)?;
+        write_serialized_to_file_sync(path, &data)?;
 
         Ok(nodes.len())
     }
@@ -345,6 +549,7 @@ impl DhtPersistence {
     ) -> Result<usize, String> {
         let file_lock = persistence_file_lock(path);
         let _guard = file_lock.lock().unwrap_or_else(|error| error.into_inner());
+        let _process_lock = acquire_process_file_lock(path)?;
 
         let mut merged = HashMap::<[u8; 20], DhtNode>::with_capacity(nodes.len());
         if let Ok(existing) = Self::load_from_file_sync(path)
@@ -360,7 +565,9 @@ impl DhtPersistence {
 
         let mut merged: Vec<_> = merged.into_values().collect();
         merged.sort_by_key(|node| node.id);
-        Self::save_to_file_sync(path, self_id, &merged)
+        let data = Self::serialize(self_id, &merged)?;
+        write_serialized_to_file_sync(path, &data)?;
+        Ok(merged.len())
     }
 
     pub async fn load_from_file(path: &Path) -> Result<DhtPersistedData, String> {
@@ -427,6 +634,7 @@ mod tests {
         assert_eq!(data[ip_start + 3], 100);
         let port = u16::from_be_bytes([data[ip_start + 4], data[ip_start + 5]]);
         assert_eq!(port, 6881);
+        assert_eq!(data.len(), 56 + NODE_ENTRY_SIZE);
     }
 
     #[test]
@@ -607,6 +815,24 @@ mod tests {
         let short_data = vec![0xA1, 0xA2];
         let result = DhtPersistence::deserialize(&short_data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_truncated_node_record_is_rejected() {
+        let node = DhtNode::new([0x11; 20], "127.0.0.1:6881".parse().unwrap());
+        let mut data = DhtPersistence::serialize(&[0x22; 20], &[node]).unwrap();
+        data.truncate(data.len() - 1);
+
+        assert!(DhtPersistence::deserialize(&data).is_err());
+    }
+
+    #[test]
+    fn test_invalid_compact_peer_length_is_rejected() {
+        let node = DhtNode::new([0x11; 20], "127.0.0.1:6881".parse().unwrap());
+        let mut data = DhtPersistence::serialize(&[0x22; 20], &[node]).unwrap();
+        data[56] = 5;
+
+        assert!(DhtPersistence::deserialize(&data).is_err());
     }
 
     #[test]

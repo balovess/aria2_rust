@@ -24,6 +24,7 @@ pub use aria2_protocol::bittorrent::tracker::public_list::TrackerFailureKind;
 pub use bt_announce::{BtAnnounce, is_udp_tracker, urlencode_infohash};
 pub use health_tracking::HealthTrackingAnnounceList;
 pub use tracker_announce::{
-    AnnounceResult, SharedTrackerRuntime, TrackerAnnouncer, TrackerRuntimeSnapshot,
+    AnnounceResult, SharedTrackerRuntime, TrackerAnnouncer, TrackerRuntimeInfo,
+    TrackerRuntimeSnapshot,
 };
 pub use types::{AnnounceEvent, TrackerEntry, TrackerTier};

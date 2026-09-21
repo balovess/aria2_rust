@@ -31,6 +31,40 @@ fn rpc_peer_port(addr: SocketAddr, is_incoming: bool) -> u16 {
     if is_incoming { 0 } else { addr.port() }
 }
 
+#[cfg(test)]
+mod peer_id_tests {
+    use super::rpc_peer_id;
+
+    #[test]
+    fn peer_id_uses_aria2_percent_encoding() {
+        let mut peer_id = [0u8; 20];
+        peer_id[0] = b'A';
+        peer_id[1] = b'7';
+        peer_id[2] = b' ';
+        peer_id[3] = 0xff;
+
+        assert_eq!(
+            rpc_peer_id(&peer_id),
+            "A7%20%FF%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00%00"
+        );
+    }
+}
+
+fn rpc_peer_id(peer_id: &[u8; 20]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut output = String::with_capacity(peer_id.len() * 3);
+    for &byte in peer_id {
+        if byte.is_ascii_alphanumeric() {
+            output.push(byte as char);
+        } else {
+            output.push('%');
+            output.push(HEX[(byte >> 4) as usize] as char);
+            output.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    output
+}
+
 /// The application adapter behind the RPC wire layer.
 pub struct CoreRpcBackend {
     group_man: Arc<RequestGroupMan>,

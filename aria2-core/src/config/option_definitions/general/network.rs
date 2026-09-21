@@ -40,19 +40,18 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::None,
             description: "DNS server address for async resolver".into(),
             category: OptionCategory::General,
-            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {
             name: "dns-timeout".into(),
             opt_type: OptionType::Integer,
-            default_value: OptionValue::None,
+            // aria2_original's NumberOptionHandler uses a 30-second default.
+            default_value: OptionValue::Int(30),
             min: Some(1),
             max: Some(60),
             description: "DNS resolution timeout in seconds".into(),
             category: OptionCategory::General,
             hidden: true,
-            supported: false,
             ..Default::default()
         });
         self.register(OptionDef {

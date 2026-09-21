@@ -82,7 +82,7 @@ mod tests {
         let info_hash = [0xABu8; 20];
         let progress = BtProgress {
             info_hash,
-            bitfield: vec![0xFF, 0xFF],
+            bitfield: vec![0xC0],
             peers: vec![],
             stats: ProgressDownloadStats {
                 downloaded_bytes: 1024,
@@ -105,9 +105,7 @@ mod tests {
         assert_eq!(progress.info_hash, info_hash);
         assert_eq!(progress.num_pieces, 2);
         assert_eq!(progress.piece_length, 256 * 1024);
-        // bitfield [0xFF, 0xFF] = 16 set bits, but only 2 pieces
-        // completion_ratio = set_bits / num_pieces = 16 / 2 = 8.0 (exceeds 1.0)
-        // This is normal behavior, as bitfield may contain more bits than num_pieces
+        // bitfield [0xC0] marks both pieces complete; the unused six bits are zero.
         assert!(
             progress.completion_ratio() >= 1.0,
             "Should be at least complete"

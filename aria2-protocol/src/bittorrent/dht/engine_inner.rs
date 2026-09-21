@@ -60,7 +60,11 @@ impl DhtTask for MaintenanceTask {
                 self.context.evict_and_replace_nodes().await;
             }
             MaintenanceKind::SaveRoutingTable => {
-                self.context.save_routing_table().await;
+                if let Err(error) = self.context.save_routing_table().await
+                    && self.context.config.dht_file_path.is_some()
+                {
+                    warn!("Automatic DHT state save failed: {error}");
+                }
             }
         }
     }
@@ -487,57 +491,48 @@ impl DhtEngineContext {
     }
 
     /// Save the routing table to disk.
-    pub(super) async fn save_routing_table(&self) {
-        if let Some(ref path) = self.config.dht_file_path {
-            let path = path.clone();
-            let persistence_max_age = self.config.persistence_max_age;
-            // Acquire the save lock before taking the snapshot. Otherwise a
-            // shutdown snapshot can be newer than an auto-save snapshot but
-            // still be written first, allowing the older snapshot to win.
-            let save_guard = Arc::clone(&self.routing_table_save_lock).lock_owned().await;
-            let self_id = self.inner.read().await.self_id;
-            let nodes = self.routing_table.read().await.collect_good_nodes();
+    pub(super) async fn save_routing_table(&self) -> Result<(), String> {
+        let Some(ref configured_path) = self.config.dht_file_path else {
+            return Err("DHT persistence is disabled (dht-file-path is not set)".to_string());
+        };
+        let path = configured_path.clone();
+        let persistence_max_age = self.config.persistence_max_age;
+        // Acquire the save lock before taking the snapshot. Otherwise a
+        // shutdown snapshot can be newer than an auto-save snapshot but
+        // still be written first, allowing the older snapshot to win.
+        let save_guard = Arc::clone(&self.routing_table_save_lock).lock_owned().await;
+        let self_id = self.inner.read().await.self_id;
+        let nodes = self.routing_table.read().await.collect_good_nodes();
 
-            let save_path = path.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                let _save_guard = save_guard;
-                super::persistence::DhtPersistence::merge_and_save_to_file_sync_with_max_age(
-                    &save_path,
-                    &self_id,
-                    &nodes,
-                    persistence_max_age,
-                )
-            })
-            .await;
-            match result {
-                Ok(Ok(_)) => trace!(path = %path.display(), "Auto-saved DHT routing table"),
-                Ok(Err(e)) => {
-                    warn!(path = %path.display(), "Failed to auto-save DHT routing table: {}", e)
-                }
-                Err(e) => {
-                    warn!(path = %path.display(), "DHT routing table save task failed: {}", e)
-                }
-            }
+        let save_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            let _save_guard = save_guard;
+            super::persistence::DhtPersistence::merge_and_save_to_file_sync_with_max_age(
+                &save_path,
+                &self_id,
+                &nodes,
+                persistence_max_age,
+            )
+        })
+        .await
+        .map_err(|error| format!("DHT routing table save task failed: {error}"))?
+        .map_err(|error| format!("Failed to save DHT routing table: {error}"))?;
+        trace!(path = %path.display(), "Saved DHT routing table");
 
-            // Persist BEP 44 items with the routing-table checkpoint so a
-            // periodic shutdown or interruption cannot split their lifecycles.
-            let item_path = path.with_extension("items");
-            let item_save_guard = Arc::clone(&self.routing_table_save_lock).lock_owned().await;
-            let save_path = item_path.clone();
-            let item_store = self.item_store.clone();
-            let item_result = tokio::task::spawn_blocking(move || {
-                let _save_guard = item_save_guard;
-                item_store.save_to_file_sync(&save_path)
-            })
-            .await;
-            match item_result {
-                Ok(Ok(())) => trace!(path = %item_path.display(), "Auto-saved BEP 44 item store"),
-                Ok(Err(error)) => warn!(
-                    path = %item_path.display(),
-                    "Failed to auto-save BEP 44 item store: {error}"
-                ),
-                Err(error) => warn!("BEP 44 item store save task failed: {error}"),
-            }
-        }
+        // Persist BEP 44 items with the routing-table checkpoint so a
+        // periodic shutdown or interruption cannot split their lifecycles.
+        let item_path = path.with_extension("items");
+        let item_save_guard = Arc::clone(&self.routing_table_save_lock).lock_owned().await;
+        let save_path = item_path.clone();
+        let item_store = self.item_store.clone();
+        tokio::task::spawn_blocking(move || {
+            let _save_guard = item_save_guard;
+            item_store.save_to_file_sync(&save_path)
+        })
+        .await
+        .map_err(|error| format!("BEP 44 item store save task failed: {error}"))?
+        .map_err(|error| format!("Failed to save BEP 44 item store: {error}"))?;
+        trace!(path = %item_path.display(), "Saved BEP 44 item store");
+        Ok(())
     }
 }

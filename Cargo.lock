@@ -295,6 +295,7 @@ dependencies = [
  "futures",
  "getrandom 0.2.17",
  "hex",
+ "libc",
  "md-5",
  "mockito",
  "num-bigint-dig",
@@ -317,6 +318,7 @@ dependencies = [
  "tracing",
  "url",
  "webpki-roots 0.26.11",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

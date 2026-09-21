@@ -85,7 +85,7 @@ pub(crate) fn now_secs() -> i64 {
 /// Format a Unix epoch timestamp as an HTTP-date per RFC 7231 Section 7.1.1.1.
 ///
 /// Example output: `"Wed, 09 Jun 2021 10:18:14 GMT"`
-pub(crate) fn format_http_date(epoch: i64) -> String {
+pub fn format_http_date(epoch: i64) -> String {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

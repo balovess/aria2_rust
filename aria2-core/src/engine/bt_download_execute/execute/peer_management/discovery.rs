@@ -177,7 +177,7 @@ impl BtDownloadCommand {
                 .await
             {
                 debug!(
-                    "[BT] Tracker announce result: {} peers from {} (event={:?}, interval={}s, seeders={}, leechers={})",
+                    "[BT] Tracker announce result: {} peers from {} (event={:?}, interval={}s, seeders={:?}, leechers={:?})",
                     result.peers.len(),
                     result.tracker_url,
                     result.event,
@@ -277,17 +277,29 @@ impl BtDownloadCommand {
             info!("[BT] Private torrent: DHT disabled (BEP 0027)");
         }
         if enable_dht && self.dht_engine.is_none() {
-            let options = { self.group.recover().options().clone() };
-            let dht_config = crate::engine::dht_config::build_dht_engine_config(&options).await?;
+            let shared_engine = self.bt_registry.as_ref().and_then(|registry| {
+                registry
+                    .read()
+                    .ok()
+                    .and_then(|registry| registry.get_global_dht_engine())
+            });
+            if let Some(engine) = shared_engine {
+                self.dht_engine = Some(engine);
+                self.register_dht_engine();
+            } else {
+                let options = { self.group.recover().options().clone() };
+                let dht_config =
+                    crate::engine::dht_config::build_dht_engine_config(&options).await?;
 
-            match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
-                Ok(engine) => {
-                    self.dht_engine = Some(engine);
-                    self.register_dht_engine();
-                    tracing::info!("[BT] DHT engine started");
-                }
-                Err(e) => {
-                    warn!("[BT] DHT engine start failed: {}", e);
+                match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
+                    Ok(engine) => {
+                        self.dht_engine = Some(engine);
+                        self.register_dht_engine();
+                        tracing::info!("[BT] shared DHT engine started");
+                    }
+                    Err(e) => {
+                        warn!("[BT] DHT engine start failed: {}", e);
+                    }
                 }
             }
         }

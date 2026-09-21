@@ -21,6 +21,9 @@ async fn read_piece_block_from_peer(
     expected_index: u32,
     expected_begin: u32,
     dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    upload_provider: Option<
+        std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+    >,
 ) -> Result<(bytes::Bytes, usize)> {
     loop {
         match connection.read_message().await {
@@ -62,6 +65,13 @@ async fn read_piece_block_from_peer(
                         }
                     }
                     other => {
+                        if let Some(provider) = upload_provider.as_deref()
+                            && connection.upload_state.is_some()
+                        {
+                            connection
+                                .handle_upload_message(other.clone(), provider)
+                                .await?;
+                        }
                         debug!(
                             "[BT] Endgame: Received non-PIECE message while waiting: {:?}",
                             other
@@ -182,6 +192,36 @@ impl BtMessageHandler {
         request_timeout: Duration,
         max_attempts: u32,
     ) -> Result<PieceDownloadResult> {
+        Self::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts_and_provider(
+            connections,
+            piece_index,
+            piece_length,
+            num_blocks,
+            endgame_state,
+            dht_engine,
+            None,
+            network_activity,
+            request_timeout,
+            max_attempts,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts_and_provider(
+        connections: &mut [BtPeerConn],
+        piece_index: u32,
+        piece_length: u32,
+        num_blocks: u32,
+        endgame_state: &mut EndgameState,
+        dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<
+            std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+        >,
+        network_activity: Option<&AtomicProgress>,
+        request_timeout: Duration,
+        max_attempts: u32,
+    ) -> Result<PieceDownloadResult> {
         let mut peer_bytes = Vec::with_capacity(num_blocks as usize);
         let mut failed_peers = Vec::new();
         let data = Self::download_piece_blocks_endgame_inner(
@@ -191,6 +231,7 @@ impl BtMessageHandler {
             num_blocks,
             endgame_state,
             dht_engine,
+            upload_provider,
             &mut peer_bytes,
             &mut failed_peers,
             network_activity,
@@ -233,6 +274,9 @@ impl BtMessageHandler {
         num_blocks: u32,
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<
+            std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+        >,
         peer_bytes: &mut Vec<PeerDownloadBytes>,
         failed_peers: &mut Vec<std::net::SocketAddr>,
         network_activity: Option<&AtomicProgress>,
@@ -282,6 +326,7 @@ impl BtMessageHandler {
                     len,
                     endgame_state,
                     dht_engine.clone(),
+                    upload_provider.clone(),
                     request_timeout,
                 )
                 .await
@@ -385,6 +430,7 @@ impl BtMessageHandler {
     /// Tracks each request in the EndgameState so we can cancel redundant ones later.
     ///
     /// # Phase 14 - B1: Endgame Duplicate Request Strategy
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn request_block_endgame(
         connections: &mut [BtPeerConn],
         piece_index: u32,
@@ -392,6 +438,9 @@ impl BtMessageHandler {
         block_length: u32,
         endgame_state: &mut EndgameState,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<
+            std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+        >,
         request_timeout: Duration,
     ) -> Result<BlockDownloadResult> {
         let req = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
@@ -443,6 +492,7 @@ impl BtMessageHandler {
                 piece_index,
                 block_offset,
                 dht_engine.clone(),
+                upload_provider,
             ),
         )
         .await
@@ -505,6 +555,9 @@ impl BtMessageHandler {
         expected_index: u32,
         expected_begin: u32,
         dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<
+            std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>,
+        >,
     ) -> Result<(bytes::Bytes, usize)> {
         // Keep one read future per peer so a slow connection cannot block a
         // responsive peer. Each future owns the connection borrow until it
@@ -517,6 +570,7 @@ impl BtMessageHandler {
                 expected_index,
                 expected_begin,
                 dht_engine.clone(),
+                upload_provider.clone(),
             ));
         }
 

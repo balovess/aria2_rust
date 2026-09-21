@@ -147,8 +147,8 @@ fn primitive_wire_models_match_golden_fixture() {
         in_flight: 0,
         interval: 1800,
         min_interval: 0,
-        seeders: 0,
-        leechers: 0,
+        seeders: Some(0),
+        leechers: Some(0),
         tracker_id: String::new(),
         seconds_since_last_success: Some(12),
     };

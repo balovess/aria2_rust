@@ -140,4 +140,11 @@ impl AtomicProgress {
             self.notify_activity();
         }
     }
+
+    pub fn add_upload_length(&self, bytes: u64) {
+        if bytes != 0 {
+            self.upload_length.fetch_add(bytes, Ordering::Relaxed);
+            self.notify_activity();
+        }
+    }
 }
