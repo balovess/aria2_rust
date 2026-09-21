@@ -13,7 +13,6 @@ use std::ptr;
 use std::slice;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(feature = "bittorrent", test))]
 use std::time::Duration;
 
 use tokio::runtime::Runtime;
@@ -106,6 +105,7 @@ static LIBRARY_INITIALIZED: AtomicBool = AtomicBool::new(false);
 const INVALID_ARGUMENT: i32 = -1;
 const INTERNAL_ERROR: i32 = -2;
 const BUFFER_TOO_SMALL: i32 = -3;
+const TIMEOUT: i32 = -4;
 
 fn ffi_result<T>(fallback: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or(fallback)
@@ -167,6 +167,28 @@ fn result_info(result: &crate::request::request_group::DownloadResult) -> Aria2R
         upload_speed: result.upload_speed,
         error_code: result.code.as_code(),
     }
+}
+
+fn download_info_from_manager(
+    manager: &RequestGroupMan,
+    gid: u64,
+) -> Option<Aria2RustDownloadInfo> {
+    if let Some(group) = manager.find_group(GroupId::new(gid)) {
+        let group = group.recover();
+        return Some(Aria2RustDownloadInfo {
+            status: status_code(&group.status()),
+            total_length: group.total_length(),
+            completed_length: group.completed_length(),
+            upload_length: group.upload_length(),
+            download_speed: group.download_speed(),
+            upload_speed: group.upload_speed(),
+            error_code: group.create_download_result().code.as_code(),
+        });
+    }
+    manager
+        .find_stopped_result(&GroupId::new(gid).to_hex_string())
+        .as_ref()
+        .map(result_info)
 }
 
 impl Aria2RustSession {
@@ -500,6 +522,42 @@ impl Aria2RustSession {
         })
     }
 
+    fn wait_download(
+        &self,
+        gid: u64,
+        timeout_ms: u64,
+    ) -> std::result::Result<Aria2RustDownloadInfo, i32> {
+        let request_man = Arc::clone(&self.request_man);
+        let wait = async move {
+            let signal = request_man.activity_signal();
+            let mut observed = signal.generation();
+            loop {
+                let Some(info) = download_info_from_manager(&request_man, gid) else {
+                    return Err(INVALID_ARGUMENT);
+                };
+                if matches!(
+                    info.status,
+                    status if status == Aria2RustDownloadStatus::Complete as u32
+                        || status == Aria2RustDownloadStatus::Error as u32
+                        || status == Aria2RustDownloadStatus::Removed as u32
+                ) {
+                    return Ok(info);
+                }
+                signal.wait_for_change(&mut observed).await;
+            }
+        };
+
+        if timeout_ms == 0 {
+            self.runtime.block_on(wait)
+        } else {
+            self.runtime.block_on(async {
+                tokio::time::timeout(Duration::from_millis(timeout_ms), wait)
+                    .await
+                    .unwrap_or(Err(TIMEOUT))
+            })
+        }
+    }
+
     fn finalize(&mut self) -> i32 {
         let _ = self.command_tx.send(EngineCommand::ForceHaltAll {
             reason: HaltReason::ShutdownSignal,
@@ -666,24 +724,8 @@ impl Aria2RustSession {
             .map_err(|error| error.to_string())
     }
 
-    fn get_info(&mut self, gid: u64) -> Option<Aria2RustDownloadInfo> {
-        let manager = &self.request_man;
-        if let Some(group) = manager.find_group(GroupId::new(gid)) {
-            let group = group.recover();
-            return Some(Aria2RustDownloadInfo {
-                status: status_code(&group.status()),
-                total_length: group.total_length(),
-                completed_length: group.completed_length(),
-                upload_length: group.upload_length(),
-                download_speed: group.download_speed(),
-                upload_speed: group.upload_speed(),
-                error_code: group.create_download_result().code.as_code(),
-            });
-        }
-        manager
-            .find_stopped_result(&GroupId::new(gid).to_hex_string())
-            .as_ref()
-            .map(result_info)
+    fn get_info(&self, gid: u64) -> Option<Aria2RustDownloadInfo> {
+        download_info_from_manager(&self.request_man, gid)
     }
 
     fn file_entries(&self, gid: u64) -> Option<Vec<crate::request::request_group::FileEntry>> {
@@ -988,6 +1030,40 @@ pub unsafe extern "C" fn aria2_rust_run(session: *mut Aria2RustSession, mode: u3
         }
         // SAFETY: See `aria2_rust_add_uri`.
         unsafe { (&mut *session).run(mode) }
+    })
+}
+
+/// Wait for one download to reach a terminal state without polling.
+///
+/// `timeout_ms == 0` waits indefinitely. On success, `output` receives the
+/// final status snapshot. `ARIA2_RUST_TIMEOUT` means that only this wait
+/// expired; the download remains unchanged.
+///
+/// # Safety
+/// `session` and `output` must point to live writable objects, and the
+/// session must not be accessed through another mutable pointer concurrently
+/// with this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn aria2_rust_wait_download(
+    session: *mut Aria2RustSession,
+    gid: u64,
+    timeout_ms: u64,
+    output: *mut Aria2RustDownloadInfo,
+) -> i32 {
+    ffi_result(INTERNAL_ERROR, || {
+        if session.is_null() || output.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let session = unsafe { &mut *session };
+        match session.wait_download(gid, timeout_ms) {
+            Ok(info) => {
+                unsafe { *output = info };
+                0
+            }
+            Err(TIMEOUT) => session.fail("download wait timed out", TIMEOUT),
+            Err(INVALID_ARGUMENT) => session.fail(format!("GID {gid} not found"), INVALID_ARGUMENT),
+            Err(error) => session.fail(format!("download wait failed: {error}"), INTERNAL_ERROR),
+        }
     })
 }
 
@@ -1546,6 +1622,49 @@ mod tests {
         }
         assert_eq!(removed_info_result, 0);
         assert_eq!(info.status, Aria2RustDownloadStatus::Removed as u32);
+
+        assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
+        assert_eq!(aria2_rust_library_deinit(), 0);
+    }
+
+    #[test]
+    fn c_api_wait_download_is_event_driven_and_timeout_safe() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(aria2_rust_library_init(), 0);
+        let (pause_entry, pause_name, pause_value) = kv("pause", "true");
+        let session = unsafe { aria2_rust_session_new(&pause_entry, 1, ptr::null_mut()) };
+        let _keep_alive = [pause_name, pause_value];
+        assert!(!session.is_null());
+
+        let uri = CString::new("http://127.0.0.1:1/not-started").unwrap();
+        let uri_ptr = uri.as_ptr();
+        let mut gid = 0;
+        assert_eq!(
+            unsafe { aria2_rust_add_uri(session, &uri_ptr, 1, ptr::null(), 0, &mut gid) },
+            0
+        );
+
+        let mut info = Aria2RustDownloadInfo::default();
+        assert_eq!(
+            unsafe { aria2_rust_wait_download(session, gid, 1, &mut info) },
+            TIMEOUT
+        );
+
+        unsafe {
+            (&*session)
+                .request_man
+                .find_group(GroupId::new(gid))
+                .expect("download group")
+                .recover()
+                .mark_complete();
+        }
+        assert_eq!(
+            unsafe { aria2_rust_wait_download(session, gid, 1_000, &mut info) },
+            0
+        );
+        assert_eq!(info.status, Aria2RustDownloadStatus::Complete as u32);
 
         assert_eq!(unsafe { aria2_rust_session_final(session) }, 0);
         assert_eq!(aria2_rust_library_deinit(), 0);

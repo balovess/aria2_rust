@@ -30,7 +30,10 @@ enum {
   ARIA2_RUST_POSITION_END = 2
 };
 
+#define ARIA2_RUST_INVALID_ARGUMENT (-1)
+#define ARIA2_RUST_INTERNAL_ERROR (-2)
 #define ARIA2_RUST_BUFFER_TOO_SMALL (-3)
+#define ARIA2_RUST_TIMEOUT (-4)
 
 typedef struct Aria2RustDownloadInfo {
   uint32_t status;
@@ -67,6 +70,10 @@ int32_t aria2_rust_session_final(Aria2RustSession *session);
 
 /* mode 0 waits for all current downloads; mode 1 runs one event turn. */
 int32_t aria2_rust_run(Aria2RustSession *session, uint32_t mode);
+/* timeout_ms == 0 waits indefinitely; timeout only stops this call. */
+int32_t aria2_rust_wait_download(Aria2RustSession *session, uint64_t gid,
+                                  uint64_t timeout_ms,
+                                  Aria2RustDownloadInfo *output);
 
 int32_t aria2_rust_add_uri(Aria2RustSession *session, const char *const *uris,
                             size_t uri_count,

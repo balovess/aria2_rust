@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +39,8 @@ pub enum DownloadManagerError {
     Engine(#[source] Aria2Error),
     #[error("waiting for the download was cancelled")]
     WaitCancelled,
+    #[error("waiting for {operation} timed out")]
+    WaitTimeout { operation: &'static str },
 }
 
 /// A small, cloneable interface for submitting and controlling downloads.
@@ -562,6 +565,21 @@ impl DownloadHandle {
             .await
     }
 
+    /// Wait for a status transition for at most `timeout`.
+    ///
+    /// A timeout only stops this future; it does not change the download.
+    pub async fn wait_for_status_with_timeout(
+        &self,
+        expected: DownloadStatus,
+        timeout: Duration,
+    ) -> std::result::Result<DownloadResult, DownloadManagerError> {
+        tokio::time::timeout(timeout, self.wait_for_status(expected))
+            .await
+            .map_err(|_| DownloadManagerError::WaitTimeout {
+                operation: "a download status",
+            })?
+    }
+
     /// Wait for a status transition while allowing the caller to cancel the
     /// wait without changing the download.
     pub async fn wait_for_status_with_cancellation(
@@ -606,6 +624,22 @@ impl DownloadHandle {
             .await
     }
 
+    /// Wait for metadata resolution for at most `timeout`.
+    ///
+    /// A timeout only stops this future; it does not pause, remove, or
+    /// otherwise change the download. Metadata resolution remains represented
+    /// by [`crate::MetadataResolvedEvent`], not by [`DownloadStatus`].
+    pub async fn wait_for_metadata_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<crate::MetadataResolvedEvent, DownloadManagerError> {
+        tokio::time::timeout(timeout, self.wait_for_metadata())
+            .await
+            .map_err(|_| DownloadManagerError::WaitTimeout {
+                operation: "metadata resolution",
+            })?
+    }
+
     /// Wait for metadata resolution while allowing the caller to cancel the
     /// wait without changing the download.
     pub async fn wait_for_metadata_with_cancellation(
@@ -645,6 +679,20 @@ impl DownloadHandle {
     /// downloads remain live and therefore do not complete this future.
     pub async fn wait(&self) -> std::result::Result<DownloadResult, DownloadManagerError> {
         self.wait_with_cancellation(&CancellationToken::new()).await
+    }
+
+    /// Wait for a terminal result for at most `timeout`.
+    ///
+    /// A timeout only stops this future; it does not change the download.
+    pub async fn wait_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<DownloadResult, DownloadManagerError> {
+        tokio::time::timeout(timeout, self.wait())
+            .await
+            .map_err(|_| DownloadManagerError::WaitTimeout {
+                operation: "a terminal download result",
+            })?
     }
 
     /// Wait for a terminal result while allowing the caller to cancel the wait.
@@ -970,6 +1018,31 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(DownloadManagerError::WaitCancelled)));
+        assert!(handle.status_snapshot().is_some());
+    }
+
+    #[tokio::test]
+    async fn metadata_wait_timeout_does_not_change_download_state() {
+        let group_man = Arc::new(RequestGroupMan::new());
+        let (command_sender, _command_receiver) = super::super::engine_command::channel();
+        let manager = manager(Arc::clone(&group_man), command_sender);
+        let handle = manager
+            .add_uri(
+                vec!["magnet:?xt=urn:btih:example".to_string()],
+                DownloadOptions::default(),
+            )
+            .expect("download submission");
+
+        let result = handle
+            .wait_for_metadata_with_timeout(Duration::from_millis(1))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DownloadManagerError::WaitTimeout {
+                operation: "metadata resolution"
+            })
+        ));
         assert!(handle.status_snapshot().is_some());
     }
 

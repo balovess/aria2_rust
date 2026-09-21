@@ -288,7 +288,15 @@ impl BtMessageValidator {
             return Ok(());
         }
         self.validate_index(index)?;
-        let length = data_len as u32;
+        let length = u32::try_from(data_len).unwrap_or(u32::MAX);
+        if length == 0 {
+            return Err(BtMessageValidationError::BlockOutOfRange {
+                index,
+                begin,
+                length: 0,
+                piece_length: self.piece_length,
+            });
+        }
         let end = begin.checked_add(length);
         match end {
             Some(e) if e <= self.piece_length => {}
@@ -467,6 +475,21 @@ mod tests {
     fn valid_piece_message() {
         let v = validator_1k();
         assert!(v.validate_piece(0, 0, 16384).is_ok());
+    }
+
+    #[test]
+    fn invalid_piece_message_empty_data() {
+        let v = validator_1k();
+        let err = v.validate_piece(0, 0, 0).unwrap_err();
+        assert_eq!(
+            err,
+            BtMessageValidationError::BlockOutOfRange {
+                index: 0,
+                begin: 0,
+                length: 0,
+                piece_length: 262144,
+            }
+        );
     }
 
     #[test]
