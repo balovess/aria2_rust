@@ -101,7 +101,7 @@ impl PeerSessionResource {
     }
 
     /// Mark all pieces as available (seeder bitfield).
-    pub fn set_all_bitfield(&mut self) {
+    fn set_all_bitfield(&mut self) {
         self.bitfield.fill(0xFF);
         // Clear trailing bits beyond num_pieces
         let remaining = (self.num_pieces as usize) % 8;

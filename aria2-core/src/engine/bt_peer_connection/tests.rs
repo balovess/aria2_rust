@@ -101,15 +101,6 @@ fn test_peer_session_resource_seeder() {
 }
 
 #[test]
-fn test_peer_session_resource_set_all_bitfield() {
-    let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
-    res.set_all_bitfield();
-    // 4 pieces in 1 byte = 0xF0 (upper 4 bits)
-    assert_eq!(res.bitfield(), &[0xF0]);
-    assert!(res.is_seeder());
-}
-
-#[test]
 fn test_peer_session_resource_reconfigure() {
     let mut res = PeerSessionResource::new(256 * 1024, 4, 1024 * 1024);
     assert_eq!(res.num_pieces(), 4);
