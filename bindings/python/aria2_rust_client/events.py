@@ -45,6 +45,9 @@ class EventSubscriber:
         self._listener_task: Optional[asyncio.Task] = None
         self._connect_task: Optional[asyncio.Task] = None
         self._queue: asyncio.Queue[Optional[DownloadEvent]] = asyncio.Queue()
+        self._terminal_waiters: dict[
+            str, set[asyncio.Future[DownloadEvent]]
+        ] = {}
         self._closed = False
         self._reconnect_attempts = 0
         self._max_reconnect_attempts = 5
@@ -53,6 +56,25 @@ class EventSubscriber:
         if self._filter is None:
             return True
         return event.event_type in self._filter
+
+    def _publish_event(self, event: DownloadEvent) -> None:
+        """Fan out one accepted event to iteration and GID-specific waiters."""
+        self._queue.put_nowait(event)
+        if event.event_type not in _TERMINAL_EVENT_TYPES:
+            return
+
+        waiters = self._terminal_waiters.pop(event.gid, ())
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(event)
+
+    def _reject_terminal_waiters(self, error: ConnectionError) -> None:
+        waiters = self._terminal_waiters
+        self._terminal_waiters = {}
+        for pending in waiters.values():
+            for waiter in pending:
+                if not waiter.done():
+                    waiter.set_exception(error)
 
     async def _connect(self) -> None:
         if self._closed:
@@ -120,7 +142,7 @@ class EventSubscriber:
 
                     event = DownloadEvent.from_rpc_notification(method, event_params)
                     if event is not None and self._should_include(event):
-                        await self._queue.put(event)
+                        self._publish_event(event)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -131,6 +153,9 @@ class EventSubscriber:
             if self._closed or not await self._try_reconnect():
                 break
 
+        self._reject_terminal_waiters(
+            ConnectionError("Subscriber closed before a terminal event was received")
+        )
         await self._queue.put(None)
 
     async def _try_reconnect(self) -> bool:
@@ -192,9 +217,10 @@ class EventSubscriber:
         """Wait for a terminal event for one GID without polling status.
 
         The subscriber is started automatically when needed. Events for other
-        GIDs and non-terminal transitions are consumed and ignored. Callers
-        should create the subscriber before submitting a task when they must
-        not miss a fast completion event.
+        GIDs and non-terminal transitions remain available to async iteration,
+        while terminal events are independently routed to matching waiters.
+        Callers should create the subscriber before submitting a task when
+        they must not miss a fast completion event.
 
         ``timeout`` is optional because a download may legitimately take an
         unbounded amount of time. When supplied, it must be positive and a
@@ -211,24 +237,24 @@ class EventSubscriber:
 
         await self.start()
 
-        async def receive_terminal() -> DownloadEvent:
-            while True:
-                event = await self.__anext__()
-                if event.gid == gid and event.event_type in _TERMINAL_EVENT_TYPES:
-                    return event
+        loop = asyncio.get_running_loop()
+        waiter = loop.create_future()
+        self._terminal_waiters.setdefault(gid, set()).add(waiter)
 
         try:
             if timeout is None:
-                return await receive_terminal()
-            return await asyncio.wait_for(receive_terminal(), timeout=timeout)
-        except StopAsyncIteration as exc:
-            raise ConnectionError(
-                "Subscriber closed before a terminal event was received"
-            ) from exc
+                return await waiter
+            return await asyncio.wait_for(waiter, timeout=timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError(
                 f"Timed out waiting for terminal event for GID {gid}"
             ) from exc
+        finally:
+            waiters = self._terminal_waiters.get(gid)
+            if waiters is not None:
+                waiters.discard(waiter)
+                if not waiters:
+                    self._terminal_waiters.pop(gid, None)
 
     async def close(self) -> None:
         self._closed = True
@@ -248,6 +274,8 @@ class EventSubscriber:
             except asyncio.CancelledError:
                 pass
             self._listener_task = None
+
+        self._reject_terminal_waiters(ConnectionError("Subscriber has been closed"))
 
         if self._ws is not None:
             try:

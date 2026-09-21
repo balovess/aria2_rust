@@ -3,9 +3,8 @@
 //! Manages the process of requesting and receiving individual blocks
 //! from peers during piece download.
 //!
-//! This is the block-download path. Per-peer control-message state is owned by
-//! [`super::BtPeerMessageHandler`], while this handler coordinates block
-//! transfers that may span multiple peers.
+//! This is the block-download path. It owns the per-piece request window and
+//! coordinates transfers that may span multiple peers.
 
 mod endgame;
 mod normal;
@@ -17,6 +16,5 @@ mod pipelined;
 /// from peers during piece download.
 ///
 /// This type intentionally has no per-peer state. It owns the block-download
-/// operations that are shared by normal, pipelined, and endgame transfers;
-/// per-peer protocol state remains in [`super::BtPeerMessageHandler`].
+/// operations shared by normal, pipelined, and endgame transfers.
 pub struct BtMessageHandler;

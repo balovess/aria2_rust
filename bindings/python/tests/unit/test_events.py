@@ -155,17 +155,41 @@ async def test_subscriber_delivers_events_after_reconnect(monkeypatch):
 async def test_wait_for_terminal_filters_other_gids_and_non_terminal_events():
     subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
     subscriber.start = AsyncMock()
-    await subscriber._queue.put(
-        DownloadEvent(EventType.DOWNLOAD_START, gid="other")
-    )
-    await subscriber._queue.put(
-        DownloadEvent(EventType.DOWNLOAD_COMPLETE, gid="other")
-    )
-    expected = DownloadEvent(EventType.DOWNLOAD_ERROR, gid="target", error_code=3)
-    await subscriber._queue.put(expected)
+    waiter = asyncio.create_task(subscriber.wait_for_terminal("target"))
+    for _ in range(10):
+        if "target" in subscriber._terminal_waiters:
+            break
+        await asyncio.sleep(0)
+    assert "target" in subscriber._terminal_waiters
 
-    assert await subscriber.wait_for_terminal("target") == expected
+    subscriber._publish_event(DownloadEvent(EventType.DOWNLOAD_START, gid="other"))
+    subscriber._publish_event(DownloadEvent(EventType.DOWNLOAD_COMPLETE, gid="other"))
+    expected = DownloadEvent(EventType.DOWNLOAD_ERROR, gid="target", error_code=3)
+    subscriber._publish_event(expected)
+
+    assert await waiter == expected
     subscriber.start.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_terminal_supports_concurrent_gids():
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    subscriber.start = AsyncMock()
+    first_wait = asyncio.create_task(subscriber.wait_for_terminal("first"))
+    second_wait = asyncio.create_task(subscriber.wait_for_terminal("second"))
+
+    for _ in range(10):
+        if set(subscriber._terminal_waiters) == {"first", "second"}:
+            break
+        await asyncio.sleep(0)
+    assert set(subscriber._terminal_waiters) == {"first", "second"}
+
+    first = DownloadEvent(EventType.DOWNLOAD_COMPLETE, gid="first")
+    second = DownloadEvent(EventType.DOWNLOAD_ERROR, gid="second", error_code=3)
+    subscriber._publish_event(second)
+    subscriber._publish_event(first)
+
+    assert await asyncio.gather(first_wait, second_wait) == [first, second]
 
 
 @pytest.mark.asyncio

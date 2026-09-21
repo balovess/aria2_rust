@@ -1,4 +1,3 @@
-use aria2_core::engine::bt_message_handler::{BLOCK_SIZE, BtPeerMessageHandler};
 use aria2_core::engine::bt_peer_connection::PeerSessionResource;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::request::request_group::GroupId;
@@ -7,8 +6,6 @@ use aria2_core::segment::PieceStatMan;
 use aria2_core::segment::Segment;
 use aria2_core::segment::bitfield::Bitfield;
 use aria2_core::ui::{MultiProgress, ProgressBar};
-use aria2_protocol::bittorrent::message::serializer::serialize;
-use aria2_protocol::bittorrent::message::types::{BtMessage, PieceBlockRequest};
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group};
 use std::time::Duration;
 
@@ -156,64 +153,6 @@ fn bench_peer_have_transition(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_bt_request_queue(c: &mut Criterion) {
-    let mut group = c.benchmark_group("bt_request_queue");
-    group.sample_size(10);
-    group.measurement_time(Duration::from_secs(2));
-
-    for request_count in [1_000usize, 10_000, 100_000] {
-        let requests: Vec<(u32, u32)> = (0..request_count)
-            .map(|index| (index as u32, (index as u32) * BLOCK_SIZE))
-            .collect();
-
-        group.bench_with_input(
-            BenchmarkId::new("single_serialization_and_enqueue", request_count),
-            &requests,
-            |b, requests| {
-                b.iter_batched(
-                    || BtPeerMessageHandler::with_max_outstanding(BLOCK_SIZE, request_count),
-                    |mut handler| {
-                        for &(index, begin) in requests {
-                            let message = BtMessage::Request {
-                                request: PieceBlockRequest::new(index, begin, BLOCK_SIZE),
-                            };
-                            let serialized = serialize(&message);
-                            assert!(handler.send_request(index, begin, BLOCK_SIZE, serialized));
-                        }
-                        black_box(handler);
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("double_serialization_and_enqueue", request_count),
-            &requests,
-            |b, requests| {
-                b.iter_batched(
-                    || BtPeerMessageHandler::with_max_outstanding(BLOCK_SIZE, request_count),
-                    |mut handler| {
-                        for &(index, begin) in requests {
-                            let message = BtMessage::Request {
-                                request: PieceBlockRequest::new(index, begin, BLOCK_SIZE),
-                            };
-                            let serialized = serialize(&message);
-                            assert!(handler.send_request(index, begin, BLOCK_SIZE, serialized));
-                            // Previous send_request implementations serialized the same
-                            // request again after it had already been queued.
-                            black_box(serialize(&message));
-                        }
-                        black_box(handler);
-                    },
-                    BatchSize::SmallInput,
-                )
-            },
-        );
-    }
-    group.finish();
-}
-
 fn bench_segment_creation(c: &mut Criterion) {
     c.bench_function("segment_creation_16", |b| {
         b.iter(|| {
@@ -269,7 +208,6 @@ criterion_group!(
     bench_bitfield_set_unset,
     bench_bt_piece_completion_bitfield,
     bench_peer_have_transition,
-    bench_bt_request_queue,
     bench_segment_creation,
     bench_progress_bar_render,
     bench_multi_progress_render,

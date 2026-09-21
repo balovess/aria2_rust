@@ -56,11 +56,7 @@ pub mod bt_download_seeding;
 #[cfg(feature = "bittorrent")]
 pub mod bt_handshake_validation;
 #[cfg(feature = "bittorrent")]
-pub mod bt_message_dispatcher;
-#[cfg(feature = "bittorrent")]
 pub mod bt_message_handler;
-#[cfg(all(test, feature = "bittorrent"))]
-pub mod bt_message_handler_tests;
 #[cfg(feature = "bittorrent")]
 pub mod bt_message_validation;
 #[cfg(feature = "bittorrent")]

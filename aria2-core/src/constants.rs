@@ -81,9 +81,6 @@ pub const BT_MAX_BLOCK_LENGTH: usize = 65536;
 /// Default number of outstanding piece requests per peer.
 /// Matches C++ `DEFAULT_MAX_OUTSTANDING_REQUEST = 6`.
 pub const BT_DEFAULT_MAX_OUTSTANDING_REQUEST: usize = 6;
-/// Upper bound for the number of outstanding requests per peer.
-/// Matches C++ `UB_MAX_OUTSTANDING_REQUEST = 256`.
-pub const BT_UB_MAX_OUTSTANDING_REQUEST: usize = 256;
 /// Size of each metadata piece for ut_metadata extension (16 KiB).
 /// Matches C++ `METADATA_PIECE_SIZE = 16_k`.
 pub const BT_METADATA_PIECE_SIZE: usize = 16384;
