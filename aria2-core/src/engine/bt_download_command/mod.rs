@@ -13,9 +13,6 @@ use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
-pub use crate::engine::bt_message_handler::{BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, MAX_RETRIES};
-pub use crate::engine::bt_piece_selector::ENDGAME_THRESHOLD;
-
 // Re-export sub-module public items
 pub use constructor::prepare_group_metadata;
 pub(crate) use constructor::{
@@ -205,7 +202,8 @@ pub struct BtDownloadCommand {
     // File lock (J6): prevents concurrent aria2 instances from writing to same output dir
     /// Download path lock held for the lifetime of this command.
     /// Prevents other aria2 instances from writing to the same output directory.
-    pub download_path_lock: Option<crate::filesystem::file_lock::DownloadPathLock>,
+    #[allow(dead_code)]
+    pub(crate) download_path_lock: Option<crate::filesystem::file_lock::DownloadPathLock>,
 
     // BEP 0027 (Private Torrent): when true, DHT/PEX/LPD and public tracker
     // announcement are disabled to enforce the privacy guarantees of the

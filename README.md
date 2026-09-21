@@ -322,7 +322,7 @@ aria2-rust/
 │   │   ├── download_engine.rs # Event loop with command queue
 │   │   ├── download_command.rs # HTTP/HTTPS downloader
 │   │   ├── ftp_download_command.rs # FTP/SFTP downloader
-│   │   ├── bt_download_command.rs # BitTorrent downloader
+│   │   ├── bt_download_command/ # BitTorrent command and constructor modules
 │   │   ├── magnet_download_command.rs # Magnet link downloader
 │   │   ├── metalink_download_command.rs # Metalink downloader
 │   │   └── concurrent_download_command.rs # Multi-segment downloader

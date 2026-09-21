@@ -1,7 +1,8 @@
 use std::time::Instant;
 
-use crate::engine::bt_download_command::{BLOCK_SIZE, BtDownloadCommand};
+use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_message_handler::BtMessageHandler;
+use crate::engine::bt_message_handler::types::BLOCK_SIZE;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, FatalError, Result};
