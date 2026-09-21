@@ -91,6 +91,10 @@ fn compact_to_socket_addr(data: &[u8]) -> Option<std::net::SocketAddr> {
 pub struct DhtPersistence;
 
 impl DhtPersistence {
+    /// Return whether a snapshot is recent enough to seed a routing table.
+    pub fn is_fresh(saved_at_secs: u64, max_age: std::time::Duration) -> bool {
+        current_epoch_secs().saturating_sub(saved_at_secs) <= max_age.as_secs()
+    }
     pub fn serialize(self_id: &[u8; 20], nodes: &[DhtNode]) -> Result<Vec<u8>, String> {
         let mut buf = Vec::with_capacity(256 + nodes.len() * NODE_ENTRY_SIZE);
 
@@ -324,11 +328,28 @@ impl DhtPersistence {
         self_id: &[u8; 20],
         nodes: &[DhtNode],
     ) -> Result<usize, String> {
+        Self::merge_and_save_to_file_sync_with_max_age(
+            path,
+            self_id,
+            nodes,
+            std::time::Duration::from_secs(24 * 60 * 60),
+        )
+    }
+
+    /// Merge only a recent existing snapshot with the current good nodes.
+    pub fn merge_and_save_to_file_sync_with_max_age(
+        path: &Path,
+        self_id: &[u8; 20],
+        nodes: &[DhtNode],
+        max_age: std::time::Duration,
+    ) -> Result<usize, String> {
         let file_lock = persistence_file_lock(path);
         let _guard = file_lock.lock().unwrap_or_else(|error| error.into_inner());
 
         let mut merged = HashMap::<[u8; 20], DhtNode>::with_capacity(nodes.len());
-        if let Ok(existing) = Self::load_from_file_sync(path) {
+        if let Ok(existing) = Self::load_from_file_sync(path)
+            && Self::is_fresh(existing.saved_at_secs, max_age)
+        {
             for node in existing.nodes {
                 merged.insert(node.id, DhtNode::new(node.id, node.addr));
             }
@@ -360,6 +381,18 @@ impl DhtPersistence {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_snapshot_freshness_rejects_old_timestamps() {
+        assert!(DhtPersistence::is_fresh(
+            u64::MAX,
+            std::time::Duration::from_secs(60)
+        ));
+        assert!(!DhtPersistence::is_fresh(
+            0,
+            std::time::Duration::from_secs(60)
+        ));
+    }
 
     #[test]
     fn test_serialize_header_magic_and_version() {

@@ -72,7 +72,7 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **断点续传**: HTTP/HTTPS 等主要路径支持控制文件续传；不同协议、并发控制文件和多 URI 失败回退仍按兼容性矩阵逐项验证
 - **BitTorrent 完整支持**:
   - ✅ DHT 网络（KRPC + 路由表 + bootstrap 节点）
-  - ✅ Tracker 通信（UDP/HTTP）
+  - ✅ Tracker 通信（UDP/HTTP），并支持按周期刷新的公共 Tracker 列表
   - ✅ Peer 交换（PEX，按 peer 进行 BEP 10 扩展 ID 协商）
   - ✅ MSE/PE 加密（BEP14 握手）
   - ✅ 阻塞算法 + seed-time/ratio 支持
@@ -84,7 +84,7 @@ Python 绑定通过 137 个测试。详细命令和证据见[兼容性状态矩�
 - **配置系统**: 类型化参数注册表，支持命令行 / 配置文件 / 环境变量 / 默认值四源合并
 - **NetRC 认证**: 自动从 `.netrc` 文件读取 FTP/HTTP 凭证
 - **URI 列表文件**: 支持 `-i` 参数批量导入下载任务
-- **公共 Tracker 列表**: 自动从 trackerslist.com 更新 BT Peer 发现
+- **公共 Tracker 列表**：默认启用，每 24 小时刷新 `https://cf.trackerslist.com/best.txt`，并将去重后的 Tracker 追加到运行中的 BT 任务
 
 ## 快速开始
 

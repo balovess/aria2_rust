@@ -19,6 +19,13 @@ pub struct TrackerResponse {
     /// The client must echo this back as the `trackerid` parameter in
     /// subsequent announce requests, per the BitTorrent tracker protocol.
     pub tracker_id: Option<String>,
+    /// Trackers supplied by a tracker response extension.
+    ///
+    /// `announce-list` is normally a torrent metainfo field (BEP 12), but a
+    /// few tracker services return it dynamically. Keep it separate from the
+    /// peer payload so the engine can append it without replacing the
+    /// torrent's configured tiers.
+    pub announce_list: Vec<Vec<String>>,
     pub warning_message: Option<String>,
     pub failure_reason: Option<String>,
 }
@@ -46,6 +53,7 @@ impl TrackerResponse {
                 peers: vec![],
                 peers6: vec![],
                 tracker_id: None,
+                announce_list: Vec::new(),
                 warning_message: None,
                 failure_reason,
             });
@@ -57,6 +65,7 @@ impl TrackerResponse {
         let leechers = root.dict_get_int("incomplete").unwrap_or(0) as u32;
         let warning_message = root.dict_get_str("warning message").map(|s| s.to_string());
         let tracker_id = root.dict_get_str("tracker id").map(|s| s.to_string());
+        let announce_list = Self::parse_announce_list(&root);
 
         let peers = Self::parse_peers(&root)?;
 
@@ -66,13 +75,14 @@ impl TrackerResponse {
         let peers6 = Self::parse_peers6(&root)?;
 
         debug!(
-            "Tracker response: interval={}s, seeders={}, leechers={}, peers={}, peers6={}, tracker_id={:?}",
+            "Tracker response: interval={}s, seeders={}, leechers={}, peers={}, peers6={}, tracker_id={:?}, announce_list={:?}",
             interval,
             seeders,
             leechers,
             peers.len(),
             peers6.len(),
             tracker_id,
+            announce_list,
         );
 
         Ok(Self {
@@ -83,6 +93,7 @@ impl TrackerResponse {
             peers,
             peers6,
             tracker_id,
+            announce_list,
             warning_message,
             failure_reason: None,
         })
@@ -100,6 +111,31 @@ impl TrackerResponse {
             }
             _ => Ok(Vec::new()),
         }
+    }
+
+    fn parse_announce_list(
+        root: &crate::bittorrent::bencode::codec::BencodeValue,
+    ) -> Vec<Vec<String>> {
+        let Some(crate::bittorrent::bencode::codec::BencodeValue::List(tiers)) =
+            root.dict_get(b"announce-list")
+        else {
+            return Vec::new();
+        };
+
+        tiers
+            .iter()
+            .filter_map(|tier| {
+                let urls = tier
+                    .as_list()?
+                    .iter()
+                    .filter_map(|url| {
+                        let url = url.as_str()?.trim();
+                        (!url.is_empty()).then(|| url.to_string())
+                    })
+                    .collect::<Vec<_>>();
+                (!urls.is_empty()).then_some(urls)
+            })
+            .collect()
     }
 
     fn parse_compact_peers(data: &[u8]) -> Result<Vec<PeerInfo>, String> {
@@ -241,6 +277,7 @@ mod tests {
         assert_eq!(parsed.peers.len(), 2);
         assert_eq!(parsed.peers[0].ip, "127.0.0.1");
         assert_eq!(parsed.peers[0].port, 6881);
+        assert!(parsed.announce_list.is_empty());
     }
 
     #[test]
@@ -275,6 +312,36 @@ mod tests {
         let parsed = TrackerResponse::parse(&encoded).unwrap();
 
         assert_eq!(parsed.tracker_id.as_deref(), Some("my-tracker-42"));
+    }
+
+    #[test]
+    fn test_parse_dynamic_announce_list() {
+        let mut resp_dict = BTreeMap::new();
+        resp_dict.insert(b"interval".to_vec(), BencodeValue::Int(300));
+        resp_dict.insert(
+            b"peers".to_vec(),
+            BencodeValue::Bytes(vec![127, 0, 0, 1, 0x1a, 0xe1]),
+        );
+        resp_dict.insert(
+            b"announce-list".to_vec(),
+            BencodeValue::List(vec![
+                BencodeValue::List(vec![BencodeValue::Bytes(
+                    b"https://tracker.example/announce".to_vec(),
+                )]),
+                BencodeValue::List(vec![BencodeValue::Bytes(
+                    b"udp://tracker.example:6969/announce".to_vec(),
+                )]),
+            ]),
+        );
+
+        let parsed = TrackerResponse::parse(&BencodeValue::Dict(resp_dict).encode()).unwrap();
+        assert_eq!(
+            parsed.announce_list,
+            vec![
+                vec!["https://tracker.example/announce".to_string()],
+                vec!["udp://tracker.example:6969/announce".to_string()],
+            ]
+        );
     }
 
     #[test]

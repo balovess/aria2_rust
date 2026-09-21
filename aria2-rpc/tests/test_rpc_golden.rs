@@ -92,6 +92,14 @@ fn primitive_wire_models_match_golden_fixture() {
             total_nodes: 0,
             good_nodes: 0,
             pending_transactions: 0,
+            questionable_nodes: 0,
+            bad_nodes: 0,
+            cached_nodes: 0,
+            bucket_count: 0,
+            persistence_enabled: false,
+            persistence_max_age_secs: 0,
+            cleanup_interval_secs: 0,
+            save_interval_secs: 0,
         })
         .unwrap(),
         golden["dht_status_stopped"]

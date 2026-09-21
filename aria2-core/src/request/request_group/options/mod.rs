@@ -124,6 +124,22 @@ pub struct DownloadOptions {
     pub peer_agent: String,
     /// DHT message timeout, in seconds.
     pub dht_message_timeout: u64,
+    /// DHT bucket refresh check interval, in seconds.
+    pub dht_refresh_check_interval: u64,
+    /// DHT token rotation interval, in seconds.
+    pub dht_token_rotation_interval: u64,
+    /// DHT node keep-alive interval, in seconds.
+    pub dht_node_contact_interval: u64,
+    /// DHT cleanup and eviction interval, in seconds.
+    pub dht_cleanup_interval: u64,
+    /// DHT routing-table persistence interval, in seconds.
+    pub dht_save_interval: u64,
+    /// DHT bootstrap timeout, in seconds.
+    pub dht_bootstrap_timeout: u64,
+    /// Maximum concurrent DHT lookups.
+    pub dht_max_concurrent_lookups: usize,
+    /// Maximum age of a persisted DHT snapshot, in seconds.
+    pub dht_persistence_max_age: u64,
     /// Enable IPv6 DHT transport.
     pub enable_dht6: bool,
     /// IPv6 DHT listen address.

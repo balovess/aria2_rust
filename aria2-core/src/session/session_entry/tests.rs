@@ -781,3 +781,20 @@ fn test_download_options_to_map_preserves_disabled_default_true_options() {
     assert!(!restored.enable_http_pipelining);
     assert!(!restored.use_head);
 }
+
+#[test]
+fn test_download_options_to_map_preserves_enabled_metadata_options() {
+    let opts = DownloadOptions {
+        bt_load_saved_metadata: true,
+        bt_save_metadata: true,
+        ..DownloadOptions::default()
+    };
+    let map = download_options_to_map(&opts);
+
+    assert_eq!(map.get("bt-load-saved-metadata"), Some(&"true".to_string()));
+    assert_eq!(map.get("bt-save-metadata"), Some(&"true".to_string()));
+
+    let restored = DownloadOptions::from_option_strings(&map);
+    assert!(restored.bt_load_saved_metadata);
+    assert!(restored.bt_save_metadata);
+}

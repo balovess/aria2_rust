@@ -246,6 +246,7 @@ fn test_process_announce_response_updates_interval() {
         }],
         peers6: vec![],
         tracker_id: None,
+        announce_list: Vec::new(),
         warning_message: None,
         failure_reason: None,
     };
@@ -273,6 +274,7 @@ fn test_process_announce_response_failure() {
         peers: vec![],
         peers6: vec![],
         tracker_id: None,
+        announce_list: Vec::new(),
         warning_message: None,
         failure_reason: Some("tracker offline".to_string()),
     };
@@ -297,6 +299,7 @@ fn test_process_announce_response_min_interval_capped() {
         peers: vec![],
         peers6: vec![],
         tracker_id: None,
+        announce_list: Vec::new(),
         warning_message: None,
         failure_reason: None,
     };
@@ -321,6 +324,7 @@ fn test_process_announce_response_uses_interval_as_min() {
         peers: vec![],
         peers6: vec![],
         tracker_id: None,
+        announce_list: Vec::new(),
         warning_message: None,
         failure_reason: None,
     };
@@ -349,6 +353,7 @@ fn test_process_announce_response_stores_tracker_id() {
         }],
         peers6: vec![],
         tracker_id: Some("tracker-abc".to_string()),
+        announce_list: Vec::new(),
         warning_message: None,
         failure_reason: None,
     };
@@ -366,6 +371,35 @@ fn test_process_announce_response_stores_tracker_id() {
         url.contains("&trackerid="),
         "announce URL should contain trackerid parameter: {}",
         url
+    );
+}
+
+#[test]
+fn test_process_announce_response_appends_dynamic_trackers() {
+    use aria2_protocol::bittorrent::tracker::response::TrackerResponse;
+
+    let mut bt = BtAnnounce::new(&[], &Some("http://original.test/announce".to_string()));
+    let response = TrackerResponse {
+        interval: 300,
+        min_interval: None,
+        seeders: 0,
+        leechers: 0,
+        peers: vec![],
+        peers6: vec![],
+        tracker_id: None,
+        announce_list: vec![
+            vec!["http://original.test/announce".to_string()],
+            vec!["udp://discovered.test:6969/announce".to_string()],
+        ],
+        warning_message: None,
+        failure_reason: None,
+    };
+
+    bt.process_announce_response(&response).unwrap();
+    assert_eq!(bt.announce_list().tier_count(), 2);
+    assert!(
+        bt.announce_list()
+            .contains_url("udp://discovered.test:6969/announce")
     );
 }
 

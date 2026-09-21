@@ -340,6 +340,14 @@ impl OptionRegistry {
             | "bt-tracker-timeout"
             | "bt-tracker-stopped-timeout"
             | "dht-message-timeout"
+            | "dht-refresh-check-interval"
+            | "dht-token-rotation-interval"
+            | "dht-node-contact-interval"
+            | "dht-cleanup-interval"
+            | "dht-save-interval"
+            | "dht-bootstrap-timeout"
+            | "dht-max-concurrent-lookups"
+            | "dht-persistence-max-age"
             | "enable-dht6"
             | "dht-listen-addr6"
             | "peer-id-prefix"
@@ -563,7 +571,7 @@ mod tests {
             );
             options.insert(
                 "bt-tracker-update-interval".to_string(),
-                serde_json::json!(86400),
+                serde_json::json!(604800),
             );
             options.insert(
                 "enable-public-trackers".to_string(),
@@ -588,7 +596,7 @@ mod tests {
             );
             assert_eq!(
                 projected.get("bt-tracker-update-interval"),
-                Some(&serde_json::json!(86400))
+                Some(&serde_json::json!(604800))
             );
             assert_eq!(
                 projected.get("enable-public-trackers"),

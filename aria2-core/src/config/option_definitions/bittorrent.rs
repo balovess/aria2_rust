@@ -327,7 +327,10 @@ impl crate::config::OptionRegistry {
         self.register(OptionDef {
             name: "bt-tracker-update-interval".into(),
             opt_type: OptionType::Integer,
-            default_value: OptionValue::Int(86_400),
+            default_value: OptionValue::Int(
+                aria2_protocol::bittorrent::tracker::public_list::DEFAULT_TRACKER_UPDATE_INTERVAL
+                    .as_secs() as i64,
+            ),
             min: Some(1),
             description: "Public tracker list refresh interval in seconds".into(),
             category: OptionCategory::BitTorrent,
@@ -391,6 +394,63 @@ impl crate::config::OptionRegistry {
             min: Some(1),
             max: Some(60),
             description: "DHT message timeout in seconds".into(),
+            category: OptionCategory::BitTorrent,
+            ..Default::default()
+        });
+        for (name, default, description) in [
+            (
+                "dht-refresh-check-interval",
+                300,
+                "DHT bucket refresh check interval in seconds",
+            ),
+            (
+                "dht-token-rotation-interval",
+                600,
+                "DHT token rotation interval in seconds",
+            ),
+            (
+                "dht-node-contact-interval",
+                900,
+                "DHT node contact interval in seconds",
+            ),
+            (
+                "dht-cleanup-interval",
+                300,
+                "DHT cleanup and eviction interval in seconds",
+            ),
+            (
+                "dht-save-interval",
+                1800,
+                "DHT routing-table save interval in seconds",
+            ),
+            (
+                "dht-bootstrap-timeout",
+                60,
+                "DHT bootstrap timeout in seconds",
+            ),
+            (
+                "dht-persistence-max-age",
+                24 * 60 * 60,
+                "Maximum age of a persisted DHT snapshot in seconds",
+            ),
+        ] {
+            self.register(OptionDef {
+                name: name.into(),
+                opt_type: OptionType::Integer,
+                default_value: OptionValue::Int(default),
+                min: Some(1),
+                description: description.into(),
+                category: OptionCategory::BitTorrent,
+                ..Default::default()
+            });
+        }
+        self.register(OptionDef {
+            name: "dht-max-concurrent-lookups".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(16),
+            min: Some(1),
+            max: Some(1024),
+            description: "Maximum concurrent DHT lookup tasks".into(),
             category: OptionCategory::BitTorrent,
             ..Default::default()
         });

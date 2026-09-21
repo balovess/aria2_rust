@@ -230,8 +230,8 @@ impl DhtEngine {
             let mut token_interval = tokio::time::interval(config.token_rotation_interval);
             let mut refresh_check_interval = tokio::time::interval(config.refresh_check_interval);
             let mut node_contact_interval = tokio::time::interval(config.node_contact_interval);
-            let mut cleanup_interval = tokio::time::interval(Duration::from_secs(300));
-            let mut save_interval = tokio::time::interval(Duration::from_secs(1800));
+            let mut cleanup_interval = tokio::time::interval(config.cleanup_interval);
+            let mut save_interval = tokio::time::interval(config.save_interval);
 
             loop {
                 tokio::select! {
@@ -488,6 +488,7 @@ impl DhtEngineContext {
     pub(super) async fn save_routing_table(&self) {
         if let Some(ref path) = self.config.dht_file_path {
             let path = path.clone();
+            let persistence_max_age = self.config.persistence_max_age;
             // Acquire the save lock before taking the snapshot. Otherwise a
             // shutdown snapshot can be newer than an auto-save snapshot but
             // still be written first, allowing the older snapshot to win.
@@ -498,8 +499,11 @@ impl DhtEngineContext {
             let save_path = path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _save_guard = save_guard;
-                super::persistence::DhtPersistence::merge_and_save_to_file_sync(
-                    &save_path, &self_id, &nodes,
+                super::persistence::DhtPersistence::merge_and_save_to_file_sync_with_max_age(
+                    &save_path,
+                    &self_id,
+                    &nodes,
+                    persistence_max_age,
                 )
             })
             .await;

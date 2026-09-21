@@ -191,9 +191,34 @@ tracker，`lastAttempt` 是最近一次尝试的 tracker。该扩展接口中
 
 `aria2.getDhtStatus` 是进程级聚合接口，汇总当前活动 BT/magnet 命令注册的
 DHT 引擎，返回 `state`（`stopped`、`bootstrapping`、`running` 或
-`shuttingDown`）以及 `totalNodes`、`goodNodes`、`pendingTransactions`。
-三个计数按 aria2 wire 格式返回字符串；没有活动 DHT 引擎时返回 stopped 和
-零计数。
+`shuttingDown`）以及 `totalNodes`、`goodNodes`、`pendingTransactions`、
+`questionableNodes`、`badNodes`、`cachedNodes` 和 `bucketCount`。同时返回当前
+DHT 配置的 `persistenceEnabled`、`persistenceMaxAgeSecs`、
+`cleanupIntervalSecs` 和 `saveIntervalSecs`。数字字段按 aria2 wire 格式返回
+字符串，`persistenceEnabled` 是 JSON 原生布尔值。没有活动 DHT 引擎时返回
+`stopped`、零计数，并将持久化标记设为 false。
+
+公共 Tracker 列表配置属于全局选项，可通过常规选项方法查询和修改。标准默认值为：
+
+```json
+{
+  "enable-public-trackers": "true",
+  "bt-tracker-source": "https://cf.trackerslist.com/best.txt",
+  "bt-tracker-update-interval": "86400"
+}
+```
+
+列表会按周期刷新，新获得的 URL 会在 torrent/用户 Tracker tier 之后追加，且会
+去重。排除规则和多源配置见[参数配置说明](configuration-guide-cn.md#公共-tracker-列表)。
+
+Tracker 响应中的扩展 `announce-list` 也会被解析并追加到现有 tier，重复 URL
+会被丢弃，原 torrent、用户配置和公共列表不会被替换。这使得 torrent 元数据、
+用户配置、公共列表和 tracker 动态返回列表形成一条可观察的完整发现链。
+
+`getTrackers` 是 tracker 健康状态的 RPC 面：`allFailed`、`announceReady`、
+`lastAttempt`、`secondsSinceLastSuccess` 和 `inFlight` 可用于判断每个任务的
+tracker 状态与当前请求并发。公共列表源的抓取并发固定限制为 4，避免多源更新
+造成无界连接；该限制属于内部保护，不改变原版 tracker RPC 响应。
 
 ### 选项、会话与进程
 

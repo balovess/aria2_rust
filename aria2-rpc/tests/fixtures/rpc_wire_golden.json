@@ -25,13 +25,29 @@
     "state": "stopped",
     "totalNodes": "0",
     "goodNodes": "0",
-    "pendingTransactions": "0"
+    "pendingTransactions": "0",
+    "questionableNodes": "0",
+    "badNodes": "0",
+    "cachedNodes": "0",
+    "bucketCount": "0",
+    "persistenceEnabled": false,
+    "persistenceMaxAgeSecs": "0",
+    "cleanupIntervalSecs": "0",
+    "saveIntervalSecs": "0"
   },
   "dht_status_default": {
     "state": "",
     "totalNodes": "0",
     "goodNodes": "0",
-    "pendingTransactions": "0"
+    "pendingTransactions": "0",
+    "questionableNodes": "0",
+    "badNodes": "0",
+    "cachedNodes": "0",
+    "bucketCount": "0",
+    "persistenceEnabled": false,
+    "persistenceMaxAgeSecs": "0",
+    "cleanupIntervalSecs": "0",
+    "saveIntervalSecs": "0"
   },
   "file_info": {
     "index": "1",

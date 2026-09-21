@@ -242,6 +242,46 @@ impl DownloadOptions {
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|value| *value > 0)
                 .unwrap_or(10),
+            dht_refresh_check_interval: options
+                .get("dht-refresh-check-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(300),
+            dht_token_rotation_interval: options
+                .get("dht-token-rotation-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(600),
+            dht_node_contact_interval: options
+                .get("dht-node-contact-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(900),
+            dht_cleanup_interval: options
+                .get("dht-cleanup-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(300),
+            dht_save_interval: options
+                .get("dht-save-interval")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(1800),
+            dht_bootstrap_timeout: options
+                .get("dht-bootstrap-timeout")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(60),
+            dht_max_concurrent_lookups: options
+                .get("dht-max-concurrent-lookups")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(16),
+            dht_persistence_max_age: options
+                .get("dht-persistence-max-age")
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(24 * 60 * 60),
             enable_dht6: options
                 .get("enable-dht6")
                 .map(|v| v == "true")

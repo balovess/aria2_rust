@@ -195,9 +195,40 @@ boolean state use native JSON types.
 
 `aria2.getDhtStatus` is process-wide. It aggregates the DHT engines registered
 by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
-`running`, or `shuttingDown`) plus `totalNodes`, `goodNodes`, and
-`pendingTransactions`. The three counters use aria2's string wire format. With
-no active DHT engine, the result is `stopped` with zero counters.
+`running`, or `shuttingDown`) plus `totalNodes`, `goodNodes`,
+`pendingTransactions`, `questionableNodes`, `badNodes`, `cachedNodes`, and
+`bucketCount`. It also reports `persistenceEnabled`,
+`persistenceMaxAgeSecs`, `cleanupIntervalSecs`, and `saveIntervalSecs` for
+the active DHT configuration. Numeric fields use aria2's string wire format;
+`persistenceEnabled` is a native JSON boolean. With no active DHT engine, the
+result is `stopped` with zero counters and persistence disabled.
+
+Public tracker catalog settings are global options and can be inspected or
+changed through the normal option methods. The standard defaults are:
+
+```json
+{
+  "enable-public-trackers": "true",
+  "bt-tracker-source": "https://cf.trackerslist.com/best.txt",
+  "bt-tracker-update-interval": "86400"
+}
+```
+
+The catalog is refreshed periodically and newly available URLs are appended
+after torrent/user tracker tiers with duplicates removed. See the
+[configuration guide](configuration-guide-en.md#public-tracker-catalog) for
+the exclusion and multi-source rules.
+
+The response extension `announce-list` is also parsed and appended as new tiers.
+Duplicate URLs are discarded, and the torrent, user, and public-catalog tiers are
+never replaced. This makes torrent metadata, user configuration, the public
+catalog, and tracker-discovered URLs one observable discovery chain.
+
+`getTrackers` is the tracker health surface: `allFailed`, `announceReady`,
+`lastAttempt`, `secondsSinceLastSuccess`, and `inFlight` expose per-task health
+and current request concurrency. Public-catalog source fetching is internally
+bounded to four concurrent sources, preventing an unbounded refresh fan-out;
+this guard does not change the original tracker RPC response.
 
 ### Options, session, and process
 

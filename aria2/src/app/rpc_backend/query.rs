@@ -389,6 +389,14 @@ impl CoreRpcBackend {
             total_nodes: 0,
             good_nodes: 0,
             pending_transactions: 0,
+            questionable_nodes: 0,
+            bad_nodes: 0,
+            cached_nodes: 0,
+            bucket_count: 0,
+            persistence_enabled: false,
+            persistence_max_age_secs: 0,
+            cleanup_interval_secs: 0,
+            save_interval_secs: 0,
             state: aria2_protocol::bittorrent::dht::engine::DhtEngineState::Stopped,
         };
         for engine in engines {
@@ -396,6 +404,18 @@ impl CoreRpcBackend {
             stats.total_nodes += current.total_nodes;
             stats.good_nodes += current.good_nodes;
             stats.pending_transactions += current.pending_transactions;
+            stats.questionable_nodes += current.questionable_nodes;
+            stats.bad_nodes += current.bad_nodes;
+            stats.cached_nodes += current.cached_nodes;
+            stats.bucket_count += current.bucket_count;
+            stats.persistence_enabled |= current.persistence_enabled;
+            stats.persistence_max_age_secs = stats
+                .persistence_max_age_secs
+                .max(current.persistence_max_age_secs);
+            stats.cleanup_interval_secs = stats
+                .cleanup_interval_secs
+                .max(current.cleanup_interval_secs);
+            stats.save_interval_secs = stats.save_interval_secs.max(current.save_interval_secs);
             if dht_state_priority(current.state) > dht_state_priority(stats.state) {
                 stats.state = current.state;
             }
@@ -406,6 +426,14 @@ impl CoreRpcBackend {
                 total_nodes: stats.total_nodes,
                 good_nodes: stats.good_nodes,
                 pending_transactions: stats.pending_transactions,
+                questionable_nodes: stats.questionable_nodes,
+                bad_nodes: stats.bad_nodes,
+                cached_nodes: stats.cached_nodes,
+                bucket_count: stats.bucket_count,
+                persistence_enabled: stats.persistence_enabled,
+                persistence_max_age_secs: stats.persistence_max_age_secs,
+                cleanup_interval_secs: stats.cleanup_interval_secs,
+                save_interval_secs: stats.save_interval_secs,
             },
         )))
     }

@@ -280,7 +280,15 @@ pub(super) fn apply_rpc_option(
         | "bt-timeout"
         | "bt-request-timeout"
         | "peer-connection-timeout"
-        | "dht-message-timeout" => {
+        | "dht-message-timeout"
+        | "dht-refresh-check-interval"
+        | "dht-token-rotation-interval"
+        | "dht-node-contact-interval"
+        | "dht-cleanup-interval"
+        | "dht-save-interval"
+        | "dht-bootstrap-timeout"
+        | "dht-persistence-max-age"
+        | "dht-max-concurrent-lookups" => {
             let value = rpc_option_u64(value, key)?;
             if value == 0 {
                 return Err(format!("Option '{}' must be greater than zero", key));
@@ -291,6 +299,17 @@ pub(super) fn apply_rpc_option(
                 "bt-request-timeout" => opts.bt_request_timeout = value,
                 "peer-connection-timeout" => opts.peer_connection_timeout = value,
                 "dht-message-timeout" => opts.dht_message_timeout = value,
+                "dht-refresh-check-interval" => opts.dht_refresh_check_interval = value,
+                "dht-token-rotation-interval" => opts.dht_token_rotation_interval = value,
+                "dht-node-contact-interval" => opts.dht_node_contact_interval = value,
+                "dht-cleanup-interval" => opts.dht_cleanup_interval = value,
+                "dht-save-interval" => opts.dht_save_interval = value,
+                "dht-bootstrap-timeout" => opts.dht_bootstrap_timeout = value,
+                "dht-persistence-max-age" => opts.dht_persistence_max_age = value,
+                "dht-max-concurrent-lookups" => {
+                    opts.dht_max_concurrent_lookups = usize::try_from(value)
+                        .map_err(|_| format!("Option '{}' is too large", key))?;
+                }
                 _ => unreachable!("BitTorrent duration option handled above"),
             }
             Ok(true)

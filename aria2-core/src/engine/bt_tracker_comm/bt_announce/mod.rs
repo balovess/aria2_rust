@@ -435,6 +435,19 @@ impl BtAnnounce {
             Some(i64::from(response.leechers)),
         );
 
+        // Some tracker services return a fresh announce-list in the
+        // response. Append it after the configured tiers; never replace the
+        // torrent/user/public tiers that were already discovered.
+        if !response.announce_list.is_empty() {
+            let added = self.announce_list.append_tiers(&response.announce_list);
+            if !added.is_empty() {
+                debug!(
+                    "[BT] Added {} tracker(s) from tracker response",
+                    added.len()
+                );
+            }
+        }
+
         // Extract peer addresses (both IPv4 and IPv6).
         // Matches C++ DefaultBtAnnounce::processAnnounceResponse which processes
         // BtAnnounce::PEERS (AF_INET) and BtAnnounce::PEERS6 (AF_INET6) separately

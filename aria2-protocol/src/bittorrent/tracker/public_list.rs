@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use crate::http::client::ensure_ring_provider;
 
 pub const DEFAULT_TRACKER_SOURCE: &str = "https://cf.trackerslist.com/best.txt";
-pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(86_400);
+pub const DEFAULT_TRACKER_UPDATE_INTERVAL: Duration = Duration::from_secs(604_800);
 /// Bound source downloads so a large user-provided source list cannot create
 /// an unbounded burst of outbound HTTP requests.
 pub const MAX_TRACKER_SOURCE_CONCURRENCY: usize = 4;

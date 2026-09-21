@@ -69,7 +69,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Resume Support**: Checkpoint-based resume for the main download paths; protocol-specific compatibility is tracked in the matrix
 - **BitTorrent**:
   - ✅ DHT network (KRPC + routing table + bootstrap)
-  - ✅ Tracker communication (UDP/HTTP)
+  - ✅ Tracker communication (UDP/HTTP), with a periodically refreshed public tracker catalog
   - ✅ Peer Exchange (PEX, per-peer BEP 10 extension-ID negotiation)
   - ✅ MSE/PE encryption (BEP14 handshake)
   - ✅ Choking algorithms + seed-time/ratio support
@@ -85,7 +85,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
-- **Public Tracker List**: Auto-update from trackerslist.com for BT peer discovery
+- **Public Tracker List**: Enabled by default; refreshes `https://cf.trackerslist.com/best.txt` every 24 hours and appends deduplicated trackers to active BT tasks
 
 ## Quick Start
 

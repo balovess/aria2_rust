@@ -45,6 +45,14 @@ pub(crate) async fn build_dht_engine_config(
         bootstrap_nodes,
         dht_file_path: dht_file_path.map(std::path::PathBuf::from),
         query_timeout: Duration::from_secs(options.dht_message_timeout.max(1)),
+        refresh_check_interval: Duration::from_secs(options.dht_refresh_check_interval.max(1)),
+        token_rotation_interval: Duration::from_secs(options.dht_token_rotation_interval.max(1)),
+        node_contact_interval: Duration::from_secs(options.dht_node_contact_interval.max(1)),
+        cleanup_interval: Duration::from_secs(options.dht_cleanup_interval.max(1)),
+        save_interval: Duration::from_secs(options.dht_save_interval.max(1)),
+        bootstrap_timeout: Duration::from_secs(options.dht_bootstrap_timeout.max(1)),
+        max_concurrent_lookups: options.dht_max_concurrent_lookups.max(1),
+        persistence_max_age: Duration::from_secs(options.dht_persistence_max_age.max(1)),
         ..Default::default()
     })
 }

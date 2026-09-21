@@ -81,6 +81,12 @@ pub struct DhtEngineConfig {
     /// engine transitions to `Running` anyway, so an unreachable network can
     /// never leave the engine stuck in `Bootstrapping` forever.
     pub bootstrap_timeout: Duration,
+    /// Interval for cleanup of expired transactions/peers and node eviction.
+    pub cleanup_interval: Duration,
+    /// Interval for routing-table and BEP 44 persistence checkpoints.
+    pub save_interval: Duration,
+    /// Maximum age of a routing-table snapshot accepted from disk.
+    pub persistence_max_age: Duration,
 }
 
 impl Default for DhtEngineConfig {
@@ -99,6 +105,9 @@ impl Default for DhtEngineConfig {
             max_concurrent_lookups: 16,
             bootstrap_on_start: true,
             bootstrap_timeout: Duration::from_secs(60),
+            cleanup_interval: Duration::from_secs(300),
+            save_interval: Duration::from_secs(1800),
+            persistence_max_age: Duration::from_secs(24 * 60 * 60),
         }
     }
 }
@@ -140,6 +149,21 @@ pub struct DhtEngineStats {
     pub good_nodes: usize,
     /// Number of pending transactions.
     pub pending_transactions: usize,
+    /// Nodes whose last contact is older than the refresh threshold.
+    pub questionable_nodes: usize,
+    /// Nodes that reached the failure threshold and are eligible for eviction.
+    pub bad_nodes: usize,
+    /// Replacement candidates retained outside full buckets.
+    pub cached_nodes: usize,
+    /// Number of routing-table buckets currently allocated.
+    pub bucket_count: usize,
+    /// Whether this engine has a routing-table persistence path.
+    pub persistence_enabled: bool,
+    /// Configured maximum age for an on-disk routing-table snapshot.
+    pub persistence_max_age_secs: u64,
+    /// Configured cleanup and save periods.
+    pub cleanup_interval_secs: u64,
+    pub save_interval_secs: u64,
     /// Current engine state.
     pub state: DhtEngineState,
 }
@@ -223,8 +247,44 @@ impl DhtEngine {
     /// `Bootstrapping` to `Running`, or [`DhtEngineConfig::local`] to skip
     /// bootstrap entirely.
     pub async fn start(config: DhtEngineConfig) -> std::io::Result<Arc<Self>> {
-        // Generate random node ID if not specified
-        let self_id = if config.self_id == [0u8; 20] {
+        let persisted_data = if let Some(ref path) = config.dht_file_path
+            && tokio::fs::try_exists(path).await.unwrap_or(false)
+        {
+            match super::persistence::DhtPersistence::load_from_file(path).await {
+                Ok(data)
+                    if super::persistence::DhtPersistence::is_fresh(
+                        data.saved_at_secs,
+                        config.persistence_max_age,
+                    ) =>
+                {
+                    Some(data)
+                }
+                Ok(data) => {
+                    warn!(
+                        saved_at = data.saved_at_secs,
+                        max_age_secs = config.persistence_max_age.as_secs(),
+                        "Ignoring stale DHT routing-table snapshot"
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to load DHT routing table: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Prefer an explicitly configured ID, then the persisted local ID,
+        // and generate a new ID only when neither is available.
+        let self_id = if config.self_id == [0u8; 20]
+            && persisted_data
+                .as_ref()
+                .is_some_and(|data| data.self_id != [0u8; 20])
+        {
+            persisted_data.as_ref().expect("checked above").self_id
+        } else if config.self_id == [0u8; 20] {
             let mut id = [0u8; 20];
             use rand::{RngCore, SeedableRng};
             // Use StdRng instead of ThreadRng to satisfy Send across async boundaries.
@@ -274,23 +334,14 @@ impl DhtEngine {
 
         // Load routing table from disk or start empty
         let mut routing_table = RoutingTable::new(self_id);
-        if let Some(ref path) = config.dht_file_path
-            && tokio::fs::try_exists(path).await.unwrap_or(false)
-        {
-            match super::persistence::DhtPersistence::load_from_file(path).await {
-                Ok(data) => {
-                    info!(
-                        count = data.nodes.len(),
-                        "Loaded DHT routing table from disk"
-                    );
-                    for pnode in data.nodes {
-                        let node = DhtNode::new(pnode.id, pnode.addr);
-                        routing_table.insert(node);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to load DHT routing table: {}", e);
-                }
+        if let Some(data) = persisted_data {
+            info!(
+                count = data.nodes.len(),
+                "Loaded DHT routing table from disk"
+            );
+            for pnode in data.nodes {
+                let node = DhtNode::new(pnode.id, pnode.addr);
+                routing_table.insert(node);
             }
         }
 
@@ -536,6 +587,7 @@ impl DhtEngine {
         // Save routing table to disk
         if let Some(ref path) = self.context.config.dht_file_path {
             let path = path.clone();
+            let persistence_max_age = self.context.config.persistence_max_age;
             // Serialize before taking the snapshot so an older automatic
             // snapshot cannot overwrite this final shutdown snapshot later.
             let save_guard = Arc::clone(&self.context.routing_table_save_lock)
@@ -548,8 +600,11 @@ impl DhtEngine {
             let save_path = path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _save_guard = save_guard;
-                super::persistence::DhtPersistence::merge_and_save_to_file_sync(
-                    &save_path, &self_id, &nodes,
+                super::persistence::DhtPersistence::merge_and_save_to_file_sync_with_max_age(
+                    &save_path,
+                    &self_id,
+                    &nodes,
+                    persistence_max_age,
                 )
             })
             .await;
@@ -599,6 +654,18 @@ impl DhtEngine {
             total_nodes: routing_table.total_node_count(),
             good_nodes: routing_table.good_node_count(),
             pending_transactions: self.context.tracker.pending_count(),
+            questionable_nodes: routing_table.questionable_node_count(),
+            bad_nodes: routing_table.bad_node_count(),
+            cached_nodes: routing_table
+                .get_all_buckets()
+                .iter()
+                .map(|bucket| bucket.cached_nodes().len())
+                .sum(),
+            bucket_count: routing_table.num_buckets(),
+            persistence_enabled: self.context.config.dht_file_path.is_some(),
+            persistence_max_age_secs: self.context.config.persistence_max_age.as_secs(),
+            cleanup_interval_secs: self.context.config.cleanup_interval.as_secs(),
+            save_interval_secs: self.context.config.save_interval.as_secs(),
             state,
         }
     }

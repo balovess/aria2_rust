@@ -339,6 +339,38 @@ pub struct BitTorrentArgs {
     #[arg(long = "dht-message-timeout")]
     pub dht_message_timeout: Option<u64>,
 
+    /// DHT bucket refresh check interval in seconds
+    #[arg(long = "dht-refresh-check-interval")]
+    pub dht_refresh_check_interval: Option<u64>,
+
+    /// DHT token rotation interval in seconds
+    #[arg(long = "dht-token-rotation-interval")]
+    pub dht_token_rotation_interval: Option<u64>,
+
+    /// DHT node contact interval in seconds
+    #[arg(long = "dht-node-contact-interval")]
+    pub dht_node_contact_interval: Option<u64>,
+
+    /// DHT cleanup and eviction interval in seconds
+    #[arg(long = "dht-cleanup-interval")]
+    pub dht_cleanup_interval: Option<u64>,
+
+    /// DHT routing-table save interval in seconds
+    #[arg(long = "dht-save-interval")]
+    pub dht_save_interval: Option<u64>,
+
+    /// DHT bootstrap timeout in seconds
+    #[arg(long = "dht-bootstrap-timeout")]
+    pub dht_bootstrap_timeout: Option<u64>,
+
+    /// Maximum concurrent DHT lookup tasks
+    #[arg(long = "dht-max-concurrent-lookups")]
+    pub dht_max_concurrent_lookups: Option<usize>,
+
+    /// Maximum age of the persisted DHT snapshot in seconds
+    #[arg(long = "dht-persistence-max-age")]
+    pub dht_persistence_max_age: Option<u64>,
+
     /// Enable IPv6 DHT
     #[arg(
         long = "enable-dht6",
