@@ -283,6 +283,7 @@ impl BtDownloadCommand {
             match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
                 Ok(engine) => {
                     self.dht_engine = Some(engine);
+                    self.register_dht_engine();
                     tracing::info!("[BT] DHT engine started");
                 }
                 Err(e) => {

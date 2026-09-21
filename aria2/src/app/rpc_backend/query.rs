@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(feature = "bittorrent")]
+use std::sync::Arc;
 
 #[cfg(feature = "bittorrent")]
 use aria2_core::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
@@ -436,6 +438,50 @@ impl CoreRpcBackend {
                 save_interval_secs: stats.save_interval_secs,
             },
         )))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) async fn save_dht_state(&self) -> Result<BackendResult, BackendError> {
+        let engines = self.dht_engines();
+        if engines.is_empty() {
+            return Err(Self::execution("DHT engine is not running"));
+        }
+        for engine in engines {
+            engine.save_state().await;
+        }
+        Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    pub(super) async fn evict_dht_nodes(&self) -> Result<BackendResult, BackendError> {
+        let engines = self.dht_engines();
+        if engines.is_empty() {
+            return Err(Self::execution("DHT engine is not running"));
+        }
+        let mut evicted = 0;
+        let mut replacements = 0;
+        for engine in engines {
+            let (current_evicted, current_replacements) = engine.evict_nodes().await;
+            evicted += current_evicted;
+            replacements += current_replacements;
+        }
+        Ok(BackendResult::response(BackendResponse::Counts([
+            evicted,
+            replacements,
+        ])))
+    }
+
+    #[cfg(feature = "bittorrent")]
+    fn dht_engines(&self) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        self.bt_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .read()
+                    .ok()
+                    .map(|registry| registry.get_dht_engines())
+            })
+            .unwrap_or_default()
     }
 
     pub(super) fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {

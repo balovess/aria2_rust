@@ -888,7 +888,10 @@ impl TrackerAnnouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
     use futures::{SinkExt, StreamExt};
+    use std::collections::BTreeMap;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_tungstenite::tungstenite::Message;
 
     #[test]
@@ -1010,6 +1013,134 @@ mod tests {
         assert!(result.is_none(), "slow tracker request should time out");
 
         server.await.expect("tracker test server should exit");
+    }
+
+    #[tokio::test]
+    async fn local_http_tracker_returns_dynamic_announce_list() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local HTTP tracker fixture");
+        let address = listener.local_addr().expect("local tracker address");
+        let dynamic_a = "http://127.0.0.1:1/dynamic-a".to_string();
+        let dynamic_b = "http://127.0.0.1:1/dynamic-b".to_string();
+        let response_body = {
+            let mut response = BTreeMap::new();
+            response.insert(b"complete".to_vec(), BencodeValue::Int(7));
+            response.insert(b"incomplete".to_vec(), BencodeValue::Int(3));
+            response.insert(b"interval".to_vec(), BencodeValue::Int(60));
+            response.insert(
+                b"announce-list".to_vec(),
+                BencodeValue::List(vec![
+                    BencodeValue::List(vec![BencodeValue::Bytes(dynamic_a.clone().into_bytes())]),
+                    BencodeValue::List(vec![BencodeValue::Bytes(dynamic_b.clone().into_bytes())]),
+                ]),
+            );
+            response.insert(
+                b"peers".to_vec(),
+                BencodeValue::Bytes(vec![192, 0, 2, 10, 0x1A, 0xE1]),
+            );
+            BencodeValue::Dict(response).encode()
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept tracker request");
+            let mut request = vec![0u8; 4096];
+            let _ = socket
+                .read(&mut request)
+                .await
+                .expect("read tracker request");
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            socket
+                .write_all(headers.as_bytes())
+                .await
+                .expect("write tracker headers");
+            socket
+                .write_all(&response_body)
+                .await
+                .expect("write tracker response");
+        });
+
+        let initial = format!("http://{address}/announce");
+        let mut announcer = TrackerAnnouncer::new(&[vec![initial.clone()]], &None);
+        announcer.set_timeouts(Duration::from_secs(2), Duration::from_secs(2));
+
+        let result = announcer
+            .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await
+            .expect("HTTP tracker fixture should return an announce result");
+        assert_eq!(result.peers, vec![("192.0.2.10".to_string(), 6881)]);
+        assert_eq!(result.seeders, 7);
+        assert_eq!(result.leechers, 3);
+        assert!(announcer.announce.announce_list().contains_url(&initial));
+        assert!(announcer.announce.announce_list().contains_url(&dynamic_a));
+        assert!(announcer.announce.announce_list().contains_url(&dynamic_b));
+        assert_eq!(announcer.announce.announce_list().tier_count(), 3);
+
+        server.await.expect("HTTP tracker fixture should exit");
+    }
+
+    #[tokio::test]
+    async fn local_udp_tracker_fixture_supports_bep15_announce() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind local UDP tracker fixture");
+        let address = socket.local_addr().expect("local UDP tracker address");
+        let server = tokio::spawn(async move {
+            let mut request = [0u8; 256];
+            let (length, peer) = socket
+                .recv_from(&mut request)
+                .await
+                .expect("receive BEP 15 connect request");
+            assert_eq!(length, 16);
+            assert_eq!(&request[0..8], &0x41727101980u64.to_be_bytes());
+            assert_eq!(&request[8..12], &0i32.to_be_bytes());
+            let transaction = u32::from_be_bytes(request[12..16].try_into().unwrap());
+            let connection_id = 0x0102_0304_0506_0708u64;
+            let mut connect_response = Vec::with_capacity(16);
+            connect_response.extend_from_slice(&0i32.to_be_bytes());
+            connect_response.extend_from_slice(&transaction.to_be_bytes());
+            connect_response.extend_from_slice(&connection_id.to_be_bytes());
+            socket
+                .send_to(&connect_response, peer)
+                .await
+                .expect("send BEP 15 connect response");
+
+            let (length, peer) = socket
+                .recv_from(&mut request)
+                .await
+                .expect("receive BEP 15 announce request");
+            assert!(length >= 98);
+            assert_eq!(&request[0..8], &connection_id.to_be_bytes());
+            assert_eq!(&request[8..12], &1i32.to_be_bytes());
+            let transaction = u32::from_be_bytes(request[12..16].try_into().unwrap());
+            let mut announce_response = Vec::with_capacity(26);
+            announce_response.extend_from_slice(&1i32.to_be_bytes());
+            announce_response.extend_from_slice(&transaction.to_be_bytes());
+            announce_response.extend_from_slice(&60u32.to_be_bytes());
+            announce_response.extend_from_slice(&3u32.to_be_bytes());
+            announce_response.extend_from_slice(&7u32.to_be_bytes());
+            announce_response.extend_from_slice(&[192, 0, 2, 11, 0x1A, 0xE1]);
+            socket
+                .send_to(&announce_response, peer)
+                .await
+                .expect("send BEP 15 announce response");
+        });
+
+        let mut announcer =
+            TrackerAnnouncer::new(&[vec![format!("udp://{address}/announce")]], &None);
+        announcer.set_timeouts(Duration::from_secs(2), Duration::from_secs(2));
+        let result = announcer
+            .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await
+            .expect("UDP tracker fixture should return an announce result");
+
+        assert_eq!(result.peers, vec![("192.0.2.11".to_string(), 6881)]);
+        assert_eq!(result.interval, Duration::from_secs(60));
+        assert_eq!(result.seeders, 7);
+        assert_eq!(result.leechers, 3);
+        server.await.expect("UDP tracker fixture should exit");
     }
 
     #[tokio::test]

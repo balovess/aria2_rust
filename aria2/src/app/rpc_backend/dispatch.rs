@@ -122,6 +122,18 @@ impl RpcBackend for CoreRpcBackend {
             BackendRequest::GetDhtStatus => {
                 Err(BackendError::Unsupported("BitTorrent is disabled".into()))
             }
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::SaveDhtState => self.save_dht_state().await,
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::SaveDhtState => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
+            #[cfg(feature = "bittorrent")]
+            BackendRequest::EvictDhtNodes => self.evict_dht_nodes().await,
+            #[cfg(not(feature = "bittorrent"))]
+            BackendRequest::EvictDhtNodes => {
+                Err(BackendError::Unsupported("BitTorrent is disabled".into()))
+            }
             BackendRequest::PauseAll => {
                 let gids = self.lifecycle_gids();
                 self.group_man.pause_all();

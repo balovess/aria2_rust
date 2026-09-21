@@ -856,7 +856,7 @@ async fn e2e_system_list_methods_returns_array() {
 
     let methods = resp["result"].as_array().unwrap();
     let expected_method_count = 35
-        + usize::from(cfg!(feature = "bittorrent")) * 4
+        + usize::from(cfg!(feature = "bittorrent")) * 6
         + usize::from(cfg!(feature = "metalink"));
     assert_eq!(
         methods.len(),

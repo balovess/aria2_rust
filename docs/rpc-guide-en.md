@@ -117,6 +117,7 @@ The compatibility baseline is the official C++ aria2 1.37.0 JSON-RPC/XML-RPC con
 | Global statistics | `getGlobalStat` speeds and task counts | Provided | Compatibility baseline |
 | Version/options/session/system | Corresponding upstream methods | Provided | Compatibility baseline |
 | DHT internals | No dedicated upstream RPC | `getDhtStatus` | Extension |
+| Manual DHT maintenance | No dedicated upstream RPC | `saveDhtState`, `evictDhtNodes` | Extension |
 | Tracker runtime snapshot | Upstream has no `getTrackers` | `getTrackers` | Extension |
 | Browser session context | Not present upstream | `updateBrowserContext`, `clearBrowserContext` | Extension |
 
@@ -148,6 +149,8 @@ Upstream method responses must not contain extension fields. Runtime data such a
 | `aria2.getPeers` | `gid` | Peer object array; requires BitTorrent |
 | `aria2.getTrackers` | `gid` | Live tracker runtime array; requires BitTorrent |
 | `aria2.getDhtStatus` | none | Aggregate DHT status for active BT/magnet tasks; requires BitTorrent |
+| `aria2.saveDhtState` | none | Immediately save routing tables and BEP 44 items for active DHT engines; requires BitTorrent |
+| `aria2.evictDhtNodes` | none | Immediately evict bad nodes and try cached replacements; returns `[evicted, replacement_attempts]`; requires BitTorrent |
 | `aria2.getGlobalStat` | none | Global speeds and task counts |
 
 `aria2.getFiles(gid)` is the standard query for file paths, total lengths,
@@ -202,6 +205,14 @@ by active BT/magnet commands and returns `state` (`stopped`, `bootstrapping`,
 the active DHT configuration. Numeric fields use aria2's string wire format;
 `persistenceEnabled` is a native JSON boolean. With no active DHT engine, the
 result is `stopped` with zero counters and persistence disabled.
+
+`aria2.saveDhtState` and `aria2.evictDhtNodes` take no parameters. The save
+operation reuses the automatic save chain's serialization lock, routing-table
+merge, and BEP 44 persistence logic. The eviction operation reuses the
+periodic cleanup path's bad-node eviction and cached replacement logic. With
+no active DHT engine they return an execution error. They affect only DHT
+engines registered in the current process and do not change `dht-*` options;
+automatic maintenance continues on its configured schedule.
 
 Public tracker catalog settings are global options and can be inspected or
 changed through the normal option methods. The standard defaults are:
@@ -264,7 +275,7 @@ The same request can be sent through `POST /jsonrpc` or the existing `ws://host:
 
 `system.listMethods` returns methods supported by the current build. `system.listNotifications` returns event names. `system.multicall` accepts an array of `{"methodName":"...","params":[...]}` objects.
 
-The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, `aria2.getTrackers`, `aria2.getDhtStatus`, and `aria2.addMetalink` as applicable; an all-features build exposes 40 methods.
+The complete base method catalog is: `aria2.addUri`, `aria2.remove`, `aria2.pause`, `aria2.forcePause`, `aria2.pauseAll`, `aria2.forcePauseAll`, `aria2.unpause`, `aria2.unpauseAll`, `aria2.forceRemove`, `aria2.changePosition`, `aria2.tellStatus`, `aria2.getUris`, `aria2.getFiles`, `aria2.getServers`, `aria2.tellActive`, `aria2.tellWaiting`, `aria2.tellStopped`, `aria2.getOption`, `aria2.changeUri`, `aria2.changeOption`, `aria2.getGlobalOption`, `aria2.changeGlobalOption`, `aria2.purgeDownloadResult`, `aria2.removeDownloadResult`, `aria2.getVersion`, `aria2.getSessionInfo`, `aria2.shutdown`, `aria2.forceShutdown`, `aria2.getGlobalStat`, `aria2.saveSession`, `aria2.updateBrowserContext`, `aria2.clearBrowserContext`, `system.multicall`, `system.listMethods`, and `system.listNotifications`. Features add `aria2.addTorrent`, `aria2.getPeers`, `aria2.getTrackers`, `aria2.getDhtStatus`, `aria2.saveDhtState`, `aria2.evictDhtNodes`, and `aria2.addMetalink` as applicable; an all-features build exposes 42 methods.
 
 ## 7. Errors and limits
 

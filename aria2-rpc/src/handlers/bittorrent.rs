@@ -21,6 +21,18 @@ pub(crate) fn parse_get_dht_status(
     Ok(BackendRequest::GetDhtStatus)
 }
 
+pub(crate) fn parse_save_dht_state(
+    _req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::SaveDhtState)
+}
+
+pub(crate) fn parse_evict_dht_nodes(
+    _req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::EvictDhtNodes)
+}
+
 pub(crate) fn parse_get_uris(req: &mut JsonRpcRequest) -> Result<BackendRequest, JsonRpcError> {
     Ok(BackendRequest::GetUris {
         gid: req.take_param(0)?,

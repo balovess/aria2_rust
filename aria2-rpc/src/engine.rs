@@ -383,6 +383,8 @@ impl RpcEngine {
             "aria2.getPeers" => handlers::bittorrent::parse_get_peers(&mut req),
             "aria2.getTrackers" => handlers::bittorrent::parse_get_trackers(&mut req),
             "aria2.getDhtStatus" => handlers::bittorrent::parse_get_dht_status(&mut req),
+            "aria2.saveDhtState" => handlers::bittorrent::parse_save_dht_state(&mut req),
+            "aria2.evictDhtNodes" => handlers::bittorrent::parse_evict_dht_nodes(&mut req),
             "aria2.pauseAll" => Ok(handlers::bittorrent::parse_pause_all(&mut req)),
             "aria2.forcePauseAll" => Ok(handlers::bittorrent::parse_force_pause_all(&mut req)),
             "aria2.unpauseAll" => Ok(handlers::bittorrent::parse_unpause_all(&mut req)),

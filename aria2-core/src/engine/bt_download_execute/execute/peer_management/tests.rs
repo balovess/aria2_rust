@@ -38,6 +38,42 @@ async fn lpd_registers_public_torrent_before_empty_peer_results() {
     );
 }
 
+#[tokio::test]
+async fn dht_discovery_registers_engine_for_rpc_status() {
+    let torrent = build_test_torrent();
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent).unwrap();
+    let options = DownloadOptions {
+        enable_dht: true,
+        enable_public_trackers: false,
+        bt_enable_lpd: false,
+        bt_exclude_tracker: Some(vec!["*".to_string()]),
+        ..DownloadOptions::default()
+    };
+    let mut command = BtDownloadCommand::new(GroupId::new(7002), &torrent, &options, None)
+        .expect("test torrent should construct");
+    let registry = Arc::new(std::sync::RwLock::new(
+        crate::engine::bt_registry::BtRegistry::new(),
+    ));
+    command.set_bt_registry(Arc::clone(&registry));
+
+    command
+        .discover_peers(&meta, meta.total_size(), &meta.network_info_hash())
+        .await
+        .expect("DHT-only discovery should start successfully");
+
+    assert_eq!(
+        registry
+            .read()
+            .expect("BT registry should be readable")
+            .get_dht_engines()
+            .len(),
+        1,
+        "DHT engine must be visible to aria2.getDhtStatus"
+    );
+
+    command.shutdown().await;
+}
+
 #[test]
 fn tracker_exclusions_and_user_trackers_follow_announce_policy() {
     let tiers = prepare_tracker_tiers(

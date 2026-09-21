@@ -229,6 +229,24 @@ pub struct DhtEngine {
 }
 
 impl DhtEngine {
+    /// Persist the current routing table and BEP 44 item store immediately.
+    ///
+    /// This is the manual counterpart of the periodic save task and reuses
+    /// the same serialized persistence path and lock.
+    pub async fn save_state(&self) {
+        self.context.save_routing_table().await;
+    }
+
+    /// Evict bad routing-table nodes and try cached replacements immediately.
+    ///
+    /// Returns `(evicted_nodes, replacement_attempts)` for operational RPC
+    /// reporting.
+    pub async fn evict_nodes(&self) -> (usize, usize) {
+        self.context.evict_and_replace_nodes().await
+    }
+}
+
+impl DhtEngine {
     /// Start the DHT engine with the given configuration.
     ///
     /// Binds a UDP socket on the configured port, loads the routing table

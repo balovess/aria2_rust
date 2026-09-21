@@ -120,6 +120,7 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | 全局统计 | `getGlobalStat` 的速度和任务计数 | 已提供 | 兼容基线 |
 | 版本/选项/会话/系统 | 原版对应方法 | 已提供 | 兼容基线 |
 | DHT 内部统计 | 原版没有专用 RPC | `getDhtStatus` | 扩展 |
+| DHT 手动维护 | 原版没有专用 RPC | `saveDhtState`、`evictDhtNodes` | 扩展 |
 | Tracker 运行快照 | 原版没有 `getTrackers` | `getTrackers` | 扩展 |
 | 浏览器会话上下文 | 原版没有 | `updateBrowserContext`、`clearBrowserContext` | 扩展 |
 
@@ -151,6 +152,8 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.getPeers` | `gid` | peer 对象数组；需 BitTorrent |
 | `aria2.getTrackers` | `gid` | tracker 运行状态数组；需 BitTorrent |
 | `aria2.getDhtStatus` | 无 | 当前活动 BT/magnet 任务聚合的 DHT 状态；需 BitTorrent |
+| `aria2.saveDhtState` | 无 | 立即保存所有活动 DHT 引擎的路由表和 BEP 44 项；需 BitTorrent |
+| `aria2.evictDhtNodes` | 无 | 立即淘汰 bad 节点并尝试缓存替换；返回 `[淘汰数, 替换尝试数]`；需 BitTorrent |
 | `aria2.getGlobalStat` | 无 | 全局速度和任务计数 |
 
 `aria2.getFiles(gid)` 是查询文件名、路径、总大小和已完成大小的标准接口，
@@ -197,6 +200,11 @@ DHT 配置的 `persistenceEnabled`、`persistenceMaxAgeSecs`、
 `cleanupIntervalSecs` 和 `saveIntervalSecs`。数字字段按 aria2 wire 格式返回
 字符串，`persistenceEnabled` 是 JSON 原生布尔值。没有活动 DHT 引擎时返回
 `stopped`、零计数，并将持久化标记设为 false。
+
+`aria2.saveDhtState` 和 `aria2.evictDhtNodes` 不需要参数。前者复用自动保存链的
+串行化锁、路由表合并和 BEP 44 保存逻辑；后者复用周期 cleanup 的 bad 节点淘汰及
+缓存替换逻辑。没有活动 DHT 引擎时返回执行错误。两个命令只影响当前进程内已经
+注册的 DHT 引擎，不改变 `dht-*` 配置；自动维护仍按配置周期继续运行。
 
 公共 Tracker 列表配置属于全局选项，可通过常规选项方法查询和修改。标准默认值为：
 
@@ -254,7 +262,7 @@ tracker 状态与当前请求并发。公共列表源的抓取并发固定限制
 
 `system.listMethods` 返回当前构建实际支持的方法；`system.listNotifications` 返回事件名；`system.multicall` 接收 `[{"methodName":"...","params":[...]}]` 数组。
 
-当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.getTrackers`、`aria2.getDhtStatus`、`aria2.addMetalink`；全 feature 构建共 40 个方法。
+当前基础方法完整名称为：`aria2.addUri`、`aria2.remove`、`aria2.pause`、`aria2.forcePause`、`aria2.pauseAll`、`aria2.forcePauseAll`、`aria2.unpause`、`aria2.unpauseAll`、`aria2.forceRemove`、`aria2.changePosition`、`aria2.tellStatus`、`aria2.getUris`、`aria2.getFiles`、`aria2.getServers`、`aria2.tellActive`、`aria2.tellWaiting`、`aria2.tellStopped`、`aria2.getOption`、`aria2.changeUri`、`aria2.changeOption`、`aria2.getGlobalOption`、`aria2.changeGlobalOption`、`aria2.purgeDownloadResult`、`aria2.removeDownloadResult`、`aria2.getVersion`、`aria2.getSessionInfo`、`aria2.shutdown`、`aria2.forceShutdown`、`aria2.getGlobalStat`、`aria2.saveSession`、`aria2.updateBrowserContext`、`aria2.clearBrowserContext`、`system.multicall`、`system.listMethods`、`system.listNotifications`。按 feature 增加 `aria2.addTorrent`、`aria2.getPeers`、`aria2.getTrackers`、`aria2.getDhtStatus`、`aria2.saveDhtState`、`aria2.evictDhtNodes`、`aria2.addMetalink`；全 feature 构建共 42 个方法。
 
 ## 7. 错误与限制
 

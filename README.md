@@ -81,7 +81,7 @@ feature has passed the complete cross-platform E2E matrix. See the
 - **Rate Limiting**: Token bucket algorithm with per-task/global limits
 - **Cookie Management**: Netscape format persistence + auto-loading from files
 - **Session Management**: Auto-save + manual save/load with .aria2 control files
-- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 40 methods and 6 notifications)
+- **RPC Remote Control**: JSON-RPC 2.0, XML-RPC, and WebSocket; the method and notification sets depend on enabled features (up to 42 methods and 6 notifications)
 - **Configuration System**: Typed option registry with four-source merging (CLI/file/environment/defaults)
 - **NetRC Authentication**: Automatic FTP/HTTP credential loading from `.netrc` files
 - **URI List Files**: Batch import download tasks via `-i` parameter
@@ -609,7 +609,7 @@ cross-platform evidence is incomplete.
 | CLI arguments | Implemented path | ~50 most-used options; full option parity is still open |
 | Configuration file (`aria2.conf`) | Implemented path | Same syntax path; defaults and changeability still need comparison |
 | Environment variables | Implemented path | `ARIA2_*` prefix mapping; full parity is still open |
-| JSON-RPC API | Implemented path | Feature-dependent method set (up to 40 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, and DHT runtime counters are available |
+| JSON-RPC API | Implemented path | Feature-dependent method set (up to 42 methods) returned by `system.listMethods`; BT metadata, tracker runtime state, DHT runtime counters, and manual DHT maintenance are available |
 | XML-RPC API | Implemented path | MethodCall/response/fault paths exist; original-client matrix remains open |
 | WebSocket events | Implemented path | 6 notifications returned by `system.listNotifications` |
 | URI list file (`-i`) | Implemented path | Mirror + inline options |

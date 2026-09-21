@@ -58,6 +58,8 @@ fn expected_methods() -> Vec<String> {
             "aria2.getPeers",
             "aria2.getTrackers",
             "aria2.getDhtStatus",
+            "aria2.saveDhtState",
+            "aria2.evictDhtNodes",
         ]
         .into_iter()
         .map(str::to_string),

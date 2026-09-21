@@ -644,6 +644,12 @@ impl RpcBackend for FakeBackend {
             BackendRequest::GetDhtStatus => Ok(BackendResult::response(
                 BackendResponse::DhtStatus(aria2_rpc::DhtStatus::default()),
             )),
+            BackendRequest::SaveDhtState => {
+                Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+            }
+            BackendRequest::EvictDhtNodes => {
+                Ok(BackendResult::response(BackendResponse::Counts([0, 0])))
+            }
             BackendRequest::PauseAll | BackendRequest::ForcePauseAll => {
                 let mut state = self.lock_state()?;
                 let mut events = Vec::new();

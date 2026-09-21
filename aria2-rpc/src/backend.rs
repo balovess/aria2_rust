@@ -53,6 +53,8 @@ impl BackendMetadata {
                 "aria2.getPeers",
                 "aria2.getTrackers",
                 "aria2.getDhtStatus",
+                "aria2.saveDhtState",
+                "aria2.evictDhtNodes",
             ]
             .map(str::to_string),
         );
@@ -233,6 +235,8 @@ pub enum BackendRequest {
         gid: String,
     },
     GetDhtStatus,
+    SaveDhtState,
+    EvictDhtNodes,
     PauseAll,
     ForcePauseAll,
     UnpauseAll,

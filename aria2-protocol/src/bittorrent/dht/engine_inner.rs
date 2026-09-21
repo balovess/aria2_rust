@@ -443,7 +443,7 @@ impl DhtEngineContext {
     /// questionable nodes with cached candidates.
     ///
     /// Equivalent to C++ periodic `DHTReplaceNodeTask` execution.
-    pub(super) async fn evict_and_replace_nodes(&self) {
+    pub(super) async fn evict_and_replace_nodes(&self) -> (usize, usize) {
         let (evicted, replacements) = {
             let mut routing_table = self.routing_table.write().await;
             let evicted = routing_table.evict_bad_nodes();
@@ -482,6 +482,8 @@ impl DhtEngineContext {
                 "DHT node eviction and replacement complete"
             );
         }
+
+        (evicted, replacement_count)
     }
 
     /// Save the routing table to disk.
