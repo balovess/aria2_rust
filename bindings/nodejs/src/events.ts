@@ -224,10 +224,11 @@ export class Aria2EventEmitter extends EventEmitter {
       const params = Array.isArray(obj.params) ? obj.params : [];
       const details = params[0];
       const detailsObject =
-        details !== null && typeof details === 'object'
+        details !== null && typeof details === 'object' && !Array.isArray(details)
           ? (details as Record<string, unknown>)
           : undefined;
-      const gid = typeof detailsObject?.gid === 'string' ? detailsObject.gid : String(details);
+      const gid = detailsObject?.gid;
+      if (typeof gid !== 'string' || gid.length === 0) return;
 
       const event: DownloadEvent = {
         type: method as EventType,

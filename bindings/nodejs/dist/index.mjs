@@ -537,8 +537,9 @@ var Aria2EventEmitter = class extends EventEmitter {
       if (!eventName) return;
       const params = Array.isArray(obj.params) ? obj.params : [];
       const details = params[0];
-      const detailsObject = details !== null && typeof details === "object" ? details : void 0;
-      const gid = typeof detailsObject?.gid === "string" ? detailsObject.gid : String(details);
+      const detailsObject = details !== null && typeof details === "object" && !Array.isArray(details) ? details : void 0;
+      const gid = detailsObject?.gid;
+      if (typeof gid !== "string" || gid.length === 0) return;
       const event = {
         type: method,
         gid

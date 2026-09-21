@@ -167,6 +167,34 @@ describe('Events E2E', () => {
     }));
   });
 
+  it('ignores notifications without a valid GID', async () => {
+    const server = new WebSocketServer({ port: 0 });
+    await new Promise<void>((resolve) => server.once('listening', resolve));
+    const address = server.address() as AddressInfo;
+    const emitter = new Aria2EventEmitter(`ws://127.0.0.1:${address.port}/jsonrpc`);
+    const handler = vi.fn();
+    emitter.on('downloadComplete', handler);
+    await emitter.connect();
+    const socket = [...server.clients][0];
+
+    for (const params of [[], [{}], [{ gid: 123 }], [['gid']], [{ gid: '' }]]) {
+      socket.send(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'aria2.onDownloadComplete',
+        params,
+      }));
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(handler).not.toHaveBeenCalled();
+
+    await emitter.close();
+    await new Promise<void>((resolve, reject) => server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    }));
+  });
+
   it('close settles an in-flight event connection', async () => {
     const server = new WebSocketServer({ port: 0 });
     await new Promise<void>((resolve) => server.once('listening', resolve));

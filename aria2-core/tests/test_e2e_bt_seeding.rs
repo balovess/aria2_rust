@@ -230,6 +230,88 @@ async fn test_bt_download_to_seed_upload_and_ratio_exit_over_tcp() {
     assert!(!manager.is_active(), "ratio exit should end seeding");
 }
 
+#[tokio::test]
+async fn test_bt_seeder_does_not_send_short_piece_for_oversized_request() {
+    let info_hash = [0x81u8; 20];
+    let local_peer_id = [0x82u8; 20];
+    let remote_peer_id = [0x83u8; 20];
+    let cancel_token = tokio_util::sync::CancellationToken::new();
+
+    let mut provider = InMemoryPieceProvider::new(16 * 1024, 1);
+    provider.set_piece_data(0, vec![0xA5; 8 * 1024]);
+    let provider = std::sync::Arc::new(provider);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(&Handshake::new(&info_hash, &remote_peer_id).to_bytes())
+            .await
+            .unwrap();
+
+        let mut response = [0u8; 68];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(Handshake::parse(&response).unwrap().info_hash, info_hash);
+
+        let availability = read_bt_frame(&mut stream).await;
+        assert_eq!(availability.first().copied(), Some(5));
+        assert_eq!(availability.get(1), Some(&0x80));
+
+        stream.write_all(&[0, 0, 0, 1, 2]).await.unwrap(); // Interested
+        loop {
+            let payload = read_bt_frame(&mut stream).await;
+            assert!(!payload.is_empty(), "seed peer closed before unchoking");
+            if payload[0] == 1 {
+                break;
+            }
+        }
+
+        let mut request = Vec::with_capacity(17);
+        request.extend_from_slice(&13u32.to_be_bytes());
+        request.push(6); // Request
+        request.extend_from_slice(&0u32.to_be_bytes());
+        request.extend_from_slice(&0u32.to_be_bytes());
+        request.extend_from_slice(&(16 * 1024u32).to_be_bytes());
+        stream.write_all(&request).await.unwrap();
+
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                read_bt_frame(&mut stream)
+            )
+            .await
+            .is_err(),
+            "seeder must not send a short Piece response"
+        );
+    });
+
+    let (server_stream, _) = listener.accept().await.unwrap();
+    let connection =
+        aria2_protocol::bittorrent::peer::connection::PeerConnection::from_incoming_stream(
+            server_stream,
+            &info_hash,
+            &local_peer_id,
+        )
+        .await
+        .unwrap();
+
+    let mut manager = BtSeedManager::new_with_cancel_token(
+        info_hash,
+        vec![connection],
+        provider,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        8 * 1024,
+        cancel_token.clone(),
+    );
+    let run = tokio::spawn(async move { manager.run_seeding_loop().await });
+
+    client.await.unwrap();
+    cancel_token.cancel();
+    run.await.unwrap().unwrap();
+}
+
 async fn read_bt_frame(stream: &mut TcpStream) -> Vec<u8> {
     let mut length = [0u8; 4];
     stream.read_exact(&mut length).await.unwrap();

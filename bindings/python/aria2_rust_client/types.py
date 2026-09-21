@@ -343,6 +343,9 @@ class DownloadEvent:
         if event_type is None:
             return None
         converted = _convert_keys(params)
+        gid = converted.get("gid")
+        if not isinstance(gid, str) or not gid:
+            return None
         files_data = converted.get("files")
         files = None
         if files_data and isinstance(files_data, list):
@@ -355,7 +358,7 @@ class DownloadEvent:
             error_code = int(raw_error_code)
         return cls(
             event_type=event_type,
-            gid=converted.get("gid"),
+            gid=gid,
             error_code=error_code,
             files=files,
         )

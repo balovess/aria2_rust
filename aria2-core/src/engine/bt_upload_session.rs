@@ -204,22 +204,29 @@ impl BtUploadSession {
                             };
                             if let Some(piece_data) = data {
                                 let data_len = piece_data.len() as u64;
-                                if let Some(ref lim) = self.upload_limiter {
-                                    lim.acquire_upload(data_len).await;
-                                }
-                                if let Some(ref lim) = self.global_upload_limiter
-                                    && lim.is_upload_limited()
-                                {
-                                    lim.acquire_upload(data_len).await;
-                                }
-                                self.conn.send_message(&BtMessage::Piece {
+                                if data_len != request.length as u64 {
+                                    warn!(
+                                        "Piece provider returned {} bytes for a {}-byte request (piece={}, offset={})",
+                                        data_len, request.length, request.index, request.begin
+                                    );
+                                } else {
+                                    if let Some(ref lim) = self.upload_limiter {
+                                        lim.acquire_upload(data_len).await;
+                                    }
+                                    if let Some(ref lim) = self.global_upload_limiter
+                                        && lim.is_upload_limited()
+                                    {
+                                        lim.acquire_upload(data_len).await;
+                                    }
+                                    self.conn.send_message(&BtMessage::Piece {
                                         index: request.index,
                                         begin: request.begin,
                                         data: piece_data.into(),
                                     }).await.map_err(|e| crate::error::Aria2Error::Recoverable(
                                         crate::error::RecoverableError::TemporaryNetworkFailure { message: e.to_string() }
                                     ))?;
-                                self.uploaded_bytes += data_len;
+                                    self.uploaded_bytes += data_len;
+                                }
                             } else {
                                 warn!(
                                     "No data for piece {} at offset {}",

@@ -325,6 +325,11 @@ class TestDownloadEvent:
         )
         assert event is None
 
+    @pytest.mark.parametrize("params", [{}, {"gid": None}, {"gid": 123}, {"gid": ""}])
+    def test_from_rpc_notification_rejects_invalid_gid(self, params):
+        event = DownloadEvent.from_rpc_notification("aria2.onDownloadComplete", params)
+        assert event is None
+
     def test_from_rpc_notification_with_files(self):
         event = DownloadEvent.from_rpc_notification(
             "aria2.onDownloadComplete",
