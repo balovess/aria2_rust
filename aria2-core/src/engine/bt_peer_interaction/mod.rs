@@ -13,7 +13,7 @@
 //! - `src/PeerConnection.cc/h` — Peer connection management
 //! - `src/BtSetup.cc/h` — BT setup and initialization
 
-pub mod types;
+mod types;
 
 pub use types::{BtPeerConnectionOptions, BtPeerCryptoPolicy, PeerConnectionResult};
 
@@ -414,7 +414,7 @@ impl BtPeerInteraction {
     /// # Arguments
     /// * `connections` - Mutable slice of active peer connections
     /// * `piece_index` - Index of the completed piece
-    pub async fn broadcast_have(connections: &mut [BtPeerConn], piece_index: u32) {
+    pub(crate) async fn broadcast_have(connections: &mut [BtPeerConn], piece_index: u32) {
         let frame = aria2_protocol::bittorrent::message::serializer::serialize_have(piece_index);
         stream::iter(connections.iter_mut())
             .for_each_concurrent(HAVE_BROADCAST_CONCURRENCY, |conn| {
@@ -429,7 +429,7 @@ impl BtPeerInteraction {
     }
 
     /// Return the stable key used by the peer bitfield tracker.
-    pub fn peer_tracker_key(conn: &BtPeerConn) -> String {
+    pub(crate) fn peer_tracker_key(conn: &BtPeerConn) -> String {
         conn.remote_peer_id()
             .map(|id| String::from_utf8_lossy(&id).into_owned())
             .unwrap_or_else(|| format!("{}:{}", conn.ip_addr, conn.port))
@@ -443,7 +443,7 @@ impl BtPeerInteraction {
     /// * `connections` - Slice of active peer connections
     /// * `num_pieces` - Total number of pieces in the torrent
     /// * `peer_tracker` - Mutable reference to the peer bitfield tracker
-    pub fn initialize_peer_tracking(
+    pub(crate) fn initialize_peer_tracking(
         connections: &[BtPeerConn],
         _num_pieces: u32,
         peer_tracker: &mut crate::engine::bt_piece::PeerBitfieldTracker,
@@ -461,18 +461,5 @@ impl BtPeerInteraction {
             "[BT] Initialized peer tracking for {} peers",
             connections.len()
         );
-    }
-
-    /// Clean up peer connections (drop them properly)
-    ///
-    /// Ensures all connections are properly closed.
-    ///
-    /// # Arguments
-    /// * `connections` - Mutable slice of peer connections to close
-    pub fn cleanup_connections(connections: &mut [BtPeerConn]) {
-        for conn in connections.iter_mut() {
-            let _ = conn;
-        }
-        debug!("[BT] Cleaned up {} connections", connections.len());
     }
 }

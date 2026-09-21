@@ -88,20 +88,6 @@ impl BtPeerConn {
         self.session_resource = None;
     }
 
-    /// Reconfigure the session resource for new torrent parameters.
-    ///
-    /// No-op if no session resource is allocated.
-    pub fn reconfigure_session_resource(
-        &mut self,
-        piece_length: u32,
-        num_pieces: u32,
-        total_length: u64,
-    ) {
-        if let Some(ref mut res) = self.session_resource {
-            res.reconfigure(piece_length, num_pieces, total_length);
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Extension negotiation delegation
     // -----------------------------------------------------------------------
@@ -114,7 +100,7 @@ impl BtPeerConn {
     }
 
     /// Record an extension ID assigned by this peer during BEP 10 negotiation.
-    pub fn register_peer_extension(&mut self, name: &str, id: u8) {
+    pub(crate) fn register_peer_extension(&mut self, name: &str, id: u8) {
         if let Some(resource) = &mut self.session_resource {
             resource.add_extension(name, id);
         }

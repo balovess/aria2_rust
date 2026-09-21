@@ -14,6 +14,14 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::BtDownloadCommand;
 
+fn normalized_announce_list(announce_list: &[Vec<String>], announce: &str) -> Vec<Vec<String>> {
+    if announce_list.is_empty() && !announce.is_empty() {
+        vec![vec![announce.to_string()]]
+    } else {
+        announce_list.to_vec()
+    }
+}
+
 /// Build the protocol-specific context that aria2 installs after torrent
 /// metadata has been resolved.
 ///
@@ -105,7 +113,7 @@ pub(crate) fn build_download_context_from_meta(
         } else {
             BtFileMode::Multi
         },
-        announce_list: meta.announce_list.clone(),
+        announce_list: normalized_announce_list(&meta.announce_list, &meta.announce),
         nodes: Vec::new(),
         info_hash: meta.info_hash.as_hex(),
         metadata: Vec::new(),
@@ -118,6 +126,26 @@ pub(crate) fn build_download_context_from_meta(
     };
     ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
     Ok(ctx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalized_announce_list;
+
+    #[test]
+    fn fills_a_missing_tier_from_the_single_announce_field() {
+        assert_eq!(
+            normalized_announce_list(&[], "https://tracker.example/announce"),
+            vec![vec!["https://tracker.example/announce".to_string()]]
+        );
+    }
+
+    #[test]
+    fn keeps_existing_tiers_and_does_not_add_an_empty_announce() {
+        let tiers = vec![vec!["https://one.example/announce".to_string()]];
+        assert_eq!(normalized_announce_list(&tiers, ""), tiers);
+        assert!(normalized_announce_list(&[], "").is_empty());
+    }
 }
 
 /// Parse local torrent metadata into an existing request group before the

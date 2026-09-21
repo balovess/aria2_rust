@@ -258,7 +258,7 @@ impl BtPeerConn {
     }
 
     /// Synchronize the peer identity captured by the transport handshake.
-    pub fn sync_peer_identity(&mut self) {
+    pub(crate) fn sync_peer_identity(&mut self) {
         if let Some(peer_id) = self.remote_peer_id() {
             self.peer_id = Some(peer_id);
             self.stats.peer_id = peer_id;
