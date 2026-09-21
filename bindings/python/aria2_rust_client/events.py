@@ -131,8 +131,11 @@ class EventSubscriber:
                     except (json.JSONDecodeError, TypeError):
                         continue
 
-                    method = message.get("method", "")
-                    if not method.startswith("aria2.on"):
+                    if not isinstance(message, dict):
+                        continue
+
+                    method = message.get("method")
+                    if not isinstance(method, str) or not method.startswith("aria2.on"):
                         continue
 
                     params = message.get("params", [{}])

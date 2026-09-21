@@ -117,10 +117,9 @@ impl PieceDownloadSession<'_> {
             .await;
 
             // PEX Integration: Drain inbound PEX peers from all connections.
-            // Peers are accumulated during block reads (in
-            // BtMessageHandler::wait_for_piece_block) and stashed on
-            // BtPeerConn::pending_pex_peers. Here we drain them and add
-            // to our known-peers list.
+            // Peers are accumulated during block reads and stashed on
+            // BtPeerConn::pending_pex_peers. Here we drain them and add to
+            // our known-peers list.
             let mut all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
                 Vec::new();
             for conn in self.active_connections.iter_mut() {

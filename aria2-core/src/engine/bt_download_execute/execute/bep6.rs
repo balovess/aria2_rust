@@ -10,8 +10,8 @@
 //!   post-handshake when we have all or no pieces.
 //!
 //! Inbound BEP 6 messages (AllowedFast, Suggest, HaveAll, HaveNone,
-//! Reject) are handled in `BtMessageHandler::wait_for_piece_block` and the
-//! peer message dispatch path.
+//! Reject) are handled by the active piece-download read path and peer
+//! interaction layer.
 
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};

@@ -14,6 +14,6 @@ pub mod types;
 
 pub use message_handler::BtMessageHandler;
 pub use types::{
-    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, BlockDownloadResult, DEFAULT_MAX_OUTSTANDING_REQUEST,
-    MAX_BLOCK_READ_MESSAGES, MAX_RETRIES, PieceDownloadResult,
+    BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES,
+    PieceDownloadResult,
 };

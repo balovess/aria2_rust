@@ -12,9 +12,6 @@ pub const MAX_RETRIES: u32 = constants::BT_MAX_RETRIES;
 /// Timeout for each block request (seconds)
 pub const BLOCK_REQUEST_TIMEOUT_SECS: u64 = constants::BT_BLOCK_REQUEST_TIMEOUT_SECS;
 
-/// Maximum messages to read while waiting for a specific block
-pub const MAX_BLOCK_READ_MESSAGES: u32 = constants::BT_MAX_BLOCK_READ_MESSAGES as u32;
-
 /// Default maximum outstanding requests per peer.
 /// Matches C++ `DEFAULT_MAX_OUTSTANDING_REQUEST = 6` (BtConstants.h).
 pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize = constants::BT_DEFAULT_MAX_OUTSTANDING_REQUEST;
@@ -23,8 +20,8 @@ pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize = constants::BT_DEFAULT_MAX_OUT
 // BlockDownloadResult — result of a block download attempt
 // ======================================================================
 
-/// Result of a block download attempt
-pub struct BlockDownloadResult {
+/// Result of an internal block download attempt.
+pub(crate) struct BlockDownloadResult {
     /// Whether the block was successfully received
     pub success: bool,
     /// The received data (if successful)

@@ -49,7 +49,6 @@ pub const RETRYABLE_HTTP_CODES: [u16; 6] = [408, 429, 500, 502, 503, 504];
 pub const BT_BLOCK_SIZE: usize = 16384;
 pub const BT_MAX_RETRIES: u32 = 3;
 pub const BT_BLOCK_REQUEST_TIMEOUT_SECS: u64 = 3;
-pub const BT_MAX_BLOCK_READ_MESSAGES: usize = 10000;
 pub const BT_PUBLIC_TRACKER_PEER_THRESHOLD: usize = 15;
 pub const BT_MAX_PUBLIC_TRACKERS_TO_TRY: usize = 10;
 pub const BT_DEFAULT_MAX_UPLOAD_SLOTS: usize = 4;

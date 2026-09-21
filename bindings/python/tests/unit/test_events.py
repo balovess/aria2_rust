@@ -152,6 +152,40 @@ async def test_subscriber_delivers_events_after_reconnect(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_subscriber_ignores_non_object_notifications_without_reconnecting():
+    class FakeWebSocket:
+        def __init__(self):
+            self._messages = iter(
+                [
+                    "[]",
+                    "null",
+                    "1",
+                    '{"method": 42}',
+                    '{"method":"aria2.onDownloadComplete",'
+                    '"params":[{"gid":"valid"}]}',
+                ]
+            )
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
+    subscriber._ws = FakeWebSocket()
+    subscriber._max_reconnect_attempts = 0
+
+    await asyncio.wait_for(subscriber._listen(), timeout=1)
+
+    event = await asyncio.wait_for(subscriber.__anext__(), timeout=1)
+    assert event.gid == "valid"
+
+
+@pytest.mark.asyncio
 async def test_wait_for_terminal_filters_other_gids_and_non_terminal_events():
     subscriber = EventSubscriber("ws://localhost:6800/jsonrpc")
     subscriber.start = AsyncMock()

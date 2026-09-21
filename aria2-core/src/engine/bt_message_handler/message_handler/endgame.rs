@@ -15,7 +15,7 @@ use super::super::types::{
 };
 use super::BtMessageHandler;
 
-async fn wait_for_piece_block_from_peer(
+async fn read_piece_block_from_peer(
     connection: &mut BtPeerConn,
     conn_idx: usize,
     expected_index: u32,
@@ -498,8 +498,8 @@ impl BtMessageHandler {
 
     /// Wait for a specific PIECE message from ANY peer.
     ///
-    /// Unlike `wait_for_piece_block` which waits on a single connection,
-    /// this polls all connections until the expected block arrives.
+    /// It polls all connections until the expected block arrives instead of
+    /// waiting on one connection at a time.
     pub(crate) async fn wait_for_any_piece_block(
         connections: &mut [BtPeerConn],
         expected_index: u32,
@@ -511,7 +511,7 @@ impl BtMessageHandler {
         // either produces the expected block or becomes unusable.
         let mut readers = FuturesUnordered::new();
         for (conn_idx, connection) in connections.iter_mut().enumerate() {
-            readers.push(wait_for_piece_block_from_peer(
+            readers.push(read_piece_block_from_peer(
                 connection,
                 conn_idx,
                 expected_index,
