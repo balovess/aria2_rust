@@ -400,6 +400,30 @@ async fn regression_tell_status_format() {
     assert_eq!(status.get("gid").unwrap().as_str().unwrap(), gid);
 }
 
+/// Test: RPC GID arguments accept a unique high-order hexadecimal prefix.
+#[tokio::test]
+async fn regression_rpc_accepts_unique_short_gid_prefix() {
+    let engine = core_engine();
+    let add_resp = engine
+        .handle_request(&make_request(
+            "aria2.addUri",
+            serde_json::json!([["http://example.com/file"]]),
+        ))
+        .await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let short_gid = &gid[..15];
+    let status_resp = engine
+        .handle_request(&make_request(
+            "aria2.tellStatus",
+            serde_json::json!([short_gid]),
+        ))
+        .await;
+    assert_success(&status_resp);
+    assert_eq!(status_resp.result.unwrap()["gid"], gid);
+}
+
 /// Test: status query `keys` parameters filter the aria2 wire object.
 #[tokio::test]
 async fn regression_status_keys_filter_fields() {

@@ -61,6 +61,9 @@ Invoke-RestMethod -Uri http://127.0.0.1:6800/jsonrpc -Method Post -ContentType '
 {"jsonrpc":"2.0","id":2,"method":"aria2.tellStatus","params":["0123456789abcdef",["gid","status","totalLength","completedLength","downloadSpeed","dir"]]}
 ```
 
+GID parameters also accept a unique high-order hexadecimal prefix, matching
+aria2's `GroupId::expandUnique` behavior. Ambiguous prefixes are rejected.
+
 ### Batch requests
 
 HTTP JSON-RPC accepts an array of requests. Read-only status calls can also be grouped with `system.multicall`:

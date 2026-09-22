@@ -15,7 +15,7 @@ impl CoreRpcBackend {
         position: i32,
         mode: PositionMode,
     ) -> Result<BackendResult, BackendError> {
-        let gid = Self::parse_gid(gid)?;
+        let gid = self.parse_gid(gid)?;
         let mode = match mode {
             PositionMode::SetFromStart => CorePositionMode::SetFromStart,
             PositionMode::MoveFromStart => CorePositionMode::MoveFromStart,
@@ -37,7 +37,8 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn pause(&self, gid: String, force: bool) -> Result<BackendResult, BackendError> {
-        let parsed = Self::parse_gid(&gid)?;
+        let parsed = self.parse_gid(&gid)?;
+        let canonical_gid = parsed.to_hex_string();
         if force {
             self.group_man
                 .force_pause_group(parsed)
@@ -50,25 +51,27 @@ impl CoreRpcBackend {
             self.send(EngineCommand::Pause { gid: parsed })?;
         }
         Ok(BackendResult::with_events(
-            BackendResponse::Gid(gid.clone()),
-            vec![BackendEvent::DownloadPause(gid)],
+            BackendResponse::Gid(canonical_gid.clone()),
+            vec![BackendEvent::DownloadPause(canonical_gid)],
         ))
     }
 
     pub(super) fn unpause(&self, gid: String) -> Result<BackendResult, BackendError> {
-        let parsed = Self::parse_gid(&gid)?;
+        let parsed = self.parse_gid(&gid)?;
+        let canonical_gid = parsed.to_hex_string();
         self.group_man
             .unpause_group(parsed)
             .map_err(|error| Self::execution(error.to_string()))?;
         self.send(EngineCommand::Unpause { gid: parsed })?;
         Ok(BackendResult::with_events(
-            BackendResponse::Gid(gid.clone()),
-            vec![BackendEvent::DownloadStart(gid)],
+            BackendResponse::Gid(canonical_gid.clone()),
+            vec![BackendEvent::DownloadStart(canonical_gid)],
         ))
     }
 
     pub(super) fn remove(&self, gid: String, force: bool) -> Result<BackendResult, BackendError> {
-        let parsed = Self::parse_gid(&gid)?;
+        let parsed = self.parse_gid(&gid)?;
+        let canonical_gid = parsed.to_hex_string();
         let enqueue = if force {
             self.group_man
                 .force_remove_group(parsed)
@@ -88,8 +91,8 @@ impl CoreRpcBackend {
             })?;
         }
         Ok(BackendResult::with_events(
-            BackendResponse::Gid(gid.clone()),
-            vec![BackendEvent::DownloadStop(gid)],
+            BackendResponse::Gid(canonical_gid.clone()),
+            vec![BackendEvent::DownloadStop(canonical_gid)],
         ))
     }
 

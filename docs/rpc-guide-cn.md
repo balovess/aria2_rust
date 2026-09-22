@@ -61,6 +61,9 @@ Invoke-RestMethod -Uri http://127.0.0.1:6800/jsonrpc -Method Post -ContentType '
 {"jsonrpc":"2.0","id":2,"method":"aria2.tellStatus","params":["0123456789abcdef",["gid","status","totalLength","completedLength","downloadSpeed","dir"]]}
 ```
 
+所有 GID 参数也接受唯一的高位十六进制前缀，这与 aria2 原版的
+`GroupId::expandUnique` 行为一致；前缀有歧义时会拒绝请求。
+
 ### 批量请求
 
 HTTP JSON-RPC 接受请求数组。多个只读状态请求也可以使用 aria2 的 `system.multicall`：

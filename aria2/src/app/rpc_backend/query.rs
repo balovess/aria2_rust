@@ -234,7 +234,7 @@ impl CoreRpcBackend {
         if let Some(group) = self.group_man.group_by_hex(&gid) {
             let group = group.recover();
             return Ok(BackendResult::response(BackendResponse::Status(
-                Self::status_from_group(&group, &gid),
+                Self::status_from_group(&group, &group.gid().to_hex_string()),
             )));
         }
         if let Some(result) = self.group_man.find_stopped_result(&gid) {
@@ -323,7 +323,10 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn get_peers(&self, gid: String) -> Result<BackendResult, BackendError> {
-        let group = self.group(&gid)?;
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No peer data is available for GID#{gid}")))?;
         let peers = group
             .recover()
             .status_snapshot()
@@ -357,8 +360,11 @@ impl CoreRpcBackend {
             .bt_registry
             .as_ref()
             .ok_or_else(|| Self::execution("BitTorrent registry is unavailable"))?;
-        let gid = u64::from_str_radix(&gid, 16)
-            .map_err(|_| Self::execution(format!("Invalid GID {gid}")))?;
+        let gid = self
+            .group_man
+            .resolve_gid_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("Invalid or non-unique GID {gid}")))?
+            .value();
         let guard = registry
             .read()
             .map_err(|_| BackendError::Internal("Failed to lock BitTorrent registry".into()))?;
@@ -544,7 +550,10 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {
-        let group = self.group(&gid)?;
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No URI data is available for GID#{gid}")))?;
         let group = group.recover();
         // Match aria2_original's GetUrisRpcMethod: it delegates to
         // createUriEntry() for the first FileEntry only, rather than
@@ -574,7 +583,10 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn get_servers(&self, gid: String) -> Result<BackendResult, BackendError> {
-        let group = self.group(&gid)?;
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No active download for GID#{gid}")))?;
         let group = group.recover();
         if !matches!(group.status(), DownloadStatus::Active) {
             return Err(Self::execution(format!("No active download for GID#{gid}")));

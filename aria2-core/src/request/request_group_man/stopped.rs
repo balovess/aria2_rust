@@ -60,10 +60,7 @@ impl StoppedResults {
         matched
     }
 
-    pub fn find_gid_by_hex(
-        &self,
-        hex: &str,
-    ) -> Option<crate::request::request_group::GroupId> {
+    pub fn find_gid_by_hex(&self, hex: &str) -> Option<crate::request::request_group::GroupId> {
         let (prefix, mask) = crate::request::request_group::GroupId::hex_prefix(hex)?;
         let results = self.results.recover();
         let mut matched = None;

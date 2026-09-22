@@ -129,8 +129,16 @@ impl CoreRpcBackend {
         Ok(())
     }
 
-    fn parse_gid(gid: &str) -> Result<GroupId, BackendError> {
-        GroupId::from_hex_string(gid).ok_or_else(|| Self::invalid("Invalid GID"))
+    fn parse_gid(&self, gid: &str) -> Result<GroupId, BackendError> {
+        let Some((prefix, _)) = GroupId::hex_prefix(gid) else {
+            return Err(Self::invalid("Invalid GID"));
+        };
+        // Keep syntactically valid but absent/ambiguous prefixes on the
+        // execution-error path, matching aria2's `str2Gid` callers.
+        Ok(self
+            .group_man
+            .resolve_gid_hex(gid)
+            .unwrap_or(GroupId(prefix)))
     }
 
     fn send(&self, command: EngineCommand) -> Result<(), BackendError> {
