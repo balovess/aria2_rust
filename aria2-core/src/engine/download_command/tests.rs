@@ -223,6 +223,238 @@ async fn first_get_content_disposition_is_reused_for_sequential_download() {
 }
 
 #[tokio::test]
+async fn inferred_content_disposition_name_enters_collision_policy() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind collision filename fixture");
+    let address = listener
+        .local_addr()
+        .expect("read collision filename fixture address");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept collision filename request");
+        let mut request = [0u8; 4096];
+        let bytes = stream
+            .read(&mut request)
+            .await
+            .expect("read collision filename request");
+        assert!(
+            String::from_utf8_lossy(&request[..bytes]).starts_with("GET /download HTTP/1.1\r\n")
+        );
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename=actual.txt\r\nConnection: close\r\n\r\ndata",
+            )
+            .await
+            .expect("write collision filename response");
+    });
+
+    let directory = tempfile::tempdir().expect("create collision output directory");
+    let existing = directory.path().join("actual.txt");
+    std::fs::write(&existing, b"keep").expect("create existing output");
+    let options = DownloadOptions {
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        force_sequential: true,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("http://{address}/download");
+    let mut command = DownloadCommand::new(GroupId::new(1006), &uri, &options, None, None)
+        .expect("create collision filename command");
+
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("collision filename download should not hang")
+        .expect("collision filename download should complete");
+
+    assert_eq!(
+        std::fs::read(&existing).expect("read existing output"),
+        b"keep"
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("actual.1.txt")).expect("read renamed output"),
+        b"data"
+    );
+    server
+        .await
+        .expect("collision filename fixture should finish");
+}
+
+#[tokio::test]
+async fn resumed_download_reuses_content_disposition_path_with_control_file() {
+    use crate::filesystem::control_file::ControlFile;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind resume filename fixture");
+    let address = listener
+        .local_addr()
+        .expect("read resume filename fixture address");
+    let server = tokio::spawn(async move {
+        for request_index in 0..2 {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept resume filename request");
+            let mut request = [0u8; 4096];
+            let bytes = stream
+                .read(&mut request)
+                .await
+                .expect("read resume filename request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            let request_lower = request.to_ascii_lowercase();
+            if request_index == 0 {
+                assert!(!request_lower.contains("range: bytes="));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nAccept-Ranges: bytes\r\nContent-Disposition: attachment; filename=actual.txt\r\nConnection: close\r\n\r\nabcd",
+                    )
+                    .await
+                    .expect("write resume metadata response");
+            } else {
+                assert!(request_lower.contains("range: bytes=2-"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nContent-Range: bytes 2-3/4\r\nContent-Disposition: attachment; filename=actual.txt\r\nConnection: close\r\n\r\ncd",
+                    )
+                    .await
+                    .expect("write resume range response");
+            }
+        }
+    });
+
+    let directory = tempfile::tempdir().expect("create resume output directory");
+    let output = directory.path().join("actual.txt");
+    tokio::fs::write(&output, b"ab")
+        .await
+        .expect("create partial output");
+    let control_path = ControlFile::control_path_for(&output);
+    let mut control = ControlFile::open_or_create(&control_path, 4, 1)
+        .await
+        .expect("create resume control file");
+    control.update_completed_length(2);
+    control.save().await.expect("save resume control file");
+
+    let options = DownloadOptions {
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        continue_download: true,
+        force_sequential: true,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("http://{address}/download");
+    let mut command = DownloadCommand::new(GroupId::new(1007), &uri, &options, None, None)
+        .expect("create resume filename command");
+
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("resume filename download should not hang")
+        .expect("resume filename download should complete");
+
+    assert_eq!(tokio::fs::read(&output).await.unwrap(), b"abcd");
+    assert!(!directory.path().join("actual.1.txt").exists());
+    server.await.expect("resume filename fixture should finish");
+}
+
+#[tokio::test]
+async fn cannot_resume_falls_back_to_fresh_download_without_renaming_path() {
+    use crate::filesystem::control_file::ControlFile;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind cannot-resume filename fixture");
+    let address = listener
+        .local_addr()
+        .expect("read cannot-resume filename fixture address");
+    let server = tokio::spawn(async move {
+        for request_index in 0..4 {
+            let (mut stream, _) = listener
+                .accept()
+                .await
+                .expect("accept cannot-resume filename request");
+            let mut request = [0u8; 4096];
+            let bytes = stream
+                .read(&mut request)
+                .await
+                .expect("read cannot-resume filename request");
+            let request = String::from_utf8_lossy(&request[..bytes]);
+            let request_lower = request.to_ascii_lowercase();
+            match request_index {
+                0 => {
+                    assert!(request.starts_with("HEAD /download HTTP/1.1\r\n"));
+                    assert!(!request_lower.contains("range: bytes="));
+                }
+                1 => assert!(request_lower.contains("range: bytes=2-")),
+                2 => {
+                    assert!(request.starts_with("HEAD /download HTTP/1.1\r\n"));
+                    assert!(!request_lower.contains("range: bytes="));
+                }
+                3 => {
+                    assert!(request.starts_with("GET /download HTTP/1.1\r\n"));
+                    assert!(!request_lower.contains("range: bytes="));
+                }
+                _ => unreachable!(),
+            }
+            stream
+                .write_all(
+                    if matches!(request_index, 0 | 2) {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename=actual.txt\r\nConnection: close\r\n\r\n".as_slice()
+                    } else {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Disposition: attachment; filename=actual.txt\r\nConnection: close\r\n\r\nabcd".as_slice()
+                    },
+                )
+                .await
+                .expect("write cannot-resume response");
+        }
+    });
+
+    let directory = tempfile::tempdir().expect("create cannot-resume output directory");
+    let output = directory.path().join("actual.txt");
+    tokio::fs::write(&output, b"ab")
+        .await
+        .expect("create cannot-resume partial output");
+    let control_path = ControlFile::control_path_for(&output);
+    let mut control = ControlFile::open_or_create(&control_path, 4, 1)
+        .await
+        .expect("create cannot-resume control file");
+    control.update_completed_length(2);
+    control
+        .save()
+        .await
+        .expect("save cannot-resume control file");
+
+    let options = DownloadOptions {
+        dir: Some(directory.path().to_string_lossy().into_owned()),
+        continue_download: true,
+        force_sequential: true,
+        use_head: true,
+        always_resume: false,
+        ..DownloadOptions::default()
+    };
+    let uri = format!("http://{address}/download");
+    let mut command = DownloadCommand::new(GroupId::new(1008), &uri, &options, None, None)
+        .expect("create cannot-resume filename command");
+
+    tokio::time::timeout(Duration::from_secs(5), command.execute())
+        .await
+        .expect("cannot-resume filename download should not hang")
+        .expect("cannot-resume filename download should complete fresh");
+
+    assert_eq!(tokio::fs::read(&output).await.unwrap(), b"abcd");
+    assert!(!directory.path().join("actual.1.txt").exists());
+    server
+        .await
+        .expect("cannot-resume filename fixture should finish");
+}
+
+#[tokio::test]
 async fn prepared_get_uses_preemptive_credentials_for_filename_metadata() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -837,6 +1069,76 @@ async fn proxy_client_leaves_redirects_for_the_download_flow() {
     );
 
     server.await.expect("proxy fixture should finish");
+}
+
+#[tokio::test]
+async fn proxied_client_binds_source_for_the_proxy_peer() {
+    use std::net::{IpAddr, Ipv4Addr};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind source-aware proxy fixture");
+    let proxy_addr = listener
+        .local_addr()
+        .expect("read source-aware proxy address");
+    let server = tokio::spawn(async move {
+        let (mut stream, peer) = listener
+            .accept()
+            .await
+            .expect("accept source-aware proxy request");
+        let mut request = [0u8; 4096];
+        let bytes = stream
+            .read(&mut request)
+            .await
+            .expect("read source-aware proxy request");
+        assert!(bytes > 0, "proxy request should not be empty");
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .await
+            .expect("write source-aware proxy response");
+        peer
+    });
+
+    let options = DownloadOptions {
+        http_proxy: Some(format!("http://{proxy_addr}")),
+        ..DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1201),
+        vec!["http://[::1]:9/file.bin".to_string()],
+        options.clone(),
+    )));
+    let policy = Arc::new(
+        OutboundNetworkPolicy::new(vec![
+            IpAddr::V6("::1".parse().expect("parse IPv6 source")),
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)),
+        ])
+        .expect("source policy should accept both address families"),
+    );
+    let command = DownloadCommand::new_with_group_and_resolved_addresses_and_policy(
+        group,
+        "http://[::1]:9/file.bin",
+        &options,
+        None,
+        None,
+        None,
+        policy,
+    )
+    .expect("proxy client must select a source compatible with the proxy peer");
+
+    let response = command
+        .client
+        .get("http://[::1]:9/file.bin")
+        .send()
+        .await
+        .expect("proxy should serve the IPv6-target request");
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        server.await.expect("proxy fixture should finish").ip(),
+        IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))
+    );
 }
 
 #[tokio::test]

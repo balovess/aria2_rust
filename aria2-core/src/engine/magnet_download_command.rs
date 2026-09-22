@@ -947,6 +947,7 @@ impl MagnetDownloadCommand {
                 piece_size: 16 * 1024,
                 ..MetadataExchangeConfig::default()
             })
+            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy))
         };
 
         if enable_dht && self.dht_engine.is_none() {

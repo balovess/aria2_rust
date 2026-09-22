@@ -935,6 +935,80 @@ async fn test_original_interface_reaches_outgoing_connection_configuration() {
 }
 
 #[tokio::test]
+async fn test_multiple_interface_reaches_all_outgoing_connection_sources() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--multiple-interface=127.0.0.1,127.0.0.2"])
+            .expect("--multiple-interface should parse through the CLI seam"),
+    )
+    .await
+    .expect("--multiple-interface should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for network binding");
+    assert_eq!(
+        engine.outbound_network_policy().addresses(),
+        vec![
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "127.0.0.2".parse::<std::net::IpAddr>().unwrap(),
+        ]
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_global_interface_reaches_lpd_multicast_interface() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--interface=127.0.0.1"])
+            .expect("--interface should parse through the CLI seam"),
+    )
+    .await
+    .expect("--interface should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for LPD binding");
+    assert_eq!(
+        engine.lpd_manager().interface(),
+        Some(std::net::Ipv4Addr::LOCALHOST),
+        "global interface must control BT LPD when bt-lpd-interface is absent"
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
+async fn test_explicit_lpd_interface_overrides_global_interface() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from([
+            "aria2",
+            "--interface=127.0.0.1",
+            "--bt-lpd-interface=127.0.0.2",
+        ])
+        .expect("both interface options should parse through the CLI seam"),
+    )
+    .await
+    .expect("both interface options should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for LPD binding");
+    assert_eq!(
+        engine.lpd_manager().interface(),
+        Some("127.0.0.2".parse().unwrap()),
+        "explicit bt-lpd-interface must retain precedence over global interface"
+    );
+}
+
+#[tokio::test]
 async fn test_async_dns_server_rejects_non_ip_addresses() {
     let mut app = App::new();
     let cli = CliArgs::try_parse_from(["aria2", "--async-dns-server=not-an-ip"])

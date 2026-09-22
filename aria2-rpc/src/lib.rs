@@ -20,7 +20,7 @@
 //!   GID generation utility.
 //!
 //! - **[`engine`]** — `RpcEngine` bridge implementing the feature-specific
-//!   aria2 RPC catalog (33 core methods, plus BitTorrent/Metalink extensions):
+//!   aria2 RPC catalog (35 core methods, plus BitTorrent/Metalink extensions):
 //!   addUri/addTorrent/remove/pause/unpause/tellStatus/tellActive/tellWaiting/
 //!   tellStopped/getGlobalStat/getUris/getFiles/getServers/getPeers/
 //!   purgeDownloadResult/getGlobalOption/changeGlobalOption/

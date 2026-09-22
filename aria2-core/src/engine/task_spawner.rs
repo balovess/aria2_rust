@@ -340,14 +340,33 @@ async fn create_command_for_uri(
     } else {
         None
     };
+    let resolved_proxy_addresses = if let Some((hostname, port)) =
+        crate::engine::download_command::http_proxy_origin(uri, options)
+    {
+        if let Ok(address) = hostname.parse::<std::net::IpAddr>() {
+            Some(vec![std::net::SocketAddr::new(address, port)])
+        } else {
+            dns_cache
+                .lock()
+                .await
+                .resolve_with_refresh(&hostname, port)
+                .await
+                .ok()
+        }
+    } else {
+        None
+    };
     let mut cmd =
-        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_addresses_and_policy(
+        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_network_addresses(
             group,
             uri,
             options,
             output_dir,
             output_name,
-            resolved_addresses,
+            crate::engine::download_command::ResolvedNetworkAddresses {
+                target: resolved_addresses,
+                proxy: resolved_proxy_addresses,
+            },
             Arc::clone(&dependencies.outbound_network_policy),
         )?;
     if let Some(limiter) = dependencies.global_limiter {

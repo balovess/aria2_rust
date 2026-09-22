@@ -99,6 +99,25 @@ fn option_snapshot_for_input(
 impl App {
     /// Initialize the download engine.
     pub async fn initialize_engine(&self) {
+        // `--interface` takes precedence over `--multiple-interface`, as in
+        // aria2_original. Resolve the specification before constructing any
+        // protocol-owned sockets so special BT paths such as LPD use the same
+        // process-wide outbound policy.
+        let outbound_policy_spec = self
+            .get_opt_str("interface")
+            .await
+            .or(self.get_opt_str("multiple-interface").await);
+        let outbound_policy = match outbound_policy_spec {
+            Some(spec) => match OutboundNetworkPolicy::resolve_spec(&spec).await {
+                Ok(policy) => Arc::new(policy),
+                Err(error) => {
+                    tracing::warn!(%error, %spec, "Ignoring invalid network interface configuration");
+                    Arc::new(OutboundNetworkPolicy::direct())
+                }
+            },
+            None => Arc::new(OutboundNetworkPolicy::direct()),
+        };
+
         #[cfg(feature = "bittorrent")]
         let mut engine = {
             let config = self.config.read().await;
@@ -145,6 +164,15 @@ impl App {
                 }
                 _ => None,
             };
+            let lpd_interface = lpd_interface.or_else(|| {
+                outbound_policy
+                    .addresses()
+                    .into_iter()
+                    .find_map(|address| match address {
+                        std::net::IpAddr::V4(address) => Some(address),
+                        std::net::IpAddr::V6(_) => None,
+                    })
+            });
             let lpd_manager = match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
                 aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
                 lpd_interface,
@@ -172,6 +200,8 @@ impl App {
         #[cfg(not(feature = "bittorrent"))]
         let mut engine = DownloadEngine::new();
 
+        engine.set_outbound_network_policy(outbound_policy);
+
         let dns_timeout = self
             .get_opt_i64("dns-timeout")
             .await
@@ -189,25 +219,6 @@ impl App {
                 }
             });
         engine.set_dns_config(dns_timeout, dns_servers);
-
-        // `--interface` takes precedence over `--multiple-interface`, as in
-        // aria2_original. Resolve the specification once and let each
-        // protocol command select a source address for its sockets.
-        let outbound_policy_spec = self
-            .get_opt_str("interface")
-            .await
-            .or(self.get_opt_str("multiple-interface").await);
-        let outbound_policy = match outbound_policy_spec {
-            Some(spec) => match OutboundNetworkPolicy::resolve_spec(&spec).await {
-                Ok(policy) => Arc::new(policy),
-                Err(error) => {
-                    tracing::warn!(%error, %spec, "Ignoring invalid network interface configuration");
-                    Arc::new(OutboundNetworkPolicy::direct())
-                }
-            },
-            None => Arc::new(OutboundNetworkPolicy::direct()),
-        };
-        engine.set_outbound_network_policy(outbound_policy);
 
         let server_stat_timeout = self
             .get_opt_i64("server-stat-timeout")

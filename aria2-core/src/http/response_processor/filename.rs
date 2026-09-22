@@ -328,6 +328,13 @@ mod tests {
         assert_eq!(filename, "report.txt");
     }
 
+    #[test]
+    fn test_filename_from_url_preserves_invalid_utf8_as_replacement() {
+        let head = parse_head(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+        let filename = determine_filename(&head, "https://example.com/%FF.bin", false);
+        assert_eq!(filename, "\u{fffd}.bin");
+    }
+
     // ── Content-Disposition filename tests ──────────────────────────────
 
     #[test]
@@ -454,6 +461,23 @@ mod tests {
         assert_eq!(sanitize_filename("CON "), Some("_CON".to_string()));
         assert_eq!(sanitize_filename("COM1."), Some("_COM1".to_string()));
         assert_eq!(sanitize_filename(".."), None);
+    }
+
+    #[test]
+    fn test_sanitize_filename_handles_reserved_names_and_utf8_length() {
+        for (input, expected) in [
+            ("PRN.txt", "_PRN.txt"),
+            ("AUX", "_AUX"),
+            ("NUL.log", "_NUL.log"),
+            ("LPT9.csv", "_LPT9.csv"),
+            ("COM0.txt", "COM0.txt"),
+        ] {
+            assert_eq!(sanitize_filename(input), Some(expected.to_owned()));
+        }
+
+        let filename = sanitize_filename(&"界".repeat(100)).unwrap();
+        assert_eq!(filename, "界".repeat(85));
+        assert_eq!(filename.len(), 255);
     }
 
     #[test]

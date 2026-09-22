@@ -6,6 +6,7 @@ pub struct MockBtPeerServer {
     addr: SocketAddr,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     requested_pieces: std::sync::Arc<tokio::sync::Mutex<Vec<u32>>>,
+    accepted_peers: std::sync::Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
 }
 
 impl std::fmt::Debug for MockBtPeerServer {
@@ -49,6 +50,7 @@ impl MockBtPeerServer {
             addr: actual_addr,
             shutdown: Some(shutdown_tx),
             requested_pieces: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            accepted_peers: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -74,13 +76,16 @@ impl MockBtPeerServer {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
         let requested_pieces = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let requested_pieces_for_task = std::sync::Arc::clone(&requested_pieces);
+        let accepted_peers = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let accepted_peers_for_task = std::sync::Arc::clone(&accepted_peers);
 
         tokio::spawn(async move {
             loop {
                 tokio::select! {
                     result = listener.accept() => {
                         match result {
-                            Ok((mut stream, _)) => {
+                            Ok((mut stream, peer_addr)) => {
+                                accepted_peers_for_task.lock().await.push(peer_addr);
                                 let ih = info_hash;
                                 let pd = piece_data.clone();
                                 let md = torrent_metadata.clone();
@@ -109,6 +114,7 @@ impl MockBtPeerServer {
             addr: actual_addr,
             shutdown: Some(shutdown_tx),
             requested_pieces,
+            accepted_peers,
         }
     }
 
@@ -118,6 +124,10 @@ impl MockBtPeerServer {
 
     pub async fn requested_pieces(&self) -> Vec<u32> {
         self.requested_pieces.lock().await.clone()
+    }
+
+    pub async fn accepted_peers(&self) -> Vec<SocketAddr> {
+        self.accepted_peers.lock().await.clone()
     }
 
     async fn handle_peer(

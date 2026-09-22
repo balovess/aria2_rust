@@ -42,5 +42,8 @@ pub fn percent_decode(s: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(out).unwrap_or_default()
+    // URI octets are not guaranteed to form valid UTF-8. Preserve the
+    // decoded bytes with the standard replacement character instead of
+    // turning the whole component into an empty string.
+    String::from_utf8_lossy(&out).into_owned()
 }

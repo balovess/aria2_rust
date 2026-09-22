@@ -7,6 +7,7 @@ use aria2_core::engine::metadata_collector::MetadataCollector;
 use aria2_core::engine::metadata_exchange::{
     MetadataExchangeConfig, MetadataExchangeError, MetadataExchangeSession,
 };
+use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::bittorrent::dht::compact::extract_compact_peers_from_response;
 use aria2_protocol::bittorrent::magnet::MagnetLink;
@@ -375,6 +376,50 @@ async fn test_e2e_metadata_exchange_over_peer_wire() {
         .expect("metadata exchange should complete over the peer wire");
 
     assert_eq!(received, info_metadata);
+}
+
+#[tokio::test]
+async fn test_e2e_metadata_exchange_uses_configured_source_address() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "metadata_source_binding_test",
+        512,
+        256,
+        "http://tracker.test/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("parse test torrent");
+    let info_hash = meta.info_hash.bytes;
+    let (root, _) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("test torrent should contain info dictionary")
+        .encode();
+    let peer =
+        MockBtPeerServer::start_with_metadata(info_hash, Vec::new(), Some(info_metadata)).await;
+    let policy = std::sync::Arc::new(OutboundNetworkPolicy::single(
+        "127.0.0.2".parse().expect("loopback source address"),
+    ));
+    let session = MetadataExchangeSession::new(MetadataExchangeConfig {
+        max_peers_to_try: 1,
+        connect_timeout: std::time::Duration::from_secs(2),
+        request_timeout: std::time::Duration::from_secs(2),
+        max_attempts: 1,
+        ..MetadataExchangeConfig::default()
+    })
+    .with_outbound_network_policy(policy);
+
+    session
+        .fetch_metadata(&info_hash, &[peer.addr()])
+        .await
+        .expect("metadata exchange should complete over the configured source");
+
+    let accepted_peers = peer.accepted_peers().await;
+    assert_eq!(accepted_peers.len(), 1);
+    assert_eq!(
+        accepted_peers[0].ip(),
+        "127.0.0.2".parse::<std::net::IpAddr>().unwrap()
+    );
 }
 
 #[tokio::test]

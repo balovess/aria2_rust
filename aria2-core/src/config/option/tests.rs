@@ -574,6 +574,22 @@ fn unsupported_concurrency_optimization_options_are_explicitly_rejected() {
     }
 }
 
+#[test]
+fn multiple_interface_is_a_supported_process_network_option() {
+    let registry = OptionRegistry::new();
+    let definition = registry
+        .get("multiple-interface")
+        .expect("multiple-interface must remain discoverable");
+    assert!(definition.is_supported());
+    assert_eq!(
+        definition
+            .parse_value("127.0.0.1,127.0.0.2")
+            .unwrap()
+            .as_str(),
+        Some("127.0.0.1,127.0.0.2")
+    );
+}
+
 #[cfg(feature = "bittorrent")]
 #[test]
 fn test_registry_parses_rpc_wire_values_through_one_typed_seam() {

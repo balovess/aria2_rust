@@ -20,7 +20,6 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::None,
             description: "Comma-separated list of interfaces for multi-homed setups".into(),
             category: OptionCategory::General,
-            supported: false,
             ..Default::default()
         });
 

@@ -36,6 +36,7 @@ pub struct DownloadCommand {
     /// Direct access to progress counters -- avoids RwLock on the hot path.
     pub(super) progress: Arc<AtomicProgress>,
     pub(super) client: Arc<reqwest::Client>,
+    pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     /// URI selected when this command was created.
     ///
     /// A request group may contain mirror URIs. Keeping the command's
@@ -107,6 +108,84 @@ pub struct DownloadCommand {
 
 fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
+}
+
+/// Return the actual HTTP proxy endpoint used for an HTTP(S) URI.
+///
+/// The endpoint, rather than the origin, determines the address family of the
+/// first outbound socket.  This helper is shared with the async command
+/// factory so proxy DNS is resolved before the synchronous reqwest client is
+/// built.
+pub(crate) fn http_proxy_origin(uri: &str, options: &DownloadOptions) -> Option<(String, u16)> {
+    let parsed_uri = url::Url::parse(uri).ok()?;
+    let hostname = parsed_uri.host_str()?;
+    let target_port = parsed_uri.port_or_known_default()?;
+
+    if let Some(no_proxy) = options.no_proxy.as_deref() {
+        let matcher = NoProxyMatcher::from_env_value(no_proxy);
+        let bypassed = hostname
+            .parse::<IpAddr>()
+            .map(|address| matcher.should_bypass(&std::net::SocketAddr::new(address, target_port)))
+            .unwrap_or_else(|_| matcher.should_bypass_hostname(hostname));
+        if bypassed {
+            return None;
+        }
+    }
+
+    let candidate = match parsed_uri.scheme() {
+        "http" => options
+            .http_proxy
+            .as_deref()
+            .filter(|proxy| !proxy.is_empty())
+            .or_else(|| {
+                options
+                    .all_proxy
+                    .as_deref()
+                    .filter(|proxy| !proxy.is_empty())
+            }),
+        "https" => options
+            .https_proxy
+            .as_deref()
+            .filter(|proxy| !proxy.is_empty())
+            .or_else(|| {
+                options
+                    .all_proxy
+                    .as_deref()
+                    .filter(|proxy| !proxy.is_empty())
+            }),
+        _ => None,
+    }?;
+    let proxy = ProxyUrl::parse(candidate).ok()?;
+    if !matches!(
+        proxy.protocol,
+        crate::http::socks_connector::ProxyProtocol::Http
+            | crate::http::socks_connector::ProxyProtocol::Https
+    ) {
+        return None;
+    }
+    Some((proxy.host, proxy.port))
+}
+
+fn source_for_remotes(
+    policy: &OutboundNetworkPolicy,
+    remotes: &[std::net::SocketAddr],
+) -> std::io::Result<Option<IpAddr>> {
+    let mut last_error = None;
+    for remote in remotes {
+        match policy.source_for(*remote) {
+            Ok(source) => return Ok(source),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        return Err(error);
+    }
+    Ok(policy.addresses().into_iter().next())
+}
+
+pub(crate) struct ResolvedNetworkAddresses {
+    pub(crate) target: Option<Vec<std::net::SocketAddr>>,
+    pub(crate) proxy: Option<Vec<std::net::SocketAddr>>,
 }
 
 fn apply_local_address(
@@ -289,13 +368,16 @@ impl DownloadCommand {
         output_name: Option<&str>,
         resolved_addresses: Option<Vec<std::net::SocketAddr>>,
     ) -> Result<Self> {
-        Self::new_with_group_and_resolved_addresses_and_policy(
+        Self::new_with_group_and_resolved_network_addresses(
             group,
             uri,
             options,
             output_dir,
             output_name,
-            resolved_addresses,
+            ResolvedNetworkAddresses {
+                target: resolved_addresses,
+                proxy: None,
+            },
             Arc::new(OutboundNetworkPolicy::direct()),
         )
     }
@@ -307,6 +389,29 @@ impl DownloadCommand {
         output_dir: Option<&str>,
         output_name: Option<&str>,
         resolved_addresses: Option<Vec<std::net::SocketAddr>>,
+        outbound_network_policy: Arc<OutboundNetworkPolicy>,
+    ) -> Result<Self> {
+        Self::new_with_group_and_resolved_network_addresses(
+            group,
+            uri,
+            options,
+            output_dir,
+            output_name,
+            ResolvedNetworkAddresses {
+                target: resolved_addresses,
+                proxy: None,
+            },
+            outbound_network_policy,
+        )
+    }
+
+    pub(crate) fn new_with_group_and_resolved_network_addresses(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        uri: &str,
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        output_name: Option<&str>,
+        resolved_addresses: ResolvedNetworkAddresses,
         outbound_network_policy: Arc<OutboundNetworkPolicy>,
     ) -> Result<Self> {
         if options.uses_memory_download_for_uri(uri) {
@@ -343,7 +448,9 @@ impl DownloadCommand {
         .flatten()
         .any(|proxy| !proxy.is_empty());
         let has_custom_tls = client_tls.requires_custom_client();
-        let policy_remote = resolved_addresses
+        let proxy_origin = http_proxy_origin(uri, options);
+        let target_remote = resolved_addresses
+            .target
             .as_ref()
             .and_then(|addresses| addresses.first().copied())
             .or_else(|| {
@@ -359,18 +466,41 @@ impl DownloadCommand {
                     })
                 })
             });
-        let local_address = policy_remote
-            .map(|remote| outbound_network_policy.source_for(remote))
-            .transpose()
+        let local_address = if proxy_origin.is_some() {
+            let literal_proxy_remote = proxy_origin.as_ref().and_then(|(host, port)| {
+                host.parse::<IpAddr>()
+                    .ok()
+                    .map(|address| std::net::SocketAddr::new(address, *port))
+            });
+            let proxy_remotes = resolved_addresses
+                .proxy
+                .as_deref()
+                .filter(|addresses| !addresses.is_empty())
+                .map(|addresses| addresses.to_vec())
+                .or_else(|| literal_proxy_remote.map(|remote| vec![remote]));
+            source_for_remotes(
+                &outbound_network_policy,
+                proxy_remotes.as_deref().unwrap_or_default(),
+            )
             .map_err(|error| {
                 Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Outbound network policy cannot serve {uri}: {error}"
+                    "Outbound network policy cannot serve HTTP proxy for {uri}: {error}"
                 )))
             })?
-            .flatten()
-            .or_else(|| outbound_network_policy.addresses().into_iter().next());
+        } else {
+            target_remote
+                .map(|remote| outbound_network_policy.source_for(remote))
+                .transpose()
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Outbound network policy cannot serve {uri}: {error}"
+                    )))
+                })?
+                .flatten()
+                .or_else(|| outbound_network_policy.addresses().into_iter().next())
+        };
         let client = if no_proxy {
-            if let Some(addresses) = resolved_addresses.as_deref()
+            if let Some(addresses) = resolved_addresses.target.as_deref()
                 && !addresses.is_empty()
             {
                 let host = uri_host(uri).ok_or_else(|| {
@@ -521,6 +651,7 @@ impl DownloadCommand {
             group,
             progress,
             client,
+            outbound_network_policy,
             initial_uri: uri.to_string(),
             output_path: path,
             output_name_explicit: output_name.is_some(),
@@ -651,6 +782,7 @@ impl DownloadCommand {
             group,
             progress,
             client,
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             initial_uri: uri.to_string(),
             output_path: path,
             output_name_explicit: output_name.is_some(),

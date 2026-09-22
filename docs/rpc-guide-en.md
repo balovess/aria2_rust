@@ -184,8 +184,9 @@ strings on the wire.
 `aria2.getPeers` reports currently active connections, not historical peers. In
 addition to the standard `peerId`, `ip`, `port`, `amChoking`, `peerChoking`,
 `downloadSpeed`, and `seeder` fields, `bitfield` is the peer's raw piece
-bitfield encoded as lowercase hexadecimal and is omitted when unknown. The
-first discovery source (`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
+bitfield encoded as lowercase hexadecimal. The field is always present; an
+empty string means the peer bitfield is not known. The first discovery source
+(`tracker`, `dht`, `pex`, `lpd`, `incoming`, or
 `unknown`) is retained internally and is not emitted in the upstream response.
 Port, speed, boolean, and seeder values follow aria2's string wire format.
 

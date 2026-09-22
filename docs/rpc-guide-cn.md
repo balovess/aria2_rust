@@ -183,8 +183,9 @@ BitTorrent 状态补充说明：`bittorrent` 是嵌套的 torrent 元数据对�
 
 `aria2.getPeers` 返回当前仍处于活动状态的连接，不是历史 peer 记录。除标准
 字段 `peerId`、`ip`、`port`、`amChoking`、`peerChoking`、`downloadSpeed`、
-`uploadSpeed` 和 `seeder` 外，`bitfield` 是 peer 原始 piece 位图的十六进制字符串（未知时省略）。
-发现来源（`tracker`、`dht`、`pex`、`lpd`、`incoming` 或 `unknown`）仅作为内部运行时数据保存，不进入原版响应。端口、
+`uploadSpeed` 和 `seeder` 外，`bitfield` 是 peer 原始 piece 位图的小写十六进制字符串。
+该字段始终存在；空字符串表示当前未知 peer 位图。发现来源（`tracker`、`dht`、
+`pex`、`lpd`、`incoming` 或 `unknown`）仅作为内部运行时数据保存，不进入原版响应。端口、
 速度、布尔值和 seeder 状态遵循 aria2 的字符串 wire 格式。
 
 `aria2.getTrackers` 返回指定 GID 的某一时点运行快照，并不表示每个 tracker

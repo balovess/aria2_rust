@@ -1,6 +1,7 @@
 use futures::{StreamExt, stream};
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
@@ -8,9 +9,11 @@ use tracing::{debug, info, warn};
 use aria2_protocol::bittorrent::extension::ut_metadata_tracker::UTMetadataRequestTracker;
 use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 use aria2_protocol::bittorrent::message::serializer::serialize_extended;
-use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
+use aria2_protocol::bittorrent::peer::connection::PeerConnection;
+use aria2_protocol::bittorrent::peer::id;
 
 use super::metadata_collector::MetadataCollector;
+use crate::network::OutboundNetworkPolicy;
 
 const METADATA_MAX_SIZE: u64 = 100 * 1024 * 1024;
 const PIECE_SIZE_MIN: u32 = 1024;
@@ -190,11 +193,20 @@ impl MetadataExchangeConfig {
 
 pub struct MetadataExchangeSession {
     config: MetadataExchangeConfig,
+    outbound_network_policy: Arc<OutboundNetworkPolicy>,
 }
 
 impl MetadataExchangeSession {
     pub fn new(config: MetadataExchangeConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
+        }
+    }
+
+    pub fn with_outbound_network_policy(mut self, policy: Arc<OutboundNetworkPolicy>) -> Self {
+        self.outbound_network_policy = policy;
+        self
     }
 
     fn can_retry_piece(&self, retry_count: usize) -> bool {
@@ -267,12 +279,24 @@ impl MetadataExchangeSession {
         peer_addr: &SocketAddr,
     ) -> Result<Vec<u8>, MetadataExchangeError> {
         let addr_str = peer_addr.to_string();
-        let addr = PeerAddr::new(&peer_addr.ip().to_string(), peer_addr.port());
 
-        let conn_result = timeout(
-            self.config.connect_timeout,
-            PeerConnection::connect(&addr, info_hash),
-        )
+        let conn_result = timeout(self.config.connect_timeout, async {
+            let stream = self
+                .outbound_network_policy
+                .connect(*peer_addr)
+                .await
+                .map_err(|error| format!("Peer connection failed: {error}"))?;
+            PeerConnection::connect_with_stream(
+                stream,
+                *peer_addr,
+                info_hash,
+                None,
+                &id::generate_peer_id(),
+                self.config.connect_timeout,
+                false,
+            )
+            .await
+        })
         .await;
         let mut conn = match conn_result {
             Ok(Ok(c)) => c,

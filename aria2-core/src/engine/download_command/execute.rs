@@ -661,7 +661,10 @@ impl DownloadCommand {
                             Arc::clone(&self.group),
                             Arc::clone(&self.progress),
                             self.global_limiter.clone(),
-                        );
+                        )
+                        .with_outbound_network_policy(Arc::clone(
+                            &self.outbound_network_policy,
+                        ));
                         let result = sequential_downloader.execute_with_gaps_with_retry(
                             uri,
                             total_length,
@@ -685,7 +688,8 @@ impl DownloadCommand {
                 Arc::clone(&self.group),
                 Arc::clone(&self.progress),
                 self.global_limiter.clone(),
-            );
+            )
+            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy));
             if let Some(prepared) = prepared_get.take() {
                 sequential_downloader = sequential_downloader.with_prepared_response(prepared);
             }

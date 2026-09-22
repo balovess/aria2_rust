@@ -13,6 +13,7 @@ use crate::engine::retry_policy::RetryPolicy;
 use crate::error::{Aria2Error, Result};
 use crate::http::HttpRequestPolicy;
 use crate::network::ConnectionContext;
+use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -47,6 +48,7 @@ pub struct SequentialDownloader {
     /// When `Some`, tokens are acquired after the per-download limiter
     /// in `download_flow.rs` and `gap_download.rs`.
     pub(crate) global_limiter: Option<RateLimiter>,
+    pub(crate) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     /// The first GET response, when filename metadata had to be read before
     /// collision resolution and resume inspection.
     pub(crate) prepared_response: Option<PreparedHttpResponse>,
@@ -73,8 +75,17 @@ impl SequentialDownloader {
             group,
             progress,
             global_limiter,
+            outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             prepared_response: None,
         }
+    }
+
+    pub(crate) fn with_outbound_network_policy(
+        mut self,
+        policy: Arc<OutboundNetworkPolicy>,
+    ) -> Self {
+        self.outbound_network_policy = policy;
+        self
     }
 
     pub(crate) fn with_prepared_response(mut self, response: PreparedHttpResponse) -> Self {
@@ -321,9 +332,16 @@ impl SequentialDownloader {
             .truncate(true)
             .open(&self.output_path)?;
 
-        let bytes = crate::http::splice_http::try_splice_download(uri, 0, total_length, &file, 0)
-            .await
-            .map_err(|e| Aria2Error::Io(format!("splice download failed: {e}")))?;
+        let bytes = crate::http::splice_http::try_splice_download_with_policy(
+            uri,
+            0,
+            total_length,
+            &file,
+            0,
+            &self.outbound_network_policy,
+        )
+        .await
+        .map_err(|e| Aria2Error::Io(format!("splice download failed: {e}")))?;
 
         let final_speed = {
             let g = self.group.recover();

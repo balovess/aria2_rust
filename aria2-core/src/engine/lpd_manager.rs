@@ -247,6 +247,11 @@ impl LpdManager {
         )
     }
 
+    /// Return the IPv4 interface selected for multicast traffic.
+    pub fn interface(&self) -> Option<Ipv4Addr> {
+        self.interface
+    }
+
     /// Register a torrent for LPD announcements
     ///
     /// Adds the info_hash to the active set so it gets periodically announced.

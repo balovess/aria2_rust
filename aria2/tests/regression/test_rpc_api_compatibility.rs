@@ -1399,6 +1399,8 @@ async fn regression_list_methods_returns_feature_specific_methods() {
         "aria2.getPeers",
         "aria2.getTrackers",
         "aria2.getDhtStatus",
+        "aria2.saveDhtState",
+        "aria2.evictDhtNodes",
     ]);
     #[cfg(feature = "metalink")]
     expected.push("aria2.addMetalink");

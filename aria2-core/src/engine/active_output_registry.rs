@@ -14,6 +14,8 @@ use tracing::{debug, info, warn};
 use crate::error::{Aria2Error, Result};
 use crate::filesystem::control_file::ControlFile;
 
+const MAX_OUTPUT_FILENAME_BYTES: usize = 255;
+
 /// Compatibility policy used when selecting a local output path.
 ///
 /// This captures the pre-local-file decisions made by aria2's
@@ -91,21 +93,13 @@ impl ActiveOutputRegistry {
         }
 
         // Collision detected — generate unique name with numeric suffix.
-        let stem = desired
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-
-        let ext = desired
-            .extension()
-            .map(|e| format!(".{}", e.to_string_lossy()))
-            .unwrap_or_default();
+        let (stem, ext) = split_filename_for_aria2(desired);
 
         let parent = desired.parent().unwrap_or_else(|| Path::new("."));
 
         let mut counter: u32 = 1;
         loop {
-            let candidate = parent.join(format!("{}.{}{}", stem, counter, ext));
+            let candidate = parent.join(numbered_filename(&stem, &ext, counter));
 
             // Check both the in-progress registry AND the filesystem to avoid conflicts
             // with previously completed downloads that happened to use the same suffix.
@@ -123,7 +117,7 @@ impl ActiveOutputRegistry {
 
             // Safety upper bound to prevent unbounded looping in pathological cases.
             if counter > 10_000 {
-                let fallback = parent.join(format!("{}.{}", stem, counter));
+                let fallback = parent.join(numbered_filename(&stem, "", counter));
                 registry.insert(fallback.clone());
                 warn!(
                     "Exhausted normal suffix range for '{}', using fallback '{}'",
@@ -177,7 +171,7 @@ impl ActiveOutputRegistry {
         let (stem, ext) = split_filename_for_aria2(desired);
         let parent = desired.parent().unwrap_or_else(|| Path::new("."));
         for counter in 1..10_000u32 {
-            let candidate = parent.join(format!("{stem}.{counter}{ext}"));
+            let candidate = parent.join(numbered_filename(&stem, &ext, counter));
             let candidate_has_control = ControlFile::control_path_for(&candidate).exists();
             if !registry.contains(&candidate) && (!candidate.exists() || candidate_has_control) {
                 registry.insert(candidate.clone());
@@ -246,6 +240,27 @@ fn split_filename_for_aria2(path: &Path) -> (String, String) {
         ),
         None => (file_name, String::new()),
     }
+}
+
+/// Build an aria2-style numbered filename without exceeding the portable
+/// basename limit. The suffix and extension are retained whenever possible;
+/// the stem is shortened first because it carries the least structural value.
+fn numbered_filename(stem: &str, ext: &str, counter: u32) -> String {
+    let suffix = format!(".{counter}");
+    let extension = truncate_utf8(ext, MAX_OUTPUT_FILENAME_BYTES.saturating_sub(suffix.len()));
+    let stem_limit = MAX_OUTPUT_FILENAME_BYTES
+        .saturating_sub(suffix.len())
+        .saturating_sub(extension.len());
+    let stem = truncate_utf8(stem, stem_limit);
+    format!("{stem}{suffix}{extension}")
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    let mut end = value.len().min(max_bytes);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }
 
 // ---------------------------------------------------------------------------
@@ -350,6 +365,70 @@ mod tests {
 
         assert_eq!(resolved, dir.path().join("download.1.bin"));
         assert_eq!(tokio::fs::read(&desired).await.unwrap(), b"existing");
+    }
+
+    #[tokio::test]
+    async fn policy_rename_keeps_extension_and_portable_length_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join(format!("{}{}", "a".repeat(251), ".bin"));
+        tokio::fs::write(&desired, b"existing").await.unwrap();
+
+        let registry = ActiveOutputRegistry::new();
+        let resolved = registry
+            .resolve_with_policy(&desired, OutputPathPolicy::default())
+            .await
+            .unwrap();
+        let expected = format!("{}{}", "a".repeat(249), ".1.bin");
+
+        assert_eq!(
+            resolved.file_name().unwrap().to_str(),
+            Some(expected.as_str())
+        );
+        assert_eq!(resolved.file_name().unwrap().len(), 255);
+    }
+
+    #[tokio::test]
+    async fn active_collision_keeps_unextended_name_within_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("a".repeat(255));
+
+        let registry = ActiveOutputRegistry::new();
+        let _first = registry.resolve(&desired).await;
+        let resolved = registry.resolve(&desired).await;
+        let expected = format!("{}{}", "a".repeat(253), ".1");
+
+        assert_eq!(
+            resolved.file_name().unwrap().to_str(),
+            Some(expected.as_str())
+        );
+        assert_eq!(resolved.file_name().unwrap().len(), 255);
+    }
+
+    #[tokio::test]
+    async fn concurrent_policy_reservations_are_unique() {
+        let dir = tempfile::tempdir().unwrap();
+        let desired = dir.path().join("shared.bin");
+        let registry = Arc::new(ActiveOutputRegistry::new());
+        let mut tasks = Vec::new();
+
+        for _ in 0..16 {
+            let registry = Arc::clone(&registry);
+            let desired = desired.clone();
+            tasks.push(tokio::spawn(async move {
+                registry
+                    .resolve_with_policy(&desired, OutputPathPolicy::default())
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        let mut resolved = HashSet::new();
+        for task in tasks {
+            resolved.insert(task.await.unwrap());
+        }
+
+        assert_eq!(resolved.len(), 16);
+        assert_eq!(registry.len().await, 16);
     }
 
     #[tokio::test]
