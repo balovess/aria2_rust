@@ -189,13 +189,14 @@ impl BtDownloadCommand {
                 ClientTlsConfig::from_download_options(group.options())
             };
             Some(
-                crate::engine::bt_web_seed::WebSeedManager::new_with_tls_and_policy(
+                crate::engine::bt_web_seed::WebSeedManager::new_with_tls_and_policy_async(
                     web_seed_urls,
                     piece_length,
                     total_size,
                     &web_seed_tls,
                     &self.outbound_network_policy,
                 )
+                .await
                 .map_err(|error| {
                     Aria2Error::Fatal(FatalError::Config(format!(
                         "Web-seed HTTP client configuration failed: {error}"

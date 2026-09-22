@@ -7,6 +7,7 @@ use aria2_core::download::download_context::{BtFileMode, ContextAttributeType, T
 #[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_tracker_comm::TrackerRuntimeSnapshot;
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
+use aria2_core::segment::piece_storage::BitfieldMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;
 use aria2_rpc::{
     BackendError, BackendReadSnapshot, BackendResponse, BackendResult, BittorrentInfo,
@@ -28,9 +29,31 @@ impl CoreRpcBackend {
             .with_upload_length(snapshot.upload_length)
             .with_download_speed(snapshot.download_speed)
             .with_upload_speed(snapshot.upload_speed)
-            .with_connections(u16::try_from(snapshot.connections).unwrap_or(u16::MAX))
+            .with_connections(snapshot.connections)
             .with_dir(group.options().dir.clone().unwrap_or_default())
             .with_files(build_file_infos(group, snapshot.completed_length));
+
+        if let Some(context) = group.get_download_context() {
+            info = info
+                .with_piece_length(context.get_piece_length() as u64)
+                .with_num_pieces(context.get_num_pieces() as u32);
+        }
+
+        let followed_by = group.followed_by_gids();
+        if !followed_by.is_empty() {
+            info = info.with_followed_by(
+                followed_by
+                    .into_iter()
+                    .map(|gid| gid.to_hex_string())
+                    .collect(),
+            );
+        }
+        if let Some(following) = group.following_gid() {
+            info = info.with_following(following.to_hex_string());
+        }
+        if let Some(belongs_to) = group.belongs_to_gid() {
+            info = info.with_belongs_to(belongs_to.to_hex_string());
+        }
 
         let integrity_man = aria2_core::checksum::check_integrity::man::shared();
         if let Ok(man) = integrity_man.try_read() {
@@ -85,23 +108,7 @@ impl CoreRpcBackend {
                 });
             }
         }
-        if info.piece_length.is_none() && snapshot.total_length > 0 {
-            info = info.with_piece_length(1_048_576);
-        }
-        if info.num_pieces.is_none() && snapshot.total_length > 0 {
-            let piece_length = info.piece_length.unwrap_or(1_048_576);
-            if piece_length > 0 {
-                info = info.with_num_pieces(snapshot.total_length.div_ceil(piece_length) as u32);
-            }
-        }
-        match status {
-            aria2_rpc::DownloadStatus::Error(message) => {
-                info.with_error_code(1).with_error_message(message)
-            }
-            aria2_rpc::DownloadStatus::Complete => info.with_error_code(0),
-            aria2_rpc::DownloadStatus::Removed => info.with_error_code(31),
-            _ => info,
-        }
+        info
     }
 
     pub(super) fn status_from_result(
@@ -116,9 +123,26 @@ impl CoreRpcBackend {
             .with_upload_speed(result.upload_speed)
             .with_error_code(result.code.as_code() as i32)
             .with_error_message(result.message.clone())
-            .with_dir(result.dir.clone());
-        if !result.files.is_empty() {
-            info = info.with_files(build_file_infos_from_result(result));
+            .with_dir(result.dir.clone())
+            .with_files(build_file_infos_from_result(result))
+            .with_connections(0)
+            .with_piece_length(result.piece_length as u64)
+            .with_num_pieces(result.num_pieces);
+
+        if !result.followed_by.is_empty() {
+            info = info.with_followed_by(
+                result
+                    .followed_by
+                    .iter()
+                    .map(|gid| gid.to_hex_string())
+                    .collect(),
+            );
+        }
+        if let Some(following) = result.following {
+            info = info.with_following(following.to_hex_string());
+        }
+        if let Some(belongs_to) = result.belongs_to {
+            info = info.with_belongs_to(belongs_to.to_hex_string());
         }
         if !result.info_hash.is_empty() {
             info = info
@@ -521,18 +545,14 @@ impl CoreRpcBackend {
 
     pub(super) fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {
         let group = self.group(&gid)?;
+        let group = group.recover();
+        // Match aria2_original's GetUrisRpcMethod: it delegates to
+        // createUriEntry() for the first FileEntry only, rather than
+        // flattening every file in a multi-file download.
         let entries = group
-            .recover()
-            .uri_entries()
-            .into_iter()
-            .map(|entry| UriEntry {
-                uri: entry.uri,
-                status: match entry.status.as_str() {
-                    "used" | "spent" => UriStatus::Used,
-                    _ => UriStatus::Waiting,
-                },
-            })
-            .collect();
+            .get_download_context()
+            .and_then(|context| context.get_file_entries().first().map(build_uri_entries))
+            .unwrap_or_else(|| group.uris().iter().cloned().map(UriEntry::new).collect());
         Ok(BackendResult::response(BackendResponse::Uris(entries)))
     }
 
@@ -766,6 +786,7 @@ fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
     };
 
     if let Some(context) = group.get_download_context() {
+        let completion = bt_completion_bitfield(group);
         return context
             .get_file_entries()
             .iter()
@@ -780,7 +801,12 @@ fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
                     file.length(),
                 )
                 .with_index(index + 1)
-                .with_completed(completed.saturating_sub(file.offset()).min(file.length()))
+                .with_completed(completed_length_for_file(
+                    completion.as_ref(),
+                    completed,
+                    file.offset(),
+                    file.length(),
+                ))
                 .with_uris(build_uri_entries(file));
                 info.selected = file.is_requested();
                 info
@@ -794,6 +820,28 @@ fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
         .with_uris(group.uris().iter().cloned().map(UriEntry::new).collect());
     info.selected = true;
     vec![info]
+}
+
+fn completed_length_for_file(
+    completion: Option<&BitfieldMan>,
+    total_completed: u64,
+    offset: u64,
+    length: u64,
+) -> u64 {
+    completion
+        .map(|bitfield| bitfield.get_offset_completed_length(offset, length))
+        .unwrap_or_else(|| total_completed.saturating_sub(offset).min(length))
+}
+
+fn bt_completion_bitfield(group: &RequestGroup) -> Option<BitfieldMan> {
+    let piece_length = group.get_bt_piece_length() as u64;
+    let bitfield = group.get_bt_bitfield()?;
+    if piece_length == 0 || bitfield.is_empty() {
+        return None;
+    }
+    let mut completion = BitfieldMan::new(piece_length, group.get_total_length_atomic());
+    completion.set_bitfield(&bitfield);
+    Some(completion)
 }
 
 fn build_uri_entries(file: &aria2_core::download::file_entry::FileEntry) -> Vec<UriEntry> {

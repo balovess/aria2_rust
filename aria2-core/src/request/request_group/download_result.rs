@@ -13,6 +13,7 @@ use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
 use super::GroupId;
 use super::result_code::DownloadResultCode;
 use super::status::DownloadStatus;
+use crate::segment::piece_storage::BitfieldMan;
 
 /// File entry within a download result.
 ///
@@ -317,7 +318,7 @@ impl DownloadResult {
                     group
                         .uris()
                         .first()
-                        .map(|uri| crate::http::response_processor::extract_filename_from_url(uri))
+                        .map(|uri| crate::validation::uri::sanitize_filename_from_uri(uri))
                 })
                 .unwrap_or_default();
             match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
@@ -328,16 +329,23 @@ impl DownloadResult {
                 _ => name,
             }
         };
+        let completion = bt_completion_bitfield(group);
         let files = if let Some(context) = group.get_download_context() {
             context
                 .get_file_entries()
                 .iter()
                 .enumerate()
                 .map(|(index, file)| {
-                    let completed_length = self
-                        .completed_length
-                        .saturating_sub(file.offset())
-                        .min(file.length());
+                    let completed_length = completion
+                        .as_ref()
+                        .map(|bitfield| {
+                            bitfield.get_offset_completed_length(file.offset(), file.length())
+                        })
+                        .unwrap_or_else(|| {
+                            self.completed_length
+                                .saturating_sub(file.offset())
+                                .min(file.length())
+                        });
                     let uris = file
                         .uris()
                         .into_iter()
@@ -412,6 +420,17 @@ impl DownloadResult {
             self.bitfield = bitfield.iter().map(|byte| format!("{byte:02x}")).collect();
         }
     }
+}
+
+fn bt_completion_bitfield(group: &super::RequestGroup) -> Option<BitfieldMan> {
+    let piece_length = group.get_bt_piece_length() as u64;
+    let bitfield = group.get_bt_bitfield()?;
+    if piece_length == 0 || bitfield.is_empty() {
+        return None;
+    }
+    let mut completion = BitfieldMan::new(piece_length, group.get_total_length_atomic());
+    completion.set_bitfield(&bitfield);
+    Some(completion)
 }
 
 #[cfg(test)]

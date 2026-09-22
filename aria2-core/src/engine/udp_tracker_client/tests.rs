@@ -18,6 +18,37 @@ async fn test_client_creation() {
 }
 
 #[tokio::test]
+async fn policy_udp_client_binds_the_requested_dual_stack_family() {
+    let policy = crate::network::OutboundNetworkPolicy::new(vec![
+        "127.0.0.2".parse().expect("parse IPv4 source"),
+        "::1".parse().expect("parse IPv6 source"),
+    ])
+    .expect("dual-stack policy should build");
+
+    let ipv4 = UdpTrackerClient::new_with_policy_for_family(0, &policy, false)
+        .await
+        .expect("IPv4 UDP tracker client should bind");
+    assert_eq!(
+        ipv4.socket
+            .local_addr()
+            .expect("read IPv4 UDP address")
+            .ip(),
+        "127.0.0.2".parse::<std::net::IpAddr>().unwrap()
+    );
+
+    let ipv6 = UdpTrackerClient::new_with_policy_for_family(0, &policy, true)
+        .await
+        .expect("IPv6 UDP tracker client should bind");
+    assert_eq!(
+        ipv6.socket
+            .local_addr()
+            .expect("read IPv6 UDP address")
+            .ip(),
+        "::1".parse::<std::net::IpAddr>().unwrap()
+    );
+}
+
+#[tokio::test]
 async fn test_add_announce_request() {
     let mut client = UdpTrackerClient::new(0).await.unwrap();
     let addr: SocketAddr = "127.0.0.1:6969".parse().unwrap();

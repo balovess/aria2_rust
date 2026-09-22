@@ -379,16 +379,6 @@ impl MagnetDownloadCommand {
             announcer.set_timeouts(max_tracker_timeout, connect_timeout);
             announcer.set_tcp_port(announce_port);
 
-            if let Ok(client) =
-                crate::engine::udp_tracker_client::UdpTrackerClient::new_with_policy(
-                    0,
-                    &self.outbound_network_policy,
-                )
-                .await
-            {
-                announcer.set_udp_client(Arc::new(tokio::sync::Mutex::new(client)));
-            }
-
             let result = announcer
                 .announce(
                     &magnet.info_hash,

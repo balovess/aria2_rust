@@ -4,6 +4,55 @@ use super::*;
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use std::collections::BTreeMap;
 
+#[tokio::test]
+async fn web_seed_hostname_uses_a_compatible_policy_source() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+        .await
+        .expect("web-seed fixture should bind");
+    let address = listener.local_addr().expect("web-seed fixture address");
+    let server = tokio::spawn(async move {
+        let (mut stream, peer) = listener.accept().await.expect("web-seed should accept");
+        let mut request = [0u8; 4096];
+        let bytes = stream
+            .read(&mut request)
+            .await
+            .expect("read web-seed request");
+        assert!(String::from_utf8_lossy(&request[..bytes]).contains("range: bytes=0-1"));
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+            )
+            .await
+            .expect("write web-seed response");
+        peer
+    });
+
+    let policy = crate::network::OutboundNetworkPolicy::new(vec![
+        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+        "::1".parse().expect("parse IPv6 source"),
+    ])
+    .expect("web-seed policy should accept both families");
+    let stats = std::sync::Arc::new(WebSeedStats::new());
+    let tls = crate::http::client_identity::ClientTlsConfig::default();
+    let client = WebSeedClient::with_shared_stats_and_tls_and_policy_async(
+        &format!("http://localhost:{}/file.bin", address.port()),
+        stats,
+        &tls,
+        &policy,
+    )
+    .await
+    .expect("web-seed client should select the IPv4 source for localhost");
+
+    assert_eq!(client.download_piece(0, 2, 0, 2).await.unwrap(), b"ok");
+    assert_eq!(
+        server.await.expect("web-seed fixture should finish").ip(),
+        std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+    );
+}
+
 // ==================== parse_url_list tests ====================
 
 #[test]

@@ -664,7 +664,6 @@ impl BtDownloadCommand {
             seed_time,
             seed_ratio,
             total_uploaded: 0,
-            udp_client: None,
             tracker_announcer: None,
             listen_port: 0,
             bt_runtime: std::sync::Arc::new(super::BtRuntimeState::new(options.bt_max_peers)),

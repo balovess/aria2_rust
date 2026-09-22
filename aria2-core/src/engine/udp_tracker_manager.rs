@@ -99,6 +99,10 @@ impl UdpTrackerManager {
         }
     }
 
+    pub(crate) fn tracker_url_is_ipv6(url: &str) -> Option<bool> {
+        Self::parse_udp_url(url, 0).map(|endpoint| endpoint.addr.is_ipv6())
+    }
+
     fn resolve_host(host_port: &str) -> Option<SocketAddr> {
         let (host, port_str) = if host_port.contains(':') {
             let parts: Vec<&str> = host_port.rsplitn(2, ':').collect();
@@ -220,6 +224,10 @@ impl UdpTrackerManager {
         self.client.lock().await.clear_completed_requests();
     }
 
+    pub(crate) fn uses_tracker_url(&self, url: &str) -> bool {
+        self.endpoints.len() == 1 && self.endpoints[0].url == url
+    }
+
     pub fn get_announce_interval(&self) -> u32 {
         self.last_announce_interval
     }
@@ -328,6 +336,18 @@ mod tests {
         let ep = UdpTrackerManager::parse_udp_url("udp://127.0.0.1/announce", 0);
         assert!(ep.is_some());
         assert_eq!(ep.unwrap().addr.port(), 6881);
+    }
+
+    #[test]
+    fn test_parse_udp_url_identifies_ipv6_endpoint() {
+        assert_eq!(
+            UdpTrackerManager::tracker_url_is_ipv6("udp://[::1]:6969/announce"),
+            Some(true)
+        );
+        assert_eq!(
+            UdpTrackerManager::tracker_url_is_ipv6("udp://127.0.0.1:6969/announce"),
+            Some(false)
+        );
     }
 
     #[tokio::test]

@@ -119,7 +119,6 @@ pub struct BtDownloadCommand {
     pub(crate) seed_time: Option<std::time::Duration>,
     pub(crate) seed_ratio: Option<f64>,
     pub(crate) total_uploaded: u64,
-    pub(crate) udp_client: Option<crate::engine::udp_tracker_client::SharedUdpClient>,
     /// Unified tracker announcer (HTTP + UDP) using BtAnnounce state machine.
     /// Created during execute() from the torrent announce list.
     pub(crate) tracker_announcer: Option<crate::engine::bt_tracker_comm::TrackerAnnouncer>,

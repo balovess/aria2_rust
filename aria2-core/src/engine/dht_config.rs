@@ -40,12 +40,14 @@ pub(crate) async fn build_dht_engine_config_with_policy(
         .transpose()
         .map_err(|error| config_error(format!("invalid dht-listen-port: {error}")))?;
 
-    let listen_addr = selected_listen_addr(options, use_ipv6)?.or_else(|| {
-        policy
-            .addresses()
-            .into_iter()
-            .find(|address| address.is_ipv6() == use_ipv6)
-    });
+    let listen_addr = selected_listen_addr(options, use_ipv6)?
+        .or_else(|| {
+            policy
+                .addresses()
+                .into_iter()
+                .find(|address| address.is_ipv6() == use_ipv6)
+        })
+        .or_else(|| use_ipv6.then_some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
     let bootstrap_specs = selected_bootstrap_specs(options, use_ipv6)?;
     let bootstrap_nodes = resolve_bootstrap_nodes(&bootstrap_specs, use_ipv6).await?;
     let dht_file_path = selected_file_path(options, use_ipv6)
@@ -81,7 +83,7 @@ fn selected_listen_addr(options: &DownloadOptions, use_ipv6: bool) -> Result<Opt
         options.dht_listen_addr.as_deref()
     };
     let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
-        return Ok(use_ipv6.then_some(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+        return Ok(None);
     };
 
     let address = raw
@@ -238,6 +240,36 @@ mod tests {
             Some(std::path::Path::new("dht6.dat"))
         );
         assert_eq!(config.query_timeout, Duration::from_secs(7));
+    }
+
+    #[tokio::test]
+    async fn dual_stack_policy_selects_matching_dht_udp_source_without_explicit_listen_addr() {
+        let options6 = DownloadOptions {
+            enable_dht6: true,
+            dht_entry_point6: Some("[::1]:49003".to_string()),
+            ..Default::default()
+        };
+        let policy = crate::network::OutboundNetworkPolicy::new(vec![
+            "127.0.0.2".parse().expect("parse IPv4 source"),
+            "::1".parse().expect("parse IPv6 source"),
+        ])
+        .expect("dual-stack policy should build");
+
+        let config6 = build_dht_engine_config_with_policy(&options6, &policy)
+            .await
+            .expect("DHT6 config should select a compatible policy source");
+
+        assert_eq!(config6.listen_addr, Some("::1".parse().unwrap()));
+
+        let options4 = DownloadOptions {
+            dht_entry_point: Some(vec!["127.0.0.1:49004".to_string()]),
+            ..Default::default()
+        };
+        let config4 = build_dht_engine_config_with_policy(&options4, &policy)
+            .await
+            .expect("DHT4 config should select a compatible policy source");
+
+        assert_eq!(config4.listen_addr, Some("127.0.0.2".parse().unwrap()));
     }
 
     #[tokio::test]

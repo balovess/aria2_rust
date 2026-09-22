@@ -209,6 +209,46 @@ impl OutboundNetworkPolicy {
         tokio::net::UdpSocket::bind(local).await
     }
 
+    /// Bind an outbound UDP socket for a specific address family.
+    ///
+    /// UDP sockets are family-specific, so callers that talk to both IPv4 and
+    /// IPv6 endpoints must create one socket per family instead of relying on
+    /// the first configured source address.
+    pub async fn bind_udp_for_family(
+        &self,
+        port: u16,
+        ipv6: bool,
+    ) -> io::Result<tokio::net::UdpSocket> {
+        let local = if self.is_direct() {
+            SocketAddr::new(
+                if ipv6 {
+                    IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+                } else {
+                    IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+                },
+                port,
+            )
+        } else {
+            let source = self
+                .sources
+                .iter()
+                .filter(|source| source.address.is_ipv6() == ipv6)
+                .min_by_key(|source| source.score())
+                .ok_or_else(|| {
+                    family_mismatch(SocketAddr::new(
+                        if ipv6 {
+                            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+                        } else {
+                            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+                        },
+                        port,
+                    ))
+                })?;
+            SocketAddr::new(source.address, port)
+        };
+        tokio::net::UdpSocket::bind(local).await
+    }
+
     fn best_source(&self, remote: SocketAddr) -> Option<&SourceState> {
         self.sources
             .iter()

@@ -178,6 +178,8 @@ pub struct TrackerAnnouncer {
     udp_manager: Option<UdpTrackerManager>,
     /// Shared UDP client for the UDP tracker manager.
     udp_client: Option<SharedUdpClient>,
+    /// Address family used by the current UDP tracker client.
+    udp_family_ipv6: Option<bool>,
     /// URL selected for the most recent announce attempt, including failures.
     last_attempt_tracker_url: Option<String>,
     /// Shared process-wide catalog for public tracker health feedback.
@@ -217,6 +219,7 @@ impl TrackerAnnouncer {
             stopped_sent: false,
             udp_manager: None,
             udp_client: None,
+            udp_family_ipv6: None,
             last_attempt_tracker_url: None,
             public_tracker_catalog: None,
             public_tracker_urls: HashSet::new(),
@@ -241,6 +244,7 @@ impl TrackerAnnouncer {
             stopped_sent: false,
             udp_manager: None,
             udp_client,
+            udp_family_ipv6: None,
             last_attempt_tracker_url: None,
             public_tracker_catalog: None,
             public_tracker_urls: HashSet::new(),
@@ -650,33 +654,53 @@ impl TrackerAnnouncer {
         let event = self.announce.announce_list().get_event();
         let udp_event = self.announce.current_udp_event();
         let numwant = self.announce.numwant();
-        // Initialize UDP manager lazily
-        if self.udp_manager.is_none() {
-            if let Some(ref client) = self.udp_client {
-                let mgr = UdpTrackerManager::new(Arc::clone(client)).await;
-                self.udp_manager = Some(mgr);
+        let tracker_url_changed = self
+            .udp_manager
+            .as_ref()
+            .is_none_or(|manager| !manager.uses_tracker_url(tracker_url));
+        let tracker_ipv6 = if tracker_url_changed {
+            UdpTrackerManager::tracker_url_is_ipv6(tracker_url).unwrap_or(false)
+        } else {
+            self.udp_family_ipv6.unwrap_or(false)
+        };
+        let needs_new_client =
+            self.udp_manager.is_none() || self.udp_family_ipv6 != Some(tracker_ipv6);
+        if needs_new_client {
+            let shared = if let Some(client) = self.udp_client.take() {
+                let matches_family = client
+                    .lock()
+                    .await
+                    .socket
+                    .local_addr()
+                    .map(|addr| addr.ip().is_ipv6() == tracker_ipv6)
+                    .unwrap_or(false);
+                matches_family.then_some(client)
             } else {
-                // No UDP client configured — try to create one
-                match crate::engine::udp_tracker_client::UdpTrackerClient::new_with_policy(
+                None
+            };
+
+            let shared = match shared {
+                Some(client) => client,
+                None => match crate::engine::udp_tracker_client::UdpTrackerClient::new_with_policy_for_family(
                     0,
                     &self.outbound_network_policy,
+                    tracker_ipv6,
                 )
                 .await
                 {
-                    Ok(client) => {
-                        let shared = Arc::new(tokio::sync::Mutex::new(client));
-                        self.udp_client = Some(Arc::clone(&shared));
-                        let mgr = UdpTrackerManager::new(shared).await;
-                        self.udp_manager = Some(mgr);
-                    }
+                    Ok(client) => Arc::new(tokio::sync::Mutex::new(client)),
                     Err(e) => {
                         warn!("[BT] Failed to create UDP tracker client: {}", e);
                         self.last_failure_kind = Some(TrackerFailureKind::Network);
                         self.announce.announce_failure();
                         return None;
                     }
-                }
-            }
+                },
+            };
+
+            self.udp_client = Some(Arc::clone(&shared));
+            self.udp_manager = Some(UdpTrackerManager::new(shared).await);
+            self.udp_family_ipv6 = Some(tracker_ipv6);
         }
 
         {
@@ -1441,6 +1465,71 @@ mod tests {
         assert_eq!(result.seeders, Some(7));
         assert_eq!(result.leechers, Some(3));
         server.await.expect("UDP tracker fixture should exit");
+    }
+
+    #[tokio::test]
+    async fn dual_stack_policy_uses_ipv6_source_for_ipv6_udp_tracker() {
+        let socket = tokio::net::UdpSocket::bind("[::1]:0")
+            .await
+            .expect("bind local IPv6 UDP tracker fixture");
+        let address = socket.local_addr().expect("local IPv6 tracker address");
+        let server = tokio::spawn(async move {
+            let mut request = [0u8; 256];
+            let (length, peer) = socket
+                .recv_from(&mut request)
+                .await
+                .expect("receive IPv6 BEP 15 connect request");
+            assert_eq!(peer.ip(), "::1".parse::<std::net::IpAddr>().unwrap());
+            assert_eq!(length, 16);
+            assert_eq!(&request[0..8], &0x41727101980u64.to_be_bytes());
+            assert_eq!(&request[8..12], &0i32.to_be_bytes());
+            let transaction = u32::from_be_bytes(request[12..16].try_into().unwrap());
+            let connection_id = 0x0102_0304_0506_0708u64;
+            let mut connect_response = Vec::with_capacity(16);
+            connect_response.extend_from_slice(&0i32.to_be_bytes());
+            connect_response.extend_from_slice(&transaction.to_be_bytes());
+            connect_response.extend_from_slice(&connection_id.to_be_bytes());
+            socket
+                .send_to(&connect_response, peer)
+                .await
+                .expect("send IPv6 BEP 15 connect response");
+
+            let (length, peer) = socket
+                .recv_from(&mut request)
+                .await
+                .expect("receive IPv6 BEP 15 announce request");
+            assert!(length >= 98);
+            assert_eq!(&request[0..8], &connection_id.to_be_bytes());
+            assert_eq!(&request[8..12], &1i32.to_be_bytes());
+            let transaction = u32::from_be_bytes(request[12..16].try_into().unwrap());
+            let mut announce_response = Vec::with_capacity(26);
+            announce_response.extend_from_slice(&1i32.to_be_bytes());
+            announce_response.extend_from_slice(&transaction.to_be_bytes());
+            announce_response.extend_from_slice(&60u32.to_be_bytes());
+            announce_response.extend_from_slice(&3u32.to_be_bytes());
+            announce_response.extend_from_slice(&7u32.to_be_bytes());
+            announce_response.extend_from_slice(&[192, 0, 2, 11, 0x1A, 0xE1]);
+            socket
+                .send_to(&announce_response, peer)
+                .await
+                .expect("send IPv6 BEP 15 announce response");
+        });
+
+        let policy = Arc::new(
+            OutboundNetworkPolicy::new(vec!["127.0.0.2".parse().unwrap(), "::1".parse().unwrap()])
+                .expect("dual-stack policy should build"),
+        );
+        let mut announcer =
+            TrackerAnnouncer::new(&[vec![format!("udp://{address}/announce")]], &None);
+        announcer.set_outbound_network_policy(policy);
+        announcer.set_timeouts(Duration::from_secs(2), Duration::from_secs(2));
+        let result = announcer
+            .announce(&[0u8; 20], &[1u8; 20], 0, 1, 0)
+            .await
+            .expect("IPv6 UDP tracker fixture should return an announce result");
+
+        assert_eq!(result.peers, vec![("192.0.2.11".to_string(), 6881)]);
+        server.await.expect("IPv6 UDP tracker fixture should exit");
     }
 
     #[tokio::test]

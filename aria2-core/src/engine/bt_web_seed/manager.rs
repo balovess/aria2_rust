@@ -63,22 +63,6 @@ impl WebSeedManager {
         total_length: u64,
         tls: &ClientTlsConfig,
     ) -> Result<Self, String> {
-        Self::new_with_tls_and_policy(
-            urls,
-            piece_length,
-            total_length,
-            tls,
-            &OutboundNetworkPolicy::direct(),
-        )
-    }
-
-    pub(crate) fn new_with_tls_and_policy(
-        urls: Vec<String>,
-        piece_length: u32,
-        total_length: u64,
-        tls: &ClientTlsConfig,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<Self, String> {
         debug!(
             count = urls.len(),
             "Creating WebSeedManager with {} seed(s)",
@@ -89,15 +73,48 @@ impl WebSeedManager {
 
         let clients = urls
             .into_iter()
-            .map(|url| {
-                WebSeedClient::with_shared_stats_and_tls_and_policy(
+            .map(|url| WebSeedClient::with_shared_stats_and_tls(&url, Arc::clone(&stats), tls))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            clients,
+            stats,
+            piece_length,
+            total_length,
+        })
+    }
+
+    /// Create policy-bound web-seed clients using async endpoint resolution.
+    ///
+    /// This is the production BT construction path: each hostname is
+    /// resolved before reqwest is built, so the local source address matches
+    /// the address family that can actually reach that seed.
+    pub(crate) async fn new_with_tls_and_policy_async(
+        urls: Vec<String>,
+        piece_length: u32,
+        total_length: u64,
+        tls: &ClientTlsConfig,
+        policy: &OutboundNetworkPolicy,
+    ) -> Result<Self, String> {
+        debug!(
+            count = urls.len(),
+            "Creating async policy-bound web-seed manager with {} seed(s)",
+            urls.len()
+        );
+
+        let stats = Arc::new(WebSeedStats::new());
+        let mut clients = Vec::with_capacity(urls.len());
+        for url in urls {
+            clients.push(
+                WebSeedClient::with_shared_stats_and_tls_and_policy_async(
                     &url,
-                    stats.clone(),
+                    Arc::clone(&stats),
                     tls,
                     policy,
                 )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .await?,
+            );
+        }
 
         Ok(Self {
             clients,

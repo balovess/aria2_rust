@@ -163,6 +163,11 @@ standalone URL-inspection method:
 - A magnet link needs metadata exchange before its file names and lengths are available.
 - `dry-run` only performs HTTP/FTP availability and length probing; it is not a general file-list API.
 
+`aria2.getUris(gid)` follows the original RPC implementation and returns the
+URI entries associated with the first `FileEntry` only. For a multi-file task,
+use `getFiles` to inspect each file's URI list; `getUris` does not flatten URI
+entries from all files.
+
 The Python and Node.js bindings expose this as `client.get_files(gid)` and
 `client.getFiles(gid)` respectively.
 

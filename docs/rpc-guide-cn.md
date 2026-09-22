@@ -165,6 +165,10 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 - magnet 必须先完成 metadata exchange，文件名和大小才会出现；
 - `dry-run` 只执行 HTTP/FTP 可用性和长度探测，不应当被当作通用文件列表接口。
 
+`aria2.getUris(gid)` 遵循原版 RPC 实现，只返回第一个 `FileEntry` 关联的 URI
+条目。多文件任务应使用 `getFiles` 查看每个文件的 URI 列表；`getUris` 不会
+把所有文件的 URI 展平合并。
+
 Python 和 Node.js binding 分别对应 `client.get_files(gid)` 与
 `client.getFiles(gid)`。
 

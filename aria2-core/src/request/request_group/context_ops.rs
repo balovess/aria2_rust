@@ -204,8 +204,9 @@ impl super::RequestGroup {
 
     /// Return all URIs (spent + remaining) across all requested file entries.
     ///
-    /// Mirrors C++ `RequestGroup::getUris()` which collects URIs from
-    /// all `FileEntry` objects.
+    /// This is an internal aggregate used by lifecycle/session accounting. The
+    /// upstream-compatible RPC `getUris` projection intentionally reads only
+    /// the first `FileEntry`.
     pub fn get_all_uris(&self) -> Vec<String> {
         let guard = self.download_context.recover();
         if let Some(ref ctx) = *guard {

@@ -69,6 +69,32 @@ impl UdpTrackerClient {
         })
     }
 
+    pub async fn new_with_policy_for_family(
+        bind_port: u16,
+        policy: &OutboundNetworkPolicy,
+        ipv6: bool,
+    ) -> Result<Self, String> {
+        let socket = policy
+            .bind_udp_for_family(bind_port, ipv6)
+            .await
+            .map_err(|e| format!("UDP bind failed: {e}"))?;
+        let addr = socket
+            .local_addr()
+            .map_err(|e| format!("UDP local address unavailable: {e}"))?;
+
+        info!(%addr, ipv6, "UdpTrackerClient bound to requested address family");
+
+        Ok(Self {
+            socket: Arc::new(socket),
+            conn_cache: HashMap::new(),
+            pending: VecDeque::new(),
+            inflight: VecDeque::new(),
+            waiting_for_conn: VecDeque::new(),
+            txn_map: HashMap::new(),
+            next_txn_id: Self::initial_txn_id(),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn add_announce(
         &mut self,

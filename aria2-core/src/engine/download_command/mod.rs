@@ -17,7 +17,6 @@ use crate::error::{Aria2Error, Result};
 use crate::http::HttpRequestPolicy;
 use crate::http::cookie::Cookie;
 use crate::http::cookie::CookieStorage;
-use crate::http::response_processor::extract_filename_from_url;
 use crate::http::socks_connector::{NoProxyMatcher, ProxyUrl};
 use crate::network::OutboundNetworkPolicy;
 use crate::rate_limiter::RateLimiter;
@@ -25,6 +24,7 @@ use crate::request::request_group::{AtomicProgress, DownloadOptions, GroupId, Re
 use crate::selector::server_stat_man::ServerStatMan;
 use crate::util::perf_monitor::{AtomicMetrics, Metrics, PerformanceMonitor};
 use crate::util::rwlock_ext::RwLockRecover;
+use crate::validation::uri::sanitize_filename_from_uri;
 
 /// Core download command that handles HTTP/HTTPS file downloads.
 ///
@@ -428,7 +428,7 @@ impl DownloadCommand {
 
         let filename = output_name
             .map(|n| n.to_string())
-            .unwrap_or_else(|| extract_filename_from_url(uri));
+            .unwrap_or_else(|| sanitize_filename_from_uri(uri));
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
         let request_policy = options.http_request_policy();
@@ -760,7 +760,7 @@ impl DownloadCommand {
 
         let filename = output_name
             .map(|n| n.to_string())
-            .unwrap_or_else(|| extract_filename_from_url(uri));
+            .unwrap_or_else(|| sanitize_filename_from_uri(uri));
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
 

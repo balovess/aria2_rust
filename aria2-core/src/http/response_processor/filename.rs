@@ -6,15 +6,9 @@
 //! normalization remain separate so the safety policy is applied uniformly.
 
 use tracing::debug;
-use url::Url;
 
 use crate::http::content_disposition::parse_content_disposition_with_default_utf8;
 use crate::http::header_processor::HttpResponseHead;
-use crate::util::uri;
-
-/// Default filename when the URI path ends with `/`.
-/// Matches C++ `Request::DEFAULT_FILE`.
-pub(crate) const DEFAULT_FILE: &str = "index.html";
 
 /// Determine the output filename from response metadata or the effective URL.
 ///
@@ -48,7 +42,7 @@ pub fn determine_filename(
         return filename;
     }
 
-    let filename = extract_filename_from_url(request_url);
+    let filename = crate::validation::uri::sanitize_filename_from_uri(request_url);
     debug!(filename = %filename, source = "URL", "Filename determined");
     filename
 }
@@ -89,22 +83,6 @@ pub(crate) fn determine_filename_from_response(
     )
 }
 
-/// Extract a filename from the URL path, preserving the raw segment until it
-/// has been isolated from the directory path.
-///
-/// This ordering matters for encoded separators such as `%2F`: decoding the
-/// entire path first would allow an encoded separator to change which segment
-/// is treated as the basename.
-/// Returns "index.html" if the path ends with `/` or is empty.
-pub(crate) fn extract_filename_from_url(url: &str) -> String {
-    let Some(raw_segment) = raw_url_path_segment(url) else {
-        return DEFAULT_FILE.to_owned();
-    };
-
-    let decoded = uri::percent_decode(&raw_segment);
-    sanitize_filename(&decoded).unwrap_or_else(|| DEFAULT_FILE.to_owned())
-}
-
 /// Return the only usable Content-Disposition value.
 ///
 /// Multiple values are ambiguous and are ignored as a group. This makes the
@@ -127,96 +105,7 @@ fn content_disposition_filename(
     };
 
     let candidate = parse_content_disposition_filename(value, default_utf8)?;
-    sanitize_filename(&candidate)
-}
-
-/// Extract the raw final path segment without decoding it first.
-fn raw_url_path_segment(url: &str) -> Option<String> {
-    if let Ok(parsed) = Url::parse(url) {
-        if parsed.path().ends_with('/') {
-            return None;
-        }
-        return parsed
-            .path()
-            .rsplit('/')
-            .find(|segment| !segment.is_empty())
-            .map(str::to_owned);
-    }
-
-    // Keep a useful fallback for URI-like inputs accepted by the request
-    // layer, while excluding query and fragment data.
-    let without_suffix = url.split(['?', '#']).next().unwrap_or_default();
-    let path = if let Some(scheme_end) = without_suffix.find("://") {
-        let authority_and_path = &without_suffix[scheme_end + 3..];
-        let slash = authority_and_path.find('/')?;
-        &authority_and_path[slash..]
-    } else {
-        without_suffix
-    };
-
-    if path.ends_with('/') {
-        return None;
-    }
-
-    path.rsplit('/')
-        .find(|segment| !segment.is_empty())
-        .map(str::to_owned)
-}
-
-/// Normalize one candidate into a safe, cross-platform basename.
-///
-/// Directory separators are untrusted path information and only the final
-/// component is retained. Windows-invalid characters are replaced even on
-/// Unix so a downloaded task remains portable.
-fn sanitize_filename(candidate: &str) -> Option<String> {
-    let basename = candidate
-        .rsplit(['/', '\\'])
-        .find(|part| !part.is_empty())?;
-
-    let mut name: String = basename
-        .chars()
-        .filter(|ch| !ch.is_control())
-        .map(|ch| match ch {
-            '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
-            _ => ch,
-        })
-        .collect();
-
-    // Trailing spaces and dots are not stable across Windows and Unix.
-    name = name.trim_end_matches([' ', '.']).to_owned();
-    if name.is_empty() || name == "." || name == ".." {
-        return None;
-    }
-
-    if is_windows_reserved_name(&name) {
-        name.insert(0, '_');
-    }
-
-    if name.len() > MAX_FILENAME_BYTES {
-        let mut end = MAX_FILENAME_BYTES;
-        while !name.is_char_boundary(end) {
-            end -= 1;
-        }
-        name.truncate(end);
-        name = name.trim_end_matches([' ', '.']).to_owned();
-    }
-
-    (!name.is_empty()).then_some(name)
-}
-
-const MAX_FILENAME_BYTES: usize = 255;
-
-fn is_windows_reserved_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or_default();
-    let bytes = stem.as_bytes();
-    stem.eq_ignore_ascii_case("CON")
-        || stem.eq_ignore_ascii_case("PRN")
-        || stem.eq_ignore_ascii_case("AUX")
-        || stem.eq_ignore_ascii_case("NUL")
-        || (bytes.len() == 4
-            && (bytes[..3].eq_ignore_ascii_case(b"COM") || bytes[..3].eq_ignore_ascii_case(b"LPT"))
-            && bytes[3].is_ascii_digit()
-            && bytes[3] != b'0')
+    crate::validation::uri::sanitize_filename_candidate(&candidate)
 }
 
 /// Parse filename from Content-Disposition header value using the full
@@ -274,6 +163,7 @@ fn parse_content_disposition_filename(cd_value: &str, default_utf8: bool) -> Opt
 mod tests {
     use super::*;
     use crate::http::header_processor::HttpHeaderProcessor;
+    use crate::validation::uri::sanitize_filename_candidate as sanitize_filename;
 
     /// Helper: parse raw HTTP response bytes into HttpResponseHead.
     fn parse_head(raw: &[u8]) -> HttpResponseHead {

@@ -72,21 +72,32 @@ impl WebSeedClient {
         stats: Arc<WebSeedStats>,
         tls: &ClientTlsConfig,
     ) -> Result<Self, String> {
-        Self::with_shared_stats_and_tls_and_policy(
-            base_url,
+        debug!(url = base_url, "Creating WebSeedClient with shared stats");
+        crate::http::client_pool::ensure_rustls_provider();
+        let client = build_client(tls, None)?;
+
+        Ok(Self {
+            base_url: base_url.to_string(),
+            client,
+            active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
             stats,
-            tls,
-            &OutboundNetworkPolicy::direct(),
-        )
+        })
     }
 
-    pub(crate) fn with_shared_stats_and_tls_and_policy(
+    /// Create a policy-bound client after resolving the web-seed endpoint.
+    ///
+    /// The production BT path is asynchronous, so it can select a source
+    /// compatible with the actual hostname resolution.
+    pub(crate) async fn with_shared_stats_and_tls_and_policy_async(
         base_url: &str,
         stats: Arc<WebSeedStats>,
         tls: &ClientTlsConfig,
         policy: &OutboundNetworkPolicy,
     ) -> Result<Self, String> {
-        debug!(url = base_url, "Creating WebSeedClient with shared stats");
+        debug!(
+            url = base_url,
+            "Creating WebSeedClient with async network policy"
+        );
         crate::http::client_pool::ensure_rustls_provider();
 
         let local_address = if policy.is_direct() {
@@ -100,13 +111,10 @@ impl WebSeedClient {
             let port = url
                 .port_or_known_default()
                 .ok_or_else(|| "web-seed URL has no port".to_string())?;
-            if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-                policy
-                    .source_for(std::net::SocketAddr::new(ip, port))
-                    .map_err(|error| format!("web-seed source selection failed: {error}"))?
-            } else {
-                policy.addresses().into_iter().next()
-            }
+            policy
+                .source_for_host(host, port)
+                .await
+                .map_err(|error| format!("web-seed source selection failed: {error}"))?
         };
         let client = build_client(tls, local_address)?;
 

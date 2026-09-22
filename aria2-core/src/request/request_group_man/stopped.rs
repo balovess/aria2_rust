@@ -46,17 +46,43 @@ impl StoppedResults {
 
     /// Find a result by GID hex string.
     pub fn find_by_hex(&self, hex: &str) -> Option<DownloadResult> {
-        self.results
-            .recover()
-            .iter()
-            .find(|r| r.gid_hex() == hex)
-            .cloned()
+        let (prefix, mask) = crate::request::request_group::GroupId::hex_prefix(hex)?;
+        let results = self.results.recover();
+        let mut matched = None;
+        for result in results.iter() {
+            if result.gid.value() & mask == prefix {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(result.clone());
+            }
+        }
+        matched
+    }
+
+    pub fn find_gid_by_hex(
+        &self,
+        hex: &str,
+    ) -> Option<crate::request::request_group::GroupId> {
+        let (prefix, mask) = crate::request::request_group::GroupId::hex_prefix(hex)?;
+        let results = self.results.recover();
+        let mut matched = None;
+        for result in results.iter() {
+            if result.gid.value() & mask == prefix {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(result.gid);
+            }
+        }
+        matched
     }
 
     /// Remove a result by GID hex string.
     pub fn remove_by_hex(&self, hex: &str) -> Option<DownloadResult> {
+        let gid = self.find_gid_by_hex(hex)?;
         let mut results = self.results.recover_mut();
-        let pos = results.iter().position(|r| r.gid_hex() == hex)?;
+        let pos = results.iter().position(|r| r.gid == gid)?;
         Some(results.remove(pos))
     }
 

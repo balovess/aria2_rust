@@ -1,6 +1,6 @@
 //! RPC API regression tests for aria2-rust.
 //!
-//! These tests verify that all 36 original RPC methods return values in the expected format
+//! These tests verify that all 35 original RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
 #[path = "../support/mod.rs"]
@@ -38,6 +38,46 @@ fn valid_torrent() -> String {
     base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         b"d8:announce27:http://example.com/announce4:infod6:lengthi4e4:name8:file.bin12:piece lengthi4e6:pieces20:12345678901234567890eee",
+    )
+}
+
+fn multi_file_torrent() -> String {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+    use std::collections::BTreeMap;
+
+    let file = |directory: &[u8], name: &[u8]| {
+        let path = BencodeValue::List(vec![
+            BencodeValue::Bytes(directory.to_vec()),
+            BencodeValue::Bytes(name.to_vec()),
+        ]);
+        let mut entry = BTreeMap::new();
+        entry.insert(b"length".to_vec(), BencodeValue::Int(4));
+        entry.insert(b"path".to_vec(), path);
+        BencodeValue::Dict(entry)
+    };
+
+    let mut info = BTreeMap::new();
+    info.insert(
+        b"files".to_vec(),
+        BencodeValue::List(vec![
+            file(b"one", b"first.bin"),
+            file(b"two", b"second.bin"),
+        ]),
+    );
+    info.insert(b"name".to_vec(), BencodeValue::Bytes(b"multi".to_vec()));
+    info.insert(b"piece length".to_vec(), BencodeValue::Int(4));
+    info.insert(b"pieces".to_vec(), BencodeValue::Bytes(vec![0; 40]));
+
+    let mut torrent = BTreeMap::new();
+    torrent.insert(
+        b"announce".to_vec(),
+        BencodeValue::Bytes(b"http://example.com/announce".to_vec()),
+    );
+    torrent.insert(b"info".to_vec(), BencodeValue::Dict(info));
+
+    base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        BencodeValue::Dict(torrent).encode(),
     )
 }
 
@@ -807,6 +847,42 @@ async fn regression_get_uris_format() {
     }
 }
 
+/// Test: aria2.getUris follows the original first-FileEntry behavior.
+#[tokio::test]
+async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
+    let engine = core_engine();
+    let add_req = make_request(
+        "aria2.addTorrent",
+        serde_json::json!([
+            multi_file_torrent(),
+            [
+                "http://example.com/first.bin",
+                "http://mirror.example.com/first.bin"
+            ]
+        ]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_req = make_request(
+        "aria2.changeUri",
+        serde_json::json!([gid, 2, [], ["http://example.com/second.bin"]]),
+    );
+    let change_resp = engine.handle_request(&change_req).await;
+    assert_success(&change_resp);
+
+    let req = make_request("aria2.getUris", serde_json::json!([gid]));
+    let resp = engine.handle_request(&req).await;
+    assert_success(&resp);
+
+    let uris: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
+    assert_eq!(uris.len(), 3);
+    assert_eq!(uris[0]["uri"], format!("bt://{gid}"));
+    assert_eq!(uris[1]["uri"], "http://example.com/first.bin");
+    assert_eq!(uris[2]["uri"], "http://mirror.example.com/first.bin");
+}
+
 /// Test: aria2.getFiles returns array with file info.
 #[tokio::test]
 async fn regression_get_files_format() {
@@ -897,8 +973,8 @@ async fn regression_tell_status_includes_original_bt_metadata() {
     assert_eq!(status["bittorrent"]["mode"], "single");
     assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
     assert_eq!(status["seeder"], "false");
-    assert_eq!(status["completedPieces"], "0");
-    assert_eq!(status["missingPieces"], "1");
+    assert!(status.get("completedPieces").is_none());
+    assert!(status.get("missingPieces").is_none());
 }
 
 /// Test: stopped BitTorrent status keeps the original torrent metadata.
@@ -936,8 +1012,8 @@ async fn regression_tell_stopped_includes_original_bt_metadata() {
     );
     assert_eq!(status["bittorrent"]["mode"], "single");
     assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
-    assert_eq!(status["completedPieces"], "0");
-    assert_eq!(status["missingPieces"], "1");
+    assert!(status.get("completedPieces").is_none());
+    assert!(status.get("missingPieces").is_none());
 }
 
 /// Test: aria2.getServers returns array with server info.

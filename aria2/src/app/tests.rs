@@ -983,6 +983,29 @@ async fn test_global_interface_reaches_lpd_multicast_interface() {
 
 #[cfg(feature = "bittorrent")]
 #[tokio::test]
+async fn test_dual_stack_global_interface_selects_ipv4_lpd_source() {
+    let mut app = App::new();
+    app.load_cli_args(
+        CliArgs::try_parse_from(["aria2", "--multiple-interface=::1,127.0.0.2"])
+            .expect("dual-stack interface list should parse through the CLI seam"),
+    )
+    .await
+    .expect("dual-stack interface list should update the configuration");
+
+    app.initialize_engine().await;
+    let engine = app.engine.lock().await;
+    let engine = engine
+        .as_ref()
+        .expect("the engine must be initialized for dual-stack LPD binding");
+    assert_eq!(
+        engine.lpd_manager().interface(),
+        Some("127.0.0.2".parse().unwrap()),
+        "IPv4-only LPD must select the IPv4 source from a dual-stack policy"
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[tokio::test]
 async fn test_explicit_lpd_interface_overrides_global_interface() {
     let mut app = App::new();
     app.load_cli_args(

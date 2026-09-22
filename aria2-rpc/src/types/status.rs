@@ -174,7 +174,7 @@ pub struct StatusInfo {
         deserialize_with = "wire::deserialize_option_string_or_number",
         skip_serializing_if = "Option::is_none"
     )]
-    pub connections: Option<u16>,
+    pub connections: Option<u32>,
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
@@ -217,20 +217,24 @@ pub struct StatusInfo {
         skip_serializing_if = "Option::is_none"
     )]
     pub num_pieces: Option<u32>,
-    /// Number of locally verified pieces (BitTorrent extension).
+    /// Number of locally verified pieces retained for internal consumers.
+    /// This is not part of the upstream `tellStatus` wire projection.
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
         deserialize_with = "wire::deserialize_option_string_or_number",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        skip
     )]
     pub completed_pieces: Option<u32>,
-    /// Number of pieces still missing locally (BitTorrent extension).
+    /// Number of pieces still missing locally, retained for internal consumers.
+    /// This is not part of the upstream `tellStatus` wire projection.
     #[serde(
         default,
         serialize_with = "wire::serialize_option_display_as_string",
         deserialize_with = "wire::deserialize_option_string_or_number",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        skip
     )]
     pub missing_pieces: Option<u32>,
     /// List of GIDs that follow (chained downloads)
@@ -344,7 +348,7 @@ impl StatusInfo {
         self.error_message = Some(m.into());
         self
     }
-    pub fn with_connections(mut self, c: u16) -> Self {
+    pub fn with_connections(mut self, c: u32) -> Self {
         self.connections = Some(c);
         self
     }

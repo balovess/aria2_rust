@@ -6,7 +6,6 @@ use tracing::{debug, info, warn};
 
 use crate::engine::bt_download_command::{BtDownloadCommand, MAX_PUBLIC_TRACKERS_TO_TRY};
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
-use crate::engine::udp_tracker_client::UdpTrackerClient;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -150,13 +149,6 @@ impl BtDownloadCommand {
         announcer.set_announce_options(force_encryption, external_ip);
         if let Some(catalog) = public_tracker_catalog {
             announcer.set_public_tracker_catalog(catalog, public_tracker_urls);
-        }
-
-        // Set up UDP client for UDP tracker support
-        if let Ok(udp) = UdpTrackerClient::new_with_policy(0, &self.outbound_network_policy).await {
-            let shared = std::sync::Arc::new(tokio::sync::Mutex::new(udp));
-            self.udp_client = Some(std::sync::Arc::clone(&shared));
-            announcer.set_udp_client(shared);
         }
 
         // The listener is created before discovery so incoming peers can join

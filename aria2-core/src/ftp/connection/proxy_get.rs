@@ -249,18 +249,8 @@ pub async fn execute_proxy_get_with_policy(
                 .await
                 .map_err(|error| Aria2Error::Network(error.to_string()))
         } else {
-            let proxy_address = tokio::net::lookup_host((
-                proxy_config.proxy_host.as_str(),
-                proxy_config.proxy_port,
-            ))
-            .await
-            .map_err(|error| Aria2Error::Network(format!("proxy lookup failed: {error}")))?
-            .find(|address| policy.source_for(*address).is_ok())
-            .ok_or_else(|| {
-                Aria2Error::Network("proxy has no address matching the outbound policy".into())
-            })?;
             policy
-                .connect(proxy_address)
+                .connect_host(&proxy_config.proxy_host, proxy_config.proxy_port)
                 .await
                 .map_err(|error| Aria2Error::Network(error.to_string()))
         }

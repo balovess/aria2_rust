@@ -19,8 +19,45 @@ impl RequestGroupMan {
 
     /// Look up a group by its hex GID string (RPC convention).
     pub fn group_by_hex(&self, hex: &str) -> Option<Arc<std::sync::RwLock<RequestGroup>>> {
-        let gid = GroupId::from_hex_string(hex)?;
+        let gid = self.resolve_group_id(hex)?;
         self.find_group(gid)
+    }
+
+    /// Resolve a unique full GID or high-order hexadecimal prefix.
+    ///
+    /// This mirrors aria2's `GroupId::expandUnique`: full 16-digit IDs take
+    /// the indexed path, while abbreviated IDs scan the canonical index and
+    /// are accepted only when exactly one group matches.
+    pub fn resolve_group_id(&self, hex: &str) -> Option<GroupId> {
+        let (prefix, mask) = GroupId::hex_prefix(hex)?;
+        if mask == u64::MAX {
+            return self
+                .groups
+                .contains_key(&GroupId(prefix))
+                .then_some(GroupId(prefix));
+        }
+
+        let mut matched = None;
+        for entry in self.groups.iter() {
+            if entry.key().0 & mask == prefix {
+                if matched.is_some() {
+                    return None;
+                }
+                matched = Some(*entry.key());
+            }
+        }
+        matched
+    }
+
+    /// Resolve a unique GID prefix across live groups and stopped results.
+    pub fn resolve_gid_hex(&self, hex: &str) -> Option<GroupId> {
+        let live = self.resolve_group_id(hex);
+        let stopped = self.stopped.find_gid_by_hex(hex);
+        match (live, stopped) {
+            (Some(live), None) => Some(live),
+            (None, Some(stopped)) => Some(stopped),
+            _ => None,
+        }
     }
 
     /// Change a reserved group's queue position and return its new index.
