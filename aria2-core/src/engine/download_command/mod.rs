@@ -431,6 +431,9 @@ impl DownloadCommand {
             .unwrap_or_else(|| sanitize_filename_from_uri(uri));
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
+        group
+            .recover()
+            .set_resolved_output_path(path.to_string_lossy());
         let request_policy = options.http_request_policy();
 
         // Every client construction path below must use the same rustls
@@ -763,6 +766,9 @@ impl DownloadCommand {
             .unwrap_or_else(|| sanitize_filename_from_uri(uri));
 
         let path = std::path::PathBuf::from(&dir).join(&filename);
+        group
+            .recover()
+            .set_resolved_output_path(path.to_string_lossy());
 
         let request_policy = options.http_request_policy();
         info!(

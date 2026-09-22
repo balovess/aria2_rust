@@ -15,7 +15,7 @@ use aria2_core::config::{ConfigManager, project_initial_options};
 use aria2_core::engine::bt_registry::BtRegistry;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
-use aria2_core::request::request_group_man::RequestGroupMan;
+use aria2_core::request::request_group_man::{GroupIdResolution, RequestGroupMan};
 use aria2_rpc::{BackendError, BackendMetadata};
 use tokio::sync::RwLock;
 
@@ -130,15 +130,14 @@ impl CoreRpcBackend {
     }
 
     fn parse_gid(&self, gid: &str) -> Result<GroupId, BackendError> {
-        let Some((prefix, _)) = GroupId::hex_prefix(gid) else {
-            return Err(Self::invalid("Invalid GID"));
-        };
-        // Keep syntactically valid but absent/ambiguous prefixes on the
-        // execution-error path, matching aria2's `str2Gid` callers.
-        Ok(self
-            .group_man
-            .resolve_gid_hex(gid)
-            .unwrap_or(GroupId(prefix)))
+        match self.group_man.resolve_gid_hex_detailed(gid) {
+            GroupIdResolution::Resolved(gid) => Ok(gid),
+            GroupIdResolution::Invalid => Err(Self::execution(format!("Invalid GID {gid}"))),
+            GroupIdResolution::NotUnique => {
+                Err(Self::execution(format!("GID {gid} is not unique")))
+            }
+            GroupIdResolution::NotFound => Err(Self::execution(format!("GID {gid} is not found"))),
+        }
     }
 
     fn send(&self, command: EngineCommand) -> Result<(), BackendError> {

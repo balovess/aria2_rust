@@ -63,6 +63,9 @@ Invoke-RestMethod -Uri http://127.0.0.1:6800/jsonrpc -Method Post -ContentType '
 
 GID parameters also accept a unique high-order hexadecimal prefix, matching
 aria2's `GroupId::expandUnique` behavior. Ambiguous prefixes are rejected.
+GIDs use hexadecimal digits only (no `0x` prefix). A malformed, missing, or
+ambiguous GID is reported as aria2's execution error (code `1`), with the
+diagnostic distinguishing `Invalid GID`, `is not found`, and `is not unique`.
 
 ### Batch requests
 

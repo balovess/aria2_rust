@@ -11,6 +11,7 @@ use aria2_protocol::bittorrent::tracker::udp_tracker_protocol::{
 };
 
 use crate::engine::udp_tracker_client::SharedUdpClient;
+use crate::network::OutboundNetworkPolicy;
 
 const DEFAULT_UDP_PORT: u16 = 6881;
 const MAX_TRACKER_ANNOUNCE_TIER: usize = 2;
@@ -29,10 +30,25 @@ pub struct UdpTrackerManager {
     last_announce_interval: u32,
     last_announce_time: Option<tokio::time::Instant>,
     request_timeout: Duration,
+    outbound_network_policy: Option<Arc<OutboundNetworkPolicy>>,
 }
 
 impl UdpTrackerManager {
     pub async fn new(client: SharedUdpClient) -> Self {
+        Self::with_policy(client, None)
+    }
+
+    pub async fn new_with_policy(
+        client: SharedUdpClient,
+        policy: Arc<OutboundNetworkPolicy>,
+    ) -> Self {
+        Self::with_policy(client, Some(policy))
+    }
+
+    fn with_policy(
+        client: SharedUdpClient,
+        outbound_network_policy: Option<Arc<OutboundNetworkPolicy>>,
+    ) -> Self {
         Self {
             client,
             endpoints: Vec::new(),
@@ -42,6 +58,7 @@ impl UdpTrackerManager {
             request_timeout: Duration::from_secs(
                 crate::engine::udp_tracker_client::REQUEST_TIMEOUT_SECS,
             ),
+            outbound_network_policy,
         }
     }
 
@@ -78,14 +95,7 @@ impl UdpTrackerManager {
             return None;
         }
 
-        let host_port = &url[6..];
-        let host_part = if let Some(query_idx) = host_port.find('?') {
-            &host_port[..query_idx]
-        } else if let Some(path_idx) = host_port.find('/') {
-            &host_port[..path_idx]
-        } else {
-            host_port
-        };
+        let host_part = Self::udp_host_port(url)?;
 
         if let Some(addr) = Self::resolve_host(host_part) {
             Some(UdpTrackerEndpoint {
@@ -101,6 +111,51 @@ impl UdpTrackerManager {
 
     pub(crate) fn tracker_url_is_ipv6(url: &str) -> Option<bool> {
         Self::parse_udp_url(url, 0).map(|endpoint| endpoint.addr.is_ipv6())
+    }
+
+    pub(crate) async fn tracker_url_is_ipv6_with_policy(
+        url: &str,
+        policy: &OutboundNetworkPolicy,
+    ) -> Option<bool> {
+        let host_port = Self::udp_host_port(url)?;
+        let (host, port) = Self::split_host_port(host_port)?;
+        policy
+            .resolve_udp_host(host, port)
+            .await
+            .ok()
+            .map(|address| address.is_ipv6())
+    }
+
+    fn udp_host_port(url: &str) -> Option<&str> {
+        let scheme = url.get(..6)?;
+        if !scheme.eq_ignore_ascii_case("udp://") {
+            return None;
+        }
+        let host_port = &url[6..];
+        Some(if let Some(query_idx) = host_port.find('?') {
+            &host_port[..query_idx]
+        } else if let Some(path_idx) = host_port.find('/') {
+            &host_port[..path_idx]
+        } else {
+            host_port
+        })
+    }
+
+    fn split_host_port(host_port: &str) -> Option<(&str, u16)> {
+        if let Some(bracketed) = host_port.strip_prefix('[') {
+            let close = bracketed.find(']')?;
+            let host = &bracketed[..close];
+            let port = bracketed[close + 1..]
+                .strip_prefix(':')
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(DEFAULT_UDP_PORT);
+            return Some((host, port));
+        }
+
+        if let Some((host, port)) = host_port.rsplit_once(':') {
+            return Some((host, port.parse().unwrap_or(DEFAULT_UDP_PORT)));
+        }
+        Some((host_port, DEFAULT_UDP_PORT))
     }
 
     fn resolve_host(host_port: &str) -> Option<SocketAddr> {
@@ -219,9 +274,37 @@ impl UdpTrackerManager {
         if self.endpoints.len() != 1 || self.endpoints[0].url != url {
             self.endpoints.clear();
             self.current_tier = 0;
-            self.parse_tracker_urls(&[url.to_string()]);
+            if let Some(policy) = self.outbound_network_policy.clone() {
+                if let Some(endpoint) = self.parse_udp_url_with_policy(url, 0, &policy).await {
+                    self.endpoints.push(endpoint);
+                }
+            } else {
+                self.parse_tracker_urls(&[url.to_string()]);
+            }
         }
         self.client.lock().await.clear_completed_requests();
+    }
+
+    async fn parse_udp_url_with_policy(
+        &self,
+        url: &str,
+        tier: u32,
+        policy: &OutboundNetworkPolicy,
+    ) -> Option<UdpTrackerEndpoint> {
+        let host_port = Self::udp_host_port(url)?;
+        let (host, port) = Self::split_host_port(host_port)?;
+        let addr = match policy.resolve_udp_host(host, port).await {
+            Ok(addr) => addr,
+            Err(error) => {
+                warn!(%error, %url, "Failed to resolve UDP tracker URL for the outbound policy");
+                return None;
+            }
+        };
+        Some(UdpTrackerEndpoint {
+            url: url.to_string(),
+            addr,
+            tier,
+        })
     }
 
     pub(crate) fn uses_tracker_url(&self, url: &str) -> bool {
@@ -299,6 +382,7 @@ impl UdpTrackerManager {
             request_timeout: Duration::from_secs(
                 crate::engine::udp_tracker_client::REQUEST_TIMEOUT_SECS,
             ),
+            outbound_network_policy: None,
         }
     }
 }
@@ -307,6 +391,7 @@ impl UdpTrackerManager {
 mod tests {
     use super::*;
     use crate::engine::udp_tracker_client::UdpTrackerClient;
+    use crate::network::OutboundNetworkPolicy;
 
     #[tokio::test]
     async fn test_manager_creation() {
@@ -348,6 +433,22 @@ mod tests {
             UdpTrackerManager::tracker_url_is_ipv6("udp://127.0.0.1:6969/announce"),
             Some(false)
         );
+    }
+
+    #[tokio::test]
+    async fn policy_tracker_resolution_selects_a_compatible_localhost_family() {
+        let shared = UdpTrackerClient::create_shared(0).await.unwrap();
+        let policy = Arc::new(OutboundNetworkPolicy::single(
+            "127.0.0.2".parse().expect("parse IPv4 source"),
+        ));
+        let mut manager = UdpTrackerManager::new_with_policy(shared, policy).await;
+
+        manager
+            .use_tracker_url("udp://localhost:6969/announce")
+            .await;
+
+        assert_eq!(manager.endpoints.len(), 1);
+        assert!(manager.endpoints[0].addr.ip().is_ipv4());
     }
 
     #[tokio::test]

@@ -64,6 +64,11 @@ pub struct RequestGroup {
     pub(super) uris: Vec<Box<str>>,
     /// Metalink file name override, independent of the global `out` option.
     pub(super) output_name: std::sync::RwLock<Option<String>>,
+    /// Effective local output path selected by the download command.
+    ///
+    /// This is updated after response metadata and collision resolution so
+    /// RPC and UI consumers report the path that the writer actually uses.
+    pub(super) resolved_output_path: std::sync::RwLock<Option<String>>,
     /// Download options — shared via `Arc` for cheap cloning.
     pub(super) options: Arc<DownloadOptions>,
     /// Canonical option values captured when this task was created.
@@ -255,6 +260,7 @@ impl RequestGroup {
             gid,
             uris: uris.into_iter().map(String::into_boxed_str).collect(),
             output_name: std::sync::RwLock::new(None),
+            resolved_output_path: std::sync::RwLock::new(None),
             options: Arc::new(options),
             option_snapshot: None,
             runtime_options: std::sync::RwLock::new(HashMap::new()),

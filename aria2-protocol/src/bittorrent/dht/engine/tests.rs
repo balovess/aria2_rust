@@ -56,6 +56,24 @@ async fn test_dht_engine_start_shutdown() {
 }
 
 #[tokio::test]
+async fn test_dht_engine_binds_configured_ipv6_udp_source() {
+    let engine = DhtEngine::start(DhtEngineConfig {
+        dht_file_path: None,
+        listen_addr: Some("::1".parse().expect("parse IPv6 loopback")),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT engine should bind the configured IPv6 source");
+
+    assert_eq!(
+        engine.context.socket.local_addr().ip(),
+        "::1".parse::<IpAddr>().unwrap()
+    );
+
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
 async fn test_dht_engine_state_subscription_is_event_driven() {
     let engine = DhtEngine::start(DhtEngineConfig::local())
         .await

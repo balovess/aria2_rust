@@ -243,6 +243,7 @@ impl DownloadCommand {
 
         let url_for_head = reqwest::Url::parse(uri).ok();
         let options = self.group.recover().options_arc();
+        self.publish_output_path();
         let known_total_length = self.group.recover().total_length();
         let needs_metadata_probe =
             options.uses_memory_download() && !options.uses_memory_download_for_uri(uri);
@@ -283,6 +284,7 @@ impl DownloadCommand {
             );
             if let Some(parent) = self.output_path.parent() {
                 self.output_path = parent.join(filename);
+                self.publish_output_path();
             }
         }
 
@@ -407,6 +409,7 @@ impl DownloadCommand {
                 self.output_path.display()
             );
         }
+        self.publish_output_path();
 
         let continue_download = options.continue_download;
         let resume_helper = ResumeHelper::new(&self.output_path, continue_download);
@@ -761,6 +764,12 @@ impl DownloadCommand {
         }
         release_path(&self.output_path).await;
         download_result
+    }
+
+    fn publish_output_path(&self) {
+        self.group
+            .recover()
+            .set_resolved_output_path(self.output_path.to_string_lossy());
     }
 }
 

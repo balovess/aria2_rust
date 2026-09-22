@@ -63,6 +63,9 @@ Invoke-RestMethod -Uri http://127.0.0.1:6800/jsonrpc -Method Post -ContentType '
 
 所有 GID 参数也接受唯一的高位十六进制前缀，这与 aria2 原版的
 `GroupId::expandUnique` 行为一致；前缀有歧义时会拒绝请求。
+GID 只能使用十六进制字符，不接受 `0x` 前缀。格式错误、找不到或有歧义的
+GID 都按 aria2 的执行错误（错误码 `1`）返回，错误信息分别区分
+`Invalid GID`、`is not found` 和 `is not unique`。
 
 ### 批量请求
 

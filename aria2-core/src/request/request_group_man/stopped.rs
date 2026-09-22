@@ -6,6 +6,8 @@
 use crate::request::request_group::download_result::DownloadResult;
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::GroupIdResolution;
+
 /// Storage for completed/failed/removed download results.
 pub struct StoppedResults {
     results: std::sync::RwLock<Vec<DownloadResult>>,
@@ -46,33 +48,42 @@ impl StoppedResults {
 
     /// Find a result by GID hex string.
     pub fn find_by_hex(&self, hex: &str) -> Option<DownloadResult> {
-        let (prefix, mask) = crate::request::request_group::GroupId::hex_prefix(hex)?;
+        let gid = match self.resolve_by_hex(hex) {
+            GroupIdResolution::Resolved(gid) => gid,
+            GroupIdResolution::NotFound
+            | GroupIdResolution::NotUnique
+            | GroupIdResolution::Invalid => return None,
+        };
         let results = self.results.recover();
-        let mut matched = None;
-        for result in results.iter() {
-            if result.gid.value() & mask == prefix {
-                if matched.is_some() {
-                    return None;
-                }
-                matched = Some(result.clone());
-            }
-        }
-        matched
+        results.iter().find(|result| result.gid == gid).cloned()
     }
 
     pub fn find_gid_by_hex(&self, hex: &str) -> Option<crate::request::request_group::GroupId> {
-        let (prefix, mask) = crate::request::request_group::GroupId::hex_prefix(hex)?;
+        match self.resolve_by_hex(hex) {
+            GroupIdResolution::Resolved(gid) => Some(gid),
+            GroupIdResolution::NotFound
+            | GroupIdResolution::NotUnique
+            | GroupIdResolution::Invalid => None,
+        }
+    }
+
+    pub(super) fn resolve_by_hex(&self, hex: &str) -> GroupIdResolution {
+        let Some((prefix, mask)) = crate::request::request_group::GroupId::hex_prefix(hex) else {
+            return GroupIdResolution::Invalid;
+        };
         let results = self.results.recover();
         let mut matched = None;
         for result in results.iter() {
             if result.gid.value() & mask == prefix {
                 if matched.is_some() {
-                    return None;
+                    return GroupIdResolution::NotUnique;
                 }
                 matched = Some(result.gid);
             }
         }
         matched
+            .map(GroupIdResolution::Resolved)
+            .unwrap_or(GroupIdResolution::NotFound)
     }
 
     /// Remove a result by GID hex string.

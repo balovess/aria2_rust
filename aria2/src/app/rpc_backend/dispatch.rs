@@ -91,9 +91,10 @@ impl RpcBackend for CoreRpcBackend {
                 Ok(BackendResult::response(BackendResponse::Text("OK".into())))
             }
             BackendRequest::RemoveDownloadResult { gid } => {
+                let gid = self.parse_gid(&gid)?.to_hex_string();
                 if self.group_man.remove_stopped_result(&gid).is_none() {
                     return Err(Self::execution(format!(
-                        "GID {gid} not found in download results"
+                        "Could not remove download result of GID#{gid}"
                     )));
                 }
                 Ok(BackendResult::response(BackendResponse::Text("OK".into())))

@@ -231,6 +231,7 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn tell_status(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         if let Some(group) = self.group_man.group_by_hex(&gid) {
             let group = group.recover();
             return Ok(BackendResult::response(BackendResponse::Status(
@@ -242,7 +243,7 @@ impl CoreRpcBackend {
                 Self::status_from_result(&result),
             )));
         }
-        Err(Self::execution(format!("GID {gid} not found")))
+        Err(Self::execution(format!("No such download for GID#{gid}")))
     }
 
     pub(super) fn tell_active(&self, keys: Vec<String>) -> Result<BackendResult, BackendError> {
@@ -299,6 +300,7 @@ impl CoreRpcBackend {
     }
 
     pub(super) async fn get_option(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         if let Some(group) = self.group_man.group_by_hex(&gid) {
             let (snapshot, runtime) = {
                 let group = group.recover();
@@ -319,10 +321,11 @@ impl CoreRpcBackend {
                 result.option_snapshot().cloned().unwrap_or_default(),
             )));
         }
-        Err(Self::execution(format!("GID {gid} not found")))
+        Err(Self::execution(format!("Cannot get option for GID#{gid}")))
     }
 
     pub(super) fn get_peers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         let group = self
             .group_man
             .group_by_hex(&gid)
@@ -356,15 +359,11 @@ impl CoreRpcBackend {
 
     #[cfg(feature = "bittorrent")]
     pub(super) fn get_trackers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.value();
         let registry = self
             .bt_registry
             .as_ref()
             .ok_or_else(|| Self::execution("BitTorrent registry is unavailable"))?;
-        let gid = self
-            .group_man
-            .resolve_gid_hex(&gid)
-            .ok_or_else(|| Self::execution(format!("Invalid or non-unique GID {gid}")))?
-            .value();
         let guard = registry
             .read()
             .map_err(|_| BackendError::Internal("Failed to lock BitTorrent registry".into()))?;
@@ -550,6 +549,7 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn get_uris(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         let group = self
             .group_man
             .group_by_hex(&gid)
@@ -566,6 +566,7 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn get_files(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         if let Some(group) = self.group_man.group_by_hex(&gid) {
             let group = group.recover();
             return Ok(BackendResult::response(BackendResponse::Files(
@@ -583,6 +584,7 @@ impl CoreRpcBackend {
     }
 
     pub(super) fn get_servers(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         let group = self
             .group_man
             .group_by_hex(&gid)
@@ -773,22 +775,21 @@ pub(super) fn paginate<T>(items: Vec<T>, offset: i64, num: usize) -> Vec<T> {
 }
 
 fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
+    let resolved_path = group.resolved_output_path();
     let fallback_path = || {
+        if let Some(path) = &resolved_path {
+            return path.clone();
+        }
         let name = group
             .options()
             .out
             .clone()
+            .or_else(|| group.output_name())
             .or_else(|| {
                 group
                     .uris()
                     .first()
-                    .and_then(|uri| {
-                        uri.rsplit('/')
-                            .next()
-                            .map(|name| name.split(['?', '#']).next().unwrap_or(name))
-                            .map(str::to_owned)
-                    })
-                    .filter(|name| !name.is_empty())
+                    .map(|uri| aria2_core::validation::uri::sanitize_filename_from_uri(uri))
             })
             .unwrap_or_default();
         match group.options().dir.as_deref().filter(|dir| !dir.is_empty()) {
@@ -804,22 +805,28 @@ fn build_file_infos(group: &RequestGroup, completed: u64) -> Vec<FileInfo> {
             .iter()
             .enumerate()
             .map(|(index, file)| {
-                let mut info = FileInfo::new(
-                    if file.path().is_empty() {
-                        fallback_path()
-                    } else {
-                        file.path().to_owned()
-                    },
-                    file.length(),
-                )
-                .with_index(index + 1)
-                .with_completed(completed_length_for_file(
-                    completion.as_ref(),
-                    completed,
-                    file.offset(),
-                    file.length(),
-                ))
-                .with_uris(build_uri_entries(file));
+                let path = if index == 0 {
+                    resolved_path.clone().unwrap_or_else(|| {
+                        if file.path().is_empty() {
+                            fallback_path()
+                        } else {
+                            file.path().to_owned()
+                        }
+                    })
+                } else if file.path().is_empty() {
+                    fallback_path()
+                } else {
+                    file.path().to_owned()
+                };
+                let mut info = FileInfo::new(path, file.length())
+                    .with_index(index + 1)
+                    .with_completed(completed_length_for_file(
+                        completion.as_ref(),
+                        completed,
+                        file.offset(),
+                        file.length(),
+                    ))
+                    .with_uris(build_uri_entries(file));
                 info.selected = file.is_requested();
                 info
             })

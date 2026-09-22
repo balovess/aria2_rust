@@ -310,25 +310,30 @@ impl DownloadResult {
         }
 
         let fallback_path = {
-            let options = group.options();
-            let name = group
-                .output_name()
-                .or_else(|| options.out.clone())
-                .or_else(|| {
-                    group
-                        .uris()
-                        .first()
-                        .map(|uri| crate::validation::uri::sanitize_filename_from_uri(uri))
-                })
-                .unwrap_or_default();
-            match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
-                Some(dir) if !name.is_empty() => std::path::PathBuf::from(dir)
-                    .join(name)
-                    .to_string_lossy()
-                    .into_owned(),
-                _ => name,
+            if let Some(path) = group.resolved_output_path() {
+                path
+            } else {
+                let options = group.options();
+                let name = group
+                    .output_name()
+                    .or_else(|| options.out.clone())
+                    .or_else(|| {
+                        group
+                            .uris()
+                            .first()
+                            .map(|uri| crate::validation::uri::sanitize_filename_from_uri(uri))
+                    })
+                    .unwrap_or_default();
+                match options.dir.as_deref().filter(|dir| !dir.is_empty()) {
+                    Some(dir) if !name.is_empty() => std::path::PathBuf::from(dir)
+                        .join(name)
+                        .to_string_lossy()
+                        .into_owned(),
+                    _ => name,
+                }
             }
         };
+        let resolved_path = group.resolved_output_path();
         let completion = bt_completion_bitfield(group);
         let files = if let Some(context) = group.get_download_context() {
             context
@@ -336,6 +341,13 @@ impl DownloadResult {
                 .iter()
                 .enumerate()
                 .map(|(index, file)| {
+                    let path = if index == 0 {
+                        resolved_path
+                            .clone()
+                            .unwrap_or_else(|| file.path().to_string())
+                    } else {
+                        file.path().to_string()
+                    };
                     let completed_length = completion
                         .as_ref()
                         .map(|bitfield| {
@@ -367,7 +379,7 @@ impl DownloadResult {
 
                     FileEntry {
                         index: index + 1,
-                        path: file.path().to_string(),
+                        path,
                         length: file.length(),
                         completed_length,
                         selected: file.is_requested(),

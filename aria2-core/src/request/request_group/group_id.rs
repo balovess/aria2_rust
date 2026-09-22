@@ -26,12 +26,13 @@ impl GroupId {
     /// Parse the high-order hexadecimal prefix used by aria2's `expandUnique`.
     /// Returns the normalized prefix and mask for unique matching.
     pub fn hex_prefix(hex_str: &str) -> Option<(u64, u64)> {
-        let trimmed = hex_str.trim_start_matches("0x");
-        if trimmed.is_empty() || trimmed.len() > 16 {
+        // RPC GIDs follow aria2's GroupId::expandUnique grammar: hexadecimal
+        // digits only, without a CLI-style `0x` prefix.
+        if hex_str.is_empty() || hex_str.len() > 16 {
             return None;
         }
-        let value = u64::from_str_radix(trimmed, 16).ok()?;
-        let bits = trimmed.len() * 4;
+        let value = u64::from_str_radix(hex_str, 16).ok()?;
+        let bits = hex_str.len() * 4;
         let mask = if bits == 64 {
             u64::MAX
         } else {

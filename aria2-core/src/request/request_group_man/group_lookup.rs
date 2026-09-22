@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{GroupId, PositionMode, RequestGroup, RequestGroupMan};
+use super::{GroupId, GroupIdResolution, PositionMode, RequestGroup, RequestGroupMan};
 use crate::error::Result;
 
 impl RequestGroupMan {
@@ -29,34 +29,68 @@ impl RequestGroupMan {
     /// the indexed path, while abbreviated IDs scan the canonical index and
     /// are accepted only when exactly one group matches.
     pub fn resolve_group_id(&self, hex: &str) -> Option<GroupId> {
-        let (prefix, mask) = GroupId::hex_prefix(hex)?;
-        if mask == u64::MAX {
-            return self
-                .groups
-                .contains_key(&GroupId(prefix))
-                .then_some(GroupId(prefix));
+        match self.resolve_group_id_detailed(hex) {
+            GroupIdResolution::Resolved(gid) => Some(gid),
+            GroupIdResolution::NotFound
+            | GroupIdResolution::NotUnique
+            | GroupIdResolution::Invalid => None,
         }
+    }
 
+    fn resolve_group_id_detailed(&self, hex: &str) -> GroupIdResolution {
+        let Some((prefix, mask)) = GroupId::hex_prefix(hex) else {
+            return GroupIdResolution::Invalid;
+        };
         let mut matched = None;
         for entry in self.groups.iter() {
             if entry.key().0 & mask == prefix {
                 if matched.is_some() {
-                    return None;
+                    return GroupIdResolution::NotUnique;
                 }
                 matched = Some(*entry.key());
             }
         }
         matched
+            .map(GroupIdResolution::Resolved)
+            .unwrap_or(GroupIdResolution::NotFound)
+    }
+
+    /// Resolve a full GID or unique high-order hexadecimal prefix while
+    /// preserving aria2's malformed/not-found/not-unique distinction.
+    pub fn resolve_gid_hex_detailed(&self, hex: &str) -> GroupIdResolution {
+        let live = self.resolve_group_id_detailed(hex);
+        let stopped = self.stopped.resolve_by_hex(hex);
+        match (live, stopped) {
+            (GroupIdResolution::Invalid, _) | (_, GroupIdResolution::Invalid) => {
+                GroupIdResolution::Invalid
+            }
+            (GroupIdResolution::NotUnique, _) | (_, GroupIdResolution::NotUnique) => {
+                GroupIdResolution::NotUnique
+            }
+            (GroupIdResolution::Resolved(live), GroupIdResolution::Resolved(stopped)) => {
+                if live == stopped {
+                    GroupIdResolution::Resolved(live)
+                } else {
+                    GroupIdResolution::NotUnique
+                }
+            }
+            (GroupIdResolution::Resolved(gid), GroupIdResolution::NotFound)
+            | (GroupIdResolution::NotFound, GroupIdResolution::Resolved(gid)) => {
+                GroupIdResolution::Resolved(gid)
+            }
+            (GroupIdResolution::NotFound, GroupIdResolution::NotFound) => {
+                GroupIdResolution::NotFound
+            }
+        }
     }
 
     /// Resolve a unique GID prefix across live groups and stopped results.
     pub fn resolve_gid_hex(&self, hex: &str) -> Option<GroupId> {
-        let live = self.resolve_group_id(hex);
-        let stopped = self.stopped.find_gid_by_hex(hex);
-        match (live, stopped) {
-            (Some(live), None) => Some(live),
-            (None, Some(stopped)) => Some(stopped),
-            _ => None,
+        match self.resolve_gid_hex_detailed(hex) {
+            GroupIdResolution::Resolved(gid) => Some(gid),
+            GroupIdResolution::NotFound
+            | GroupIdResolution::NotUnique
+            | GroupIdResolution::Invalid => None,
         }
     }
 

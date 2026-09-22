@@ -17,6 +17,7 @@
 use std::collections::HashSet;
 use std::io::IsTerminal;
 use std::io::{self, Write};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
@@ -196,9 +197,28 @@ impl ConsoleProgressReporter {
             let num_peers = bt.map_or(0, |bt| bt.peer_count());
 
             let filename = group
-                .uris()
-                .first()
-                .map(|u| extract_filename(u))
+                .resolved_output_path()
+                .and_then(|path| {
+                    Path::new(&path)
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                })
+                .or_else(|| {
+                    group.get_download_context().and_then(|context| {
+                        context
+                            .get_file_entries()
+                            .first()
+                            .map(|file| file.basename())
+                    })
+                })
+                .or_else(|| {
+                    group.options().out.as_deref().and_then(|path| {
+                        Path::new(path)
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                    })
+                })
+                .or_else(|| group.output_name())
                 .unwrap_or_else(|| format!("gid#{}", gid.to_hex_string()));
 
             tasks.push(TaskProgress {
@@ -363,42 +383,9 @@ fn build_terminal_frame(previous_line_count: usize, output: &str) -> String {
     frame
 }
 
-/// Extract a human-readable filename from a URI.
-///
-/// Takes the last path segment after `/`. Returns `"unknown"` if the URI
-/// is empty or ends with `/`.
-fn extract_filename(uri: &str) -> String {
-    uri.rsplit('/')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("unknown")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_extract_filename_http() {
-        assert_eq!(extract_filename("http://example.com/file.iso"), "file.iso");
-    }
-
-    #[test]
-    fn test_extract_filename_path() {
-        assert_eq!(extract_filename("/path/to/file.txt"), "file.txt");
-    }
-
-    #[test]
-    fn test_extract_filename_empty() {
-        assert_eq!(extract_filename("http://example.com/"), "unknown");
-    }
-
-    #[test]
-    fn test_extract_filename_no_path() {
-        // "http://example.com" yields "example.com" (the host)
-        assert_eq!(extract_filename("http://example.com"), "example.com");
-    }
 
     #[test]
     fn terminal_frame_clears_only_previous_lines() {

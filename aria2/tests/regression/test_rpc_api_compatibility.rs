@@ -6,6 +6,7 @@
 #[path = "../support/mod.rs"]
 mod support;
 
+use aria2_rpc::engine::RpcEngine;
 use aria2_rpc::json_rpc::JsonRpcRequest;
 use aria2_rpc::json_rpc::JsonRpcResponse;
 use aria2_rpc::server::RpcAuthMiddleware;
@@ -32,6 +33,15 @@ fn assert_success(resp: &JsonRpcResponse) {
 fn assert_error_code(resp: &JsonRpcResponse, expected_code: i32) {
     assert!(resp.is_error(), "Expected error response");
     assert_eq!(resp.error.as_ref().unwrap().code, expected_code);
+}
+
+async fn add_uri_task(engine: &RpcEngine) -> JsonRpcResponse {
+    engine
+        .handle_request(&make_request(
+            "aria2.addUri",
+            serde_json::json!([["http://example.com/file"]]),
+        ))
+        .await
 }
 
 fn valid_torrent() -> String {
@@ -422,6 +432,43 @@ async fn regression_rpc_accepts_unique_short_gid_prefix() {
         .await;
     assert_success(&status_resp);
     assert_eq!(status_resp.result.unwrap()["gid"], gid);
+
+    let invalid_resp = engine
+        .handle_request(&make_request(
+            "aria2.tellStatus",
+            serde_json::json!([format!("0x{}", &gid[..15])]),
+        ))
+        .await;
+    assert_error_code(&invalid_resp, 1);
+}
+
+/// Test: an ambiguous GID prefix is rejected instead of targeting a
+/// synthetic numeric GID that happens to equal one matching task.
+#[tokio::test]
+async fn regression_rpc_rejects_ambiguous_gid_prefix() {
+    let engine = core_engine();
+    let first = add_uri_task(&engine).await;
+    let second = add_uri_task(&engine).await;
+    assert_success(&first);
+    assert_success(&second);
+    let first_gid: String = serde_json::from_value(first.result.unwrap()).unwrap();
+    let second_gid: String = serde_json::from_value(second.result.unwrap()).unwrap();
+    assert_eq!(&first_gid[..15], &second_gid[..15]);
+
+    let response = engine
+        .handle_request(&make_request(
+            "aria2.remove",
+            serde_json::json!([&first_gid[..15]]),
+        ))
+        .await;
+    assert_error_code(&response, 1);
+
+    for gid in [first_gid, second_gid] {
+        let status = engine
+            .handle_request(&make_request("aria2.tellStatus", serde_json::json!([gid])))
+            .await;
+        assert_success(&status);
+    }
 }
 
 /// Test: status query `keys` parameters filter the aria2 wire object.
@@ -1471,7 +1518,10 @@ async fn regression_remove_download_result_returns_ok() {
 
     // Removal updates the shared manager synchronously, so the result is
     // available even though this focused fixture has no download loop.
-    let req = make_request("aria2.removeDownloadResult", serde_json::json!([gid]));
+    let req = make_request(
+        "aria2.removeDownloadResult",
+        serde_json::json!([&gid[..15]]),
+    );
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();

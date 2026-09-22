@@ -659,7 +659,13 @@ impl TrackerAnnouncer {
             .as_ref()
             .is_none_or(|manager| !manager.uses_tracker_url(tracker_url));
         let tracker_ipv6 = if tracker_url_changed {
-            UdpTrackerManager::tracker_url_is_ipv6(tracker_url).unwrap_or(false)
+            UdpTrackerManager::tracker_url_is_ipv6_with_policy(
+                tracker_url,
+                &self.outbound_network_policy,
+            )
+            .await
+            .or_else(|| UdpTrackerManager::tracker_url_is_ipv6(tracker_url))
+            .unwrap_or(false)
         } else {
             self.udp_family_ipv6.unwrap_or(false)
         };
@@ -699,7 +705,13 @@ impl TrackerAnnouncer {
             };
 
             self.udp_client = Some(Arc::clone(&shared));
-            self.udp_manager = Some(UdpTrackerManager::new(shared).await);
+            self.udp_manager = Some(
+                UdpTrackerManager::new_with_policy(
+                    shared,
+                    Arc::clone(&self.outbound_network_policy),
+                )
+                .await,
+            );
             self.udp_family_ipv6 = Some(tracker_ipv6);
         }
 

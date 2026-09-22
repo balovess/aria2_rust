@@ -101,6 +101,7 @@ impl CoreRpcBackend {
         gid: String,
         options: HashMap<String, serde_json::Value>,
     ) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
         self.group_man
             .change_group_options(&gid, normalize_options(&options))
             .map_err(Self::execution)?;

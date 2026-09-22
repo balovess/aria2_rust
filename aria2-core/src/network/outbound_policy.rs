@@ -149,6 +149,21 @@ impl OutboundNetworkPolicy {
         )))
     }
 
+    /// Resolve a UDP peer and retain the first address compatible with this
+    /// policy's configured source families.
+    pub async fn resolve_udp_host(&self, host: &str, port: u16) -> io::Result<SocketAddr> {
+        let addresses = tokio::net::lookup_host((host, port)).await?;
+        for remote in addresses {
+            if self.is_direct() || self.best_source(remote).is_some() {
+                return Ok(remote);
+            }
+        }
+        Err(family_mismatch(SocketAddr::new(
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port,
+        )))
+    }
+
     /// Establish a TCP connection to a hostname through the policy.
     pub async fn connect_host(&self, host: &str, port: u16) -> io::Result<TcpStream> {
         let addresses = tokio::net::lookup_host((host, port)).await?;

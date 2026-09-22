@@ -49,9 +49,9 @@ pub fn determine_filename(
 
 /// Determine a filename directly from a reqwest response.
 ///
-/// This is the adapter used by the download engine. Keeping the conversion
-/// here prevents the reqwest path from growing a second Content-Disposition
-/// parser or a second URL sanitization policy.
+/// This is the reqwest response entry point used by the download engine.
+/// Keeping the conversion here prevents the reqwest path from growing a
+/// second Content-Disposition parser or a second URL sanitization policy.
 pub(crate) fn determine_filename_from_response(
     response: &reqwest::Response,
     content_disposition_default_utf8: bool,
