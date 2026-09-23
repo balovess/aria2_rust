@@ -120,6 +120,43 @@ impl WebSeedManager {
         }
     }
 
+    /// Whether all file-backed bytes in a piece currently have a WebSeed.
+    ///
+    /// A piece is eligible for exclusive background scheduling only when
+    /// every non-padding range can be supplied. Partially covered pieces stay
+    /// with the peer path, which may still use the existing fallback.
+    pub(crate) fn has_complete_sources_for_piece(
+        &self,
+        piece_index: u32,
+        piece_data_length: u32,
+    ) -> bool {
+        let Some(group) = &self.live_group else {
+            return !self.clients.is_empty();
+        };
+        let piece_start = piece_index as u64 * self.piece_length as u64;
+        let piece_end = piece_start.saturating_add(piece_data_length as u64);
+        let group = group.recover();
+        let Some(context) = group.get_download_context() else {
+            return false;
+        };
+        let entries = context.get_file_entries();
+        let first = entries.partition_point(|entry| entry.last_offset() <= piece_start);
+        let mut has_range = false;
+        for entry in entries[first..]
+            .iter()
+            .take_while(|entry| entry.offset() < piece_end)
+        {
+            if entry.offset().max(piece_start) >= entry.last_offset().min(piece_end) {
+                continue;
+            }
+            has_range = true;
+            if entry.remaining_uris().is_empty() && entry.spent_uris().is_empty() {
+                return false;
+            }
+        }
+        has_range
+    }
+
     /// Get the shared statistics.
     pub fn stats(&self) -> &WebSeedStats {
         &self.stats

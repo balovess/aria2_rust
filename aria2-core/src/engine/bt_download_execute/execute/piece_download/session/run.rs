@@ -1,18 +1,88 @@
 use std::time::Instant;
+use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, Result};
-use crate::request::request_group::{BtPeerSource, DownloadResultCode, HaltReason};
+use crate::request::request_group::{
+    ActiveConnectionGuard, BtPeerSource, DownloadResultCode, HaltReason,
+};
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::{debug, info, warn};
 
 use super::super::peer_events::NewPeerConnectionsContext;
 use super::{PieceDownloadSession, PieceLoopAction};
 
+const MAX_WEB_SEED_PIECES_IN_FLIGHT: usize = 4;
+
+#[derive(Default)]
+struct WebSeedRetries {
+    due: BinaryHeap<Reverse<(Instant, u32)>>,
+    attempts: std::collections::HashMap<u32, u32>,
+}
+
+impl WebSeedRetries {
+    fn schedule(&mut self, piece_index: u32, max_retries: u32, retry_wait: Duration) {
+        let attempts = self.attempts.entry(piece_index).or_default();
+        if *attempts >= max_retries {
+            return;
+        }
+        *attempts += 1;
+        let now = Instant::now();
+        let deadline = now.checked_add(retry_wait).unwrap_or(now);
+        self.due.push(Reverse((deadline, piece_index)));
+    }
+
+    fn pop_ready(&mut self, now: Instant) -> Option<u32> {
+        self.due
+            .peek()
+            .is_some_and(|Reverse((deadline, _))| *deadline <= now)
+            .then(|| self.due.pop().map(|Reverse((_, piece_index))| piece_index))
+            .flatten()
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.due.peek().map(|Reverse((deadline, _))| *deadline)
+    }
+
+    fn clear(&mut self) {
+        self.due.clear();
+        self.attempts.clear();
+    }
+}
+
+async fn wait_for_uri_generation(
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    notifier: std::sync::Arc<tokio::sync::Notify>,
+    observed: u64,
+) {
+    loop {
+        let notified = notifier.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if generation.load(std::sync::atomic::Ordering::Acquire) != observed {
+            return;
+        }
+        notified.await;
+    }
+}
+
 impl PieceDownloadSession<'_> {
     pub(super) async fn run(mut self) -> Result<()> {
+        let mut web_seed_tasks = tokio::task::JoinSet::new();
+        let mut active_web_seed_pieces = std::collections::HashSet::new();
+        let mut web_seed_retries = WebSeedRetries::default();
+        let mut web_seed_scan_cursor = 0u32;
+        let mut observed_uri_generation = self.command.group.recover().uri_generation();
+        let web_seed_concurrency =
+            self.command
+                .group
+                .recover()
+                .options()
+                .split
+                .unwrap_or(crate::constants::DEFAULT_SPLIT as u16)
+                .clamp(1, MAX_WEB_SEED_PIECES_IN_FLIGHT as u16) as usize;
         self.announce_available_pieces().await;
         self.command
             .apply_upload_choke_round(self.active_connections)
@@ -95,6 +165,41 @@ impl PieceDownloadSession<'_> {
                     "BitTorrent download halted".into(),
                 ));
             }
+
+            let current_uri_generation = self.command.group.recover().uri_generation();
+            if current_uri_generation != observed_uri_generation {
+                observed_uri_generation = current_uri_generation;
+                web_seed_scan_cursor = 0;
+                web_seed_retries.clear();
+            }
+            self.schedule_web_seed_pieces(
+                &mut web_seed_tasks,
+                &mut active_web_seed_pieces,
+                &mut web_seed_scan_cursor,
+                &mut web_seed_retries,
+                web_seed_concurrency,
+            );
+            while let Some(joined) = web_seed_tasks.try_join_next() {
+                match joined {
+                    Ok((piece_index, result)) => {
+                        active_web_seed_pieces.remove(&piece_index);
+                        if self.complete_web_seed_piece(piece_index, result).await? {
+                            self.refresh_download_progress();
+                        } else {
+                            self.schedule_web_seed_retry(piece_index, &mut web_seed_retries);
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%error, "WebSeed worker terminated unexpectedly");
+                        web_seed_tasks.abort_all();
+                        for piece_index in active_web_seed_pieces.drain() {
+                            self.piece_picker.mark_reserved(piece_index, false);
+                        }
+                        break;
+                    }
+                }
+            }
+
             if BtPieceSelector::is_complete(&self.piece_picker) {
                 if self.endgame_state.is_endgame_active() {
                     self.endgame_state.exit_endgame();
@@ -280,24 +385,43 @@ impl PieceDownloadSession<'_> {
             // socket/message event, a lifecycle notification, a completed DHT
             // lookup, or the next protocol/stop-timeout deadline.
             if self.active_connections.is_empty()
-                && self
+                && web_seed_tasks.is_empty()
+                && (self
                     .web_seed_manager
                     .as_ref()
                     .is_none_or(|manager| manager.is_empty())
+                    || web_seed_scan_cursor >= self.num_pieces)
             {
                 debug!("[BT] No peers available, waiting for peer discovery...");
-                let deadline = self.command.next_peer_event_deadline(
+                let peer_deadline = self.command.next_peer_event_deadline(
                     self.active_connections,
                     self.stop_timeout.deadline(),
                 );
-                let event = self
-                    .command
-                    .wait_for_peer_event(
-                        self.active_connections,
-                        deadline,
-                        Some(std::sync::Arc::clone(&self.upload_provider)),
-                    )
-                    .await;
+                let deadline = web_seed_retries
+                    .next_deadline()
+                    .map_or(peer_deadline, |retry_deadline| {
+                        peer_deadline.min(retry_deadline)
+                    });
+                let (uri_generation, uri_notifier) = {
+                    let group = self.command.group.recover();
+                    (group.uri_generation_handle(), group.uri_notifier())
+                };
+                let peer_event = self.command.wait_for_peer_event(
+                    self.active_connections,
+                    deadline,
+                    Some(std::sync::Arc::clone(&self.upload_provider)),
+                );
+                let event = tokio::select! {
+                    event = peer_event => Some(event),
+                    _ = wait_for_uri_generation(
+                        uri_generation,
+                        uri_notifier,
+                        observed_uri_generation,
+                    ) => None,
+                };
+                let Some(event) = event else {
+                    continue;
+                };
                 let incoming = BtDownloadCommand::apply_peer_wait_event(
                     event,
                     self.active_connections,
@@ -332,11 +456,40 @@ impl PieceDownloadSession<'_> {
             let next_piece_idx = match selection.piece_index {
                 Some(idx) => idx,
                 None => {
+                    if !web_seed_tasks.is_empty() {
+                        match web_seed_tasks.join_next().await {
+                            Some(Ok((piece_index, result))) => {
+                                active_web_seed_pieces.remove(&piece_index);
+                                if self.complete_web_seed_piece(piece_index, result).await? {
+                                    self.refresh_download_progress();
+                                } else {
+                                    self.schedule_web_seed_retry(
+                                        piece_index,
+                                        &mut web_seed_retries,
+                                    );
+                                }
+                            }
+                            Some(Err(error)) => {
+                                warn!(%error, "WebSeed worker terminated unexpectedly");
+                                web_seed_tasks.abort_all();
+                                for piece_index in active_web_seed_pieces.drain() {
+                                    self.piece_picker.mark_reserved(piece_index, false);
+                                }
+                            }
+                            None => {}
+                        }
+                        continue;
+                    }
                     tracing::debug!("[BT] No piece available, waiting...");
-                    let deadline = self.command.next_peer_event_deadline(
+                    let peer_deadline = self.command.next_peer_event_deadline(
                         self.active_connections,
                         self.stop_timeout.deadline(),
                     );
+                    let deadline = web_seed_retries
+                        .next_deadline()
+                        .map_or(peer_deadline, |retry_deadline| {
+                            peer_deadline.min(retry_deadline)
+                        });
                     let event = self
                         .command
                         .wait_for_peer_event(
@@ -372,25 +525,15 @@ impl PieceDownloadSession<'_> {
                 }
             };
 
-            if matches!(
-                self.download_piece(next_piece_idx).await?,
-                PieceLoopAction::RefreshProgress
-            ) {
-                {
-                    self.command
-                        .progress
-                        .set_completed_length(self.command.completed_bytes);
-
-                    let elapsed = self.last_speed_update.elapsed();
-                    if elapsed.as_millis() >= 500 {
-                        let delta = self.command.completed_bytes - self.last_completed;
-                        let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
-                        self.command.progress.set_download_speed(speed);
-                        self.last_speed_update = Instant::now();
-                        self.last_completed = self.command.completed_bytes;
-                    }
-                    self.refresh_upload_stats();
-                }
+            self.piece_picker
+                .mark_in_progress(next_piece_idx as u32, true);
+            let action = self.download_piece(next_piece_idx).await?;
+            if matches!(action, PieceLoopAction::Retry) {
+                self.piece_picker
+                    .mark_in_progress(next_piece_idx as u32, false);
+            }
+            if matches!(action, PieceLoopAction::RefreshProgress) {
+                self.refresh_download_progress();
             }
         }
         tracing::info!("[BT] Finalizing writer...");
@@ -415,6 +558,89 @@ impl PieceDownloadSession<'_> {
         Ok(())
     }
 
+    fn schedule_web_seed_pieces(
+        &mut self,
+        tasks: &mut tokio::task::JoinSet<(u32, std::result::Result<Vec<u8>, String>)>,
+        active_pieces: &mut std::collections::HashSet<u32>,
+        scan_cursor: &mut u32,
+        retries: &mut WebSeedRetries,
+        concurrency: usize,
+    ) {
+        let Some(manager) = self.web_seed_manager.as_ref() else {
+            return;
+        };
+        while tasks.len() < concurrency {
+            let piece_index = match retries.pop_ready(Instant::now()) {
+                Some(piece_index) => piece_index,
+                None if *scan_cursor < self.num_pieces => {
+                    let piece_index = *scan_cursor;
+                    *scan_cursor += 1;
+                    piece_index
+                }
+                None => break,
+            };
+            if !self.piece_picker.is_allowed(piece_index)
+                || self.piece_picker.is_completed(piece_index)
+                || self.piece_picker.is_in_progress(piece_index)
+                || self.piece_picker.is_reserved(piece_index)
+            {
+                continue;
+            }
+            let piece_data_length = self.actual_piece_length(piece_index as usize);
+            if piece_data_length == 0
+                || !manager.has_complete_sources_for_piece(piece_index, piece_data_length)
+            {
+                continue;
+            }
+
+            self.piece_picker.mark_reserved(piece_index, true);
+            active_pieces.insert(piece_index);
+            let manager = std::sync::Arc::clone(manager);
+            let group = std::sync::Arc::clone(&self.command.group);
+            let progress = std::sync::Arc::clone(&self.command.progress);
+            tasks.spawn(async move {
+                let connection = ActiveConnectionGuard::new(group);
+                connection.set(1);
+                let result = manager
+                    .request_piece_with_length_and_activity(
+                        piece_index,
+                        piece_data_length as u64,
+                        Some(progress.as_ref()),
+                    )
+                    .await;
+                (piece_index, result)
+            });
+        }
+    }
+
+    fn schedule_web_seed_retry(&self, piece_index: u32, retries: &mut WebSeedRetries) {
+        let group = self.command.group.recover();
+        retries.schedule(
+            piece_index,
+            group.options().max_retries,
+            Duration::from_secs(group.options().retry_wait),
+        );
+    }
+
+    fn refresh_download_progress(&mut self) {
+        self.command
+            .progress
+            .set_completed_length(self.command.completed_bytes);
+
+        let elapsed = self.last_speed_update.elapsed();
+        if elapsed.as_millis() >= 500 {
+            let delta = self
+                .command
+                .completed_bytes
+                .saturating_sub(self.last_completed);
+            let speed = (delta as f64 / elapsed.as_secs_f64()) as u64;
+            self.command.progress.set_download_speed(speed);
+            self.last_speed_update = Instant::now();
+            self.last_completed = self.command.completed_bytes;
+        }
+        self.refresh_upload_stats();
+    }
+
     fn refresh_upload_stats(&mut self) {
         let uploaded_by_peers = self
             .upload_counter
@@ -434,6 +660,31 @@ impl PieceDownloadSession<'_> {
             self.command.progress.set_upload_speed(speed);
             self.last_upload_speed_update = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebSeedRetries;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn web_seed_retries_are_delayed_and_limited() {
+        let now = Instant::now();
+        let mut delayed = WebSeedRetries::default();
+        delayed.schedule(7, 2, Duration::from_secs(60));
+        assert_eq!(delayed.pop_ready(now), None);
+        assert!(delayed.next_deadline().is_some());
+
+        let mut retries = WebSeedRetries::default();
+        retries.schedule(7, 2, Duration::ZERO);
+        assert_eq!(retries.pop_ready(Instant::now()), Some(7));
+
+        retries.schedule(7, 2, Duration::ZERO);
+        assert_eq!(retries.pop_ready(Instant::now()), Some(7));
+
+        retries.schedule(7, 2, Duration::ZERO);
+        assert_eq!(retries.pop_ready(Instant::now()), None);
     }
 }
 

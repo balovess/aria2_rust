@@ -37,6 +37,26 @@ pub struct UriMemoryStats {
 }
 
 impl super::RequestGroup {
+    pub(crate) fn uri_generation(&self) -> u64 {
+        self.uri_generation
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(crate) fn uri_generation_handle(&self) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(&self.uri_generation)
+    }
+
+    pub(crate) fn uri_notifier(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.uri_notify)
+    }
+
+    fn notify_uri_changed(&self) {
+        self.uri_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.uri_notify.notify_waiters();
+        self.notify_activity_changed();
+    }
+
     /// Measure URI duplication across the group's fallback list and its
     /// download-context URI lifecycle lists. This is diagnostic only and
     /// does not change URI ownership or ordering.
@@ -305,7 +325,11 @@ impl super::RequestGroup {
                 }
                 None => entry.add_uris(add_uris),
             };
-            self.notify_activity_changed();
+            if deleted > 0 || added > 0 {
+                self.notify_uri_changed();
+            } else {
+                self.notify_activity_changed();
+            }
             return Ok((deleted, added));
         }
 
@@ -350,7 +374,11 @@ impl super::RequestGroup {
                 })
                 .sum(),
         };
-        self.notify_activity_changed();
+        if deleted > 0 || added > 0 {
+            self.notify_uri_changed();
+        } else {
+            self.notify_activity_changed();
+        }
         Ok((deleted, added))
     }
 

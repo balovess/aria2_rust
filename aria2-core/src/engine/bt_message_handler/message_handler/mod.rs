@@ -7,8 +7,13 @@
 //! coordinates transfers that may span multiple peers.
 
 mod endgame;
+mod endgame_pipeline;
 mod normal;
+mod normal_pipeline;
+mod peer_worker;
 mod pipelined;
+
+pub(crate) use peer_worker::{PeerCommand, PeerEvent, peer_worker};
 
 /// BT message handler for block-level operations.
 ///

@@ -428,6 +428,17 @@ fn test_endgame_allows_duplicate_requests() {
 }
 
 #[test]
+fn test_endgame_never_selects_a_piece_reserved_for_web_seed() {
+    let mut picker = PiecePicker::new(2);
+    picker.set_strategy(PieceSelectionStrategy::Sequential);
+    picker.set_endgame_threshold(2);
+    picker.mark_reserved(0, true);
+
+    assert_eq!(picker.pick_next(), Some(1));
+    assert_eq!(picker.pick_next(), Some(1));
+}
+
+#[test]
 fn test_endgame_candidates_populated_near_completion() {
     let mut picker = PiecePicker::new(4u32);
     picker.set_endgame_threshold(2);

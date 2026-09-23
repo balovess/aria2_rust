@@ -8,8 +8,8 @@
 //!
 //! # Architecture
 //!
-//! - [`BtSeedManager`] — Top-level seeding manager that owns upload sessions
-//!   and runs the seeding loop until exit conditions are met.
+//! - [`BtSeedManager`] — Top-level seeding manager that owns seeding peer
+//!   actors and runs until exit conditions are met.
 //! - [`SeedExitCondition`] — Conditions under which seeding should stop
 //!   (time limit, ratio limit, or infinite).
 //!
@@ -19,9 +19,9 @@
 //! protocol deadline. Each event performs the smallest required state update:
 //! 1. Check cancellation / exit conditions
 //! 2. Admit incoming peers or process one ready peer message
-//! 3. Sync upload-session state -> PeerStats
+//! 3. Sync peer-worker state -> PeerStats
 //! 4. Run the seeder-state choking algorithm when its deadline expires
-//! 5. Apply choke/unchoke decisions back to upload sessions
+//! 5. Apply choke/unchoke decisions through peer-worker command channels
 //! 6. Remove dead sessions and report progress
 //!
 //! # C++ Equivalence
@@ -33,6 +33,7 @@
 //! | `BtSeederStateChoke` | `BtSeederStateChoke` |
 
 mod constructors;
+mod peer_actor;
 mod seeding_loop;
 #[cfg(test)]
 mod tests;
@@ -42,15 +43,18 @@ pub mod types;
 pub use types::SeedExitCondition;
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
+use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
-use crate::engine::bt_upload_session::{BtSeedingConfig, BtUploadSession, PieceDataProvider};
+use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
 use crate::engine::peer_stats::PeerStats;
 use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
+use peer_actor::SeedPeerActor;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -71,13 +75,18 @@ const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
 /// 3. Uploads piece data at the configured rate limit
 /// 4. Monitors seed exit conditions (ratio/time) and stops when met
 ///
-/// Mirrors C++ `SeedCheckCommand` combined with upload session management.
+/// Mirrors C++ `SeedCheckCommand` combined with peer connection management.
 /// Top-level manager for the BitTorrent seeding phase.
 pub struct BtSeedManager {
     /// Info hash of the torrent being seeded
     info_hash: [u8; 20],
-    /// Active upload sessions (one per connected peer)
-    upload_sessions: Vec<BtUploadSession>,
+    /// Connections admitted before the long-lived peer workers start.
+    upload_sessions: Vec<BtPeerConn>,
+    /// Long-lived I/O owners after the seeding loop starts.
+    seed_peer_actors: Vec<SeedPeerActor>,
+    seed_peer_event_tx: Option<tokio::sync::mpsc::Sender<peer_actor::PeerEvent>>,
+    seed_peer_event_rx: Option<tokio::sync::mpsc::Receiver<peer_actor::PeerEvent>>,
+    next_seed_peer_actor_id: u64,
     /// Peer statistics synced with the choking algorithm
     peer_stats: Vec<PeerStats>,
     /// Piece data provider for reading completed pieces from disk
@@ -91,6 +100,8 @@ pub struct BtSeedManager {
     total_downloaded: u64,
     /// Total bytes uploaded during seeding
     pub total_uploaded: u64,
+    /// Authoritative upload counter shared with the connection-owned workers.
+    upload_counter: Arc<AtomicU64>,
     /// When seeding started
     pub seeding_start_time: Instant,
     /// Whether seeding is currently active
@@ -197,9 +208,9 @@ impl BtSeedManager {
         &self.info_hash
     }
 
-    /// Return the number of active upload sessions.
+    /// Return the number of connected peers owned by this manager.
     pub fn num_sessions(&self) -> usize {
-        self.upload_sessions.len()
+        self.upload_sessions.len() + self.seed_peer_actors.len()
     }
 
     /// Record bytes uploaded to a peer.
@@ -210,6 +221,8 @@ impl BtSeedManager {
     /// Restore upload statistics when a paused BT command resumes seeding.
     pub(crate) fn set_total_uploaded(&mut self, total_uploaded: u64) {
         self.total_uploaded = total_uploaded;
+        self.upload_counter
+            .store(total_uploaded, std::sync::atomic::Ordering::Relaxed);
         self.publish_upload_stats();
     }
 
@@ -262,7 +275,8 @@ impl BtSeedManager {
     }
 
     fn peer_snapshots(&self) -> Vec<BtPeerSnapshot> {
-        self.upload_sessions
+        let mut snapshots = self
+            .upload_sessions
             .iter()
             .enumerate()
             .filter_map(|(index, session)| {
@@ -274,13 +288,13 @@ impl BtSeedManager {
                     is_incoming: true,
                     source: crate::request::request_group::BtPeerSource::Incoming,
                     bitfield: None,
-                    uploaded_bytes: session.uploaded_bytes(),
+                    uploaded_bytes: session.stats.uploaded_bytes,
                     downloaded_bytes: 0,
                     upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),
                     download_speed: 0.0,
                     avg_upload_speed: stats.map_or(0, |stats| stats.avg_upload_speed),
                     avg_download_speed: 0,
-                    am_choking: session.is_peer_choked(),
+                    am_choking: session.stats.am_choking,
                     peer_choking: false,
                     seeder: Some(false),
                     connection_duration_secs: stats
@@ -295,7 +309,43 @@ impl BtSeedManager {
                     is_banned: false,
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        snapshots.extend(
+            self.seed_peer_actors
+                .iter()
+                .enumerate()
+                .map(|(index, actor)| {
+                    let addr = actor.endpoint;
+                    let stats = self.peer_stats.get(index);
+                    BtPeerSnapshot {
+                        peer_id: stats.map_or([0; 20], |stats| stats.peer_id),
+                        addr,
+                        is_incoming: true,
+                        source: crate::request::request_group::BtPeerSource::Incoming,
+                        bitfield: None,
+                        uploaded_bytes: stats.map_or(0, |stats| stats.uploaded_bytes),
+                        downloaded_bytes: 0,
+                        upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),
+                        download_speed: 0.0,
+                        avg_upload_speed: stats.map_or(0, |stats| stats.avg_upload_speed),
+                        avg_download_speed: 0,
+                        am_choking: stats.is_none_or(|stats| stats.am_choking),
+                        peer_choking: false,
+                        seeder: Some(false),
+                        connection_duration_secs: stats
+                            .map_or(0, |stats| stats.connection_duration_secs()),
+                        last_data_age_secs: stats.map_or(0, |stats| {
+                            stats
+                                .last_data_time
+                                .map(|time| time.elapsed().as_secs())
+                                .unwrap_or_else(|| stats.connection_duration_secs())
+                        }),
+                        is_snubbed: stats.is_some_and(|stats| stats.is_snubbed),
+                        is_banned: false,
+                    }
+                }),
+        );
+        snapshots
     }
 
     fn publish_upload_stats(&self) {

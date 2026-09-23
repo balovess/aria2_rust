@@ -14,52 +14,144 @@ use super::{PieceDownloadSession, PieceLoopAction};
 use crate::engine::bt_download_execute::types::PeerKey;
 
 impl PieceDownloadSession<'_> {
+    pub(super) async fn complete_web_seed_piece(
+        &mut self,
+        piece_index: u32,
+        result: std::result::Result<Vec<u8>, String>,
+    ) -> Result<bool> {
+        let web_seed_data = match result {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::warn!(piece_index, %error, "WebSeed piece request failed");
+                self.piece_picker.mark_reserved(piece_index, false);
+                return Ok(false);
+            }
+        };
+        let expected_hash = self.piece_manager.expected_piece_verification(piece_index);
+        let (verified, web_seed_data) =
+            super::super::super::hash_verification::verify_piece_hash_async(
+                expected_hash,
+                web_seed_data,
+            )
+            .await?;
+        if !verified {
+            tracing::warn!(piece_index, "WebSeed piece failed hash verification");
+            self.piece_picker.mark_reserved(piece_index, false);
+            return Ok(false);
+        }
+
+        let web_seed_data_length = web_seed_data.len() as u64;
+        let web_seed_bytes = bytes::Bytes::from(web_seed_data);
+        if let Some(ref layout) = self.command.multi_file_layout {
+            let max_open_files = self.command.group.recover().options().bt_max_open_files;
+            crate::engine::bt_piece_downloader::write_piece_to_multi_files_coalesced_with_limit(
+                layout,
+                piece_index,
+                &web_seed_bytes,
+                layout.piece_length(),
+                max_open_files,
+            )
+            .await?;
+        } else {
+            self.writer
+                .write_bytes_at(
+                    piece_index as u64 * self.piece_length as u64,
+                    web_seed_bytes,
+                )
+                .await?;
+        }
+
+        let accounted_bytes = if self.meta.info.meta_version == Some(2) && self.has_v1_piece_hashes
+        {
+            self.command
+                .multi_file_layout
+                .as_ref()
+                .map(|layout| layout.content_bytes_in_piece(piece_index))
+                .unwrap_or(web_seed_data_length)
+        } else {
+            web_seed_data_length
+        };
+        self.piece_manager.mark_piece_complete(piece_index);
+        self.piece_picker.mark_completed(piece_index);
+        self.command.completed_bytes = self.command.completed_bytes.saturating_add(accounted_bytes);
+        self.command
+            .group
+            .recover()
+            .update_bt_bitfield_piece(piece_index, self.num_pieces);
+        self.command
+            .persist_checkpoint_after_piece(
+                &mut self.writer,
+                &self.completed_bitfield,
+                accounted_bytes,
+            )
+            .await?;
+        crate::engine::bt_peer_interaction::BtPeerInteraction::broadcast_have(
+            self.active_connections,
+            piece_index,
+        )
+        .await;
+        self.command.maybe_save_progress(
+            self.meta,
+            &self.completed_bitfield,
+            self.piece_length,
+            self.total_size,
+            self.num_pieces,
+            self.start_time,
+            &mut self.last_progress_save,
+            piece_index as usize,
+        );
+        Ok(true)
+    }
+
+    pub(super) fn actual_piece_length(&self, next_piece_idx: usize) -> u32 {
+        if self.meta.info.meta_version == Some(2) && !self.has_v1_piece_hashes {
+            self.command
+                .multi_file_layout
+                .as_ref()
+                .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
+                .filter(|&length| length > 0)
+                .map(|length| length as u32)
+                .unwrap_or_else(|| {
+                    self.piece_selector.calculate_piece_length(
+                        next_piece_idx,
+                        self.piece_length,
+                        self.total_size,
+                    )
+                })
+        } else if self.meta.info.meta_version == Some(2) {
+            self.command
+                .multi_file_layout
+                .as_ref()
+                .map(|layout| {
+                    self.piece_selector.calculate_piece_length(
+                        next_piece_idx,
+                        self.piece_length,
+                        layout.piece_space_size(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    self.piece_selector.calculate_piece_length(
+                        next_piece_idx,
+                        self.piece_length,
+                        self.total_size,
+                    )
+                })
+        } else {
+            self.piece_selector.calculate_piece_length(
+                next_piece_idx,
+                self.piece_length,
+                self.total_size,
+            )
+        }
+    }
+
     pub(super) async fn download_piece(
         &mut self,
         next_piece_idx: usize,
     ) -> Result<PieceLoopAction> {
         tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
 
-        let actual_piece_len =
-            if self.meta.info.meta_version == Some(2) && !self.has_v1_piece_hashes {
-                self.command
-                    .multi_file_layout
-                    .as_ref()
-                    .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
-                    .filter(|&length| length > 0)
-                    .map(|length| length as u32)
-                    .unwrap_or_else(|| {
-                        self.piece_selector.calculate_piece_length(
-                            next_piece_idx,
-                            self.piece_length,
-                            self.total_size,
-                        )
-                    })
-            } else if self.meta.info.meta_version == Some(2) {
-                self.command
-                    .multi_file_layout
-                    .as_ref()
-                    .map(|layout| {
-                        self.piece_selector.calculate_piece_length(
-                            next_piece_idx,
-                            self.piece_length,
-                            layout.piece_space_size(),
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        self.piece_selector.calculate_piece_length(
-                            next_piece_idx,
-                            self.piece_length,
-                            self.total_size,
-                        )
-                    })
-            } else {
-                self.piece_selector.calculate_piece_length(
-                    next_piece_idx,
-                    self.piece_length,
-                    self.total_size,
-                )
-            };
+        let actual_piece_len = self.actual_piece_length(next_piece_idx);
 
         let num_blocks = BtPieceSelector::calculate_num_blocks(actual_piece_len, BLOCK_SIZE);
         tracing::debug!(
@@ -87,7 +179,7 @@ impl PieceDownloadSession<'_> {
                     next_piece_idx,
                     self.active_connections.len()
                 );
-                BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts_and_provider(
+                BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts_and_provider_and_choking(
                                 self.active_connections,
                                 next_piece_idx as u32,
                                 actual_piece_len,
@@ -98,10 +190,11 @@ impl PieceDownloadSession<'_> {
                                 Some(self.command.progress.as_ref()),
                                 self.request_timeout,
                                 max_attempts,
+                                self.command.choking_algo.as_mut(),
                             )
                             .await
             } else {
-                BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts_and_provider(
+                BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts_and_provider_and_choking(
                                 self.active_connections,
                                 next_piece_idx as u32,
                                 actual_piece_len,
@@ -111,6 +204,7 @@ impl PieceDownloadSession<'_> {
                                 Some(self.command.progress.as_ref()),
                                 self.request_timeout,
                                 max_attempts,
+                                self.command.choking_algo.as_mut(),
                             )
                             .await
             }
@@ -370,7 +464,7 @@ impl PieceDownloadSession<'_> {
                 };
             piece_ok = super::super::super::web_seed::try_web_seed_fallback(
                 self.command,
-                self.web_seed_manager,
+                self.web_seed_manager.as_deref(),
                 next_piece_idx,
                 actual_piece_len,
                 accounted_piece_bytes,
@@ -424,7 +518,7 @@ impl BtDownloadCommand {
     /// Periodically save download progress to .aria2 file (P1 integration).
     /// Called after a piece is successfully verified and written.
     #[allow(clippy::too_many_arguments)]
-    fn maybe_save_progress(
+    pub(super) fn maybe_save_progress(
         &self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,

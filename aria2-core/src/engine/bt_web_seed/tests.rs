@@ -396,10 +396,14 @@ async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
     );
 
     assert!(!manager.is_empty());
+    assert!(!manager.has_complete_sources_for_piece(0, 8));
+    let original_uri_generation = group.recover().uri_generation();
     group
         .recover_mut()
         .change_uris(2, &[], &[second_url], None)
         .expect("changeUri should add the second file source");
+    assert!(group.recover().uri_generation() > original_uri_generation);
+    assert!(manager.has_complete_sources_for_piece(0, 8));
     let data = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         manager.request_piece_with_length_and_activity(0, 8, None),

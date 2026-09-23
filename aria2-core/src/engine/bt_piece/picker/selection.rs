@@ -39,7 +39,10 @@ impl PiecePicker {
     /// being downloaded by another request.
     #[inline]
     fn is_available(&self, i: usize) -> bool {
-        self.allowed.test(i) && !self.completed.test(i) && !self.in_progress.test(i)
+        self.allowed.test(i)
+            && !self.completed.test(i)
+            && !self.in_progress.test(i)
+            && !self.reserved.test(i)
     }
 
     /// Test bit `i` of an MSB-first bitfield. `None` means "peer has everything".
@@ -114,6 +117,7 @@ impl PiecePicker {
             if index < n
                 && self.allowed.test(index)
                 && !self.completed.test(index)
+                && !self.reserved.test(index)
                 && (allow_in_progress || !self.in_progress.test(index))
                 && Self::peer_has(bitfield, index)
             {
@@ -168,6 +172,7 @@ impl PiecePicker {
         let usable = |p: &Self, i: usize| -> bool {
             p.allowed.test(i)
                 && !p.completed.test(i)
+                && !p.reserved.test(i)
                 && (allow_in_progress || !p.in_progress.test(i))
                 && Self::peer_has(bitfield, i)
         };

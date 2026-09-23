@@ -221,7 +221,7 @@ impl Command for BtDownloadCommand {
                 piece_length,
                 total_size,
                 num_pieces,
-                session.web_seed_manager.as_ref(),
+                session.web_seed_manager.clone(),
                 &mut session.pex_enabled_peers,
                 &mut session.last_pex_send,
                 PEX_SEND_INTERVAL_SECS,

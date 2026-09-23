@@ -57,11 +57,6 @@ impl BtDownloadCommand {
             (None, None) => SeedExitCondition::infinite(),
         };
 
-        let upload_connections = connections
-            .into_iter()
-            .filter_map(|connection| connection.into_upload_connection())
-            .collect();
-
         // Reuse the download announcer so the completed event and tracker
         // timing state remain part of one lifecycle.
         let announcer = self.tracker_announcer.take();
@@ -69,7 +64,7 @@ impl BtDownloadCommand {
 
         let mut manager = BtSeedManager::new_with_transports(
             info_hash,
-            upload_connections,
+            connections,
             file_provider,
             config,
             exit_cond,

@@ -151,10 +151,14 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 `addTorrent` 的 `uris` 参数是额外的 WebSeed 地址，会与 torrent 元数据中的
 `url-list` 合并、排序并去重，作为 BT WebSeed 源，不是 Tracker 地址。单文件与多文件
 torrent 均按文件布局展开地址；多文件请求只读取 piece 覆盖的文件范围，并按源站复用
-HTTP 客户端。Peer piece 下载失败后才尝试 WebSeed；原版会通过文件分配命令并行调度
-WebSeed 分段，因此同时有可用 Peer 与 WebSeed 时，调度时序和并发取数仍有差异。
-运行中的 `changeUri` 会更新相应文件的 WebSeed 队列，后续 WebSeed 请求会读取新队列；
-当前实现不会像原版那样立即创建独立分段命令并重新开放相应 piece 范围。
+HTTP 客户端。BT 会话最多并发调度 4 个 WebSeed piece 请求，并通过独占 piece 预留与
+Peer 下载并行；网络任务只取数，piece 校验、写盘和完成记账由 BT 会话串行完成。只有
+所有文件范围都可由 WebSeed 覆盖的 piece 才进入该调度；部分覆盖的 piece 仍走 Peer
+下载及失败回退，因此与原版按文件分段、共享 PieceStorage 的调度粒度仍不同。
+运行中的 `changeUri` 会更新相应文件的 WebSeed 队列、重置调度扫描位置并唤醒空闲调度器；
+已经在途的请求不会被强制取消。当前 URI 队列的一轮请求失败后不会紧密循环重试；该 piece
+会按任务的 `max-tries` 限次重试，并遵循 `retry-wait`；Peer 仍可并行获取该 piece。URI
+变更会重新扫描并重置 WebSeed 重试计数。
 
 ### 状态与文件
 

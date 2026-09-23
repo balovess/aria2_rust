@@ -16,24 +16,6 @@ pub const BLOCK_REQUEST_TIMEOUT_SECS: u64 = constants::BT_BLOCK_REQUEST_TIMEOUT_
 /// Matches C++ `DEFAULT_MAX_OUTSTANDING_REQUEST = 6` (BtConstants.h).
 pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize = constants::BT_DEFAULT_MAX_OUTSTANDING_REQUEST;
 
-// ======================================================================
-// BlockDownloadResult — result of a block download attempt
-// ======================================================================
-
-/// Result of an internal block download attempt.
-pub(crate) struct BlockDownloadResult {
-    /// Whether the block was successfully received
-    pub success: bool,
-    /// The received data (if successful)
-    pub data: Option<bytes::Bytes>,
-    /// Index of the peer that supplied the block.
-    pub peer_index: Option<usize>,
-    /// Number of bytes received (for statistics)
-    pub bytes_received: u64,
-    /// Concrete peers that failed while attempting this block.
-    pub failed_peers: Vec<std::net::SocketAddr>,
-}
-
 /// Bytes supplied by a peer during a piece download.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerDownloadBytes {

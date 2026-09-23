@@ -150,13 +150,18 @@ The `uris` parameter of `addTorrent` supplies additional WebSeed endpoints.
 They are merged, sorted, and deduplicated with the torrent's `url-list`; they
 are not Tracker URLs. Single- and multi-file torrents expand endpoints against
 their file layout. Each piece request reads only the overlapping file ranges,
-and HTTP clients are reused by origin. WebSeeds are currently tried after a
-peer piece download fails. Upstream also schedules segmented WebSeed file
-commands concurrently, so scheduling and concurrent transfer behavior still
-differ when both peers and WebSeeds are available. For an active BitTorrent
-task, `changeUri` updates the affected file's WebSeed queue and later WebSeed
-requests see the new queue; it does not yet create an independent segmented
-command immediately or reopen the corresponding piece range as upstream does.
+and HTTP clients are reused by origin. The BT session schedules up to four
+WebSeed piece requests concurrently with peer downloads, using exclusive piece
+reservations. Network workers only fetch data; the BT session remains the sole
+owner of hash verification, writing, and completion accounting. A piece is
+scheduled this way only when WebSeeds cover all its file-backed ranges;
+partially covered pieces still use peers and the failure fallback. This is a
+coarser scheduling unit than upstream's per-file segments sharing PieceStorage.
+For an active task, `changeUri` updates the affected WebSeed queue, resets the
+scheduler scan, and wakes an idle scheduler; requests already in flight are
+not forcibly canceled. Failed pieces are retried up to the task's `max-tries`
+limit, observing `retry-wait`; peers can still fetch those pieces concurrently.
+A URI change triggers a new scan and resets WebSeed retry counts.
 
 ### Status and files
 

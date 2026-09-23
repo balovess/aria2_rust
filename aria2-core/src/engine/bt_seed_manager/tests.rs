@@ -42,6 +42,60 @@ async fn seeding_accepts_a_peer_after_download_has_no_initial_peers() {
 }
 
 #[tokio::test]
+async fn cancelled_seeding_loop_future_preserves_incoming_peer_and_actor_channels() {
+    let mut provider = crate::engine::bt_upload_session::InMemoryPieceProvider::new(1024, 1);
+    provider.set_piece_data(0, vec![0x5a; 1024]);
+    let provider = Arc::new(provider);
+    let (sender, receiver) = mpsc::channel(1);
+    let mut manager = BtSeedManager::new_with_transports(
+        [7u8; 20],
+        Vec::new(),
+        provider,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        1024,
+        None,
+        [1u8; 20],
+        Some(receiver),
+    );
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), manager.run_seeding_loop())
+            .await
+            .is_err()
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let cancel = manager.cancellation_token();
+    let cancel_after_availability = cancel.clone();
+    let client = tokio::spawn(async move {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        let availability = read_bt_frame(&mut stream).await;
+        assert!(matches!(availability.first(), Some(5)));
+        assert_eq!(availability.get(1), Some(&0x80));
+        cancel_after_availability.cancel();
+    });
+    let (server_stream, endpoint) = listener.accept().await.unwrap();
+    let peer_connection =
+        PeerConnection::from_stream_with_peer(server_stream, [2u8; 20], false, false);
+    sender
+        .send(crate::engine::bt_peer_listener::IncomingPeer {
+            connection: IncomingConnection::Plain(Box::new(peer_connection)),
+            endpoint,
+        })
+        .await
+        .unwrap();
+    drop(sender);
+
+    tokio::time::timeout(Duration::from_secs(2), manager.run_seeding_loop())
+        .await
+        .expect("seeding manager did not stop after actor cancellation")
+        .expect("seeding manager returned an error");
+    client.await.unwrap();
+}
+
+#[tokio::test]
 async fn incoming_seed_peer_receives_piece_availability_before_interested() {
     let info_hash = [0x52u8; 20];
     let local_peer_id = [0x62u8; 20];

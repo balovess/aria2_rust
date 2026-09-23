@@ -52,6 +52,9 @@ pub struct PiecePicker {
     allowed: Bitfield,
     /// Per-piece in-progress tracking (true = piece is being downloaded)
     in_progress: Bitfield,
+    /// Pieces exclusively leased to a non-peer source such as a WebSeed.
+    /// End-game duplicate requests must not compete with these owners.
+    reserved: Bitfield,
     /// Per-piece priority (0 = default, higher = more important)
     priorities: Vec<u8>,
     /// Explicitly prioritized pieces, in the order in which they are tried.
@@ -89,6 +92,7 @@ impl PiecePicker {
             completed: Bitfield::new(n),
             allowed: Bitfield::all_set(n),
             in_progress: Bitfield::new(n),
+            reserved: Bitfield::new(n),
             priorities: vec![0; n],
             priority_pieces: Vec::new(),
             endgame_candidates: Vec::new(),
@@ -327,6 +331,7 @@ impl PiecePicker {
             }
         }
         self.in_progress.clear(i);
+        self.reserved.clear(i);
         self.refresh_endgame_candidates();
     }
 
@@ -360,6 +365,26 @@ impl PiecePicker {
     pub fn is_in_progress(&self, index: u32) -> bool {
         let i = index as usize;
         i < self.num_pieces as usize && self.in_progress.test(i)
+    }
+
+    /// Reserve a piece for an exclusive non-peer source.
+    pub fn mark_reserved(&mut self, index: u32, reserved: bool) {
+        let i = index as usize;
+        if i >= self.num_pieces as usize {
+            return;
+        }
+        if reserved {
+            self.reserved.set(i);
+        } else {
+            self.reserved.clear(i);
+            self.reopen(i);
+        }
+    }
+
+    /// Whether a non-peer source currently owns this piece.
+    pub fn is_reserved(&self, index: u32) -> bool {
+        let i = index as usize;
+        i < self.num_pieces as usize && self.reserved.test(i)
     }
 
     /// Whether a piece has been completed and verified.

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use tokio::sync::Notify;
 use tracing::info;
@@ -111,6 +111,11 @@ pub struct RequestGroup {
     /// exposed through the shared status snapshot and is updated by the
     /// protocol schedulers while their real connections are active.
     pub(crate) connection_state: Arc<ConnectionState>,
+
+    /// Changes when the group's URI sources are edited at runtime.
+    pub(crate) uri_generation: Arc<AtomicU64>,
+    /// Dedicated wake-up for schedulers waiting for source URI changes.
+    pub(crate) uri_notify: Arc<Notify>,
 
     /// Download context — central metadata (file entries, piece hashes, attributes).
     /// In C++ aria2, `RequestGroup` owns `shared_ptr<DownloadContext> dctx_`.
@@ -273,6 +278,8 @@ impl RequestGroup {
             bt_bitfield: std::sync::RwLock::new(None),
             bt_peer_snapshots: Arc::new(std::sync::RwLock::new(Vec::new())),
             connection_state: Arc::new(ConnectionState::new()),
+            uri_generation: Arc::new(AtomicU64::new(0)),
+            uri_notify: Arc::new(Notify::new()),
             download_context: std::sync::RwLock::new(None),
             bt_num_pieces: AtomicU32::new(0),
             bt_piece_length: AtomicU32::new(0),

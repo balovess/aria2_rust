@@ -8,60 +8,6 @@ use crate::rate_limiter::RateLimiterConfig;
 use crate::engine::bt_message_validation::BtMessageValidator;
 use aria2_protocol::bittorrent::message::types::BtMessage;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
-use aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection;
-
-/// Transport variants that can serve upload requests after a torrent is complete.
-///
-/// Incoming MSE connections must remain encrypted for the whole upload session;
-/// converting them to `PeerConnection` would silently drop the crypto state.
-pub(crate) enum BtUploadConnection {
-    Plain(Box<PeerConnection>),
-    Encrypted(Box<EncryptedConnection>),
-}
-
-impl BtUploadConnection {
-    async fn read_message(&mut self) -> std::result::Result<Option<BtMessage>, String> {
-        match self {
-            Self::Plain(connection) => connection.read_message().await,
-            Self::Encrypted(connection) => connection.read_message().await,
-        }
-    }
-
-    async fn send_message(&mut self, message: &BtMessage) -> std::result::Result<(), String> {
-        match self {
-            Self::Plain(connection) => connection.send_message(message).await,
-            Self::Encrypted(connection) => connection.send_message(message).await,
-        }
-    }
-
-    async fn send_choke(&mut self) -> std::result::Result<(), String> {
-        match self {
-            Self::Plain(connection) => connection.send_choke().await,
-            Self::Encrypted(connection) => connection.send_choke().await,
-        }
-    }
-
-    async fn send_unchoke(&mut self) -> std::result::Result<(), String> {
-        match self {
-            Self::Plain(connection) => connection.send_unchoke().await,
-            Self::Encrypted(connection) => connection.send_unchoke().await,
-        }
-    }
-
-    fn remote_addr(&self) -> Option<std::net::SocketAddr> {
-        match self {
-            Self::Plain(connection) => connection.remote_addr(),
-            Self::Encrypted(connection) => connection.remote_addr(),
-        }
-    }
-
-    fn remote_peer_id(&self) -> Option<[u8; 20]> {
-        match self {
-            Self::Plain(connection) => connection.remote_peer_id().copied(),
-            Self::Encrypted(connection) => connection.remote_peer_id().copied(),
-        }
-    }
-}
 
 #[async_trait]
 pub trait PieceDataProvider: Send + Sync {
@@ -116,7 +62,7 @@ pub(crate) trait BtUploadTransport {
 }
 
 #[async_trait]
-impl BtUploadTransport for BtUploadConnection {
+impl BtUploadTransport for PeerConnection {
     async fn send_upload_message(
         &mut self,
         message: &BtMessage,
@@ -345,17 +291,13 @@ impl BtUploadState {
 }
 
 pub struct BtUploadSession {
-    conn: BtUploadConnection,
+    conn: PeerConnection,
     state: BtUploadState,
     pub(crate) is_dead: bool,
 }
 
 impl BtUploadSession {
     pub fn new(conn: PeerConnection, config: &BtSeedingConfig) -> Self {
-        Self::new_with_connection(BtUploadConnection::Plain(Box::new(conn)), config)
-    }
-
-    pub(crate) fn new_with_connection(conn: BtUploadConnection, config: &BtSeedingConfig) -> Self {
         Self {
             conn,
             state: BtUploadState::new(config),
@@ -449,7 +391,7 @@ impl BtUploadSession {
     }
 
     pub fn remote_peer_id(&self) -> Option<[u8; 20]> {
-        self.conn.remote_peer_id()
+        self.conn.remote_peer_id().copied()
     }
 
     pub fn uploaded_bytes(&self) -> u64 {
@@ -457,10 +399,7 @@ impl BtUploadSession {
     }
 
     pub fn connection_mut(&mut self) -> Option<&mut PeerConnection> {
-        match &mut self.conn {
-            BtUploadConnection::Plain(connection) => Some(connection),
-            BtUploadConnection::Encrypted(_) => None,
-        }
+        Some(&mut self.conn)
     }
 }
 

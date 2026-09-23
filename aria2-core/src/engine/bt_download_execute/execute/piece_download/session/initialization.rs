@@ -25,7 +25,7 @@ impl<'a> PieceDownloadSession<'a> {
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
-        web_seed_manager: Option<&'a crate::engine::bt_web_seed::WebSeedManager>,
+        web_seed_manager: Option<Arc<crate::engine::bt_web_seed::WebSeedManager>>,
         pex_enabled_peers: &'a mut HashSet<PeerKey>,
         last_pex_send: &'a mut Instant,
         pex_send_interval_secs: u64,

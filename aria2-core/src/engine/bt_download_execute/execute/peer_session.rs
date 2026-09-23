@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Instant;
 
 use tracing::{debug, info, warn};
@@ -14,7 +15,7 @@ use super::environment::parse_listen_ports;
 
 pub(super) struct PeerSession {
     pub(super) active_connections: Vec<BtPeerConn>,
-    pub(super) web_seed_manager: Option<crate::engine::bt_web_seed::WebSeedManager>,
+    pub(super) web_seed_manager: Option<Arc<crate::engine::bt_web_seed::WebSeedManager>>,
     pub(super) pex_enabled_peers: HashSet<PeerKey>,
     pub(super) last_pex_send: Instant,
 }
@@ -170,7 +171,7 @@ impl BtDownloadCommand {
                 ClientTlsConfig::from_download_options(group.options())
             };
             info!("[BT] Initializing live per-file web-seed fallback");
-            Some(
+            Some(Arc::new(
                 crate::engine::bt_web_seed::WebSeedManager::for_request_group(
                     std::sync::Arc::clone(&self.group),
                     piece_length,
@@ -178,7 +179,7 @@ impl BtDownloadCommand {
                     web_seed_tls,
                     self.outbound_network_policy.clone(),
                 ),
-            )
+            ))
         } else {
             None
         };
