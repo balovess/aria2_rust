@@ -145,7 +145,7 @@ impl BtMessageHandler {
                             let Some(event) = event else { break };
                             match event {
                                 PeerEvent::UploadBytes { .. } => {}
-                                PeerEvent::InterestChanged { snapshot } => {
+                                PeerEvent::InterestChanged { snapshot, .. } => {
                                     apply_interest_change(
                                         &mut workers,
                                         &peer_identity_indices,

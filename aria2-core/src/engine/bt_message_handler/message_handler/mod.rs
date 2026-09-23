@@ -13,7 +13,7 @@ mod normal_pipeline;
 mod peer_worker;
 mod pipelined;
 
-pub(crate) use peer_worker::{PeerCommand, PeerEvent, peer_worker};
+pub(crate) use peer_worker::{PeerActorTask, PeerCommand, PeerEvent};
 
 /// BT message handler for block-level operations.
 ///

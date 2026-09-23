@@ -144,6 +144,7 @@ impl BtSeedManager {
             actor.shutdown().await;
         }
         self.seed_peer_actors.clear();
+        self.seed_peer_actor_indices.clear();
         self.seed_peer_event_tx = None;
         self.seed_peer_event_rx = None;
         self.total_uploaded = self
@@ -242,12 +243,14 @@ impl BtSeedManager {
         for connection in sessions {
             let actor_id = self.next_seed_peer_actor_id as usize;
             self.next_seed_peer_actor_id = self.next_seed_peer_actor_id.wrapping_add(1);
+            let actor_index = self.seed_peer_actors.len();
             self.seed_peer_actors.push(SeedPeerActor::spawn(
                 actor_id,
                 connection,
                 Arc::clone(&provider),
                 event_tx.clone(),
             ));
+            self.seed_peer_actor_indices.insert(actor_id, actor_index);
         }
     }
 
@@ -269,29 +272,22 @@ impl BtSeedManager {
                     .load(std::sync::atomic::Ordering::Relaxed);
                 self.publish_upload_stats();
             }
-            PeerEvent::InterestChanged { snapshot } => {
-                if let Some(stats) = self
-                    .peer_stats
-                    .iter_mut()
-                    .find(|stats| stats.peer_id == snapshot.peer_id && stats.addr == snapshot.addr)
-                {
-                    *stats = *snapshot;
-                }
+            PeerEvent::InterestChanged {
+                peer_index,
+                snapshot,
+            } => {
+                self.update_actor_stats(peer_index, *snapshot);
             }
             PeerEvent::Disconnected { peer_index } => {
-                if let Some(actor) = self
-                    .seed_peer_actors
-                    .iter_mut()
-                    .find(|actor| actor.actor_id == peer_index)
+                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&peer_index)
+                    && let Some(actor) = self.seed_peer_actors.get_mut(actor_index)
                 {
                     actor.dead = true;
                 }
             }
             PeerEvent::RequestFailed { peer_index, .. } => {
-                if let Some(actor) = self
-                    .seed_peer_actors
-                    .iter_mut()
-                    .find(|actor| actor.actor_id == peer_index)
+                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&peer_index)
+                    && let Some(actor) = self.seed_peer_actors.get_mut(actor_index)
                 {
                     actor.dead = true;
                 }
@@ -301,10 +297,7 @@ impl BtSeedManager {
     }
 
     fn update_actor_stats(&mut self, actor_id: usize, snapshot: PeerStats) {
-        if let Some(actor_index) = self
-            .seed_peer_actors
-            .iter()
-            .position(|actor| actor.actor_id == actor_id)
+        if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
             && let Some(stats) = self.peer_stats.get_mut(actor_index)
         {
             *stats = snapshot;
@@ -392,12 +385,14 @@ impl BtSeedManager {
         ) {
             let actor_id = self.next_seed_peer_actor_id as usize;
             self.next_seed_peer_actor_id = self.next_seed_peer_actor_id.wrapping_add(1);
+            let actor_index = self.seed_peer_actors.len();
             self.seed_peer_actors.push(SeedPeerActor::spawn(
                 actor_id,
                 connection,
                 std::sync::Arc::clone(provider),
                 event_tx.clone(),
             ));
+            self.seed_peer_actor_indices.insert(actor_id, actor_index);
         } else {
             self.upload_sessions.push(connection);
         }
@@ -425,6 +420,7 @@ impl BtSeedManager {
                 let actor = &self.seed_peer_actors[index];
                 if actor.dead {
                     self.release_peer(actor.endpoint);
+                    self.seed_peer_actor_indices.remove(&actor.actor_id);
                     self.seed_peer_actors.remove(index);
                     if index < self.peer_stats.len() {
                         self.peer_stats.remove(index);
@@ -432,6 +428,10 @@ impl BtSeedManager {
                 }
             }
             self.peer_stats.truncate(self.seed_peer_actors.len());
+            for (actor_index, actor) in self.seed_peer_actors.iter().enumerate() {
+                self.seed_peer_actor_indices
+                    .insert(actor.actor_id, actor_index);
+            }
             let removed = before - self.seed_peer_actors.len();
             if removed > 0 {
                 debug!("Removed {} dead seeding peer actors", removed);

@@ -66,13 +66,17 @@ impl BtDownloadCommand {
         }
         *last_snub_check = Instant::now();
 
+        let mut connection_indices = HashMap::with_capacity(active_connections.len());
+        for (index, connection) in active_connections.iter().enumerate() {
+            if let Some(peer_id) = PeerKey::from_peer(&connection.ip_addr, connection.port) {
+                connection_indices.entry(peer_id).or_insert(index);
+            }
+        }
+
         let mut newly_snubbed = Vec::new();
         for (&peer_id, &last_time) in peer_last_data_time {
             if last_time.elapsed().as_secs() > SNUB_TIMEOUT_SECS {
-                if let Some(index) = active_connections
-                    .iter()
-                    .position(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port) == Some(peer_id))
-                {
+                if let Some(&index) = connection_indices.get(&peer_id) {
                     self.mark_peer_snubbed(index);
                 }
                 newly_snubbed.push(peer_id);

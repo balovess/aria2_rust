@@ -13,7 +13,7 @@ pub mod message_handler;
 pub mod types;
 
 pub use message_handler::BtMessageHandler;
-pub(crate) use message_handler::{PeerCommand, PeerEvent, peer_worker};
+pub(crate) use message_handler::{PeerActorTask, PeerCommand, PeerEvent};
 pub use types::{
     BLOCK_REQUEST_TIMEOUT_SECS, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_RETRIES,
     PieceDownloadResult,

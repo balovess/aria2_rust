@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
@@ -208,6 +209,7 @@ impl BtSeedManager {
             info_hash,
             upload_sessions: connections,
             seed_peer_actors: Vec::new(),
+            seed_peer_actor_indices: HashMap::new(),
             seed_peer_event_tx: None,
             seed_peer_event_rx: None,
             next_seed_peer_actor_id: 1,

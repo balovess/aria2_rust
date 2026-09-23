@@ -256,7 +256,7 @@ pub(super) async fn run_attempt(
                 let Some(event) = event else { break };
                 match event {
                     PeerEvent::UploadBytes { .. } => {}
-                    PeerEvent::InterestChanged { snapshot } => {
+                    PeerEvent::InterestChanged { snapshot, .. } => {
                         apply_interest_change(
                             workers,
                             peer_indices,

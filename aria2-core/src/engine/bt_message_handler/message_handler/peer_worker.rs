@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use futures::{StreamExt, stream::FuturesUnordered};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tracing::trace;
 
 use crate::engine::bt_peer_connection::BtPeerConn;
@@ -38,6 +39,7 @@ pub(crate) enum PeerEvent {
         message: aria2_protocol::bittorrent::message::types::BtMessage,
     },
     InterestChanged {
+        peer_index: usize,
         snapshot: Box<crate::engine::peer_stats::PeerStats>,
     },
     UploadBytes {
@@ -53,6 +55,86 @@ pub(crate) enum PeerEvent {
     },
 }
 
+/// Bounded command endpoint shared by download workers and long-lived seed actors.
+#[derive(Clone)]
+pub(crate) struct PeerActorControl(mpsc::Sender<PeerCommand>);
+
+impl PeerActorControl {
+    pub(crate) fn channel(capacity: usize) -> (Self, mpsc::Receiver<PeerCommand>) {
+        let (sender, receiver) = mpsc::channel(capacity.max(1));
+        (Self(sender), receiver)
+    }
+
+    pub(crate) async fn send(
+        &self,
+        command: PeerCommand,
+    ) -> std::result::Result<(), mpsc::error::SendError<PeerCommand>> {
+        self.0.send(command).await
+    }
+
+    pub(crate) fn try_send(
+        &self,
+        command: PeerCommand,
+    ) -> std::result::Result<(), mpsc::error::TrySendError<PeerCommand>> {
+        self.0.try_send(command)
+    }
+}
+
+/// Tokio-owned peer worker used when the connection lifetime outlives one
+/// piece-transfer future.
+pub(crate) struct PeerActorTask {
+    pub(crate) control: PeerActorControl,
+    task: Option<JoinHandle<BtPeerConn>>,
+}
+
+impl PeerActorTask {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_owned(
+        peer_index: usize,
+        mut connection: BtPeerConn,
+        event_tx: mpsc::Sender<PeerEvent>,
+        dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
+        command_capacity: usize,
+    ) -> Self {
+        let (control, command_rx) = PeerActorControl::channel(command_capacity);
+        let task = tokio::spawn(async move {
+            let _ = peer_worker(
+                peer_index,
+                &mut connection,
+                command_rx,
+                event_tx,
+                dht_engine,
+                upload_provider,
+            )
+            .await;
+            connection
+        });
+        Self {
+            control,
+            task: Some(task),
+        }
+    }
+
+    pub(crate) async fn shutdown(
+        &mut self,
+    ) -> std::result::Result<BtPeerConn, tokio::task::JoinError> {
+        let _ = self.control.send(PeerCommand::Shutdown).await;
+        self.task
+            .take()
+            .expect("peer actor task can only be shut down once")
+            .await
+    }
+}
+
+impl Drop for PeerActorTask {
+    fn drop(&mut self) {
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
 pub(super) type WorkerFuture<'a> = Pin<Box<dyn Future<Output = usize> + Send + 'a>>;
 
 /// Owns one local worker future per connection while a piece is in flight.
@@ -60,7 +142,7 @@ pub(super) type WorkerFuture<'a> = Pin<Box<dyn Future<Output = usize> + Send + '
 /// Workers borrow connections rather than moving them into detached tasks, so
 /// cancellation cannot silently remove a live connection from the session.
 pub(super) struct PeerWorkers<'a> {
-    pub(super) senders: Vec<Option<mpsc::Sender<PeerCommand>>>,
+    pub(super) senders: Vec<Option<PeerActorControl>>,
     pub(super) workers: FuturesUnordered<WorkerFuture<'a>>,
 }
 
@@ -76,7 +158,7 @@ impl<'a> PeerWorkers<'a> {
 
         for (peer_index, connection) in connections.iter_mut().enumerate() {
             let (command_tx, command_rx) =
-                mpsc::channel(DEFAULT_MAX_OUTSTANDING_REQUEST.saturating_mul(2).max(8));
+                PeerActorControl::channel(DEFAULT_MAX_OUTSTANDING_REQUEST.saturating_mul(2).max(8));
             senders.push(Some(command_tx));
             let worker: WorkerFuture<'a> = Box::pin(peer_worker(
                 peer_index,
@@ -209,6 +291,7 @@ pub(crate) async fn peer_worker(
                         }
                         if connection.stats.peer_interested != was_interested
                             && event_tx.send(PeerEvent::InterestChanged {
+                                peer_index,
                                 snapshot: Box::new(connection.stats.clone()),
                             }).await.is_err()
                         {

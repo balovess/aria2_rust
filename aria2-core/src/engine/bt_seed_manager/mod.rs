@@ -42,6 +42,7 @@ pub mod types;
 // Re-export the exit-condition type from the types submodule for convenience.
 pub use types::SeedExitCondition;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
@@ -84,6 +85,8 @@ pub struct BtSeedManager {
     upload_sessions: Vec<BtPeerConn>,
     /// Long-lived I/O owners after the seeding loop starts.
     seed_peer_actors: Vec<SeedPeerActor>,
+    /// Stable actor ID to the actor/statistics slot used by incoming events.
+    seed_peer_actor_indices: HashMap<usize, usize>,
     seed_peer_event_tx: Option<tokio::sync::mpsc::Sender<peer_actor::PeerEvent>>,
     seed_peer_event_rx: Option<tokio::sync::mpsc::Receiver<peer_actor::PeerEvent>>,
     next_seed_peer_actor_id: u64,
