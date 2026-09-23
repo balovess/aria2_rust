@@ -36,6 +36,11 @@ impl BtPeerConn {
         self.last_keepalive_sent + self.keep_alive_interval
     }
 
+    /// Return when an idle peer should be disconnected for inactivity.
+    pub(crate) fn peer_timeout_deadline(&self) -> std::time::Instant {
+        self.last_message_received + self.peer_timeout
+    }
+
     /// Configure the keep-alive and peer inactivity intervals for this
     /// connection. The download command applies task options here after the
     /// transport handshake completes.

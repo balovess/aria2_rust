@@ -306,27 +306,7 @@ impl BtDownloadCommand {
                                 .session_resource
                                 .as_ref()
                                 .map(|resource| resource.bitfield().to_vec());
-                            match message {
-                                aria2_protocol::bittorrent::message::types::BtMessage::Have {
-                                    piece_index,
-                                } => connection.update_peer_bitfield(piece_index as usize, 1),
-                                aria2_protocol::bittorrent::message::types::BtMessage::Bitfield {
-                                    data,
-                                } => connection.set_peer_bitfield(&data),
-                                aria2_protocol::bittorrent::message::types::BtMessage::HaveAll => {
-                                    connection.mark_seeder()
-                                }
-                                aria2_protocol::bittorrent::message::types::BtMessage::HaveNone => {
-                                    connection.set_peer_bitfield(&[])
-                                }
-                                aria2_protocol::bittorrent::message::types::BtMessage::Choke => {
-                                    connection.stats.peer_choking = true;
-                                }
-                                aria2_protocol::bittorrent::message::types::BtMessage::Unchoke => {
-                                    connection.stats.peer_choking = false;
-                                }
-                                _ => {}
-                            }
+                            connection.apply_peer_state_message(&message);
                             let after = connection
                                 .session_resource
                                 .as_ref()

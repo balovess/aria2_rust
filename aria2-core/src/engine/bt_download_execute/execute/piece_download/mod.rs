@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
-use crate::request::request_group::BtPeerSnapshot;
 
 fn progress_snapshot(
     info_hash: [u8; 20],
@@ -40,36 +39,9 @@ fn sync_peer_snapshots(
     group: &crate::request::request_group::RequestGroup,
     active_connections: &[BtPeerConn],
 ) {
-    let snapshots: Vec<BtPeerSnapshot> = active_connections
+    let snapshots: Vec<crate::request::request_group::BtPeerSnapshot> = active_connections
         .iter()
-        .filter_map(|conn| {
-            Some(BtPeerSnapshot {
-                peer_id: conn.peer_id.unwrap_or(conn.stats.peer_id),
-                addr: conn.remote_endpoint()?,
-                is_incoming: conn.incoming,
-                source: conn.source,
-                bitfield: conn
-                    .session_resource
-                    .as_ref()
-                    .map(|resource| resource.bitfield().to_vec()),
-                uploaded_bytes: conn.stats.uploaded_bytes,
-                downloaded_bytes: conn.stats.downloaded_bytes,
-                upload_speed: conn.stats.upload_speed,
-                download_speed: conn.stats.download_speed,
-                avg_upload_speed: conn.stats.avg_upload_speed,
-                avg_download_speed: conn.stats.avg_download_speed,
-                am_choking: conn.stats.am_choking,
-                peer_choking: conn.stats.peer_choking,
-                seeder: Some(conn.seeder),
-                connection_duration_secs: conn.stats.connection_duration_secs(),
-                last_data_age_secs: conn
-                    .stats
-                    .last_data_time
-                    .map_or(conn.stats.age().as_secs(), |time| time.elapsed().as_secs()),
-                is_snubbed: conn.stats.is_snubbed,
-                is_banned: conn.stats.is_banned,
-            })
-        })
+        .filter_map(BtPeerConn::snapshot)
         .collect();
     group.set_bt_connection_count(snapshots.len());
     group.set_bt_peer_snapshots(snapshots);

@@ -386,9 +386,9 @@ Rust-specific differences are:
 
 | Area | Current implementation |
 | --- | --- |
-| Disk I/O | Positioned offset writes, write-back range cache, threshold batching, and coalesced multi-file writes. Blocking syscalls run on Tokio's blocking pool; Linux `io_uring` is an opt-in backend. |
+| Disk I/O | Slow disk operations run in the background so synchronous reads and writes do not stall network tasks. Storage speed can still limit overall download speed. |
 | Data path | `bytes::Bytes` is transferred through the cache, Piece writer, and multi-file slices to reduce copies and temporary allocations. This is a reduced-copy path, not an end-to-end zero-copy guarantee. |
-| Hash verification | Bounded background hash workers, chunked integrity dispatch, cooperative yields, and RequestGroup-aware cancellation. |
+| Hash verification | File and piece checks run in the background to reduce their impact on download tasks. |
 | BitTorrent/DHT | Hash-based peer lifecycle, incremental piece-frequency tracking, shared HAVE frame encoding with bounded concurrent sends, bucket-tree/top-K routing, and bounded UDP workers. |
 | File allocation | Platform-aware Linux `fallocate`, Windows `SetFileValidData`, macOS `F_PREALLOCATE`, and cooperative fallbacks that keep long allocation work off the reactor. |
 | RPC control plane | Owned wire parsing, up to 64 concurrent read-only calls in HTTP/WebSocket batches, mutation barriers, and blocking workers for heavy payload conversion. `system.multicall` keeps original sequential semantics. |
@@ -444,6 +444,14 @@ These are microbenchmark results, not a whole-download throughput claim or a
 comparison with `aria2_original`. Details and validation commands are recorded
 in [docs/MIGRATION.md](docs/MIGRATION.md) and
 [docs/engine-loop-performance.md](docs/engine-loop-performance.md).
+
+### Download Responsiveness
+
+Disk writes and integrity checks run in the background so synchronous I/O or
+hashing does not stall network tasks. The worker queue is bounded; if storage
+falls behind, download tasks still wait and overall speed remains limited by
+the device. The current write benchmark does not include a real network
+download, so it does not establish higher download throughput.
 
 To reproduce the focused benchmarks:
 

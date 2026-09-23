@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::engine::peer_stats::PeerStats;
-use crate::request::request_group::BtPeerSource;
+use crate::request::request_group::{BtPeerSnapshot, BtPeerSource};
 
 use super::session_resource::PeerSessionResource;
 use super::types::{ConnectionType, SendBuffer};
@@ -165,6 +165,64 @@ pub struct BtPeerConn {
 }
 
 impl BtPeerConn {
+    /// Apply protocol state carried by a peer message.
+    ///
+    /// Both actor-driven and coordinator-driven reads use this operation so
+    /// availability and choke state have one transition implementation.
+    pub(crate) fn apply_peer_state_message(
+        &mut self,
+        message: &aria2_protocol::bittorrent::message::types::BtMessage,
+    ) {
+        use aria2_protocol::bittorrent::message::types::BtMessage;
+
+        match message {
+            BtMessage::AllowedFast { index } => self.add_allowed_fast(*index),
+            BtMessage::Have { piece_index } => {
+                self.update_peer_bitfield(*piece_index as usize, 1);
+            }
+            BtMessage::Bitfield { data } => self.set_peer_bitfield(data),
+            BtMessage::HaveAll => self.mark_seeder(),
+            BtMessage::HaveNone => {
+                self.seeder = false;
+                self.set_peer_bitfield(&[]);
+            }
+            BtMessage::Choke => self.stats.peer_choking = true,
+            BtMessage::Unchoke => self.stats.peer_choking = false,
+            _ => {}
+        }
+    }
+
+    /// Capture the externally visible state for this connection without
+    /// exposing the connection internals to the torrent coordinator.
+    pub(crate) fn snapshot(&self) -> Option<BtPeerSnapshot> {
+        Some(BtPeerSnapshot {
+            peer_id: self.peer_id.unwrap_or(self.stats.peer_id),
+            addr: self.remote_endpoint()?,
+            is_incoming: self.incoming,
+            source: self.source,
+            bitfield: self
+                .session_resource
+                .as_ref()
+                .map(|resource| resource.bitfield().to_vec()),
+            uploaded_bytes: self.stats.uploaded_bytes,
+            downloaded_bytes: self.stats.downloaded_bytes,
+            upload_speed: self.stats.upload_speed,
+            download_speed: self.stats.download_speed,
+            avg_upload_speed: self.stats.avg_upload_speed,
+            avg_download_speed: self.stats.avg_download_speed,
+            am_choking: self.stats.am_choking,
+            peer_choking: self.stats.peer_choking,
+            seeder: Some(self.seeder),
+            connection_duration_secs: self.stats.connection_duration_secs(),
+            last_data_age_secs: self
+                .stats
+                .last_data_time
+                .map_or(self.stats.age().as_secs(), |time| time.elapsed().as_secs()),
+            is_snubbed: self.stats.is_snubbed,
+            is_banned: self.stats.is_banned,
+        })
+    }
+
     pub(crate) fn configure_upload_with_auto_unchoke(
         &mut self,
         config: &crate::engine::bt_upload_session::BtSeedingConfig,
@@ -241,6 +299,18 @@ impl BtPeerConn {
         if result.is_ok() {
             self.stats.am_choking = false;
         }
+        result
+    }
+
+    pub(crate) async fn announce_upload_availability(
+        &mut self,
+        provider: &dyn crate::engine::bt_upload_session::PieceDataProvider,
+    ) -> crate::error::Result<()> {
+        let Some(mut state) = self.upload_state.take() else {
+            return Ok(());
+        };
+        let result = state.send_piece_availability(self, provider).await;
+        self.upload_state = Some(state);
         result
     }
 

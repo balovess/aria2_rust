@@ -45,6 +45,13 @@ impl SeedPeerActor {
         self.actor.control.send(command).await
     }
 
+    pub(super) fn try_send(
+        &self,
+        command: PeerCommand,
+    ) -> Result<(), mpsc::error::TrySendError<PeerCommand>> {
+        self.actor.control.try_send(command)
+    }
+
     pub(super) async fn shutdown(&mut self) {
         let _ = self.actor.shutdown().await;
     }

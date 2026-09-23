@@ -13,7 +13,8 @@ use crate::util::rwlock_ext::RwLockRecover;
 
 use super::environment::parse_listen_ports;
 
-pub(super) struct PeerSession {
+/// Torrent-scoped swarm state retained from peer discovery through seeding.
+pub(super) struct TorrentSession {
     pub(super) active_connections: Vec<BtPeerConn>,
     pub(super) web_seed_manager: Option<Arc<crate::engine::bt_web_seed::WebSeedManager>>,
     pub(super) pex_enabled_peers: HashSet<PeerKey>,
@@ -21,14 +22,14 @@ pub(super) struct PeerSession {
 }
 
 impl BtDownloadCommand {
-    pub(super) async fn prepare_peer_session(
+    pub(super) async fn prepare_torrent_session(
         &mut self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
         network_info_hash: [u8; 20],
-    ) -> crate::error::Result<PeerSession> {
+    ) -> crate::error::Result<TorrentSession> {
         // Register this torrent on the engine-owned listener before discovery
         // so one socket can serve all active torrents and route by info-hash.
         if self.incoming_peers.is_none() {
@@ -248,7 +249,7 @@ impl BtDownloadCommand {
         );
 
         // Download pieces from the connected peers, using web seeds and PEX as configured.
-        Ok(PeerSession {
+        Ok(TorrentSession {
             active_connections,
             web_seed_manager,
             pex_enabled_peers,

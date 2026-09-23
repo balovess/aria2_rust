@@ -28,6 +28,7 @@ pub(crate) enum PeerCommand {
         piece_index: u32,
         request: BlockRequest,
     },
+    AnnounceAvailability,
     ChokeUpload,
     UnchokeUpload,
     Shutdown,
@@ -248,8 +249,15 @@ pub(crate) async fn peer_worker(
 ) -> PeerActorId {
     loop {
         let keepalive_deadline = tokio::time::Instant::from_std(connection.keepalive_deadline());
+        let peer_timeout_deadline =
+            tokio::time::Instant::from_std(connection.peer_timeout_deadline());
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(peer_timeout_deadline) => {
+                tracing::debug!(actor_id = actor_id.0, "BT peer inactivity timeout elapsed");
+                let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                break;
+            }
             _ = tokio::time::sleep_until(keepalive_deadline) => {
                 if let Err(error) = connection.send_keepalive().await {
                     tracing::debug!(actor_id = actor_id.0, %error, "Failed to send BT peer keep-alive");
@@ -274,6 +282,18 @@ pub(crate) async fn peer_worker(
                     Some(PeerCommand::Cancel { piece_index, request }) => {
                         if connection.send_cancel(&request.message(piece_index)).await.is_ok() {
                             connection.record_outbound_activity();
+                        }
+                    }
+                    Some(PeerCommand::AnnounceAvailability) => {
+                        let Some(provider) = upload_provider.as_deref() else {
+                            tracing::debug!(actor_id = actor_id.0, "Peer actor has no upload provider for availability announcement");
+                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                            break;
+                        };
+                        if let Err(error) = connection.announce_upload_availability(provider).await {
+                            tracing::debug!(actor_id = actor_id.0, %error, "Failed to announce BT peer availability");
+                            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                            break;
                         }
                     }
                     Some(PeerCommand::ChokeUpload) => {
@@ -377,6 +397,8 @@ async fn process_peer_message(
 )> {
     use aria2_protocol::bittorrent::message::types::BtMessage;
 
+    connection.apply_peer_state_message(&message);
+
     let mut uploaded_bytes = 0;
     if !matches!(message, BtMessage::Piece { .. } | BtMessage::Reject { .. })
         && let Some(provider) = upload_provider
@@ -389,10 +411,6 @@ async fn process_peer_message(
 
     match message {
         BtMessage::Piece { .. } | BtMessage::Reject { .. } => Ok((Some(message), uploaded_bytes)),
-        BtMessage::AllowedFast { index } => {
-            connection.add_allowed_fast(index);
-            Ok((None, uploaded_bytes))
-        }
         BtMessage::Port { port } => {
             if port != 0
                 && let Ok(ip) = connection.ip_addr.parse()
@@ -413,31 +431,6 @@ async fn process_peer_message(
             {
                 BtMessageHandler::try_process_pex_during_read(connection, ext_id, &payload);
             }
-            Ok((None, uploaded_bytes))
-        }
-        BtMessage::Have { piece_index } => {
-            connection.update_peer_bitfield(piece_index as usize, 1);
-            Ok((None, uploaded_bytes))
-        }
-        BtMessage::Bitfield { data } => {
-            connection.set_peer_bitfield(&data);
-            Ok((None, uploaded_bytes))
-        }
-        BtMessage::HaveAll => {
-            connection.mark_seeder();
-            Ok((None, uploaded_bytes))
-        }
-        BtMessage::HaveNone => {
-            connection.seeder = false;
-            connection.set_peer_bitfield(&[]);
-            Ok((None, uploaded_bytes))
-        }
-        BtMessage::Choke => {
-            connection.stats.peer_choking = true;
-            Ok((None, uploaded_bytes))
-        }
-        BtMessage::Unchoke => {
-            connection.stats.peer_choking = false;
             Ok((None, uploaded_bytes))
         }
         _ => Ok((None, uploaded_bytes)),

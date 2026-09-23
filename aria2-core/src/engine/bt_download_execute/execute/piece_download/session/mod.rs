@@ -13,6 +13,7 @@ use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::engine::bt_download_execute::types::{EndgameState, PeerKey};
 
 use super::BtStopTimeoutState;
+use crate::engine::bt_download_execute::execute::peer_session::TorrentSession;
 
 mod initialization;
 mod piece;
@@ -63,14 +64,11 @@ impl BtDownloadCommand {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::engine::bt_download_execute::execute) async fn download_pieces_loop(
         &mut self,
-        active_connections: &mut Vec<BtPeerConn>,
+        torrent_session: &mut TorrentSession,
         meta: &mut aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
-        web_seed_manager: Option<Arc<WebSeedManager>>,
-        pex_enabled_peers: &mut HashSet<PeerKey>,
-        last_pex_send: &mut Instant,
         pex_send_interval_secs: u64,
         verified_piece_indices: &[usize],
     ) -> Result<()> {
@@ -80,14 +78,14 @@ impl BtDownloadCommand {
         }
         let session = PieceDownloadSession::new(
             self,
-            active_connections,
+            &mut torrent_session.active_connections,
             meta,
             piece_length,
             total_size,
             num_pieces,
-            web_seed_manager,
-            pex_enabled_peers,
-            last_pex_send,
+            torrent_session.web_seed_manager.clone(),
+            &mut torrent_session.pex_enabled_peers,
+            &mut torrent_session.last_pex_send,
             pex_send_interval_secs,
             verified_piece_indices,
         )?;

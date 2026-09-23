@@ -329,9 +329,9 @@ aria2-rust/
 
 | 领域 | 当前 Rust 实现 |
 | --- | --- |
-| 磁盘 I/O | Positioned offset write、写回 range cache、阈值批处理和多文件 coalescing；阻塞 syscall 放入 Tokio blocking pool，Linux `io_uring` 为 opt-in backend。 |
+| 磁盘 I/O | 慢速磁盘操作在后台处理，避免同步读写卡住网络任务；磁盘性能仍会影响整体下载速度。 |
 | 数据路径 | 通过 `bytes::Bytes` 在 cache、Piece writer 和多文件切片之间传递，减少复制和临时分配；这是 reduced-copy path，不是端到端 zero-copy 保证。 |
-| Hash 校验 | 有界后台 hash worker、分块完整性 dispatcher、协作式让出和 RequestGroup 生命周期取消。 |
+| Hash 校验 | 在后台执行文件和分片校验，减少校验计算对下载任务的影响。 |
 | BT/DHT | Hash-based peer 生命周期、增量 Piece 频率、共享 HAVE frame 的有界并发发送、bucket tree/top-K 路由和有界 UDP worker。 |
 | 文件预分配 | Linux `fallocate`、Windows `SetFileValidData`、macOS `F_PREALLOCATE` 的平台适配，以及不会阻塞 reactor 的 fallback。 |
 | RPC 控制面 | owned wire parsing、HTTP/WebSocket batch 中最多 64 路只读并发、mutation barrier，以及重 payload 转换的 blocking worker；`system.multicall` 保留原版顺序语义。 |
@@ -380,6 +380,12 @@ Windows release 构建中的 Rust-only Criterion 基准（`50,000` pieces，同�
 `aria2_original` 的对比结果。详细说明、测试证据和边界条件见
 [docs/MIGRATION.md](docs/MIGRATION.md) 及
 [docs/engine-loop-performance.md](docs/engine-loop-performance.md)。
+
+### 下载响应性
+
+磁盘写入和完整性校验在后台执行，避免同步 I/O 或哈希计算卡住网络任务。
+后台队列有容量限制；磁盘跟不上时，下载任务仍会等待，整体速度也仍受磁盘性能影响。
+目前的写入基准没有覆盖真实网络下载，因此不据此宣称下载吞吐有所提升。
 
 运行专项基准：
 

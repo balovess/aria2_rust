@@ -34,23 +34,14 @@ impl BtSeedManager {
             self.upload_sessions.len()
         );
 
-        if let Some(provider) = self.piece_provider.as_ref() {
-            let mut failed_indices = Vec::new();
-            for (index, connection) in self.upload_sessions.iter_mut().enumerate() {
-                if let Err(error) = send_piece_availability(connection, provider.as_ref()).await {
-                    warn!(%error, "Failed to announce completed BitTorrent seed availability");
-                    failed_indices.push(index);
-                }
-            }
-            for index in failed_indices.into_iter().rev() {
-                self.upload_sessions.remove(index);
-                if index < self.peer_stats.len() {
-                    self.peer_stats.remove(index);
-                }
-            }
-        }
         self.remove_dead_sessions();
         self.start_seed_peer_actors();
+        for actor in &mut self.seed_peer_actors {
+            if let Err(error) = actor.try_send(PeerCommand::AnnounceAvailability) {
+                actor.dead = true;
+                warn!(%error, actor_id = actor.actor_id.0, "Failed to queue seed availability announcement");
+            }
+        }
         self.publish_connection_state();
         self.publish_upload_stats();
 
@@ -372,14 +363,6 @@ impl BtSeedManager {
             return;
         }
 
-        if let Some(provider) = self.piece_provider.as_ref()
-            && let Err(error) = send_piece_availability(&mut connection, provider.as_ref()).await
-        {
-            debug!(%endpoint, %error, "Failed to announce completed BitTorrent seed availability");
-            self.release_peer(endpoint);
-            warn!(%endpoint, %error, "Failed to announce BitTorrent seed availability");
-            return;
-        }
         let peer_stats = connection.stats.clone();
         if let (Some(provider), Some(event_tx)) = (
             self.piece_provider.as_ref(),
@@ -394,6 +377,12 @@ impl BtSeedManager {
                 event_tx.clone(),
             ));
             self.seed_peer_actor_indices.insert(actor_id, actor_index);
+            if let Some(actor) = self.seed_peer_actors.last_mut()
+                && let Err(error) = actor.try_send(PeerCommand::AnnounceAvailability)
+            {
+                actor.dead = true;
+                debug!(%endpoint, %error, "Failed to queue seed peer availability announcement");
+            }
         } else {
             self.upload_sessions.push(connection);
         }
@@ -547,22 +536,4 @@ impl BtSeedManager {
             }
         }
     }
-}
-
-async fn send_piece_availability(
-    connection: &mut BtPeerConn,
-    provider: &dyn crate::engine::bt_upload_session::PieceDataProvider,
-) -> crate::error::Result<()> {
-    let num_pieces = provider.num_pieces();
-    if num_pieces == 0 {
-        return connection.send_have_none().await;
-    }
-
-    let mut bitfield = vec![0u8; (num_pieces as usize).div_ceil(8)];
-    for piece_index in 0..num_pieces {
-        if provider.has_piece(piece_index) {
-            bitfield[piece_index as usize / 8] |= 1 << (7 - piece_index % 8);
-        }
-    }
-    connection.send_bitfield(bitfield).await
 }
