@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use tracing::{debug, info, warn};
 
-use crate::download::download_context::{ContextAttributeType, TorrentAttribute};
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_peer_connection::BtPeerConn;
@@ -21,19 +20,6 @@ pub(super) struct PeerSession {
 }
 
 impl BtDownloadCommand {
-    fn configured_web_seed_urls(&self) -> Vec<String> {
-        self.group
-            .recover()
-            .get_download_context()
-            .and_then(|context| {
-                context
-                    .get_attribute(ContextAttributeType::BitTorrent)
-                    .and_then(|attribute| attribute.downcast_ref::<TorrentAttribute>())
-                    .map(|torrent| torrent.url_list.clone())
-            })
-            .unwrap_or_default()
-    }
-
     pub(super) async fn prepare_peer_session(
         &mut self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
@@ -175,33 +161,23 @@ impl BtDownloadCommand {
         }
 
         // Initialize web seed manager only when the task explicitly enables
-        // the BEP 19 fallback. The torrent's url-list is metadata, not an
-        // instruction to bypass --bt-enable-web-seed=false.
+        // the BEP 19 fallback. It reads the current per-file URI queues when
+        // requesting each piece so RPC changeUri updates take effect live.
         let web_seed_enabled = self.group.recover().options().bt_enable_web_seed;
-        let web_seed_urls = self.configured_web_seed_urls();
-        let web_seed_manager = if web_seed_enabled && !web_seed_urls.is_empty() {
-            info!(
-                "[BT] Initializing web seed manager with {} URL(s)",
-                web_seed_urls.len()
-            );
+        let web_seed_manager = if web_seed_enabled {
             let web_seed_tls = {
                 let group = self.group.recover();
                 ClientTlsConfig::from_download_options(group.options())
             };
+            info!("[BT] Initializing live per-file web-seed fallback");
             Some(
-                crate::engine::bt_web_seed::WebSeedManager::new_with_tls_and_policy_async(
-                    web_seed_urls,
+                crate::engine::bt_web_seed::WebSeedManager::for_request_group(
+                    std::sync::Arc::clone(&self.group),
                     piece_length,
                     total_size,
-                    &web_seed_tls,
-                    &self.outbound_network_policy,
-                )
-                .await
-                .map_err(|error| {
-                    Aria2Error::Fatal(FatalError::Config(format!(
-                        "Web-seed HTTP client configuration failed: {error}"
-                    )))
-                })?,
+                    web_seed_tls,
+                    self.outbound_network_policy.clone(),
+                ),
             )
         } else {
             None

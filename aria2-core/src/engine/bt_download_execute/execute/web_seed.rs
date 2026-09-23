@@ -15,6 +15,8 @@ pub(super) async fn try_web_seed_fallback(
     cmd: &mut BtDownloadCommand,
     web_seed_manager: Option<&crate::engine::bt_web_seed::WebSeedManager>,
     next_piece_idx: usize,
+    piece_data_length: u32,
+    accounted_piece_bytes: u64,
     piece_manager: &mut crate::engine::bt_piece::PieceManager,
     piece_picker: &mut crate::engine::bt_piece::PiecePicker,
     completed_bitfield: &std::sync::Arc<std::sync::RwLock<Vec<u8>>>,
@@ -35,7 +37,11 @@ pub(super) async fn try_web_seed_fallback(
     let web_seed_connection = ActiveConnectionGuard::new(std::sync::Arc::clone(&cmd.group));
     web_seed_connection.set(1);
     let web_seed_result = ws_mgr
-        .request_piece_with_activity(next_piece_idx as u32, Some(cmd.progress.as_ref()))
+        .request_piece_with_length_and_activity(
+            next_piece_idx as u32,
+            piece_data_length as u64,
+            Some(cmd.progress.as_ref()),
+        )
         .await;
     drop(web_seed_connection);
 
@@ -60,7 +66,6 @@ pub(super) async fn try_web_seed_fallback(
                 piece_manager.mark_piece_complete(next_piece_idx as u32);
                 piece_picker.mark_completed(next_piece_idx as u32);
 
-                let web_seed_len = web_seed_data.len() as u64;
                 let web_seed_bytes = bytes::Bytes::from(web_seed_data);
                 if let Some(ref layout) = cmd.multi_file_layout {
                     let max_open_files = cmd.group.recover().options().bt_max_open_files;
@@ -81,9 +86,13 @@ pub(super) async fn try_web_seed_fallback(
                 cmd.group
                     .recover()
                     .update_bt_bitfield_piece(next_piece_idx as u32, num_pieces);
-                cmd.completed_bytes += web_seed_len;
-                cmd.persist_checkpoint_after_piece(writer, completed_bitfield, web_seed_len)
-                    .await?;
+                cmd.completed_bytes += accounted_piece_bytes;
+                cmd.persist_checkpoint_after_piece(
+                    writer,
+                    completed_bitfield,
+                    accounted_piece_bytes,
+                )
+                .await?;
                 Ok(true)
             } else {
                 warn!(

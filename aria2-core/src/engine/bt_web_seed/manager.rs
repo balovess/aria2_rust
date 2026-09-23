@@ -29,7 +29,7 @@ pub struct WebSeedManager {
     /// become visible without rebuilding the piece session.
     live_group: Option<Arc<std::sync::RwLock<RequestGroup>>>,
     tls: ClientTlsConfig,
-    network_policy: Option<OutboundNetworkPolicy>,
+    network_policy: Option<Arc<OutboundNetworkPolicy>>,
     /// HTTP pools are shared by origin, not by file URL, so multi-file
     /// torrents do not allocate one connection pool per file.
     http_clients: tokio::sync::Mutex<HashMap<String, reqwest::Client>>,
@@ -98,50 +98,6 @@ impl WebSeedManager {
         })
     }
 
-    /// Create policy-bound web-seed clients using async endpoint resolution.
-    ///
-    /// This is the production BT construction path: each hostname is
-    /// resolved before reqwest is built, so the local source address matches
-    /// the address family that can actually reach that seed.
-    pub(crate) async fn new_with_tls_and_policy_async(
-        urls: Vec<String>,
-        piece_length: u32,
-        total_length: u64,
-        tls: &ClientTlsConfig,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<Self, String> {
-        debug!(
-            count = urls.len(),
-            "Creating async policy-bound web-seed manager with {} seed(s)",
-            urls.len()
-        );
-
-        let stats = Arc::new(WebSeedStats::new());
-        let mut clients = Vec::with_capacity(urls.len());
-        for url in urls {
-            clients.push(
-                WebSeedClient::with_shared_stats_and_tls_and_policy_async(
-                    &url,
-                    Arc::clone(&stats),
-                    tls,
-                    policy,
-                )
-                .await?,
-            );
-        }
-
-        Ok(Self {
-            clients,
-            stats,
-            piece_length,
-            total_length,
-            live_group: None,
-            tls: tls.clone(),
-            network_policy: Some(policy.clone()),
-            http_clients: tokio::sync::Mutex::new(HashMap::new()),
-        })
-    }
-
     /// Build a live per-file WebSeed view for a BT task. URI queues remain
     /// owned by `RequestGroup`; this manager snapshots only the files touched
     /// by each piece and reuses HTTP clients by origin.
@@ -150,7 +106,7 @@ impl WebSeedManager {
         piece_length: u32,
         total_length: u64,
         tls: ClientTlsConfig,
-        policy: OutboundNetworkPolicy,
+        policy: Arc<OutboundNetworkPolicy>,
     ) -> Self {
         Self {
             clients: Vec::new(),
@@ -195,12 +151,8 @@ impl WebSeedManager {
             .total_length
             .saturating_sub(piece_offset)
             .min(self.piece_length as u64);
-        self.request_piece_with_length_and_activity(
-            piece_index,
-            length,
-            network_activity,
-        )
-        .await
+        self.request_piece_with_length_and_activity(piece_index, length, network_activity)
+            .await
     }
 
     pub(crate) async fn request_piece_with_length_and_activity(
@@ -211,12 +163,7 @@ impl WebSeedManager {
     ) -> Result<Vec<u8>, String> {
         if let Some(group) = &self.live_group {
             return self
-                .request_live_piece(
-                    group,
-                    piece_index,
-                    piece_data_length,
-                    network_activity,
-                )
+                .request_live_piece(group, piece_index, piece_data_length, network_activity)
                 .await;
         }
         if self.clients.is_empty() {
@@ -296,14 +243,7 @@ impl WebSeedManager {
                 .filter_map(|entry| {
                     let start = piece_start.max(entry.offset());
                     let end = piece_end.min(entry.last_offset());
-                    (start < end).then(|| {
-                        (
-                            start,
-                            end,
-                            entry.offset(),
-                            entry.uris(),
-                        )
-                    })
+                    (start < end).then(|| (start, end, entry.offset(), entry.uris()))
                 })
                 .collect::<Vec<_>>()
         };
@@ -312,7 +252,9 @@ impl WebSeedManager {
             return Err(format!("Piece {piece_index} has no file-backed byte range"));
         }
 
-        let mut piece = vec![0; piece_data_length as usize];
+        let piece_length = usize::try_from(piece_data_length)
+            .map_err(|_| "WebSeed piece exceeds addressable memory".to_string())?;
+        let mut piece = vec![0; piece_length];
         let mut last_error = None;
         for (start, end, file_offset, uris) in file_ranges {
             if uris.is_empty() {
@@ -321,7 +263,15 @@ impl WebSeedManager {
                 ));
             }
             let length = end - start;
-            let mut fragment = None;
+            let output_start = usize::try_from(start - piece_start)
+                .map_err(|_| "WebSeed piece offset exceeds addressable memory".to_string())?;
+            let output_length = usize::try_from(length)
+                .map_err(|_| "WebSeed file range exceeds addressable memory".to_string())?;
+            let output_end = output_start
+                .checked_add(output_length)
+                .filter(|&end| end <= piece.len())
+                .ok_or_else(|| "WebSeed file range exceeds piece buffer".to_string())?;
+            let mut range_received = false;
             for uri in &uris {
                 let client = match self.live_client(uri).await {
                     Ok(client) => client,
@@ -331,38 +281,34 @@ impl WebSeedManager {
                     }
                 };
                 match client
-                    .download_piece_with_activity(
+                    .download_piece_into(
                         piece_index,
-                        self.piece_length as u64,
                         start - file_offset,
-                        length,
+                        &mut piece[output_start..output_end],
                         network_activity,
                     )
                     .await
                 {
-                    Ok(data) if data.len() as u64 == length => {
-                        fragment = Some(data);
+                    Ok(received) if received as u64 == length => {
+                        range_received = true;
                         break;
                     }
-                    Ok(data) => {
+                    Ok(received) => {
                         last_error = Some(format!(
                             "{uri}: expected {length} bytes, received {}",
-                            data.len()
+                            received
                         ));
                     }
                     Err(error) => last_error = Some(format!("{uri}: {error}")),
                 }
             }
 
-            let Some(fragment) = fragment else {
+            if !range_received {
                 return Err(format!(
                     "All WebSeeds failed for piece {piece_index} range {start}..{end}: {}",
                     last_error.unwrap_or_else(|| "no usable endpoint".to_string())
                 ));
-            };
-            let output_start = (start - piece_start) as usize;
-            let output_end = output_start + fragment.len();
-            piece[output_start..output_end].copy_from_slice(&fragment);
+            }
         }
         Ok(piece)
     }
@@ -397,7 +343,7 @@ impl WebSeedManager {
             if let Some(client) = clients.get(&origin) {
                 client.clone()
             } else {
-                let client = WebSeedClient::build_client(&self.tls, local_address)?;
+                let client = super::client::build_client(&self.tls, local_address)?;
                 clients.insert(origin, client.clone());
                 client
             }

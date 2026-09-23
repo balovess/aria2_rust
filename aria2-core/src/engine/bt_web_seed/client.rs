@@ -8,7 +8,6 @@ use tracing::{debug, warn};
 
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
-use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::AtomicProgress;
 
 /// HTTP client for downloading individual BT pieces from a single web-seed URL.
@@ -97,48 +96,6 @@ impl WebSeedClient {
         }
     }
 
-    /// Create a policy-bound client after resolving the web-seed endpoint.
-    ///
-    /// The production BT path is asynchronous, so it can select a source
-    /// compatible with the actual hostname resolution.
-    pub(crate) async fn with_shared_stats_and_tls_and_policy_async(
-        base_url: &str,
-        stats: Arc<WebSeedStats>,
-        tls: &ClientTlsConfig,
-        policy: &OutboundNetworkPolicy,
-    ) -> Result<Self, String> {
-        debug!(
-            url = base_url,
-            "Creating WebSeedClient with async network policy"
-        );
-        crate::http::client_pool::ensure_rustls_provider();
-
-        let local_address = if policy.is_direct() {
-            None
-        } else {
-            let url = reqwest::Url::parse(base_url)
-                .map_err(|error| format!("invalid web-seed URL: {error}"))?;
-            let host = url
-                .host_str()
-                .ok_or_else(|| "web-seed URL has no host".to_string())?;
-            let port = url
-                .port_or_known_default()
-                .ok_or_else(|| "web-seed URL has no port".to_string())?;
-            policy
-                .source_for_host(host, port)
-                .await
-                .map_err(|error| format!("web-seed source selection failed: {error}"))?
-        };
-        let client = build_client(tls, local_address)?;
-
-        Ok(Self {
-            base_url: base_url.to_string(),
-            client,
-            active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
-            stats,
-        })
-    }
-
     /// Check if a piece can be requested (not already active).
     pub fn can_request(&self, piece_index: u32) -> bool {
         let active = self
@@ -215,7 +172,28 @@ impl WebSeedClient {
         length: u64,
         network_activity: Option<&AtomicProgress>,
     ) -> Result<Vec<u8>, String> {
-        let range_end = piece_offset + length.saturating_sub(1);
+        let buffer_length = usize::try_from(length)
+            .map_err(|_| format!("requested WebSeed range is too large: {length} bytes"))?;
+        let mut data = vec![0; buffer_length];
+        let received = self
+            .download_piece_into(piece_index, piece_offset, &mut data, network_activity)
+            .await?;
+        data.truncate(received);
+        Ok(data)
+    }
+
+    pub(crate) async fn download_piece_into(
+        &self,
+        piece_index: u32,
+        piece_offset: u64,
+        destination: &mut [u8],
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<usize, String> {
+        let length = destination.len() as u64;
+        if length == 0 {
+            return Ok(0);
+        }
+        let range_end = piece_offset.saturating_add(length - 1);
         let range_header = format!("bytes={}-{}", piece_offset, range_end);
 
         debug!(
@@ -243,31 +221,38 @@ impl WebSeedClient {
             return Err(format!("Unexpected HTTP status {} from web-seed", status));
         }
 
-        let mut data = Vec::new();
+        let mut received = 0usize;
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| format!("Failed to read response body: {}", e))?;
+            if received.saturating_add(chunk.len()) > destination.len() {
+                return Err(format!(
+                    "Web-seed response exceeded requested range: expected at most {length} bytes"
+                ));
+            }
             if !chunk.is_empty()
                 && let Some(progress) = network_activity
             {
                 progress.record_network_activity();
             }
-            data.extend_from_slice(&chunk);
+            let next = received + chunk.len();
+            destination[received..next].copy_from_slice(&chunk);
+            received = next;
         }
 
         // Record statistics
-        self.stats.record_bytes(data.len() as u64);
+        self.stats.record_bytes(received as u64);
 
-        if data.len() != length as usize {
+        if received as u64 != length {
             warn!(
                 expected = length,
-                actual = data.len(),
+                actual = received,
                 piece_index,
                 "Web-seed response size mismatch"
             );
         }
 
-        Ok(data)
+        Ok(received)
     }
 
     /// Request a piece from this web seed with concurrency control.
@@ -353,6 +338,7 @@ pub(crate) fn build_client(
     tls: &ClientTlsConfig,
     local_address: Option<std::net::IpAddr>,
 ) -> Result<reqwest::Client, String> {
+    crate::http::client_pool::ensure_rustls_provider();
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_max_idle_per_host(4)

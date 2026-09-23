@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::engine::peer_stats::PeerStats;
@@ -10,16 +12,26 @@ impl BtDownloadCommand {
             return;
         };
 
-        for connection in active_connections.iter() {
-            algo.sync_peer_by_identity(&connection.stats);
-        }
+        let connection_indices = active_connections.iter().enumerate().fold(
+            HashMap::with_capacity(active_connections.len()),
+            |mut map, (index, connection)| {
+                map.entry(PeerIdentity::from(&connection.stats))
+                    .or_insert(index);
+                map
+            },
+        );
+        algo.sync_peers_by_identity(
+            active_connections
+                .iter()
+                .map(|connection| &connection.stats),
+        );
         let actions = algo.rotate_choke_by_identity();
         let next_optimistic = algo.optimistically_unchoke_by_identity();
         for action in &actions {
             let identity = action.identity();
-            let Some(connection) = active_connections
-                .iter_mut()
-                .find(|connection| PeerIdentity::from(&connection.stats) == identity)
+            let Some(connection) = connection_indices
+                .get(&identity)
+                .and_then(|&index| active_connections.get_mut(index))
             else {
                 continue;
             };
@@ -34,9 +46,9 @@ impl BtDownloadCommand {
         }
 
         if let Some(next) = next_optimistic
-            && let Some(connection) = active_connections
-                .iter_mut()
-                .find(|connection| PeerIdentity::from(&connection.stats) == next)
+            && let Some(connection) = connection_indices
+                .get(&next)
+                .and_then(|&index| active_connections.get_mut(index))
             && let Err(error) = connection.unchoke_upload_peer().await
         {
             tracing::debug!(%error, peer = %next.addr, "Failed to apply optimistic unchoke");

@@ -9,7 +9,7 @@
 mod optimistic;
 mod selection;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::peer_stats::PeerStats;
 
@@ -275,8 +275,49 @@ impl ChokingAlgorithm {
             .iter_mut()
             .find(|peer| PeerIdentity::from(&**peer) == identity)
         {
-            *peer = snapshot.clone();
+            Self::replace_live_snapshot(peer, snapshot);
         }
+    }
+
+    /// Synchronize live peer snapshots in one indexed pass.
+    ///
+    /// Reuses the algorithm-owned rotation state while replacing connection
+    /// statistics. The identity index makes synchronization O(peers + updates)
+    /// instead of performing one full peer scan for every connection.
+    pub fn sync_peers_by_identity<'a>(
+        &mut self,
+        snapshots: impl IntoIterator<Item = &'a PeerStats>,
+    ) {
+        let indices = self.peers.iter().enumerate().fold(
+            HashMap::with_capacity(self.peers.len()),
+            |mut indices, (index, peer)| {
+                indices.entry(PeerIdentity::from(peer)).or_insert(index);
+                indices
+            },
+        );
+
+        for snapshot in snapshots {
+            let identity = PeerIdentity::from(snapshot);
+            if let Some(&index) = indices.get(&identity)
+                && let Some(peer) = self.peers.get_mut(index)
+            {
+                Self::replace_live_snapshot(peer, snapshot);
+            }
+        }
+    }
+
+    fn replace_live_snapshot(peer: &mut PeerStats, snapshot: &PeerStats) {
+        let last_unchoke_at = peer.last_unchoke_at;
+        let last_optimistic_unchoke_at = peer.last_optimistic_unchoke_at;
+        let opt_unchoking = peer.opt_unchoking;
+        let is_snubbed = peer.is_snubbed;
+        let snub_count = peer.snub_count;
+        *peer = snapshot.clone();
+        peer.last_unchoke_at = last_unchoke_at;
+        peer.last_optimistic_unchoke_at = last_optimistic_unchoke_at;
+        peer.opt_unchoking = opt_unchoking;
+        peer.is_snubbed = is_snubbed;
+        peer.snub_count = snub_count;
     }
 
     /// Get all peers as a slice

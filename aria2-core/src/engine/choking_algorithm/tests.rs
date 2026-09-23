@@ -187,6 +187,30 @@ fn test_recent_download_data_precedes_higher_speed_regular_candidate() {
 }
 
 #[test]
+fn test_regular_ranking_uses_download_speed_not_upload_speed() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig {
+        max_upload_slots: 2,
+        ..Default::default()
+    });
+    let mut faster_downloader = create_test_peer(20_000.0, 0.0, true, true);
+    let faster_identity = PeerIdentity::from(&faster_downloader);
+    faster_downloader.last_data_time = Some(std::time::Instant::now());
+    let mut faster_uploader = create_test_peer(10_000.0, 1_000_000.0, true, true);
+    let uploader_identity = PeerIdentity::from(&faster_uploader);
+    faster_uploader.last_data_time = Some(std::time::Instant::now());
+    algo.add_peer(faster_downloader);
+    algo.add_peer(faster_uploader);
+
+    let actions = algo.rotate_choke_by_identity();
+    assert!(actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == faster_identity)
+    }));
+    assert!(!actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == uploader_identity)
+    }));
+}
+
+#[test]
 fn test_rotate_choke_minimizes_changes() {
     let config = ChokingConfig {
         max_upload_slots: 3,
@@ -553,6 +577,48 @@ fn test_opt_unchoking_rotation_changes_peer() {
     );
     assert!(identities.contains(&first_identity));
     assert!(identities.contains(&second_identity));
+}
+
+#[test]
+fn test_sync_live_peer_preserves_choking_rotation_state() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig::default());
+    let mut tracked = create_test_peer(1000.0, 100.0, false, true);
+    let identity = PeerIdentity::from(&tracked);
+    let now = std::time::Instant::now();
+    tracked.last_unchoke_at = now - std::time::Duration::from_secs(20);
+    tracked.last_optimistic_unchoke_at = now - std::time::Duration::from_secs(25);
+    tracked.opt_unchoking = true;
+    tracked.is_snubbed = true;
+    tracked.snub_count = 3;
+    algo.add_peer(tracked);
+
+    let mut live = algo.peers()[0].clone();
+    assert_eq!(PeerIdentity::from(&live), identity);
+    live.download_speed = 500.0;
+    live.upload_speed = 50.0;
+    live.downloaded_bytes = 2048;
+    live.last_data_time = Some(now);
+    live.last_unchoke_at = now;
+    live.last_optimistic_unchoke_at = now;
+    live.opt_unchoking = false;
+    live.is_snubbed = false;
+    live.snub_count = 0;
+    algo.sync_peers_by_identity([&live]);
+
+    let synced = algo.peers().first().unwrap();
+    assert_eq!(synced.downloaded_bytes, 2048);
+    assert_eq!(synced.last_data_time, Some(now));
+    assert_eq!(
+        synced.last_unchoke_at,
+        now - std::time::Duration::from_secs(20)
+    );
+    assert_eq!(
+        synced.last_optimistic_unchoke_at,
+        now - std::time::Duration::from_secs(25)
+    );
+    assert!(synced.opt_unchoking);
+    assert!(synced.is_snubbed);
+    assert_eq!(synced.snub_count, 3);
 }
 
 #[test]

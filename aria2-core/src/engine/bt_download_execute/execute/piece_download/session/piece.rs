@@ -358,10 +358,22 @@ impl PieceDownloadSession<'_> {
 
         if !piece_ok {
             // Try Web Seeds as fallback (BEP 19)
+            let accounted_piece_bytes =
+                if self.meta.info.meta_version == Some(2) && self.has_v1_piece_hashes {
+                    self.command
+                        .multi_file_layout
+                        .as_ref()
+                        .map(|layout| layout.content_bytes_in_piece(next_piece_idx as u32))
+                        .unwrap_or(actual_piece_len as u64)
+                } else {
+                    actual_piece_len as u64
+                };
             piece_ok = super::super::super::web_seed::try_web_seed_fallback(
                 self.command,
                 self.web_seed_manager,
                 next_piece_idx,
+                actual_piece_len,
+                accounted_piece_bytes,
                 &mut self.piece_manager,
                 &mut self.piece_picker,
                 &self.completed_bitfield,

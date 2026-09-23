@@ -10,8 +10,8 @@ use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
 use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
-use crate::util::uri::percent_encode;
 use crate::util::rwlock_ext::RwLockRecover;
+use crate::util::uri::percent_encode;
 
 use super::BtDownloadCommand;
 
@@ -23,10 +23,7 @@ fn normalized_announce_list(announce_list: &[Vec<String>], announce: &str) -> Ve
     }
 }
 
-fn normalized_web_seed_list(
-    torrent_seeds: &[String],
-    additional_seeds: &[String],
-) -> Vec<String> {
+fn normalized_web_seed_list(torrent_seeds: &[String], additional_seeds: &[String]) -> Vec<String> {
     let mut seeds = Vec::with_capacity(torrent_seeds.len() + additional_seeds.len());
     seeds.extend(torrent_seeds.iter().cloned());
     seeds.extend(additional_seeds.iter().cloned());
@@ -55,7 +52,9 @@ fn file_web_seed_urls(
             .collect();
     }
 
-    let mut path = String::with_capacity(torrent_name.len() + file_path.iter().map(String::len).sum::<usize>() + file_path.len());
+    let mut path = String::with_capacity(
+        torrent_name.len() + file_path.iter().map(String::len).sum::<usize>() + file_path.len(),
+    );
     path.push_str(&percent_encode(torrent_name));
     for component in file_path {
         path.push('/');
@@ -142,8 +141,8 @@ pub(crate) fn build_download_context_from_meta(
             }
         } else if let Some(files) = v2_files {
             for file in files {
-                offset = offset.div_ceil(meta.info.piece_length as u64)
-                    * meta.info.piece_length as u64;
+                offset =
+                    offset.div_ceil(meta.info.piece_length as u64) * meta.info.piece_length as u64;
                 add_entry(file.length, &file.path, &mut offset);
             }
         }
@@ -189,7 +188,7 @@ pub(crate) fn build_download_context_from_meta(
 
 #[cfg(test)]
 mod tests {
-    use super::normalized_announce_list;
+    use super::{file_web_seed_urls, normalized_announce_list, normalized_web_seed_list};
 
     #[test]
     fn fills_a_missing_tier_from_the_single_announce_field() {
@@ -204,6 +203,54 @@ mod tests {
         let tiers = vec![vec!["https://one.example/announce".to_string()]];
         assert_eq!(normalized_announce_list(&tiers, ""), tiers);
         assert!(normalized_announce_list(&[], "").is_empty());
+    }
+
+    #[test]
+    fn combines_and_deduplicates_torrent_and_external_web_seeds() {
+        assert_eq!(
+            normalized_web_seed_list(
+                &[
+                    "https://seed.test/root/".into(),
+                    "https://seed.test/other".into()
+                ],
+                &[
+                    "https://seed.test/root/".into(),
+                    "https://extra.test/".into()
+                ],
+            ),
+            vec![
+                "https://extra.test/",
+                "https://seed.test/other",
+                "https://seed.test/root/",
+            ]
+        );
+    }
+
+    #[test]
+    fn expands_web_seed_roots_to_single_and_multi_file_paths() {
+        let seeds = vec!["https://seed.test/root".to_string()];
+        assert_eq!(
+            file_web_seed_urls(&seeds, "file name.bin", &[], true),
+            vec!["https://seed.test/root".to_string()]
+        );
+        assert_eq!(
+            file_web_seed_urls(
+                &seeds,
+                "release pack",
+                &["sub dir".into(), "a#b.bin".into()],
+                false
+            ),
+            vec!["https://seed.test/root/release%20pack/sub%20dir/a%23b.bin"]
+        );
+        assert_eq!(
+            file_web_seed_urls(
+                &["https://seed.test/root/".into()],
+                "file name.bin",
+                &[],
+                true
+            ),
+            vec!["https://seed.test/root/file%20name.bin"]
+        );
     }
 }
 

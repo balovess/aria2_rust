@@ -279,7 +279,12 @@ impl PieceDownloadSession<'_> {
             // DHT, PEX, or incoming-peer discovery. The wait is driven by a
             // socket/message event, a lifecycle notification, a completed DHT
             // lookup, or the next protocol/stop-timeout deadline.
-            if self.active_connections.is_empty() && self.web_seed_manager.is_none() {
+            if self.active_connections.is_empty()
+                && self
+                    .web_seed_manager
+                    .as_ref()
+                    .is_none_or(|manager| manager.is_empty())
+            {
                 debug!("[BT] No peers available, waiting for peer discovery...");
                 let deadline = self.command.next_peer_event_deadline(
                     self.active_connections,

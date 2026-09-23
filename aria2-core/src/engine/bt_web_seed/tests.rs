@@ -1,6 +1,7 @@
 //! Tests for bt_web_seed module.
 
 use super::*;
+use crate::util::rwlock_ext::RwLockRecover;
 use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 use std::collections::BTreeMap;
 
@@ -37,14 +38,17 @@ async fn web_seed_hostname_uses_a_compatible_policy_source() {
     .expect("web-seed policy should accept both families");
     let stats = std::sync::Arc::new(WebSeedStats::new());
     let tls = crate::http::client_identity::ClientTlsConfig::default();
-    let client = WebSeedClient::with_shared_stats_and_tls_and_policy_async(
+    let local_address = policy
+        .source_for_host("localhost", address.port())
+        .await
+        .expect("web-seed policy should select the IPv4 source for localhost");
+    let http_client = super::client::build_client(&tls, local_address)
+        .expect("web-seed HTTP client should build");
+    let client = WebSeedClient::with_shared_http_client(
         &format!("http://localhost:{}/file.bin", address.port()),
         stats,
-        &tls,
-        &policy,
-    )
-    .await
-    .expect("web-seed client should select the IPv4 source for localhost");
+        http_client,
+    );
 
     assert_eq!(client.download_piece(0, 2, 0, 2).await.unwrap(), b"ok");
     assert_eq!(
@@ -323,4 +327,90 @@ fn test_web_seed_manager_stats() {
     // Stats should be accessible
     let stats = manager.stats();
     assert_eq!(stats.total_bytes_downloaded(), 0);
+}
+
+#[tokio::test]
+async fn live_web_seed_uses_per_file_ranges_and_observes_change_uri() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    async fn range_server(body: &'static [u8]) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local web-seed fixture");
+        let address = listener.local_addr().expect("get fixture address");
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept web-seed request");
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 512];
+            loop {
+                let count = stream.read(&mut buffer).await.expect("read request");
+                assert_ne!(count, 0, "request ended before headers completed");
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            assert!(request.contains("range: bytes=0-3"));
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write response headers");
+            stream.write_all(body).await.expect("write response body");
+        });
+        (format!("http://{address}/file"), task)
+    }
+
+    let (first_url, first_server) = range_server(b"ABCD").await;
+    let (second_url, second_server) = range_server(b"EFGH").await;
+    let entries = vec![
+        crate::download::file_entry::FileEntry::new("first".into(), 4, 0, vec![first_url]),
+        crate::download::file_entry::FileEntry::new("second".into(), 4, 4, Vec::new()),
+    ];
+    let mut context = crate::download::DownloadContext::new_default();
+    context.set_piece_length(8);
+    context.set_file_entries(entries);
+    let group = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            crate::request::request_group::GroupId::new(7101),
+            Vec::new(),
+            Default::default(),
+        ),
+    ));
+    group
+        .recover()
+        .set_download_context(std::sync::Arc::new(context));
+    let manager = WebSeedManager::for_request_group(
+        std::sync::Arc::clone(&group),
+        8,
+        8,
+        crate::http::client_identity::ClientTlsConfig::default(),
+        crate::network::OutboundNetworkPolicy::direct().into(),
+    );
+
+    assert!(!manager.is_empty());
+    group
+        .recover_mut()
+        .change_uris(2, &[], &[second_url], None)
+        .expect("changeUri should add the second file source");
+    let data = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        manager.request_piece_with_length_and_activity(0, 8, None),
+    )
+    .await
+    .expect("live WebSeed request should not hang")
+    .expect("per-file sources should supply the piece");
+
+    assert_eq!(data, b"ABCDEFGH");
+    first_server.await.expect("first file source should finish");
+    second_server
+        .await
+        .expect("second file source should finish");
 }

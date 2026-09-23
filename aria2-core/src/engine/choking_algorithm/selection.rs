@@ -7,8 +7,8 @@ use crate::constants;
 ///
 /// Steps:
 /// 1. Check and mark snubbed peers (timeout-based)
-/// 2. Calculate score for each peer
-/// 3. Sort by score descending
+/// 2. Put peers with download activity in the last 30 seconds first
+/// 3. Rank by download speed descending
 /// 4. Interested, non-snubbed peers compete for regular slots; the configured
 ///    upload-slot limit includes one separately managed optimistic slot
 ///    BUT: keep currently unchoked peers unchoked if they're still in top K
@@ -34,7 +34,7 @@ pub(super) fn rotate_choke_by_identity(algo: &mut ChokingAlgorithm) -> Vec<Ident
                 identity,
                 peer.last_data_time
                     .is_some_and(|received_at| received_at.elapsed().as_secs() < 30),
-                calculate_peer_score(peer, algo.snubbed_peers.contains(&identity)),
+                peer.download_speed,
             )
         })
         .collect();
