@@ -12,6 +12,117 @@ use super::super::super::types::{EndgameState, PeerKey};
 
 const PUBLIC_TRACKER_REFRESH_POLL_SECS: u64 = 30;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::bt_download_command_tests::build_test_torrent;
+    use crate::engine::bt_upload_session::{
+        BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider,
+    };
+    use crate::request::request_group::{DownloadOptions, GroupId};
+    use aria2_protocol::bittorrent::message::{
+        handshake::Handshake, serializer::serialize, types::BtMessage,
+    };
+    use aria2_protocol::bittorrent::peer::connection::PeerAddr;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn cancelled_peer_wait_preserves_incoming_receiver() {
+        let torrent = build_test_torrent();
+        let options = DownloadOptions::default();
+        let mut command = BtDownloadCommand::new(GroupId::new(7101), &torrent, &options, None)
+            .expect("test torrent should construct");
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        command.incoming_peers = Some(receiver);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(10),
+            command.wait_for_peer_event(&mut [], Instant::now() + Duration::from_secs(60), None),
+        )
+        .await;
+        assert!(result.is_err(), "the idle wait should have been cancelled");
+        assert!(command.incoming_peers.is_some());
+        assert!(!sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn handled_upload_interest_does_not_disconnect_peer() {
+        let torrent = build_test_torrent();
+        let options = DownloadOptions::default();
+        let mut command = BtDownloadCommand::new(GroupId::new(7102), &torrent, &options, None)
+            .expect("test torrent should construct");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let info_hash = [0x51; 20];
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let remote = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut handshake = [0; 68];
+            stream.read_exact(&mut handshake).await.unwrap();
+            stream
+                .write_all(&Handshake::new(&info_hash, &[0x52; 20]).to_bytes())
+                .await
+                .unwrap();
+            stream
+                .write_all(&serialize(&BtMessage::Interested))
+                .await
+                .unwrap();
+            let _ = release_rx.await;
+        });
+        let mut connection = BtPeerConn::connect_plain_with_options(
+            &PeerAddr::new("127.0.0.1", address.port()),
+            &info_hash,
+            None,
+            &[0x53; 20],
+            Duration::from_secs(5),
+            false,
+        )
+        .await
+        .unwrap();
+        connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 1, 16, false);
+        let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let mut connections = vec![connection];
+        let event = tokio::time::timeout(
+            Duration::from_secs(5),
+            command.wait_for_peer_event(
+                &mut connections,
+                Instant::now() + Duration::from_secs(60),
+                Some(provider),
+            ),
+        )
+        .await
+        .expect("interested event timed out");
+        assert!(matches!(event, PeerWaitEvent::PeerMessageHandled));
+        let mut tracker = crate::engine::bt_piece::PeerBitfieldTracker::new(1);
+        let mut pex = HashSet::new();
+        let mut last_data = HashMap::new();
+        let mut allowed_fast = HashMap::new();
+        let mut suggest_counts = HashMap::new();
+        let mut endgame = EndgameState::new();
+        let storage = Arc::new(Mutex::new(
+            crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
+        ));
+        BtDownloadCommand::apply_peer_wait_event(
+            event,
+            &mut connections,
+            &mut tracker,
+            &mut pex,
+            &mut last_data,
+            &mut allowed_fast,
+            &mut suggest_counts,
+            &mut endgame,
+            None,
+            &storage,
+        );
+        assert_eq!(connections.len(), 1);
+        assert!(!connections[0].disconnected_gracefully);
+        let _ = release_tx.send(());
+        remote.await.unwrap();
+    }
+}
+
 pub(super) struct NewPeerConnectionsContext<'a> {
     pub(super) peer_last_data_time: &'a mut HashMap<PeerKey, Instant>,
     pub(super) pex_enabled_peers: &'a mut HashSet<PeerKey>,
@@ -27,6 +138,7 @@ pub(super) enum PeerWaitEvent {
         index: usize,
         result: Result<Option<aria2_protocol::bittorrent::message::types::BtMessage>>,
     },
+    PeerMessageHandled,
     Wake,
 }
 
@@ -99,7 +211,10 @@ impl BtDownloadCommand {
         let completion_wait = completion_notify.notified();
         let lifecycle_notify = self.group.recover().lifecycle_notifier();
         let lifecycle_wait = lifecycle_notify.notified();
-        let mut incoming_receiver = self.incoming_peers.take();
+        // Borrow the receiver across the wait: cancelling this future must not
+        // discard the listener's route for subsequent waits.
+        let mut incoming_receiver = self.incoming_peers.as_mut();
+        let mut incoming_closed = false;
         let deadline_wait = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
         tokio::pin!(deadline_wait);
 
@@ -118,7 +233,7 @@ impl BtDownloadCommand {
             } => match incoming {
                 Some(incoming) => PeerWaitEvent::Incoming(incoming),
                 None => {
-                    incoming_receiver = None;
+                    incoming_closed = true;
                     PeerWaitEvent::Wake
                 }
             },
@@ -133,6 +248,7 @@ impl BtDownloadCommand {
         };
 
         drop(peer_reads);
+        let mut upload_handled = false;
         if let PeerWaitEvent::PeerMessage { index, result } = &mut event
             && let Ok(Some(message)) = result
             && matches!(
@@ -150,11 +266,16 @@ impl BtDownloadCommand {
                 .handle_upload_message(upload_message, provider)
                 .await
             {
-                Ok(_) => *result = Ok(None),
+                Ok(_) => upload_handled = true,
                 Err(error) => *result = Err(error),
             }
         }
-        self.incoming_peers = incoming_receiver;
+        if upload_handled {
+            event = PeerWaitEvent::PeerMessageHandled;
+        }
+        if incoming_closed {
+            self.incoming_peers = None;
+        }
         event
     }
 
@@ -243,7 +364,7 @@ impl BtDownloadCommand {
                     );
                 }
             }
-            PeerWaitEvent::Wake => {}
+            PeerWaitEvent::PeerMessageHandled | PeerWaitEvent::Wake => {}
         }
         None
     }
