@@ -407,6 +407,7 @@ impl BtDependency {
         let ctx = build_download_context_from_meta(
             &meta,
             self.output_path.to_string_lossy().into_owned(),
+            &[],
         )
         .map_err(|error| error.to_string())?;
         let mut ctx = ctx;

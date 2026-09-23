@@ -158,6 +158,30 @@ fn test_add_peer_to_tracking() {
 }
 
 #[test]
+fn test_incoming_peer_is_registered_for_upload_choking() {
+    let mut cmd = create_test_command();
+    cmd.choking_algo = Some(ChokingAlgorithm::new(ChokingConfig::default()));
+
+    let addr: SocketAddr = "192.168.1.30:6881".parse().unwrap();
+    let peer = PeerStats::new([0x33; 20], addr);
+    cmd.track_peer_for_upload_choking(&peer);
+    assert_eq!(cmd.choking_algo.as_ref().unwrap().len(), 1);
+    assert_eq!(
+        crate::engine::choking_algorithm::PeerIdentity::from(
+            cmd.choking_algo.as_ref().unwrap().get_peer(0).unwrap()
+        ),
+        crate::engine::choking_algorithm::PeerIdentity::from(&peer)
+    );
+
+    cmd.track_peer_for_upload_choking(&peer);
+    assert_eq!(
+        cmd.choking_algo.as_ref().unwrap().len(),
+        1,
+        "tracking the same admitted connection twice must not duplicate it"
+    );
+}
+
+#[test]
 fn test_download_command_no_choking_config() {
     let mut cmd = create_test_command();
     assert!(cmd.choking_algo.is_none());

@@ -146,6 +146,12 @@ Upstream method responses must not contain extension fields. Runtime data such a
 entry even when that file is currently unselected. It returns the number of
 deleted and added URIs as string-valued numbers.
 
+The `uris` parameter of `addTorrent` supplies additional WebSeed endpoints.
+They are merged with the torrent's `url-list` for BitTorrent HTTP fallback;
+they are not Tracker URLs. For an active BitTorrent task, `changeUri` currently
+updates the file URI queue, but already-created WebSeed clients do not reload
+those changes immediately.
+
 ### Status and files
 
 | Method | Parameters | Result |

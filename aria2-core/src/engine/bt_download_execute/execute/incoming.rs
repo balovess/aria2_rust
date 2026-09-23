@@ -78,6 +78,7 @@ impl BtDownloadCommand {
         }
         conn.allocate_session_resource(piece_length, num_pieces, total_size);
         self.configure_upload_connection(&mut conn, piece_length, num_pieces);
+        self.track_peer_for_upload_choking(&conn.stats);
         active_connections.push(conn);
         self.bt_runtime.set_connections(active_connections.len());
         self.group

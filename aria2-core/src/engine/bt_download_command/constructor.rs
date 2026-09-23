@@ -30,6 +30,7 @@ fn normalized_announce_list(announce_list: &[Vec<String>], announce: &str) -> Ve
 pub(crate) fn build_download_context_from_meta(
     meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
     path: String,
+    additional_web_seeds: &[String],
 ) -> crate::error::Result<crate::download::DownloadContext> {
     use crate::download::DownloadContext;
     use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
@@ -122,7 +123,15 @@ pub(crate) fn build_download_context_from_meta(
         creation_date: meta.creation_date.unwrap_or(0),
         comment: meta.comment.clone().unwrap_or_default(),
         created_by: meta.created_by.clone().unwrap_or_default(),
-        url_list: meta.web_seeds.clone(),
+        url_list: {
+            let mut urls = meta.web_seeds.clone();
+            for url in additional_web_seeds {
+                if !urls.contains(url) {
+                    urls.push(url.clone());
+                }
+            }
+            urls
+        },
     };
     ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
     Ok(ctx)
@@ -160,6 +169,7 @@ pub fn prepare_group_metadata(
     torrent_bytes: &[u8],
     options: &DownloadOptions,
     output_dir: Option<&str>,
+    additional_web_seeds: &[String],
 ) -> Result<()> {
     let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
         .map_err(|error| {
@@ -170,7 +180,11 @@ pub fn prepare_group_metadata(
         .or_else(|| options.dir.clone())
         .unwrap_or_else(|| ".".to_string());
     let path = std::path::PathBuf::from(&dir).join(&meta.info.name);
-    let mut context = build_download_context_from_meta(&meta, path.to_string_lossy().into_owned())?;
+    let mut context = build_download_context_from_meta(
+        &meta,
+        path.to_string_lossy().into_owned(),
+        additional_web_seeds,
+    )?;
     apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
     apply_select_file_filter(&mut context, options.select_file.as_deref())?;
 
@@ -389,7 +403,7 @@ impl BtDownloadCommand {
                     .to_string_lossy()
                     .into_owned()
             };
-            let mut context = build_download_context_from_meta(&meta, context_path)?;
+            let mut context = build_download_context_from_meta(&meta, context_path, &[])?;
             apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
             apply_file_mappings(&mut context, file_mappings)?;
             apply_select_file_filter(&mut context, options.select_file.as_deref())?;
@@ -514,7 +528,8 @@ impl BtDownloadCommand {
         // In C++ aria2, this is done by bittorrent_helper::processRootDictionary()
         // which calls ctx->setAttribute(CTX_ATTR_BT, torrent) with all torrent
         // metadata fields. We replicate this here.
-        let mut ctx = build_download_context_from_meta(&meta, path.to_string_lossy().to_string())?;
+        let mut ctx =
+            build_download_context_from_meta(&meta, path.to_string_lossy().to_string(), &[])?;
         apply_index_out_paths(&mut ctx, options.index_out.as_deref(), &dir)?;
         apply_select_file_filter(&mut ctx, options.select_file.as_deref())?;
         group.set_download_context(std::sync::Arc::new(ctx));

@@ -368,9 +368,8 @@ impl Aria2RustSession {
         }
         let options = self.merged_options(overrides)?;
         let gid = self.request_man.next_available_gid();
-        let mut uris = Vec::with_capacity(1 + web_seed_uris.len());
+        let mut uris = Vec::with_capacity(1);
         uris.push(format!("bt://{}", gid.to_hex_string()));
-        uris.extend(web_seed_uris);
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             uris,
@@ -387,6 +386,7 @@ impl Aria2RustSession {
             &data,
             &options,
             options.dir.as_deref(),
+            &web_seed_uris,
         )
         .map_err(|error| error.to_string())?;
         group.recover().set_bt_metadata_data(data);

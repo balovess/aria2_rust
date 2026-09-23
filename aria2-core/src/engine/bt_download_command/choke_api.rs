@@ -84,6 +84,22 @@ impl BtDownloadCommand {
         index
     }
 
+    pub(crate) fn track_peer_for_upload_choking(&mut self, stats: &PeerStats) {
+        let Some(algo) = self.choking_algo.as_mut() else {
+            return;
+        };
+        let identity = PeerIdentity::from(stats);
+        if algo
+            .peers()
+            .iter()
+            .any(|peer| PeerIdentity::from(peer) == identity)
+        {
+            algo.sync_peer_by_identity(stats);
+        } else {
+            algo.add_peer(stats.clone());
+        }
+    }
+
     pub fn select_best_peer_for_request(&self) -> Option<usize> {
         let algo = self.choking_algo.as_ref()?;
         let peers = algo.peers();

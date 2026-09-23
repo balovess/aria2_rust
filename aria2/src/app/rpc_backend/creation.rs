@@ -18,6 +18,7 @@ impl CoreRpcBackend {
         options: DownloadOptions,
         option_snapshot: HashMap<String, serde_json::Value>,
         torrent_data: Option<Vec<u8>>,
+        additional_web_seeds: &[String],
     ) -> Result<String, BackendError> {
         self.group_man
             .add_group_with_gid(gid, uris, options)
@@ -38,6 +39,7 @@ impl CoreRpcBackend {
                 data,
                 &options,
                 options.dir.as_deref(),
+                additional_web_seeds,
             ) {
                 let _ = self.group_man.remove_group_by_id(gid);
                 return Err(Self::invalid(error.to_string()));
@@ -65,7 +67,7 @@ impl CoreRpcBackend {
     ) -> Result<BackendResult, BackendError> {
         let (download_options, snapshot) = self.merged_task_options(options).await?;
         let gid = self.group_man.next_available_gid();
-        let gid_hex = self.add_group(gid, uris, download_options, snapshot, None)?;
+        let gid_hex = self.add_group(gid, uris, download_options, snapshot, None, &[])?;
         if let Some(position) = position {
             self.change_position(&gid_hex, position as i32, PositionMode::SetFromStart)?;
         }
@@ -95,10 +97,15 @@ impl CoreRpcBackend {
             Self::validate_torrent_data(&data)?;
             let (download_options, snapshot) = self.merged_task_options(options).await?;
             let gid = self.group_man.next_available_gid();
-            let mut uris = Vec::with_capacity(1 + additional_uris.len());
-            uris.push(format!("bt://{}", gid.to_hex_string()));
-            uris.extend(additional_uris);
-            let gid_hex = self.add_group(gid, uris, download_options, snapshot, Some(data))?;
+            let uris = vec![format!("bt://{}", gid.to_hex_string())];
+            let gid_hex = self.add_group(
+                gid,
+                uris,
+                download_options,
+                snapshot,
+                Some(data),
+                &additional_uris,
+            )?;
             if let Some(position) = position {
                 self.change_position(&gid_hex, position as i32, PositionMode::SetFromStart)?;
             }

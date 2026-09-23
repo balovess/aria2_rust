@@ -127,9 +127,8 @@ impl DownloadManager {
         }
 
         let gid = self.group_man.next_available_gid();
-        let mut uris = Vec::with_capacity(web_seed_uris.len() + 1);
+        let mut uris = Vec::with_capacity(1);
         uris.push(format!("bt://{}", gid.to_hex_string()));
-        uris.extend(web_seed_uris);
         let group = Arc::new(std::sync::RwLock::new(RequestGroup::new(
             gid,
             uris,
@@ -148,6 +147,7 @@ impl DownloadManager {
             &data,
             &options,
             options.dir.as_deref(),
+            &web_seed_uris,
         )
         .map_err(DownloadManagerError::Preparation)?;
         group.recover().set_bt_metadata_data(data);

@@ -148,6 +148,10 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 `changeUri` 的 `fileIndex` 从 1 开始，即使目标文件当前未选中，也会操作指定的
 文件条目。返回值中的删除数和新增数按字符串数字序列化。
 
+`addTorrent` 的 `uris` 参数是额外的 WebSeed 地址，会与 torrent 元数据中的
+`url-list` 合并用于 BT HTTP 回退，不是 Tracker 地址。`changeUri` 对运行中的
+BT 任务目前只更新文件 URI 队列；已创建的 WebSeed 客户端不会即时重载这些变更。
+
 ### 状态与文件
 
 | 方法 | 参数 | 返回 |
