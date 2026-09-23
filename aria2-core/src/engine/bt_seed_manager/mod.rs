@@ -55,7 +55,7 @@ use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
 use crate::engine::peer_stats::PeerStats;
 use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
-use peer_actor::SeedPeerActor;
+use peer_actor::{PeerActorId, SeedPeerActor};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -86,10 +86,9 @@ pub struct BtSeedManager {
     /// Long-lived I/O owners after the seeding loop starts.
     seed_peer_actors: Vec<SeedPeerActor>,
     /// Stable actor ID to the actor/statistics slot used by incoming events.
-    seed_peer_actor_indices: HashMap<usize, usize>,
+    seed_peer_actor_indices: HashMap<PeerActorId, usize>,
     seed_peer_event_tx: Option<tokio::sync::mpsc::Sender<peer_actor::PeerEvent>>,
     seed_peer_event_rx: Option<tokio::sync::mpsc::Receiver<peer_actor::PeerEvent>>,
-    next_seed_peer_actor_id: u64,
     /// Peer statistics synced with the choking algorithm
     peer_stats: Vec<PeerStats>,
     /// Piece data provider for reading completed pieces from disk

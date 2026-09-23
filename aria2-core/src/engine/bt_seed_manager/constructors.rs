@@ -212,7 +212,6 @@ impl BtSeedManager {
             seed_peer_actor_indices: HashMap::new(),
             seed_peer_event_tx: None,
             seed_peer_event_rx: None,
-            next_seed_peer_actor_id: 1,
             peer_stats,
             piece_provider: Some(piece_provider),
             config,

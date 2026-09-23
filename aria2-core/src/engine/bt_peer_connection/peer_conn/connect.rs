@@ -97,6 +97,7 @@ impl BtPeerConn {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
+                    actor_id: super::PeerActorId::allocate(),
                     inner: InnerConnection::Encrypted(conn),
                     ip_addr: addr.ip.clone(),
                     port: addr.port,
@@ -211,6 +212,7 @@ impl BtPeerConn {
             Ok(conn) => {
                 let now = Instant::now();
                 Ok(Self {
+                    actor_id: super::PeerActorId::allocate(),
                     inner: InnerConnection::Plain(conn),
                     ip_addr: addr.ip.clone(),
                     port: addr.port,
@@ -259,6 +261,7 @@ impl BtPeerConn {
         let now = Instant::now();
         let peer_id = conn.remote_peer_id().copied();
         Self {
+            actor_id: super::PeerActorId::allocate(),
             inner: InnerConnection::Plain(conn),
             ip_addr: endpoint.ip().to_string(),
             port: endpoint.port(),
@@ -294,6 +297,7 @@ impl BtPeerConn {
         let now = Instant::now();
         let peer_id = conn.remote_peer_id().copied();
         Self {
+            actor_id: super::PeerActorId::allocate(),
             inner: InnerConnection::Encrypted(conn),
             ip_addr: endpoint.ip().to_string(),
             port: endpoint.port(),
@@ -351,6 +355,7 @@ impl BtPeerConn {
             );
 
         Self {
+            actor_id: super::PeerActorId::allocate(),
             inner: InnerConnection::Plain(peer_conn),
             ip_addr: "127.0.0.1".to_string(),
             port: 0,
@@ -442,6 +447,7 @@ impl BtPeerConn {
         let now = Instant::now();
 
         Ok(Self {
+            actor_id: super::PeerActorId::allocate(),
             inner: InnerConnection::Utp(utp_conn),
             ip_addr: addr.ip().to_string(),
             port: addr.port(),

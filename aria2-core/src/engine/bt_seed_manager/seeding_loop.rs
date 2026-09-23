@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::peer_stats::PeerStats;
 
-use super::peer_actor::{PeerCommand, PeerEvent, SeedPeerActor};
+use super::peer_actor::{PeerActorId, PeerCommand, PeerEvent, SeedPeerActor};
 use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS};
 
 enum SeedWaitEvent {
@@ -241,8 +241,7 @@ impl BtSeedManager {
         self.seed_peer_event_rx = Some(event_rx);
         let sessions = std::mem::take(&mut self.upload_sessions);
         for connection in sessions {
-            let actor_id = self.next_seed_peer_actor_id as usize;
-            self.next_seed_peer_actor_id = self.next_seed_peer_actor_id.wrapping_add(1);
+            let actor_id = connection.actor_id;
             let actor_index = self.seed_peer_actors.len();
             self.seed_peer_actors.push(SeedPeerActor::spawn(
                 actor_id,
@@ -263,40 +262,43 @@ impl BtSeedManager {
     fn apply_peer_event(&mut self, event: PeerEvent) {
         match event {
             PeerEvent::UploadBytes {
-                peer_index,
-                snapshot,
+                actor_id, snapshot, ..
             } => {
-                self.update_actor_stats(peer_index, *snapshot);
+                self.update_actor_stats(actor_id, *snapshot);
                 self.total_uploaded = self
                     .upload_counter
                     .load(std::sync::atomic::Ordering::Relaxed);
                 self.publish_upload_stats();
             }
             PeerEvent::InterestChanged {
-                peer_index,
-                snapshot,
+                actor_id, snapshot, ..
             } => {
-                self.update_actor_stats(peer_index, *snapshot);
+                self.update_actor_stats(actor_id, *snapshot);
             }
-            PeerEvent::Disconnected { peer_index } => {
-                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&peer_index)
+            PeerEvent::Disconnected { actor_id, .. } => {
+                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
                     && let Some(actor) = self.seed_peer_actors.get_mut(actor_index)
                 {
                     actor.dead = true;
                 }
             }
-            PeerEvent::RequestFailed { peer_index, .. } => {
-                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&peer_index)
+            PeerEvent::RequestFailed { actor_id, .. } => {
+                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
                     && let Some(actor) = self.seed_peer_actors.get_mut(actor_index)
                 {
                     actor.dead = true;
                 }
             }
-            PeerEvent::Message { .. } => {}
+            PeerEvent::Message { actor_id, .. } => {
+                tracing::trace!(
+                    actor_id = actor_id.0,
+                    "Ignoring block message while seeding"
+                );
+            }
         }
     }
 
-    fn update_actor_stats(&mut self, actor_id: usize, snapshot: PeerStats) {
+    fn update_actor_stats(&mut self, actor_id: PeerActorId, snapshot: PeerStats) {
         if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
             && let Some(stats) = self.peer_stats.get_mut(actor_index)
         {
@@ -383,8 +385,7 @@ impl BtSeedManager {
             self.piece_provider.as_ref(),
             self.seed_peer_event_tx.as_ref(),
         ) {
-            let actor_id = self.next_seed_peer_actor_id as usize;
-            self.next_seed_peer_actor_id = self.next_seed_peer_actor_id.wrapping_add(1);
+            let actor_id = connection.actor_id;
             let actor_index = self.seed_peer_actors.len();
             self.seed_peer_actors.push(SeedPeerActor::spawn(
                 actor_id,

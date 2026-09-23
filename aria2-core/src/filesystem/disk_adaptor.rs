@@ -28,7 +28,7 @@ pub trait DiskAdaptor: Send + Sync {
 /// This is an advisory hint: failure to evict pages must not change the bytes
 /// returned to the caller. Non-POSIX callers simply omit the call.
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "ios"))))]
-pub(crate) fn advise_drop_cache(file: &tokio::fs::File, offset: u64, length: u64) {
+pub(crate) fn advise_drop_cache(file: &impl std::os::fd::AsRawFd, offset: u64, length: u64) {
     use std::os::fd::AsRawFd;
 
     let Ok(offset) = libc::off_t::try_from(offset) else {
@@ -49,10 +49,10 @@ pub(crate) fn advise_drop_cache(file: &tokio::fs::File, offset: u64, length: u64
 // not on a file descriptor. Cache eviction is only an advisory optimization,
 // so preserve the read contract with a no-op on Apple Unix.
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-pub(crate) fn advise_drop_cache(_file: &tokio::fs::File, _offset: u64, _length: u64) {}
+pub(crate) fn advise_drop_cache(_file: &impl std::os::fd::AsRawFd, _offset: u64, _length: u64) {}
 
 pub struct DirectDiskAdaptor {
-    file: Option<tokio::fs::File>,
+    file: Option<std::sync::Arc<std::fs::File>>,
     path: std::path::PathBuf,
 }
 
@@ -69,8 +69,16 @@ impl DirectDiskAdaptor {
     pub async fn read_data_drop_cache(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
         let data = self.read(offset, length).await?;
         #[cfg(unix)]
-        if let Some(file) = self.file.as_ref() {
-            advise_drop_cache(file, offset, data.len() as u64);
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        advise_drop_cache(file.as_ref(), offset, data.len() as u64);
+                        Ok(())
+                    },
+                    "drop disk cache hint",
+                )
+                .await?;
         }
         Ok(data)
     }
@@ -86,55 +94,62 @@ impl Default for DirectDiskAdaptor {
 impl DiskAdaptor for DirectDiskAdaptor {
     async fn open(&mut self, path: &Path) -> Result<()> {
         self.path = path.to_path_buf();
-        let mut open_opts = tokio::fs::OpenOptions::new();
-
-        if path.exists() {
-            open_opts.write(true).read(true);
-        } else {
-            open_opts.write(true).create(true).read(true);
-        }
-
-        self.file =
-            Some(open_opts.open(path).await.map_err(|e| {
-                crate::error::Aria2Error::FileOpen(format!("{}: {e}", path.display()))
-            })?);
+        let path = path.to_path_buf();
+        let file = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    let mut open_opts = std::fs::OpenOptions::new();
+                    open_opts.write(true).read(true);
+                    if !path.exists() {
+                        open_opts.create(true);
+                    }
+                    open_opts.open(&path).map_err(|e| {
+                        crate::error::Aria2Error::FileOpen(format!("{}: {e}", path.display()))
+                    })
+                },
+                "disk adaptor open",
+            )
+            .await?;
+        self.file = Some(std::sync::Arc::new(file));
 
         Ok(())
     }
 
     async fn write(&mut self, offset: u64, data: &[u8]) -> Result<()> {
-        if let Some(ref mut file) = self.file {
-            use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-            file.seek(std::io::SeekFrom::Start(offset))
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            file.write_all(data)
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+        if let Some(file) = self.file.as_ref().cloned() {
+            let data = data.to_vec();
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        crate::filesystem::positioned_disk_writer::platform_io::write_all_at(
+                            file.as_ref(),
+                            &data,
+                            offset,
+                        )
+                    },
+                    "disk adaptor write",
+                )
+                .await?;
         }
         Ok(())
     }
 
     async fn read(&mut self, offset: u64, length: u64) -> Result<Vec<u8>> {
-        if let Some(ref mut file) = self.file {
-            use tokio::io::{AsyncReadExt, AsyncSeekExt};
-            file.seek(std::io::SeekFrom::Start(offset))
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-
-            let mut buffer = vec![0u8; length as usize];
-            let bytes_read = file.read_exact(&mut buffer).await;
-
-            match bytes_read {
-                Ok(_) => Ok(buffer),
-                Err(e) => {
-                    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        let mut buffer = vec![0u8; length as usize];
+                        crate::filesystem::positioned_disk_writer::platform_io::read_exact_at(
+                            file.as_ref(),
+                            &mut buffer,
+                            offset,
+                        )?;
                         Ok(buffer)
-                    } else {
-                        Err(crate::error::Aria2Error::Io(e.to_string()))
-                    }
-                }
-            }
+                    },
+                    "disk adaptor read",
+                )
+                .await
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
                 "File not open".to_string(),
@@ -143,36 +158,48 @@ impl DiskAdaptor for DirectDiskAdaptor {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.file = None;
+        if let Some(file) = self.file.take() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        drop(file);
+                        Ok(())
+                    },
+                    "disk adaptor close",
+                )
+                .await?;
+        }
         Ok(())
     }
 
     async fn truncate(&mut self, length: u64) -> Result<()> {
-        if let Some(ref mut file) = self.file {
-            file.set_len(length)
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || file.set_len(length).map_err(crate::error::Aria2Error::from),
+                    "disk adaptor truncate",
+                )
+                .await?;
         }
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<()> {
-        if let Some(ref mut file) = self.file {
-            use tokio::io::AsyncWriteExt;
-            file.flush()
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-        }
         Ok(())
     }
 
     async fn size(&self) -> Result<u64> {
-        if let Some(ref file) = self.file {
-            let metadata = file
-                .metadata()
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        file.metadata()
+                            .map(|metadata| metadata.len())
+                            .map_err(crate::error::Aria2Error::from)
+                    },
+                    "disk adaptor metadata",
+                )
                 .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            Ok(metadata.len())
         } else {
             Err(crate::error::Aria2Error::DownloadFailed(
                 "File not open".to_string(),

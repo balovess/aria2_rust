@@ -1,9 +1,6 @@
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::Semaphore;
 use tracing::warn;
 
 use crate::checksum::checksum::Checksum;
@@ -30,61 +27,34 @@ fn expected_piece_count(total_length: u64, piece_length: u64) -> usize {
     total_length.div_ceil(piece_length.max(1)) as usize
 }
 
-const MAX_HASH_WORKERS: usize = 4;
-
-fn hash_slots() -> &'static Arc<Semaphore> {
-    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    HASH_SLOTS.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(1, MAX_HASH_WORKERS);
-        Arc::new(Semaphore::new(workers))
-    })
-}
-
 async fn hash_bytes_async(algo: HashType, data: Vec<u8>) -> Result<Vec<u8>> {
-    let permit = hash_slots()
-        .clone()
-        .acquire_owned()
+    crate::checksum::hash_worker_pool::shared()
+        .run(
+            move || Ok(MessageDigest::hash_data(algo, &data)),
+            "integrity hash",
+        )
         .await
-        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        Ok::<_, Aria2Error>(MessageDigest::hash_data(algo, &data))
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))?
 }
 
 async fn update_digest_async(digest: MessageDigest, data: Vec<u8>) -> Result<MessageDigest> {
-    let permit = hash_slots()
-        .clone()
-        .acquire_owned()
+    crate::checksum::hash_worker_pool::shared()
+        .run(
+            move || {
+                Ok({
+                    let mut digest = digest;
+                    digest.update(&data);
+                    digest
+                })
+            },
+            "integrity digest update",
+        )
         .await
-        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let mut digest = digest;
-        digest.update(&data);
-        digest
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))
 }
 
 async fn finalize_digest_async(digest: MessageDigest) -> Result<String> {
-    let permit = hash_slots()
-        .clone()
-        .acquire_owned()
+    crate::checksum::hash_worker_pool::shared()
+        .run(|| Ok(digest.finalize_hex()), "integrity digest finalize")
         .await
-        .map_err(|error| Aria2Error::Io(format!("integrity hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        digest.finalize_hex()
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("integrity hash task failed: {error}")))
 }
 
 #[async_trait]
@@ -124,7 +94,7 @@ pub trait CheckIntegrityTask: Send + Sync {
 /// the corresponding expected digest.
 pub struct FileChunkValidator {
     path: PathBuf,
-    file: Option<tokio::fs::File>,
+    file: Option<std::fs::File>,
     piece_length: u64,
     total_length: u64,
     expected: Vec<Vec<u8>>,
@@ -183,9 +153,16 @@ impl FileChunkValidator {
 
     async fn ensure_open(&mut self) -> Result<()> {
         if self.file.is_none() {
-            let f = tokio::fs::File::open(&self.path)
-                .await
-                .map_err(|e| Aria2Error::Io(format!("open {}: {}", self.path.display(), e)))?;
+            let path = self.path.clone();
+            let f = crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        std::fs::File::open(&path)
+                            .map_err(|e| Aria2Error::Io(format!("open {}: {e}", path.display())))
+                    },
+                    "integrity file open",
+                )
+                .await?;
             self.file = Some(f);
         }
         Ok(())
@@ -211,31 +188,42 @@ impl CheckIntegrityTask for FileChunkValidator {
             return Ok(());
         }
         self.ensure_open().await?;
-        let file = self.file.as_mut().expect("file opened above");
-
         let offset = self.current_piece as u64 * self.piece_length;
         let end = (offset + self.piece_length).min(self.total_length);
         let len = (end - offset) as usize;
         let mut buf = vec![0u8; len];
 
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|e| Aria2Error::Io(e.to_string()))?;
-        // Retry short reads and treat EOF before the requested length as a
-        // truncated final chunk, so the digest reports a mismatch instead of
-        // failing with an I/O error.
-        let mut read = 0;
-        while read < len {
-            let n = file
-                .read(&mut buf[read..])
-                .await
-                .map_err(|e| Aria2Error::Io(format!("read {}: {}", self.path.display(), e)))?;
-            if n == 0 {
-                break;
-            }
-            read += n;
-        }
-        buf.truncate(read);
+        let mut file = self.file.take().expect("file opened above");
+        let path = self.path.clone();
+        let (file, read_result) = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    use std::io::{Read, Seek};
+                    let result: Result<Vec<u8>> = (|| {
+                        file.seek(std::io::SeekFrom::Start(offset))
+                            .map_err(|e| Aria2Error::Io(e.to_string()))?;
+                        // Short reads are treated as a truncated chunk and
+                        // reported by the digest comparison below.
+                        let mut read = 0;
+                        while read < len {
+                            let n = file.read(&mut buf[read..]).map_err(|e| {
+                                Aria2Error::Io(format!("read {}: {e}", path.display()))
+                            })?;
+                            if n == 0 {
+                                break;
+                            }
+                            read += n;
+                        }
+                        buf.truncate(read);
+                        Ok(buf)
+                    })();
+                    Ok((file, result))
+                },
+                "integrity piece read",
+            )
+            .await?;
+        self.file = Some(file);
+        let buf = read_result?;
 
         let actual = hash_bytes_async(self.algo, buf).await?;
 
@@ -340,29 +328,35 @@ impl MultiFileChunkValidator {
             }
             let read_start = offset.max(file_start);
             let read_end = piece_end.min(file_end);
-            let mut file = tokio::fs::File::open(path)
-                .await
-                .map_err(|e| Aria2Error::Io(format!("open {}: {}", path.display(), e)))?;
-            file.seek(std::io::SeekFrom::Start(read_start - file_start))
-                .await
-                .map_err(|e| Aria2Error::Io(format!("seek {}: {}", path.display(), e)))?;
+            let path = path.clone();
             let count = (read_end - read_start) as usize;
-            let mut buf = vec![0u8; count];
-            let mut read = 0;
-            while read < count {
-                let n = file
-                    .read(&mut buf[read..])
-                    .await
-                    .map_err(|e| Aria2Error::Io(format!("read {}: {}", path.display(), e)))?;
-                if n == 0 {
-                    // A physically truncated entry is an incomplete piece,
-                    // not a fatal validation error. Keep the bytes available
-                    // so the digest mismatch selects the re-download path.
-                    break;
-                }
-                read += n;
-            }
-            output.extend_from_slice(&buf[..read]);
+            let file_offset = read_start - file_start;
+            let data = crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        use std::io::{Read, Seek};
+                        let mut file = std::fs::File::open(&path)
+                            .map_err(|e| Aria2Error::Io(format!("open {}: {e}", path.display())))?;
+                        file.seek(std::io::SeekFrom::Start(file_offset))
+                            .map_err(|e| Aria2Error::Io(format!("seek {}: {e}", path.display())))?;
+                        let mut buf = vec![0u8; count];
+                        let mut read = 0;
+                        while read < count {
+                            let n = file.read(&mut buf[read..]).map_err(|e| {
+                                Aria2Error::Io(format!("read {}: {e}", path.display()))
+                            })?;
+                            if n == 0 {
+                                break;
+                            }
+                            read += n;
+                        }
+                        buf.truncate(read);
+                        Ok(buf)
+                    },
+                    "multi-file integrity read",
+                )
+                .await?;
+            output.extend_from_slice(&data);
         }
         Ok(output)
     }
@@ -419,7 +413,7 @@ impl CheckIntegrityTask for MultiFileChunkValidator {
 /// lifecycle behavior as piece-integrity checks.
 pub struct FileChecksumTask {
     path: PathBuf,
-    file: Option<tokio::fs::File>,
+    file: Option<std::fs::File>,
     total_length: u64,
     current_length: u64,
     expected_hex: String,
@@ -444,9 +438,17 @@ impl FileChecksumTask {
 
     async fn ensure_open(&mut self) -> Result<()> {
         if self.file.is_none() {
-            let file = tokio::fs::File::open(&self.path).await.map_err(|error| {
-                Aria2Error::Io(format!("Failed to open {}: {}", self.path.display(), error))
-            })?;
+            let path = self.path.clone();
+            let file = crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        std::fs::File::open(&path).map_err(|error| {
+                            Aria2Error::Io(format!("Failed to open {}: {error}", path.display()))
+                        })
+                    },
+                    "file checksum open",
+                )
+                .await?;
             self.file = Some(file);
         }
         Ok(())
@@ -474,15 +476,25 @@ impl CheckIntegrityTask for FileChecksumTask {
         self.ensure_open().await?;
 
         let mut buffer = vec![0u8; 64 * 1024];
-        let bytes_read = self
-            .file
-            .as_mut()
-            .expect("file opened above")
-            .read(&mut buffer)
-            .await
-            .map_err(|error| {
-                Aria2Error::Io(format!("Failed to read {}: {}", self.path.display(), error))
-            })?;
+        let mut file = self.file.take().expect("file opened above");
+        let path = self.path.clone();
+        let (file, read_result) = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    use std::io::Read;
+                    let result = file
+                        .read(&mut buffer)
+                        .map_err(|error| {
+                            Aria2Error::Io(format!("Failed to read {}: {error}", path.display()))
+                        })
+                        .map(|bytes_read| (buffer, bytes_read));
+                    Ok((file, result))
+                },
+                "file checksum read",
+            )
+            .await?;
+        self.file = Some(file);
+        let (mut buffer, bytes_read) = read_result?;
 
         if bytes_read == 0 {
             let digest = self

@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::trace;
 
-use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_peer_connection::{BtPeerConn, PeerActorId};
 use crate::engine::choking_algorithm::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::error::Result;
 
@@ -35,23 +35,23 @@ pub(crate) enum PeerCommand {
 
 pub(crate) enum PeerEvent {
     Message {
-        peer_index: usize,
+        actor_id: PeerActorId,
         message: aria2_protocol::bittorrent::message::types::BtMessage,
     },
     InterestChanged {
-        peer_index: usize,
+        actor_id: PeerActorId,
         snapshot: Box<crate::engine::peer_stats::PeerStats>,
     },
     UploadBytes {
-        peer_index: usize,
+        actor_id: PeerActorId,
         snapshot: Box<crate::engine::peer_stats::PeerStats>,
     },
     RequestFailed {
-        peer_index: usize,
+        actor_id: PeerActorId,
         request: BlockRequest,
     },
     Disconnected {
-        peer_index: usize,
+        actor_id: PeerActorId,
     },
 }
 
@@ -90,7 +90,7 @@ pub(crate) struct PeerActorTask {
 impl PeerActorTask {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn_owned(
-        peer_index: usize,
+        actor_id: PeerActorId,
         mut connection: BtPeerConn,
         event_tx: mpsc::Sender<PeerEvent>,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
@@ -100,7 +100,7 @@ impl PeerActorTask {
         let (control, command_rx) = PeerActorControl::channel(command_capacity);
         let task = tokio::spawn(async move {
             let _ = peer_worker(
-                peer_index,
+                actor_id,
                 &mut connection,
                 command_rx,
                 event_tx,
@@ -135,7 +135,7 @@ impl Drop for PeerActorTask {
     }
 }
 
-pub(super) type WorkerFuture<'a> = Pin<Box<dyn Future<Output = usize> + Send + 'a>>;
+pub(super) type WorkerFuture<'a> = Pin<Box<dyn Future<Output = PeerActorId> + Send + 'a>>;
 
 /// Owns one local worker future per connection while a piece is in flight.
 ///
@@ -143,6 +143,7 @@ pub(super) type WorkerFuture<'a> = Pin<Box<dyn Future<Output = usize> + Send + '
 /// cancellation cannot silently remove a live connection from the session.
 pub(super) struct PeerWorkers<'a> {
     pub(super) senders: Vec<Option<PeerActorControl>>,
+    actor_indices: HashMap<PeerActorId, usize>,
     pub(super) workers: FuturesUnordered<WorkerFuture<'a>>,
 }
 
@@ -154,14 +155,17 @@ impl<'a> PeerWorkers<'a> {
         upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
     ) -> Self {
         let mut senders = Vec::with_capacity(connections.len());
+        let mut actor_indices = HashMap::with_capacity(connections.len());
         let workers = FuturesUnordered::new();
 
         for (peer_index, connection) in connections.iter_mut().enumerate() {
+            let actor_id = connection.actor_id;
+            actor_indices.insert(actor_id, peer_index);
             let (command_tx, command_rx) =
                 PeerActorControl::channel(DEFAULT_MAX_OUTSTANDING_REQUEST.saturating_mul(2).max(8));
             senders.push(Some(command_tx));
             let worker: WorkerFuture<'a> = Box::pin(peer_worker(
-                peer_index,
+                actor_id,
                 connection,
                 command_rx,
                 event_tx.clone(),
@@ -171,7 +175,15 @@ impl<'a> PeerWorkers<'a> {
             workers.push(worker);
         }
 
-        Self { senders, workers }
+        Self {
+            senders,
+            actor_indices,
+            workers,
+        }
+    }
+
+    pub(super) fn peer_index(&self, actor_id: PeerActorId) -> Option<usize> {
+        self.actor_indices.get(&actor_id).copied()
     }
 
     /// Stop a peer after its in-flight requests have been requeued.
@@ -227,38 +239,73 @@ impl<'a> PeerWorkers<'a> {
 }
 
 pub(crate) async fn peer_worker(
-    peer_index: usize,
+    actor_id: PeerActorId,
     connection: &mut BtPeerConn,
     mut command_rx: mpsc::Receiver<PeerCommand>,
     event_tx: mpsc::Sender<PeerEvent>,
     dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
-) -> usize {
+) -> PeerActorId {
     loop {
+        let keepalive_deadline = tokio::time::Instant::from_std(connection.keepalive_deadline());
         tokio::select! {
             biased;
+            _ = tokio::time::sleep_until(keepalive_deadline) => {
+                if let Err(error) = connection.send_keepalive().await {
+                    tracing::debug!(actor_id = actor_id.0, %error, "Failed to send BT peer keep-alive");
+                    let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                    break;
+                }
+            }
             command = command_rx.recv() => {
                 match command {
                     Some(PeerCommand::Request { piece_index, request }) => {
-                        if connection.send_request(request.message(piece_index)).await.is_err() {
-                            let _ = event_tx.send(PeerEvent::RequestFailed {
-                                peer_index,
-                                request,
-                            }).await;
-                            break;
+                        match connection.send_request(request.message(piece_index)).await {
+                            Ok(()) => connection.record_outbound_activity(),
+                            Err(_) => {
+                                let _ = event_tx.send(PeerEvent::RequestFailed {
+                                    actor_id,
+                                    request,
+                                }).await;
+                                break;
+                            }
                         }
                     }
                     Some(PeerCommand::Cancel { piece_index, request }) => {
-                        let _ = connection.send_cancel(&request.message(piece_index)).await;
+                        if connection.send_cancel(&request.message(piece_index)).await.is_ok() {
+                            connection.record_outbound_activity();
+                        }
                     }
                     Some(PeerCommand::ChokeUpload) => {
-                        if let Err(error) = connection.choke_upload_peer().await {
-                            tracing::debug!(peer_index, %error, "Failed to choke BT upload peer");
+                        let has_upload_state = connection.upload_state.is_some();
+                        let was_choked = connection
+                            .upload_state
+                            .as_ref()
+                            .is_some_and(|state| state.is_peer_choked());
+                        match connection.choke_upload_peer().await {
+                            Ok(()) if has_upload_state && !was_choked => {
+                                connection.record_outbound_activity();
+                            }
+                            Ok(()) => {}
+                            Err(error) => {
+                                tracing::debug!(actor_id = actor_id.0, %error, "Failed to choke BT upload peer");
+                            }
                         }
                     }
                     Some(PeerCommand::UnchokeUpload) => {
-                        if let Err(error) = connection.unchoke_upload_peer().await {
-                            tracing::debug!(peer_index, %error, "Failed to unchoke BT upload peer");
+                        let has_upload_state = connection.upload_state.is_some();
+                        let was_choked = connection
+                            .upload_state
+                            .as_ref()
+                            .is_some_and(|state| state.is_peer_choked());
+                        match connection.unchoke_upload_peer().await {
+                            Ok(()) if has_upload_state && was_choked => {
+                                connection.record_outbound_activity();
+                            }
+                            Ok(()) => {}
+                            Err(error) => {
+                                tracing::debug!(actor_id = actor_id.0, %error, "Failed to unchoke BT upload peer");
+                            }
                         }
                     }
                     Some(PeerCommand::Shutdown) | None => break,
@@ -276,34 +323,39 @@ pub(crate) async fn peer_worker(
                         ).await {
                             Ok(message) => message,
                             Err(error) => {
-                                tracing::debug!(peer_index, %error, "BT upload request handling failed");
-                                let _ = event_tx.send(PeerEvent::Disconnected { peer_index }).await;
+                                tracing::debug!(actor_id = actor_id.0, %error, "BT upload request handling failed");
+                                let _ = event_tx
+                                    .send(PeerEvent::Disconnected { actor_id })
+                                    .await;
                                 break;
                             }
                         };
-                        if uploaded_bytes > 0
-                            && event_tx.send(PeerEvent::UploadBytes {
-                                peer_index,
+                        if uploaded_bytes > 0 {
+                            connection.record_outbound_activity();
+                            if event_tx.send(PeerEvent::UploadBytes {
+                                actor_id,
                                 snapshot: Box::new(connection.stats.clone()),
-                            }).await.is_err()
-                        {
-                            break;
+                            }).await.is_err() {
+                                break;
+                            }
                         }
                         if connection.stats.peer_interested != was_interested
                             && event_tx.send(PeerEvent::InterestChanged {
-                                peer_index,
+                                actor_id,
                                 snapshot: Box::new(connection.stats.clone()),
                             }).await.is_err()
                         {
                             break;
                         }
                         let Some(message) = message else { continue; };
-                        if event_tx.send(PeerEvent::Message { peer_index, message }).await.is_err() {
+                        if event_tx.send(PeerEvent::Message { actor_id, message }).await.is_err() {
                             break;
                         }
                     }
                     Ok(None) | Err(_) => {
-                        let _ = event_tx.send(PeerEvent::Disconnected { peer_index }).await;
+                        let _ = event_tx
+                            .send(PeerEvent::Disconnected { actor_id })
+                            .await;
                         break;
                     }
                 }
@@ -311,7 +363,7 @@ pub(crate) async fn peer_worker(
         }
     }
 
-    peer_index
+    actor_id
 }
 
 async fn process_peer_message(

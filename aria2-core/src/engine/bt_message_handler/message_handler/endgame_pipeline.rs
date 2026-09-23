@@ -144,8 +144,15 @@ impl BtMessageHandler {
                         event = event_rx.recv() => {
                             let Some(event) = event else { break };
                             match event {
-                                PeerEvent::UploadBytes { .. } => {}
-                                PeerEvent::InterestChanged { snapshot, .. } => {
+                                PeerEvent::UploadBytes { actor_id, .. } => {
+                                    if workers.peer_index(actor_id).is_none() {
+                                        continue;
+                                    }
+                                }
+                                PeerEvent::InterestChanged { actor_id, snapshot } => {
+                                    if workers.peer_index(actor_id).is_none() {
+                                        continue;
+                                    }
                                     apply_interest_change(
                                         &mut workers,
                                         &peer_identity_indices,
@@ -153,7 +160,11 @@ impl BtMessageHandler {
                                         *snapshot,
                                     ).await;
                                 }
-                                PeerEvent::Message { peer_index, message } => {
+                                PeerEvent::Message { actor_id, message } => {
+                                    let Some(peer_index) = workers.peer_index(actor_id) else {
+                                        continue;
+                                    };
+                                    tracing::trace!(actor_id = actor_id.0, peer_index, "Received BT peer event");
                                     use aria2_protocol::bittorrent::message::types::BtMessage;
                                     match message {
                                         BtMessage::Piece { index, begin, data }
@@ -176,8 +187,11 @@ impl BtMessageHandler {
                                         _ => {}
                                     }
                                 }
-                                PeerEvent::RequestFailed { peer_index, .. }
-                                | PeerEvent::Disconnected { peer_index } => {
+                                PeerEvent::RequestFailed { actor_id, .. }
+                                | PeerEvent::Disconnected { actor_id } => {
+                                    let Some(peer_index) = workers.peer_index(actor_id) else {
+                                        continue;
+                                    };
                                     live[peer_index] = false;
                                     if let Some(address) = peer_addresses[peer_index]
                                         && !failed_peers.contains(&address)
@@ -188,7 +202,9 @@ impl BtMessageHandler {
                             }
                         }
                         worker = workers.workers.next(), if workers_active => {
-                            if let Some(peer_index) = worker {
+                            if let Some(actor_id) = worker
+                                && let Some(peer_index) = workers.peer_index(actor_id)
+                            {
                                 live[peer_index] = false;
                                 if let Some(address) = peer_addresses[peer_index]
                                     && !failed_peers.contains(&address)

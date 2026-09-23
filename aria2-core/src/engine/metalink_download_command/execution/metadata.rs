@@ -1,8 +1,6 @@
 //! Metadata retrieval and Metalink hash verification.
 
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
-use tokio::sync::Semaphore;
 use tracing::warn;
 
 use super::{MetalinkDownloadCommand, classify_metalink_http_status};
@@ -171,9 +169,16 @@ impl MetalinkDownloadCommand {
         if pieces.length == 0 {
             return Ok(false);
         }
-        let metadata = tokio::fs::metadata(path)
-            .await
-            .map_err(|error| Aria2Error::FileIo(error.to_string()))?;
+        let metadata_path = path.to_path_buf();
+        let metadata = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    std::fs::metadata(&metadata_path)
+                        .map_err(|error| Aria2Error::FileIo(error.to_string()))
+                },
+                "Metalink integrity metadata",
+            )
+            .await?;
         let expected = pieces.num_pieces(metadata.len());
         if pieces.hashes.len() != expected
             || pieces
@@ -184,20 +189,39 @@ impl MetalinkDownloadCommand {
             return Ok(false);
         }
 
-        let mut file = tokio::fs::File::open(path)
-            .await
-            .map_err(|error| Aria2Error::FileIo(error.to_string()))?;
+        let open_path = path.to_path_buf();
+        let file = crate::filesystem::disk_io_pool::shared()
+            .run(
+                move || {
+                    std::fs::File::open(open_path)
+                        .map(std::sync::Arc::new)
+                        .map_err(|error| Aria2Error::FileIo(error.to_string()))
+                },
+                "Metalink integrity open",
+            )
+            .await?;
         let mut buffer = vec![0u8; pieces.length as usize];
         for (index, expected_hash) in pieces.hashes.iter().enumerate() {
-            let mut read = 0usize;
-            while read < buffer.len() {
-                let count = tokio::io::AsyncReadExt::read(&mut file, &mut buffer[read..]).await?;
-                if count == 0 {
-                    break;
-                }
-                read += count;
-            }
-            let (actual, returned_buffer) = digest_hex_async(buffer, read, pieces.type_).await?;
+            let file = std::sync::Arc::clone(&file);
+            let buffer_to_read = std::mem::take(&mut buffer);
+            let offset = index as u64 * pieces.length as u64;
+            let (buffer_for_hash, read) = crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        let mut buffer = buffer_to_read;
+                        let read =
+                            crate::filesystem::positioned_disk_writer::platform_io::read_exact_at(
+                                file.as_ref(),
+                                &mut buffer,
+                                offset,
+                            )?;
+                        Ok((buffer, read))
+                    },
+                    "Metalink integrity read",
+                )
+                .await?;
+            let (actual, returned_buffer) =
+                digest_hex_async(buffer_for_hash, read, pieces.type_).await?;
             buffer = returned_buffer;
             if !actual.eq_ignore_ascii_case(expected_hash) {
                 warn!(piece = index, "Metalink piece hash mismatch");
@@ -254,35 +278,21 @@ fn digest_hex(data: &[u8], algo: aria2_protocol::metalink::parser::HashAlgorithm
     }
 }
 
-const MAX_METALINK_HASH_WORKERS: usize = 4;
-
-fn metalink_hash_slots() -> &'static Arc<Semaphore> {
-    static HASH_SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
-    HASH_SLOTS.get_or_init(|| {
-        let workers = std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
-            .clamp(1, MAX_METALINK_HASH_WORKERS);
-        Arc::new(Semaphore::new(workers))
-    })
-}
-
 async fn digest_hex_async(
     data: Vec<u8>,
     used: usize,
     algo: aria2_protocol::metalink::parser::HashAlgorithm,
 ) -> Result<(String, Vec<u8>)> {
     debug_assert!(used <= data.len());
-    let permit = metalink_hash_slots()
-        .clone()
-        .acquire_owned()
+    crate::checksum::hash_worker_pool::shared()
+        .run(
+            move || {
+                Ok({
+                    let digest = digest_hex(&data[..used], algo);
+                    (digest, data)
+                })
+            },
+            "Metalink piece hash",
+        )
         .await
-        .map_err(|error| Aria2Error::Io(format!("Metalink hash dispatcher closed: {error}")))?;
-    tokio::task::spawn_blocking(move || {
-        let _permit = permit;
-        let digest = digest_hex(&data[..used], algo);
-        (digest, data)
-    })
-    .await
-    .map_err(|error| Aria2Error::Io(format!("Metalink hash task failed: {error}")))
 }

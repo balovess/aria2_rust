@@ -73,9 +73,7 @@ pub async fn write_piece_to_multi_files(
     piece_data: &[u8],
     _piece_length: u32,
 ) -> Result<()> {
-    use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-
-    let mut file_writers: HashMap<usize, tokio::fs::File> = HashMap::new();
+    let mut file_writers: HashMap<usize, PositionedDiskWriter> = HashMap::new();
 
     let mut data_offset = 0usize;
     while data_offset < piece_data.len() {
@@ -95,17 +93,11 @@ pub async fn write_piece_to_multi_files(
                 // on partial / resumed downloads).  We seek + write at the
                 // correct offset, so the file must be opened for random-access
                 // writing without truncation (matching C++ aria2 behavior).
-                let f = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .truncate(false)
-                    .write(true)
-                    .read(true)
-                    .open(&file_path)
-                    .await
-                    .map_err(|e| {
-                        Aria2Error::Fatal(FatalError::Config(format!("open failed: {}", e)))
-                    })?;
-                e.insert(f);
+                let mut writer = PositionedDiskWriter::new(&file_path, None);
+                writer.open().await.map_err(|error| {
+                    Aria2Error::Fatal(FatalError::Config(format!("open failed: {error}")))
+                })?;
+                e.insert(writer);
             }
 
             let file_info = layout.get_file_info(file_idx).ok_or_else(|| {
@@ -125,14 +117,8 @@ pub async fn write_piece_to_multi_files(
             let writer = file_writers
                 .get_mut(&file_idx)
                 .expect("file writer was just inserted above and must exist");
-            writer
-                .seek(std::io::SeekFrom::Start(file_offset))
-                .await
-                .map_err(|e| {
-                    Aria2Error::Fatal(FatalError::Config(format!("seek failed: {}", e)))
-                })?;
-            writer.write_all(chunk).await.map_err(|e| {
-                Aria2Error::Fatal(FatalError::Config(format!("write failed: {}", e)))
+            writer.write_at(file_offset, chunk).await.map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!("write failed: {error}")))
             })?;
 
             data_offset += write_len;
@@ -143,10 +129,10 @@ pub async fn write_piece_to_multi_files(
         }
     }
 
-    for (_, mut f) in file_writers {
-        f.flush()
-            .await
-            .map_err(|e| Aria2Error::Fatal(FatalError::Config(format!("flush failed: {}", e))))?;
+    for (_, mut writer) in file_writers {
+        writer.flush().await.map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!("flush failed: {error}")))
+        })?;
     }
 
     Ok(())

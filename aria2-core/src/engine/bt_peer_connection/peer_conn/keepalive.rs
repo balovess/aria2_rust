@@ -20,6 +20,11 @@ impl BtPeerConn {
         self.last_keepalive_sent.elapsed() >= self.keep_alive_interval
     }
 
+    /// Reset the keep-alive deadline after an outbound protocol message.
+    pub(crate) fn record_outbound_activity(&mut self) {
+        self.last_keepalive_sent = std::time::Instant::now();
+    }
+
     /// Check whether the peer has timed out according to the configured
     /// inactivity interval.
     pub fn is_peer_timed_out(&self) -> bool {

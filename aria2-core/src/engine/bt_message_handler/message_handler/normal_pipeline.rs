@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use crate::engine::choking_algorithm::{ChokingAlgorithm, PeerIdentity};
 use crate::request::request_group::AtomicProgress;
@@ -255,8 +255,15 @@ pub(super) async fn run_attempt(
             event = event_rx.recv() => {
                 let Some(event) = event else { break };
                 match event {
-                    PeerEvent::UploadBytes { .. } => {}
-                    PeerEvent::InterestChanged { snapshot, .. } => {
+                    PeerEvent::UploadBytes { actor_id, .. } => {
+                        if workers.peer_index(actor_id).is_none() {
+                            continue;
+                        }
+                    }
+                    PeerEvent::InterestChanged { actor_id, snapshot } => {
+                        if workers.peer_index(actor_id).is_none() {
+                            continue;
+                        }
                         apply_interest_change(
                             workers,
                             peer_indices,
@@ -264,7 +271,11 @@ pub(super) async fn run_attempt(
                             *snapshot,
                         ).await;
                     }
-                    PeerEvent::Message { peer_index, message } => {
+                    PeerEvent::Message { actor_id, message } => {
+                        let Some(peer_index) = workers.peer_index(actor_id) else {
+                            continue;
+                        };
+                        trace!(actor_id = actor_id.0, peer_index, "Received BT peer event");
                         use aria2_protocol::bittorrent::message::types::BtMessage;
                         match message {
                             BtMessage::Piece { index, begin, data } if index == piece_index => {
@@ -342,7 +353,10 @@ pub(super) async fn run_attempt(
                             _ => {}
                         }
                     }
-                    PeerEvent::RequestFailed { peer_index, request } => {
+                    PeerEvent::RequestFailed { actor_id, request } => {
+                        let Some(peer_index) = workers.peer_index(actor_id) else {
+                            continue;
+                        };
                         debug!(peer_index, offset = request.offset, "BT request send failed");
                         mark_peer_failed(
                             peer_index,
@@ -356,7 +370,10 @@ pub(super) async fn run_attempt(
                             &mut failed_peers,
                         );
                     }
-                    PeerEvent::Disconnected { peer_index } => {
+                    PeerEvent::Disconnected { actor_id } => {
+                        let Some(peer_index) = workers.peer_index(actor_id) else {
+                            continue;
+                        };
                         debug!(peer_index, "BT peer disconnected during pipelined piece download");
                         mark_peer_failed(
                             peer_index,
@@ -373,7 +390,9 @@ pub(super) async fn run_attempt(
                 }
             }
             worker = workers.workers.next(), if workers_active => {
-                if let Some(peer_index) = worker {
+                if let Some(actor_id) = worker
+                    && let Some(peer_index) = workers.peer_index(actor_id)
+                {
                     mark_peer_failed(
                         peer_index,
                         workers,

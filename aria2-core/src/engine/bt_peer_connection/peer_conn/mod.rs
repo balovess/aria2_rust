@@ -16,6 +16,7 @@ mod messages;
 mod session;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::engine::peer_stats::PeerStats;
@@ -46,6 +47,17 @@ pub(crate) enum InnerConnection {
     Utp(UtpPeerConnection),
 }
 
+/// Identity that remains attached to one peer connection across worker restarts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PeerActorId(pub(crate) u64);
+
+impl PeerActorId {
+    pub(crate) fn allocate() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BtPeerConn
 // ---------------------------------------------------------------------------
@@ -63,6 +75,8 @@ pub(crate) enum InnerConnection {
 /// - Keep-alive / timeout tracking.
 /// - [`PeerStats`] for integration with the choking algorithm.
 pub struct BtPeerConn {
+    /// Stable identity for the I/O actor associated with this connection.
+    pub(crate) actor_id: PeerActorId,
     pub(crate) inner: InnerConnection,
 
     // -----------------------------------------------------------------------

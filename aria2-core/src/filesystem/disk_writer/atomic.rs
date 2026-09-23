@@ -12,7 +12,7 @@ use std::path::Path;
 
 pub struct DefaultDiskWriter {
     path: std::path::PathBuf,
-    file: Option<tokio::fs::File>,
+    file: Option<std::sync::Arc<std::sync::Mutex<std::fs::File>>>,
     write_offset: Option<u64>,
 }
 
@@ -41,65 +41,91 @@ impl DefaultDiskWriter {
 #[async_trait]
 impl DiskWriter for DefaultDiskWriter {
     async fn write(&mut self, data: &[u8]) -> Result<()> {
-        use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-
         if self.file.is_none() {
-            let file = if self.write_offset.is_some() {
-                tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(&self.path)
-                    .await
-            } else {
-                tokio::fs::File::create(&self.path).await
-            };
-            self.file = Some(file.map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?);
+            let path = self.path.clone();
+            let preserve_existing = self.write_offset.is_some();
+            let file = crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        let file = if preserve_existing {
+                            std::fs::OpenOptions::new()
+                                .write(true)
+                                .create(true)
+                                .truncate(false)
+                                .open(path)
+                        } else {
+                            std::fs::File::create(path)
+                        }
+                        .map_err(crate::error::Aria2Error::from)?;
+                        Ok(file)
+                    },
+                    "sequential writer open",
+                )
+                .await?;
+            self.file = Some(std::sync::Arc::new(std::sync::Mutex::new(file)));
         }
-        if let Some(ref mut file) = self.file {
-            if let Some(offset) = self.write_offset {
-                file.seek(std::io::SeekFrom::Start(offset))
-                    .await
-                    .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            }
-            file.write_all(data)
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+        if let Some(file) = self.file.as_ref().cloned() {
+            let data = data.to_vec();
+            let bytes_written = data.len() as u64;
+            let offset = self.write_offset;
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        use std::io::{Seek, Write};
+                        let mut file = file
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(offset) = offset {
+                            file.seek(std::io::SeekFrom::Start(offset))
+                                .map_err(crate::error::Aria2Error::from)?;
+                        }
+                        file.write_all(&data)
+                            .map_err(crate::error::Aria2Error::from)
+                    },
+                    "sequential write",
+                )
+                .await?;
             if let Some(offset) = &mut self.write_offset {
-                *offset = offset.saturating_add(data.len() as u64);
+                *offset = offset.saturating_add(bytes_written);
             }
         }
         Ok(())
     }
 
     async fn flush(&mut self) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
-
-        if let Some(file) = self.file.as_mut() {
-            file.flush()
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            file.sync_data()
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
+        if let Some(file) = self.file.as_ref().cloned() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        use std::io::Write;
+                        let mut file = file
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        file.flush().map_err(crate::error::Aria2Error::from)?;
+                        file.sync_data().map_err(crate::error::Aria2Error::from)
+                    },
+                    "sequential writer flush",
+                )
+                .await?;
         }
         Ok(())
     }
 
     async fn finalize(&mut self) -> Result<Vec<u8>> {
-        if let Some(mut file) = self.file.take() {
-            use tokio::io::AsyncWriteExt;
-            file.flush()
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            file.sync_all()
-                .await
-                .map_err(|e| crate::error::Aria2Error::Io(e.to_string()))?;
-            // Close the file synchronously by converting to std::fs::File.
-            // tokio::fs::File's Drop spawns a background close task, which on
-            // Windows can leave the handle open briefly and cause "Access denied"
-            // (os error 5) when the caller immediately reads the file.
-            drop(file.into_std().await);
+        if let Some(file) = self.file.take() {
+            crate::filesystem::disk_io_pool::shared()
+                .run(
+                    move || {
+                        use std::io::Write;
+                        let mut file = file
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        file.flush().map_err(crate::error::Aria2Error::from)?;
+                        file.sync_all().map_err(crate::error::Aria2Error::from)
+                    },
+                    "sequential writer finalize",
+                )
+                .await?;
         }
         Ok(vec![])
     }

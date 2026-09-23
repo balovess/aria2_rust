@@ -68,9 +68,9 @@ pub(crate) async fn async_zero_fill_from<D: DiskAdaptor>(
 /// - **Other**: Returns `u64::MAX` as a sentinel
 pub async fn get_available_space(path: &Path) -> Result<u64> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || get_available_space_sync(&path))
+    crate::filesystem::disk_io_pool::shared()
+        .run(move || get_available_space_sync(&path), "disk space query")
         .await
-        .map_err(|error| Aria2Error::Io(format!("disk space query task failed: {error}")))?
 }
 
 fn get_available_space_sync(path: &Path) -> Result<u64> {

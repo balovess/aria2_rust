@@ -477,16 +477,26 @@ impl crate::engine::bt_upload_session::BtUploadTransport for BtPeerConn {
         &mut self,
         message: &BtMessage,
     ) -> std::result::Result<(), String> {
-        self.send_bt_message(message)
-            .await
-            .map_err(|error| error.to_string())
+        let result = self.send_bt_message(message).await;
+        if result.is_ok() {
+            self.record_outbound_activity();
+        }
+        result.map_err(|error| error.to_string())
     }
 
     async fn send_upload_choke(&mut self) -> std::result::Result<(), String> {
-        self.send_choke().await.map_err(|error| error.to_string())
+        let result = self.send_choke().await;
+        if result.is_ok() {
+            self.record_outbound_activity();
+        }
+        result.map_err(|error| error.to_string())
     }
 
     async fn send_upload_unchoke(&mut self) -> std::result::Result<(), String> {
-        self.send_unchoke().await.map_err(|error| error.to_string())
+        let result = self.send_unchoke().await;
+        if result.is_ok() {
+            self.record_outbound_activity();
+        }
+        result.map_err(|error| error.to_string())
     }
 }

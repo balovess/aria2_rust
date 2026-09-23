@@ -7,10 +7,11 @@ use tokio::sync::mpsc;
 
 pub(super) use crate::engine::bt_message_handler::{PeerActorTask, PeerCommand, PeerEvent};
 use crate::engine::bt_peer_connection::BtPeerConn;
+pub(super) use crate::engine::bt_peer_connection::PeerActorId;
 use crate::engine::bt_upload_session::PieceDataProvider;
 
 pub(super) struct SeedPeerActor {
-    pub(super) actor_id: usize,
+    pub(super) actor_id: PeerActorId,
     pub(super) endpoint: SocketAddr,
     pub(super) dead: bool,
     actor: PeerActorTask,
@@ -18,7 +19,7 @@ pub(super) struct SeedPeerActor {
 
 impl SeedPeerActor {
     pub(super) fn spawn(
-        actor_id: usize,
+        actor_id: PeerActorId,
         connection: BtPeerConn,
         provider: Arc<dyn PieceDataProvider>,
         event_tx: mpsc::Sender<PeerEvent>,
