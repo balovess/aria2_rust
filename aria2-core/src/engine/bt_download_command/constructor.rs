@@ -10,6 +10,7 @@ use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
 use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
+use crate::util::uri::percent_encode;
 use crate::util::rwlock_ext::RwLockRecover;
 
 use super::BtDownloadCommand;
@@ -20,6 +21,56 @@ fn normalized_announce_list(announce_list: &[Vec<String>], announce: &str) -> Ve
     } else {
         announce_list.to_vec()
     }
+}
+
+fn normalized_web_seed_list(
+    torrent_seeds: &[String],
+    additional_seeds: &[String],
+) -> Vec<String> {
+    let mut seeds = Vec::with_capacity(torrent_seeds.len() + additional_seeds.len());
+    seeds.extend(torrent_seeds.iter().cloned());
+    seeds.extend(additional_seeds.iter().cloned());
+    seeds.sort_unstable();
+    seeds.dedup();
+    seeds
+}
+
+fn file_web_seed_urls(
+    web_seeds: &[String],
+    torrent_name: &str,
+    file_path: &[String],
+    single_file: bool,
+) -> Vec<String> {
+    if single_file {
+        let filename = percent_encode(torrent_name);
+        return web_seeds
+            .iter()
+            .map(|seed| {
+                if seed.ends_with('/') {
+                    format!("{seed}{filename}")
+                } else {
+                    seed.clone()
+                }
+            })
+            .collect();
+    }
+
+    let mut path = String::with_capacity(torrent_name.len() + file_path.iter().map(String::len).sum::<usize>() + file_path.len());
+    path.push_str(&percent_encode(torrent_name));
+    for component in file_path {
+        path.push('/');
+        path.push_str(&percent_encode(component));
+    }
+    web_seeds
+        .iter()
+        .map(|seed| {
+            if seed.ends_with('/') {
+                format!("{seed}{path}")
+            } else {
+                format!("{seed}/{path}")
+            }
+        })
+        .collect()
 }
 
 /// Build the protocol-specific context that aria2 installs after torrent
@@ -36,7 +87,9 @@ pub(crate) fn build_download_context_from_meta(
     use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
     use crate::download::file_entry::FileEntry;
 
-    let mut ctx = if meta.is_single_file() {
+    let web_seeds = normalized_web_seed_list(&meta.web_seeds, additional_web_seeds);
+    let is_single_file = meta.is_single_file();
+    let mut ctx = if is_single_file {
         DownloadContext::new(meta.info.piece_length, meta.total_size(), path)
     } else {
         let base_dir = std::path::Path::new(&path)
@@ -63,11 +116,12 @@ pub(crate) fn build_download_context_from_meta(
         let mut add_entry = |length: u64, path: &Vec<String>, offset: &mut u64| {
             let original_name = path.join("/");
             let file_path = base_dir.join(std::path::Path::new(&original_name));
+            let web_seed_urls = file_web_seed_urls(&web_seeds, &meta.info.name, path, false);
             let mut entry = FileEntry::new(
                 file_path.to_string_lossy().into_owned(),
                 length,
                 *offset,
-                Vec::new(),
+                web_seed_urls,
             );
             entry.set_original_name(original_name.clone());
             entry.set_suffix_path(original_name);
@@ -88,6 +142,8 @@ pub(crate) fn build_download_context_from_meta(
             }
         } else if let Some(files) = v2_files {
             for file in files {
+                offset = offset.div_ceil(meta.info.piece_length as u64)
+                    * meta.info.piece_length as u64;
                 add_entry(file.length, &file.path, &mut offset);
             }
         }
@@ -101,6 +157,8 @@ pub(crate) fn build_download_context_from_meta(
     {
         entry.set_original_name(meta.info.name.clone());
         entry.set_suffix_path(meta.info.name.clone());
+        let web_seed_urls = file_web_seed_urls(&web_seeds, &meta.info.name, &[], true);
+        entry.add_uris(&web_seed_urls);
     }
     if meta.info.meta_version != Some(2) {
         let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
@@ -123,15 +181,7 @@ pub(crate) fn build_download_context_from_meta(
         creation_date: meta.creation_date.unwrap_or(0),
         comment: meta.comment.clone().unwrap_or_default(),
         created_by: meta.created_by.clone().unwrap_or_default(),
-        url_list: {
-            let mut urls = meta.web_seeds.clone();
-            for url in additional_web_seeds {
-                if !urls.contains(url) {
-                    urls.push(url.clone());
-                }
-            }
-            urls
-        },
+        url_list: web_seeds,
     };
     ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
     Ok(ctx)

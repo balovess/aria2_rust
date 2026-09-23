@@ -1,5 +1,6 @@
 //! Multi-seed endpoint manager with automatic fallback.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -8,7 +9,8 @@ use super::client::WebSeedClient;
 use super::stats::WebSeedStats;
 use crate::http::client_identity::ClientTlsConfig;
 use crate::network::OutboundNetworkPolicy;
-use crate::request::request_group::AtomicProgress;
+use crate::request::request_group::{AtomicProgress, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
 
 /// Manages multiple web-seed endpoints with automatic fallback.
 ///
@@ -23,6 +25,14 @@ pub struct WebSeedManager {
     piece_length: u32,
     /// Total file length
     total_length: u64,
+    /// BT tasks read file URI queues at request time so `changeUri` updates
+    /// become visible without rebuilding the piece session.
+    live_group: Option<Arc<std::sync::RwLock<RequestGroup>>>,
+    tls: ClientTlsConfig,
+    network_policy: Option<OutboundNetworkPolicy>,
+    /// HTTP pools are shared by origin, not by file URL, so multi-file
+    /// torrents do not allocate one connection pool per file.
+    http_clients: tokio::sync::Mutex<HashMap<String, reqwest::Client>>,
 }
 
 impl WebSeedManager {
@@ -81,6 +91,10 @@ impl WebSeedManager {
             stats,
             piece_length,
             total_length,
+            live_group: None,
+            tls: tls.clone(),
+            network_policy: None,
+            http_clients: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -121,7 +135,33 @@ impl WebSeedManager {
             stats,
             piece_length,
             total_length,
+            live_group: None,
+            tls: tls.clone(),
+            network_policy: Some(policy.clone()),
+            http_clients: tokio::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Build a live per-file WebSeed view for a BT task. URI queues remain
+    /// owned by `RequestGroup`; this manager snapshots only the files touched
+    /// by each piece and reuses HTTP clients by origin.
+    pub(crate) fn for_request_group(
+        group: Arc<std::sync::RwLock<RequestGroup>>,
+        piece_length: u32,
+        total_length: u64,
+        tls: ClientTlsConfig,
+        policy: OutboundNetworkPolicy,
+    ) -> Self {
+        Self {
+            clients: Vec::new(),
+            stats: Arc::new(WebSeedStats::new()),
+            piece_length,
+            total_length,
+            live_group: Some(group),
+            tls,
+            network_policy: Some(policy),
+            http_clients: tokio::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Get the shared statistics.
@@ -150,6 +190,35 @@ impl WebSeedManager {
         piece_index: u32,
         network_activity: Option<&AtomicProgress>,
     ) -> Result<Vec<u8>, String> {
+        let piece_offset = piece_index as u64 * self.piece_length as u64;
+        let length = self
+            .total_length
+            .saturating_sub(piece_offset)
+            .min(self.piece_length as u64);
+        self.request_piece_with_length_and_activity(
+            piece_index,
+            length,
+            network_activity,
+        )
+        .await
+    }
+
+    pub(crate) async fn request_piece_with_length_and_activity(
+        &self,
+        piece_index: u32,
+        piece_data_length: u64,
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<Vec<u8>, String> {
+        if let Some(group) = &self.live_group {
+            return self
+                .request_live_piece(
+                    group,
+                    piece_index,
+                    piece_data_length,
+                    network_activity,
+                )
+                .await;
+        }
         if self.clients.is_empty() {
             return Err("No web-seeds configured".to_string());
         }
@@ -167,10 +236,11 @@ impl WebSeedManager {
             }
 
             match client
-                .request_piece_with_activity(
+                .download_piece_with_activity(
                     piece_index,
-                    self.piece_length,
-                    self.total_length,
+                    self.piece_length as u64,
+                    piece_index as u64 * self.piece_length as u64,
+                    piece_data_length,
                     network_activity,
                 )
                 .await
@@ -199,6 +269,144 @@ impl WebSeedManager {
         }
 
         Err(format!("All web-seeds failed: {}", last_error))
+    }
+
+    async fn request_live_piece(
+        &self,
+        group: &Arc<std::sync::RwLock<RequestGroup>>,
+        piece_index: u32,
+        piece_data_length: u64,
+        network_activity: Option<&AtomicProgress>,
+    ) -> Result<Vec<u8>, String> {
+        if piece_data_length == 0 {
+            return Err("Cannot request an empty BitTorrent piece".to_string());
+        }
+        let piece_start = piece_index as u64 * self.piece_length as u64;
+        let piece_end = piece_start.saturating_add(piece_data_length);
+        let file_ranges = {
+            let group = group.recover();
+            let context = group
+                .get_download_context()
+                .ok_or_else(|| "BitTorrent download context is unavailable".to_string())?;
+            let entries = context.get_file_entries();
+            let first = entries.partition_point(|entry| entry.last_offset() <= piece_start);
+            entries[first..]
+                .iter()
+                .take_while(|entry| entry.offset() < piece_end)
+                .filter_map(|entry| {
+                    let start = piece_start.max(entry.offset());
+                    let end = piece_end.min(entry.last_offset());
+                    (start < end).then(|| {
+                        (
+                            start,
+                            end,
+                            entry.offset(),
+                            entry.uris(),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        if file_ranges.is_empty() {
+            return Err(format!("Piece {piece_index} has no file-backed byte range"));
+        }
+
+        let mut piece = vec![0; piece_data_length as usize];
+        let mut last_error = None;
+        for (start, end, file_offset, uris) in file_ranges {
+            if uris.is_empty() {
+                return Err(format!(
+                    "No WebSeed URI is configured for piece {piece_index} file range {start}..{end}"
+                ));
+            }
+            let length = end - start;
+            let mut fragment = None;
+            for uri in &uris {
+                let client = match self.live_client(uri).await {
+                    Ok(client) => client,
+                    Err(error) => {
+                        last_error = Some(format!("{uri}: {error}"));
+                        continue;
+                    }
+                };
+                match client
+                    .download_piece_with_activity(
+                        piece_index,
+                        self.piece_length as u64,
+                        start - file_offset,
+                        length,
+                        network_activity,
+                    )
+                    .await
+                {
+                    Ok(data) if data.len() as u64 == length => {
+                        fragment = Some(data);
+                        break;
+                    }
+                    Ok(data) => {
+                        last_error = Some(format!(
+                            "{uri}: expected {length} bytes, received {}",
+                            data.len()
+                        ));
+                    }
+                    Err(error) => last_error = Some(format!("{uri}: {error}")),
+                }
+            }
+
+            let Some(fragment) = fragment else {
+                return Err(format!(
+                    "All WebSeeds failed for piece {piece_index} range {start}..{end}: {}",
+                    last_error.unwrap_or_else(|| "no usable endpoint".to_string())
+                ));
+            };
+            let output_start = (start - piece_start) as usize;
+            let output_end = output_start + fragment.len();
+            piece[output_start..output_end].copy_from_slice(&fragment);
+        }
+        Ok(piece)
+    }
+
+    async fn live_client(&self, uri: &str) -> Result<WebSeedClient, String> {
+        let parsed = reqwest::Url::parse(uri).map_err(|error| format!("invalid URI: {error}"))?;
+        let scheme = parsed.scheme();
+        if !matches!(scheme, "http" | "https") {
+            return Err(format!("unsupported WebSeed scheme: {scheme}"));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| "WebSeed URI has no host".to_string())?;
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| "WebSeed URI has no port".to_string())?;
+        let policy = self
+            .network_policy
+            .as_ref()
+            .ok_or_else(|| "WebSeed network policy is unavailable".to_string())?;
+        let local_address = if policy.is_direct() {
+            None
+        } else {
+            policy
+                .source_for_host(host, port)
+                .await
+                .map_err(|error| format!("WebSeed source selection failed: {error}"))?
+        };
+        let origin = format!("{scheme}://{host}:{port}/{local_address:?}");
+        let client = {
+            let mut clients = self.http_clients.lock().await;
+            if let Some(client) = clients.get(&origin) {
+                client.clone()
+            } else {
+                let client = WebSeedClient::build_client(&self.tls, local_address)?;
+                clients.insert(origin, client.clone());
+                client
+            }
+        };
+        Ok(WebSeedClient::with_shared_http_client(
+            uri,
+            Arc::clone(&self.stats),
+            client,
+        ))
     }
 
     /// Attempt to download a piece from any available web-seed.
@@ -277,6 +485,16 @@ impl WebSeedManager {
 
     /// Check if any web-seeds are configured.
     pub fn is_empty(&self) -> bool {
+        if let Some(group) = &self.live_group {
+            return group
+                .recover()
+                .get_download_context()
+                .is_none_or(|context| {
+                    context.get_file_entries().iter().all(|entry| {
+                        entry.remaining_uris().is_empty() && entry.spent_uris().is_empty()
+                    })
+                });
+        }
         self.clients.is_empty()
     }
 

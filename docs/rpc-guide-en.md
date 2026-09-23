@@ -147,10 +147,14 @@ entry even when that file is currently unselected. It returns the number of
 deleted and added URIs as string-valued numbers.
 
 The `uris` parameter of `addTorrent` supplies additional WebSeed endpoints.
-They are merged with the torrent's `url-list` for BitTorrent HTTP fallback;
-they are not Tracker URLs. For an active BitTorrent task, `changeUri` currently
-updates the file URI queue, but already-created WebSeed clients do not reload
-those changes immediately.
+They are merged with the torrent's `url-list` as BitTorrent HTTP fallback
+sources; they are not Tracker URLs. The current implementation passes them to
+a torrent-level Range downloader. It does not yet match upstream's per-file URL
+expansion and parallel per-file segmented downloads, so multi-file WebSeed
+behavior remains incompatible. For an active BitTorrent task, `changeUri`
+currently updates only the file URI queue: it does not wake a download command
+or re-enable the corresponding piece range, and existing WebSeed clients do
+not reload those changes immediately.
 
 ### Status and files
 

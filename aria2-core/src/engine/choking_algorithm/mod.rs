@@ -47,7 +47,7 @@ impl IdentityChokeAction {
 /// Configuration for the choking algorithm
 #[derive(Debug, Clone)]
 pub struct ChokingConfig {
-    /// Maximum number of peers to unchoke simultaneously (default: 4)
+    /// Maximum number of peers to unchoke simultaneously, including the optimistic slot (default: 4)
     pub max_upload_slots: usize,
     /// Interval in seconds between optimistic unchokes (default: 30)
     pub optimistic_unchoke_interval_secs: u64,
@@ -71,8 +71,8 @@ impl Default for ChokingConfig {
 /// BitTorrent choking algorithm implementation (tit-for-tat strategy)
 ///
 /// This implements the standard BT choking algorithm:
-/// - Top K peers by score get unchoked (reciprocity-based)
-/// - One additional slot for optimistic unchoke (random selection)
+/// - Up to `max_upload_slots - 1` interested peers get regular unchoke slots
+/// - One slot is reserved for optimistic unchoke when the limit is nonzero
 /// - Snubbed peers are penalized heavily
 ///
 /// The algorithm minimizes churn by only changing state when necessary.

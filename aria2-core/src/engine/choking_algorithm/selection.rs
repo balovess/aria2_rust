@@ -9,7 +9,8 @@ use crate::constants;
 /// 1. Check and mark snubbed peers (timeout-based)
 /// 2. Calculate score for each peer
 /// 3. Sort by score descending
-/// 4. Top K get Unchoke, rest get Choke
+/// 4. Interested, non-snubbed peers compete for regular slots; the configured
+///    upload-slot limit includes one separately managed optimistic slot
 ///    BUT: keep currently unchoked peers unchoked if they're still in top K
 ///    (avoid churn - only change what's necessary)
 /// 5. Return only the actions that changed state
@@ -18,30 +19,40 @@ pub(super) fn rotate_choke_by_identity(algo: &mut ChokingAlgorithm) -> Vec<Ident
     if algo.peers.is_empty() {
         return Vec::new();
     }
-    let max_slots = algo.config.max_upload_slots;
-    let mut scored: Vec<(PeerIdentity, f64)> = algo
+    let regular_slots = algo.config.max_upload_slots.saturating_sub(1);
+    let mut scored: Vec<(PeerIdentity, bool, f64)> = algo
         .peers
         .iter()
+        .filter(|peer| {
+            peer.peer_interested
+                && !peer.is_snubbed
+                && !algo.snubbed_peers.contains(&PeerIdentity::from(*peer))
+        })
         .map(|peer| {
             let identity = peer.into();
             (
                 identity,
+                peer.last_data_time
+                    .is_some_and(|received_at| received_at.elapsed().as_secs() < 30),
                 calculate_peer_score(peer, algo.snubbed_peers.contains(&identity)),
             )
         })
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    scored
+    scored.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let selected: std::collections::HashSet<_> = scored
         .into_iter()
-        .enumerate()
-        .map(|(rank, (identity, _))| {
-            let peer = algo
-                .peers
-                .iter_mut()
-                .find(|peer| PeerIdentity::from(&**peer) == identity)
-                .expect("scored peer must remain registered");
-            if rank < max_slots {
+        .take(regular_slots)
+        .map(|(identity, _, _)| identity)
+        .collect();
+
+    algo.peers
+        .iter_mut()
+        .map(|peer| {
+            let identity = PeerIdentity::from(&*peer);
+            if selected.contains(&identity) {
                 if peer.am_choking {
                     peer.record_unchoke();
                     IdentityChokeAction::Unchoke(identity)

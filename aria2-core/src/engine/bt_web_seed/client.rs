@@ -84,6 +84,19 @@ impl WebSeedClient {
         })
     }
 
+    pub(crate) fn with_shared_http_client(
+        base_url: &str,
+        stats: Arc<WebSeedStats>,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            client,
+            active_requests: Arc::new(std::sync::Mutex::new(HashSet::new())),
+            stats,
+        }
+    }
+
     /// Create a policy-bound client after resolving the web-seed endpoint.
     ///
     /// The production BT path is asynchronous, so it can select a source
@@ -336,7 +349,7 @@ impl WebSeedClient {
     }
 }
 
-fn build_client(
+pub(crate) fn build_client(
     tls: &ClientTlsConfig,
     local_address: Option<std::net::IpAddr>,
 ) -> Result<reqwest::Client, String> {

@@ -200,8 +200,8 @@ pub struct DownloadOptions {
     // ------------------------------------------------------------------
     // Choking algorithm configuration (BT tit-for-tat)
     // ------------------------------------------------------------------
-    /// Maximum number of peers to unchoke simultaneously during seeding.
-    /// Default: 4. Set to enable the choking algorithm.
+    /// Maximum number of peers to unchoke simultaneously during BT download or seeding,
+    /// including the optimistic slot. Default: 4.
     pub bt_max_upload_slots: Option<u32>,
 
     /// Interval in seconds between optimistic unchokes.

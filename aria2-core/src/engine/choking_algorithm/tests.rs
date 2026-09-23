@@ -88,7 +88,7 @@ fn test_add_remove_peers() {
 #[test]
 fn test_rotate_choke_selects_top_k() {
     let config = ChokingConfig {
-        max_upload_slots: 3,
+        max_upload_slots: 4,
         ..Default::default()
     };
     let mut algo = ChokingAlgorithm::new(config);
@@ -123,9 +123,73 @@ fn test_rotate_choke_selects_top_k() {
 }
 
 #[test]
+fn test_regular_unchoke_requires_interest_and_reserves_optimistic_slot() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig {
+        max_upload_slots: 2,
+        optimistic_unchoke_interval_secs: 0,
+        ..Default::default()
+    });
+    let interested = create_test_peer(1000.0, 0.0, true, true);
+    let interested_identity = PeerIdentity::from(&interested);
+    let optimistic_candidate = create_test_peer(500.0, 0.0, true, true);
+    let optimistic_identity = PeerIdentity::from(&optimistic_candidate);
+    let uninterested = create_test_peer(100_000.0, 0.0, true, false);
+    let uninterested_identity = PeerIdentity::from(&uninterested);
+    algo.add_peer(interested);
+    algo.add_peer(optimistic_candidate);
+    algo.add_peer(uninterested);
+
+    let actions = algo.rotate_choke_by_identity();
+    assert!(actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == interested_identity)
+    }));
+    assert!(!actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == uninterested_identity)
+    }));
+    assert_eq!(
+        algo.optimistically_unchoke_by_identity(),
+        Some(optimistic_identity),
+        "the reserved optimistic slot goes to another interested peer"
+    );
+}
+
+#[test]
+fn test_first_optimistic_unchoke_does_not_wait_for_rotation_interval() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig::default());
+    let peer = create_test_peer(1000.0, 0.0, true, true);
+    let identity = PeerIdentity::from(&peer);
+    algo.add_peer(peer);
+
+    assert_eq!(algo.optimistically_unchoke_by_identity(), Some(identity));
+}
+
+#[test]
+fn test_recent_download_data_precedes_higher_speed_regular_candidate() {
+    let mut algo = ChokingAlgorithm::new(ChokingConfig {
+        max_upload_slots: 2,
+        ..Default::default()
+    });
+    let stale_fast = create_test_peer(100_000.0, 0.0, true, true);
+    let stale_identity = PeerIdentity::from(&stale_fast);
+    let mut recent_slow = create_test_peer(100.0, 0.0, true, true);
+    let recent_identity = PeerIdentity::from(&recent_slow);
+    recent_slow.last_data_time = Some(std::time::Instant::now());
+    algo.add_peer(stale_fast);
+    algo.add_peer(recent_slow);
+
+    let actions = algo.rotate_choke_by_identity();
+    assert!(actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == recent_identity)
+    }));
+    assert!(!actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == stale_identity)
+    }));
+}
+
+#[test]
 fn test_rotate_choke_minimizes_changes() {
     let config = ChokingConfig {
-        max_upload_slots: 2,
+        max_upload_slots: 3,
         ..Default::default()
     };
     let mut algo = ChokingAlgorithm::new(config);
@@ -422,7 +486,7 @@ fn test_identity_api_survives_peer_reordering() {
 #[test]
 fn test_identity_actions_match_registered_peers() {
     let mut algo = ChokingAlgorithm::new(ChokingConfig {
-        max_upload_slots: 1,
+        max_upload_slots: 2,
         ..Default::default()
     });
     let first = create_test_peer(3000.0, 0.0, true, true);

@@ -5,6 +5,9 @@ use super::{ChokingAlgorithm, PeerIdentity};
 pub(super) fn optimistically_unchoke_by_identity(
     algo: &mut ChokingAlgorithm,
 ) -> Option<PeerIdentity> {
+    if algo.config.max_upload_slots == 0 {
+        return None;
+    }
     // Find candidates that are:
     //   - Currently choked (am_choking == true)
     //   - Interested in us (peer_interested == true)
@@ -19,8 +22,9 @@ pub(super) fn optimistically_unchoke_by_identity(
                 && peer.peer_interested
                 && !peer.is_snubbed
                 && !algo.snubbed_peers.contains(&(*peer).into())
-                && peer.time_since_last_optimistic_unchoke().as_secs()
-                    >= algo.config.optimistic_unchoke_interval_secs
+                && (algo.current_optimistic_peer.is_none()
+                    || peer.time_since_last_optimistic_unchoke().as_secs()
+                        >= algo.config.optimistic_unchoke_interval_secs)
         })
         .map(|(_, peer)| PeerIdentity::from(peer))
         .collect();
