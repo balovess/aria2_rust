@@ -1,9 +1,48 @@
+use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::choking_algorithm::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::engine::peer_stats::PeerStats;
 
 use super::BtDownloadCommand;
 
 impl BtDownloadCommand {
+    pub(crate) async fn apply_upload_choke_round(&mut self, active_connections: &mut [BtPeerConn]) {
+        let Some(algo) = self.choking_algo.as_mut() else {
+            return;
+        };
+
+        for connection in active_connections.iter() {
+            algo.sync_peer_by_identity(&connection.stats);
+        }
+        let actions = algo.rotate_choke_by_identity();
+        let next_optimistic = algo.optimistically_unchoke_by_identity();
+        for action in &actions {
+            let identity = action.identity();
+            let Some(connection) = active_connections
+                .iter_mut()
+                .find(|connection| PeerIdentity::from(&connection.stats) == identity)
+            else {
+                continue;
+            };
+            let result = match action {
+                IdentityChokeAction::Choke(_) => connection.choke_upload_peer().await,
+                IdentityChokeAction::Unchoke(_) => connection.unchoke_upload_peer().await,
+                IdentityChokeAction::NoChange(_) => Ok(()),
+            };
+            if let Err(error) = result {
+                tracing::debug!(%error, peer = %identity.addr, "Failed to apply BT upload choke decision");
+            }
+        }
+
+        if let Some(next) = next_optimistic
+            && let Some(connection) = active_connections
+                .iter_mut()
+                .find(|connection| PeerIdentity::from(&connection.stats) == next)
+            && let Err(error) = connection.unchoke_upload_peer().await
+        {
+            tracing::debug!(%error, peer = %next.addr, "Failed to apply optimistic unchoke");
+        }
+    }
+
     pub fn on_peer_choke(&mut self, peer_idx: usize) {
         if let Some(algo) = self.choking_algo.as_mut()
             && let Some(peer) = algo.get_peer_mut(peer_idx)

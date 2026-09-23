@@ -151,14 +151,16 @@ pub struct BtPeerConn {
 }
 
 impl BtPeerConn {
-    pub(crate) fn configure_upload(
+    pub(crate) fn configure_upload_with_auto_unchoke(
         &mut self,
         config: &crate::engine::bt_upload_session::BtSeedingConfig,
         num_pieces: u32,
         piece_length: u32,
+        auto_unchoke: bool,
     ) {
         let mut state = crate::engine::bt_upload_session::BtUploadState::new(config);
         state.configure_message_validator(num_pieces, piece_length);
+        state.set_auto_unchoke(auto_unchoke);
         self.upload_state = Some(state);
     }
 
@@ -170,9 +172,29 @@ impl BtPeerConn {
         let Some(mut state) = self.upload_state.take() else {
             return Ok(0);
         };
+        let message_for_stats = message.clone();
         let result = state.handle_message(self, message, provider).await;
         self.upload_state = Some(state);
         if let Ok(bytes) = result {
+            self.stats.am_choking = self
+                .upload_state
+                .as_ref()
+                .is_some_and(|upload| upload.is_peer_choked());
+            match message_for_stats {
+                aria2_protocol::bittorrent::message::types::BtMessage::Interested => {
+                    self.stats.peer_interested = true;
+                }
+                aria2_protocol::bittorrent::message::types::BtMessage::NotInterested => {
+                    self.stats.peer_interested = false;
+                }
+                aria2_protocol::bittorrent::message::types::BtMessage::Choke => {
+                    self.stats.peer_choking = true;
+                }
+                aria2_protocol::bittorrent::message::types::BtMessage::Unchoke => {
+                    self.stats.peer_choking = false;
+                }
+                _ => {}
+            }
             self.stats.on_data_sent(bytes);
             if bytes > 0
                 && let Some(progress) = self.upload_progress.as_ref()
@@ -180,6 +202,30 @@ impl BtPeerConn {
                 progress.add_upload_length(bytes);
                 progress.set_upload_speed(self.stats.upload_speed.max(0.0) as u64);
             }
+        }
+        result
+    }
+
+    pub(crate) async fn choke_upload_peer(&mut self) -> crate::error::Result<()> {
+        let Some(mut state) = self.upload_state.take() else {
+            return Ok(());
+        };
+        let result = state.choke_peer(self).await;
+        self.upload_state = Some(state);
+        if result.is_ok() {
+            self.stats.am_choking = true;
+        }
+        result
+    }
+
+    pub(crate) async fn unchoke_upload_peer(&mut self) -> crate::error::Result<()> {
+        let Some(mut state) = self.upload_state.take() else {
+            return Ok(());
+        };
+        let result = state.unchoke_peer(self).await;
+        self.upload_state = Some(state);
+        if result.is_ok() {
+            self.stats.am_choking = false;
         }
         result
     }

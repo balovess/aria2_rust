@@ -954,6 +954,33 @@ async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
     assert_eq!(uris[2]["uri"], "http://mirror.example.com/first.bin");
 }
 
+/// Test: changeUri follows aria2's fileIndex contract even for an unselected
+/// file entry in a multi-file task.
+#[tokio::test]
+async fn regression_change_uri_allows_unselected_file_entry() {
+    let engine = core_engine();
+    let add_req = make_request(
+        "aria2.addTorrent",
+        serde_json::json!([
+            multi_file_torrent(),
+            [],
+            {"select-file": "1"}
+        ]),
+    );
+    let add_resp = engine.handle_request(&add_req).await;
+    assert_success(&add_resp);
+    let gid: String = serde_json::from_value(add_resp.result.unwrap()).unwrap();
+
+    let change_resp = engine
+        .handle_request(&make_request(
+            "aria2.changeUri",
+            serde_json::json!([gid, 2, [], ["http://example.com/second.bin"]]),
+        ))
+        .await;
+    assert_success(&change_resp);
+    assert_eq!(change_resp.result.unwrap(), serde_json::json!(["0", "1"]));
+}
+
 /// Test: aria2.getFiles returns array with file info.
 #[tokio::test]
 async fn regression_get_files_format() {

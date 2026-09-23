@@ -169,7 +169,11 @@ impl RpcBackend for CoreRpcBackend {
                 add_uris,
                 position,
             } => {
-                let group = self.group(&gid)?;
+                let gid = self.parse_gid(&gid)?.to_hex_string();
+                let group = self
+                    .group_man
+                    .group_by_hex(&gid)
+                    .ok_or_else(|| Self::execution(format!("Cannot remove URIs from GID#{gid}")))?;
                 let result = group
                     .write()
                     .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?

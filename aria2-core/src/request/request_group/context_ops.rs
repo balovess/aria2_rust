@@ -283,10 +283,9 @@ impl super::RequestGroup {
             let entry = ctx_inner
                 .get_file_entries_mut()
                 .get_mut(file_index)
-                .filter(|fe| fe.is_requested())
                 .ok_or_else(|| {
                     crate::error::Aria2Error::InvalidArgument(
-                        "download context has no requested file entry".to_string(),
+                        "fileIndex is out of range".to_string(),
                     )
                 })?;
             let mut deleted = 0;

@@ -145,6 +145,9 @@ XML-RPC 返回标准 `methodResponse`。请求体同样受 `rpc-max-request-size
 | `aria2.changePosition` | `gid`, `pos`, `how` (`POS_SET`/`POS_CUR`/`POS_END`) | 新位置 |
 | `aria2.changeUri` | `gid`, `fileIndex`, `delUris`, `addUris` | `OK` |
 
+`changeUri` 的 `fileIndex` 从 1 开始，即使目标文件当前未选中，也会操作指定的
+文件条目。返回值中的删除数和新增数按字符串数字序列化。
+
 ### 状态与文件
 
 | 方法 | 参数 | 返回 |

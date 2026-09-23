@@ -250,7 +250,12 @@ impl<'a> PieceDownloadSession<'a> {
         };
         let upload_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         for connection in active_connections.iter_mut() {
-            connection.configure_upload(&upload_config, num_pieces, piece_length);
+            connection.configure_upload_with_auto_unchoke(
+                &upload_config,
+                num_pieces,
+                piece_length,
+                command.choking_algo.is_none(),
+            );
             connection.set_upload_counter(Arc::clone(&upload_counter));
         }
         piece_selector.initialize_frequencies(&mut piece_picker, &peer_tracker);
@@ -296,6 +301,7 @@ impl<'a> PieceDownloadSession<'a> {
             last_speed_update,
             last_completed,
             last_upload_speed_update: Instant::now(),
+            last_upload_choke_round: Instant::now(),
             last_uploaded: 0,
             upload_counter,
             last_progress_save,

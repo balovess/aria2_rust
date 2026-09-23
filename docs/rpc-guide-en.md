@@ -142,6 +142,10 @@ Upstream method responses must not contain extension fields. Runtime data such a
 | `aria2.changePosition` | `gid`, `pos`, `how` (`POS_SET`/`POS_CUR`/`POS_END`) | New position |
 | `aria2.changeUri` | `gid`, `fileIndex`, `delUris`, `addUris` | `OK` |
 
+`changeUri` uses a one-based `fileIndex` and applies to the addressed file
+entry even when that file is currently unselected. It returns the number of
+deleted and added URIs as string-valued numbers.
+
 ### Status and files
 
 | Method | Parameters | Result |

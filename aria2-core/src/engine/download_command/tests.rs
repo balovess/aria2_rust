@@ -34,6 +34,27 @@ impl DownloadCommand {
 }
 
 #[test]
+fn candidate_uris_follow_runtime_change_uri_updates() {
+    let old_uri = "http://example.test/old";
+    let new_uri = "http://example.test/new";
+    let options = DownloadOptions::default();
+    let group = std::sync::Arc::new(std::sync::RwLock::new(RequestGroup::new(
+        GroupId::new(1_014),
+        vec![old_uri.to_string()],
+        options.clone(),
+    )));
+    let command = DownloadCommand::new_with_group(group.clone(), old_uri, &options, None, None)
+        .expect("HTTP command should be created");
+
+    group
+        .recover_mut()
+        .change_uris(1, &[old_uri.to_string()], &[new_uri.to_string()], None)
+        .expect("runtime URI update should succeed");
+
+    assert_eq!(command.candidate_uris(), vec![new_uri.to_string()]);
+}
+
+#[test]
 fn command_timeout_comes_from_download_options() {
     let options = DownloadOptions {
         timeout: Some(7),

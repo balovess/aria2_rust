@@ -98,6 +98,7 @@ impl Default for BtSeedingConfig {
 /// lets the same request handling run on an active download connection.
 pub(crate) struct BtUploadState {
     am_choke_state: bool,
+    auto_unchoke: bool,
     peer_interested: bool,
     uploaded_bytes: u64,
     upload_limiter: Option<RateLimiter>,
@@ -141,6 +142,7 @@ impl BtUploadState {
 
         Self {
             am_choke_state: false,
+            auto_unchoke: true,
             peer_interested: false,
             uploaded_bytes: 0,
             upload_limiter,
@@ -155,6 +157,13 @@ impl BtUploadState {
         counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) {
         self.upload_counter = Some(counter);
+    }
+
+    pub(crate) fn set_auto_unchoke(&mut self, enabled: bool) {
+        self.auto_unchoke = enabled;
+        if !enabled {
+            self.am_choke_state = true;
+        }
     }
 
     pub(crate) fn configure_message_validator(&mut self, num_pieces: u32, piece_length: u32) {
@@ -265,7 +274,7 @@ impl BtUploadState {
             }
             BtMessage::Interested => {
                 self.peer_interested = true;
-                if !self.am_choke_state {
+                if self.auto_unchoke && !self.am_choke_state {
                     transport.send_upload_unchoke().await.ok();
                 }
             }
@@ -667,5 +676,37 @@ mod tests {
             Some(BtMessage::Piece { index: 0, begin: 4, data }) if data.as_ref() == &[0x5a; 8]
         ));
         assert_eq!(state.uploaded_bytes(), 8);
+    }
+
+    #[tokio::test]
+    async fn upload_state_policy_keeps_peer_choked_until_rotation_allows_it() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x3c; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        state.set_auto_unchoke(false);
+        let mut transport = TestUploadTransport { sent: Vec::new() };
+
+        state
+            .handle_message(&mut transport, BtMessage::Interested, &provider)
+            .await
+            .unwrap();
+        let uploaded = state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+                        index: 0,
+                        begin: 0,
+                        length: 8,
+                    },
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(uploaded, 0);
+        assert!(state.is_peer_choked());
+        assert!(transport.sent.is_empty());
     }
 }

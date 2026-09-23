@@ -34,6 +34,7 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) last_speed_update: Instant,
     pub(super) last_completed: u64,
     pub(super) last_upload_speed_update: Instant,
+    pub(super) last_upload_choke_round: Instant,
     pub(super) last_uploaded: u64,
     pub(super) upload_counter: Arc<std::sync::atomic::AtomicU64>,
     pub(super) last_progress_save: Instant,

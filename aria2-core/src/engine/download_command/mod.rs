@@ -37,13 +37,6 @@ pub struct DownloadCommand {
     pub(super) progress: Arc<AtomicProgress>,
     pub(super) client: Arc<reqwest::Client>,
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
-    /// URI selected when this command was created.
-    ///
-    /// A request group may contain mirror URIs. Keeping the command's
-    /// selected URI separate from the group's snapshot prevents a later
-    /// runtime URI update from silently changing the request that is already
-    /// being attempted.
-    pub(super) initial_uri: String,
     pub(super) output_path: std::path::PathBuf,
     /// Whether the filename came from an explicit `--out`/metadata name.
     /// Implicit HTTP names may be replaced by response metadata before I/O.
@@ -655,7 +648,6 @@ impl DownloadCommand {
             progress,
             client,
             outbound_network_policy,
-            initial_uri: uri.to_string(),
             output_path: path,
             output_name_explicit: output_name.is_some(),
             output_path_resolved: false,
@@ -789,7 +781,6 @@ impl DownloadCommand {
             progress,
             client,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
-            initial_uri: uri.to_string(),
             output_path: path,
             output_name_explicit: output_name.is_some(),
             output_path_resolved: false,

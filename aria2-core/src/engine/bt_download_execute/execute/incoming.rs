@@ -99,6 +99,11 @@ impl BtDownloadCommand {
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };
-        connection.configure_upload(&config, num_pieces, piece_length);
+        connection.configure_upload_with_auto_unchoke(
+            &config,
+            num_pieces,
+            piece_length,
+            self.choking_algo.is_none(),
+        );
     }
 }

@@ -160,7 +160,7 @@ mod tests {
         )
         .await
         .unwrap();
-        connection.configure_upload(&BtSeedingConfig::default(), 2, 16);
+        connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 2, 16, true);
 
         let mut provider = InMemoryPieceProvider::new(16, 2);
         provider.set_piece_data(0, locally_verified_piece.clone());
@@ -186,6 +186,7 @@ mod tests {
         assert_eq!(result.data, vec![0xB7; 16]);
         assert_eq!(connection.stats().uploaded_bytes, 16);
         assert!(connection.stats().upload_speed > 0.0);
+        assert!(!connection.stats().am_choking);
         assert_eq!(remote.await.unwrap(), locally_verified_piece);
     }
 

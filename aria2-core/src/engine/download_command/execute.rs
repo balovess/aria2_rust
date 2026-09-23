@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use futures::StreamExt;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -784,8 +785,7 @@ impl Command for DownloadCommand {
             self.started = true;
         }
 
-        let uris = self.candidate_uris();
-        let first_uri = uris.first().cloned().ok_or_else(|| {
+        let first_uri = self.candidate_uris().into_iter().next().ok_or_else(|| {
             Aria2Error::Fatal(crate::error::FatalError::Config(
                 "Download URI is empty".into(),
             ))
@@ -805,8 +805,12 @@ impl Command for DownloadCommand {
         self.spawn_progress_aggregator();
 
         let mut last_error = None;
-        let mut candidates = uris.into_iter().peekable();
-        while let Some(uri) = candidates.next() {
+        let mut attempted_uris = HashSet::new();
+        while let Some(uri) = self
+            .candidate_uris()
+            .into_iter()
+            .find(|uri| attempted_uris.insert(uri.clone()))
+        {
             match self.execute_attempt(&uri).await {
                 Ok(()) => {
                     self.drain_progress_aggregator().await;
@@ -828,7 +832,10 @@ impl Command for DownloadCommand {
                     let options = self.group.recover().options_arc();
                     let limit_reached = options.max_resume_failure_tries > 0
                         && failure_count >= options.max_resume_failure_tries;
-                    let no_mirror_left = candidates.peek().is_none();
+                    let no_mirror_left = self
+                        .candidate_uris()
+                        .into_iter()
+                        .all(|candidate| attempted_uris.contains(&candidate));
 
                     if !options.always_resume && (limit_reached || no_mirror_left) {
                         if let Err(reset_error) = self.prepare_fresh_download().await {
@@ -848,13 +855,11 @@ impl Command for DownloadCommand {
                 }
                 Err(error) => {
                     last_error = Some(error);
-                    // A request group may contain mirrors. Exhaust the
-                    // candidates before returning the last error so a
-                    // transient or mirror-local failure does not abort the
-                    // whole download prematurely.
-                    if candidates.peek().is_none() {
-                        break;
-                    }
+                    // Re-read the live URI pool before the next attempt.
+                    // `aria2.changeUri` mutates the same FileEntry pool that
+                    // the original command scheduler observes, so a newly
+                    // added mirror must be eligible without recreating the
+                    // whole command generation.
                 }
             }
         }
@@ -894,19 +899,8 @@ impl Command for DownloadCommand {
 }
 
 impl DownloadCommand {
-    fn candidate_uris(&self) -> Vec<String> {
-        let mut candidates = Vec::new();
-        if !self.initial_uri.is_empty() {
-            candidates.push(self.initial_uri.clone());
-        }
-
-        let group_uris = self.group.recover().uris().to_vec();
-        for uri in group_uris {
-            if !uri.is_empty() && !candidates.iter().any(|candidate| candidate == uri.as_ref()) {
-                candidates.push(uri.to_string());
-            }
-        }
-        candidates
+    pub(crate) fn candidate_uris(&self) -> Vec<String> {
+        self.group.recover().get_remaining_uris()
     }
 
     /// Reset the shared output for aria2's fresh-download fallback.

@@ -14,8 +14,26 @@ use super::{PieceDownloadSession, PieceLoopAction};
 impl PieceDownloadSession<'_> {
     pub(super) async fn run(mut self) -> Result<()> {
         self.announce_available_pieces().await;
+        self.command
+            .apply_upload_choke_round(self.active_connections)
+            .await;
+        self.last_upload_choke_round = Instant::now();
         loop {
             self.refresh_upload_stats();
+            let choke_interval = self
+                .command
+                .choking_algo
+                .as_ref()
+                .map(|algo| algo.config().choke_rotation_interval_secs)
+                .unwrap_or(0);
+            if choke_interval > 0
+                && self.last_upload_choke_round.elapsed().as_secs() >= choke_interval
+            {
+                self.command
+                    .apply_upload_choke_round(self.active_connections)
+                    .await;
+                self.last_upload_choke_round = Instant::now();
+            }
             self.command.drain_incoming_peers(
                 self.active_connections,
                 self.piece_length,

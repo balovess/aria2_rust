@@ -266,6 +266,19 @@ impl ChokingAlgorithm {
         self.peers.get(idx)
     }
 
+    /// Refresh one tracked peer from the live connection snapshot while
+    /// retaining the algorithm's stable identity and rotation state.
+    pub fn sync_peer_by_identity(&mut self, snapshot: &PeerStats) {
+        let identity = PeerIdentity::from(snapshot);
+        if let Some(peer) = self
+            .peers
+            .iter_mut()
+            .find(|peer| PeerIdentity::from(&**peer) == identity)
+        {
+            *peer = snapshot.clone();
+        }
+    }
+
     /// Get all peers as a slice
     pub fn peers(&self) -> &[PeerStats] {
         &self.peers

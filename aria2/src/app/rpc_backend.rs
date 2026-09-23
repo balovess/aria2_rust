@@ -14,7 +14,7 @@ use aria2_core::config::{ConfigManager, project_initial_options};
 #[cfg(feature = "bittorrent")]
 use aria2_core::engine::bt_registry::BtRegistry;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
-use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
+use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::{GroupIdResolution, RequestGroupMan};
 use aria2_rpc::{BackendError, BackendMetadata};
 use tokio::sync::RwLock;
@@ -146,12 +146,6 @@ impl CoreRpcBackend {
         })
     }
 
-    fn group(&self, gid: &str) -> Result<Arc<std::sync::RwLock<RequestGroup>>, BackendError> {
-        self.group_man
-            .group_by_hex(gid)
-            .ok_or_else(|| Self::execution(format!("GID {gid} not found")))
-    }
-
     async fn global_options(&self) -> HashMap<String, serde_json::Value> {
         self.config
             .read()
@@ -183,6 +177,7 @@ impl CoreRpcBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aria2_core::request::request_group::RequestGroup;
 
     #[test]
     fn status_uses_real_non_bt_connection_count_instead_of_split() {
