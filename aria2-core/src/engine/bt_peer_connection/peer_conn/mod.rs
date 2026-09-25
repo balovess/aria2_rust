@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::engine::peer_stats::PeerStats;
-use crate::request::request_group::{BtPeerSnapshot, BtPeerSource};
+use crate::request::request_group::BtPeerSource;
 
 use super::session_resource::PeerSessionResource;
 use super::types::{ConnectionType, SendBuffer};
@@ -110,9 +110,10 @@ pub struct BtPeerConn {
     // -----------------------------------------------------------------------
     /// Connection type (TCP or uTP).
     pub(crate) connection_type: ConnectionType,
-    /// Set of piece indices for which the peer has sent an AllowedFast message.
-    /// Pieces in this set can be requested even when the peer is choked.
-    pub(crate) allowed_fast: HashSet<u32>,
+    /// Pieces the remote peer allowed us to request while it is choking us.
+    pub(crate) peer_allowed_fast: HashSet<u32>,
+    /// Pieces we allowed the remote peer to request while we are choking it.
+    pub(crate) am_allowed_fast: HashSet<u32>,
 
     // -----------------------------------------------------------------------
     // Session resource (allocated when active)
@@ -176,7 +177,7 @@ impl BtPeerConn {
         use aria2_protocol::bittorrent::message::types::BtMessage;
 
         match message {
-            BtMessage::AllowedFast { index } => self.add_allowed_fast(*index),
+            BtMessage::AllowedFast { index } => self.add_peer_allowed_fast(*index),
             BtMessage::Have { piece_index } => {
                 self.update_peer_bitfield(*piece_index as usize, 1);
             }
@@ -190,37 +191,6 @@ impl BtPeerConn {
             BtMessage::Unchoke => self.stats.peer_choking = false,
             _ => {}
         }
-    }
-
-    /// Capture the externally visible state for this connection without
-    /// exposing the connection internals to the torrent coordinator.
-    pub(crate) fn snapshot(&self) -> Option<BtPeerSnapshot> {
-        Some(BtPeerSnapshot {
-            peer_id: self.peer_id.unwrap_or(self.stats.peer_id),
-            addr: self.remote_endpoint()?,
-            is_incoming: self.incoming,
-            source: self.source,
-            bitfield: self
-                .session_resource
-                .as_ref()
-                .map(|resource| resource.bitfield().to_vec()),
-            uploaded_bytes: self.stats.uploaded_bytes,
-            downloaded_bytes: self.stats.downloaded_bytes,
-            upload_speed: self.stats.upload_speed,
-            download_speed: self.stats.download_speed,
-            avg_upload_speed: self.stats.avg_upload_speed,
-            avg_download_speed: self.stats.avg_download_speed,
-            am_choking: self.stats.am_choking,
-            peer_choking: self.stats.peer_choking,
-            seeder: Some(self.seeder),
-            connection_duration_secs: self.stats.connection_duration_secs(),
-            last_data_age_secs: self
-                .stats
-                .last_data_time
-                .map_or(self.stats.age().as_secs(), |time| time.elapsed().as_secs()),
-            is_snubbed: self.stats.is_snubbed,
-            is_banned: self.stats.is_banned,
-        })
     }
 
     pub(crate) fn configure_upload_with_auto_unchoke(
@@ -248,10 +218,6 @@ impl BtPeerConn {
         let result = state.handle_message(self, message, provider).await;
         self.upload_state = Some(state);
         if let Ok(bytes) = result {
-            self.stats.am_choking = self
-                .upload_state
-                .as_ref()
-                .is_some_and(|upload| upload.is_peer_choked());
             match message_for_stats {
                 aria2_protocol::bittorrent::message::types::BtMessage::Interested => {
                     self.stats.peer_interested = true;
@@ -267,15 +233,48 @@ impl BtPeerConn {
                 }
                 _ => {}
             }
-            self.stats.on_data_sent(bytes);
-            if bytes > 0
-                && let Some(progress) = self.upload_progress.as_ref()
-            {
-                progress.add_upload_length(bytes);
-                progress.set_upload_speed(self.stats.upload_speed.max(0.0) as u64);
-            }
+            self.record_uploaded_bytes(bytes);
         }
         result
+    }
+
+    pub(crate) fn has_pending_upload_messages(&self) -> bool {
+        self.upload_state
+            .as_ref()
+            .is_some_and(|state| state.has_pending_messages())
+    }
+
+    pub(crate) async fn flush_upload_messages(
+        &mut self,
+        provider: &dyn crate::engine::bt_upload_session::PieceDataProvider,
+    ) -> crate::error::Result<u64> {
+        let Some(mut state) = self.upload_state.take() else {
+            return Ok(0);
+        };
+        let result = state.flush_pending_messages(self, provider).await;
+        self.upload_state = Some(state);
+        if let Ok(bytes) = result {
+            self.record_uploaded_bytes(bytes);
+        }
+        result
+    }
+
+    fn record_uploaded_bytes(&mut self, bytes: u64) {
+        self.stats.am_choking = self
+            .upload_state
+            .as_ref()
+            .is_some_and(|upload| upload.is_peer_choked());
+        self.stats.outstanding_upload_count = self.upload_state.as_ref().map_or(
+            0,
+            crate::engine::bt_upload_session::BtUploadState::outstanding_upload_count,
+        );
+        self.stats.on_data_sent(bytes);
+        if bytes > 0
+            && let Some(progress) = self.upload_progress.as_ref()
+        {
+            progress.add_upload_length(bytes);
+            progress.set_upload_speed(self.stats.upload_speed.max(0.0) as u64);
+        }
     }
 
     pub(crate) async fn choke_upload_peer(&mut self) -> crate::error::Result<()> {

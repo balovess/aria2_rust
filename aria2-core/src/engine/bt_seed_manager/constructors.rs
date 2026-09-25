@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
@@ -9,9 +8,8 @@ use crate::engine::bt_choke_manager::BtSeederStateChoke;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
-use crate::engine::peer_stats::PeerStats;
 
-use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS, SeedExitCondition};
+use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS, PeerSwarm, SeedExitCondition};
 
 impl BtSeedManager {
     /// Create a new seed manager with basic parameters.
@@ -40,6 +38,7 @@ impl BtSeedManager {
             None,
             None,
             [0u8; 20],
+            None,
         )
     }
 
@@ -69,6 +68,7 @@ impl BtSeedManager {
             None,
             None,
             [0u8; 20],
+            None,
         )
     }
 
@@ -102,6 +102,7 @@ impl BtSeedManager {
             None,
             announcer,
             peer_id,
+            None,
         )
     }
 
@@ -132,11 +133,12 @@ impl BtSeedManager {
             None,
             None,
             [0u8; 20],
+            None,
         )
     }
 
-    /// Construct the production seeding manager with the transport variants
-    /// already accepted by the download loop and its live incoming-peer route.
+    /// Build a test seeding manager with pre-established transport variants.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_transports(
         info_hash: [u8; 20],
@@ -162,7 +164,42 @@ impl BtSeedManager {
             incoming_peers,
             announcer,
             peer_id,
+            None,
         )
+    }
+
+    /// Continue a torrent lifecycle with the actor registry already owned by
+    /// its download session instead of creating a second peer registry.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_swarm(
+        info_hash: [u8; 20],
+        swarm: PeerSwarm,
+        piece_provider: Arc<dyn PieceDataProvider>,
+        config: BtSeedingConfig,
+        exit_condition: SeedExitCondition,
+        total_downloaded: u64,
+        announcer: Option<TrackerAnnouncer>,
+        peer_id: [u8; 20],
+        incoming_peers: Option<
+            tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>,
+        >,
+        upload_counter: Arc<AtomicU64>,
+    ) -> Self {
+        let mut manager = Self::build(
+            info_hash,
+            Vec::new(),
+            piece_provider,
+            config,
+            exit_condition,
+            total_downloaded,
+            CancellationToken::new(),
+            incoming_peers,
+            announcer,
+            peer_id,
+            Some(swarm),
+        );
+        manager.upload_counter = upload_counter;
+        manager
     }
 
     /// Common builder used by all public constructors.
@@ -180,6 +217,7 @@ impl BtSeedManager {
         >,
         announcer: Option<TrackerAnnouncer>,
         peer_id: [u8; 20],
+        swarm: Option<PeerSwarm>,
     ) -> Self {
         for connection in &mut connections {
             connection.configure_upload_with_auto_unchoke(
@@ -191,14 +229,6 @@ impl BtSeedManager {
             connection.stats.am_choking = true;
         }
 
-        // Initialise PeerStats for each session (the seeder-state algorithm
-        // needs peer_interested, upload_speed, etc.). Keep the transport
-        // endpoint as the identity used by the choking and reporting layers.
-        let peer_stats: Vec<PeerStats> = connections
-            .iter()
-            .map(|connection| connection.stats.clone())
-            .collect();
-
         let seeder_choke = BtSeederStateChoke::with_slots(config.max_peers_to_unchoke);
         let upload_counter = Arc::new(AtomicU64::new(0));
         for connection in &mut connections {
@@ -208,11 +238,7 @@ impl BtSeedManager {
         Self {
             info_hash,
             upload_sessions: connections,
-            seed_peer_actors: Vec::new(),
-            seed_peer_actor_indices: HashMap::new(),
-            seed_peer_event_tx: None,
-            seed_peer_event_rx: None,
-            peer_stats,
+            swarm: swarm.unwrap_or_else(|| PeerSwarm::new(64)),
             piece_provider: Some(piece_provider),
             config,
             exit_condition,

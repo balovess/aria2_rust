@@ -2,6 +2,8 @@
 
 use super::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::constants;
+use rand::Rng;
+use rand::seq::SliceRandom;
 
 /// Core algorithm: performs tit-for-tat choke rotation.
 ///
@@ -9,43 +11,49 @@ use crate::constants;
 /// 1. Check and mark snubbed peers (timeout-based)
 /// 2. Put peers with download activity in the last 30 seconds first
 /// 3. Rank by download speed descending
-/// 4. Interested, non-snubbed peers compete for regular slots; the configured
-///    upload-slot limit includes one separately managed optimistic slot
-///    BUT: keep currently unchoked peers unchoked if they're still in top K
-///    (avoid churn - only change what's necessary)
+/// 4. Recently contributing interested peers are ranked first; the remaining
+///    peer tail is shuffled and occupies regular positions even when a peer is
+///    uninterested, matching aria2's leecher selector.
 /// 5. Return only the actions that changed state
 pub(super) fn rotate_choke_by_identity(algo: &mut ChokingAlgorithm) -> Vec<IdentityChokeAction> {
+    let mut rng = rand::thread_rng();
+    rotate_choke_by_identity_with_rng(algo, &mut rng)
+}
+
+pub(super) fn rotate_choke_by_identity_with_rng<R: Rng + ?Sized>(
+    algo: &mut ChokingAlgorithm,
+    rng: &mut R,
+) -> Vec<IdentityChokeAction> {
     check_snubbed_peers_internal(algo);
     if algo.peers.is_empty() {
         return Vec::new();
     }
     let regular_slots = algo.config.max_upload_slots.saturating_sub(1);
-    let mut scored: Vec<(PeerIdentity, bool, f64)> = algo
-        .peers
-        .iter()
-        .filter(|peer| {
-            peer.peer_interested
-                && !peer.is_snubbed
-                && !algo.snubbed_peers.contains(&PeerIdentity::from(*peer))
-        })
-        .map(|peer| {
-            let identity = peer.into();
-            (
-                identity,
-                peer.last_data_time
-                    .is_some_and(|received_at| received_at.elapsed().as_secs() < 30),
-                peer.download_speed,
-            )
-        })
-        .collect();
-    scored.sort_by(|a, b| {
-        b.1.cmp(&a.1)
-            .then_with(|| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
-    });
-    let selected: std::collections::HashSet<_> = scored
+    let mut regular_candidates = Vec::new();
+    let mut stale_candidates = Vec::new();
+    for peer in &algo.peers {
+        let identity = PeerIdentity::from(peer);
+        if peer.is_snubbed || algo.snubbed_peers.contains(&identity) {
+            continue;
+        }
+        let recent_interested = peer.peer_interested
+            && peer
+                .last_data_time
+                .is_some_and(|received_at| received_at.elapsed().as_secs() < 30);
+        let candidate = (identity, peer.peer_interested, peer.download_speed);
+        if recent_interested {
+            regular_candidates.push(candidate);
+        } else {
+            stale_candidates.push(candidate);
+        }
+    }
+    regular_candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    stale_candidates.shuffle(rng);
+    regular_candidates.extend(stale_candidates);
+    let selected: std::collections::HashSet<_> = regular_candidates
         .into_iter()
         .take(regular_slots)
-        .map(|(identity, _, _)| identity)
+        .filter_map(|(identity, interested, _)| interested.then_some(identity))
         .collect();
 
     algo.peers

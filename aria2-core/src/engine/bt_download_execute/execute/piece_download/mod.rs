@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_progress_info_file::{BtProgress, DownloadStats as ProgressDownloadStats};
 
 fn progress_snapshot(
@@ -28,20 +28,36 @@ fn progress_snapshot(
     }
 }
 
-fn count_piece_sources(connections: &[BtPeerConn], piece_index: usize) -> usize {
-    connections
-        .iter()
-        .filter(|connection| connection.seeder || connection.has_piece(piece_index))
-        .count()
-}
-
-fn sync_peer_snapshots(
+fn sync_peer_snapshots_with_swarm(
     group: &crate::request::request_group::RequestGroup,
-    active_connections: &[BtPeerConn],
+    swarm: &PeerSwarm,
 ) {
-    let snapshots: Vec<crate::request::request_group::BtPeerSnapshot> = active_connections
+    let snapshots: Vec<_> = swarm
         .iter()
-        .filter_map(BtPeerConn::snapshot)
+        .filter(|actor| !actor.dead)
+        .map(|actor| crate::request::request_group::BtPeerSnapshot {
+            peer_id: actor.stats.peer_id,
+            addr: actor.endpoint,
+            is_incoming: actor.incoming,
+            source: actor.source,
+            bitfield: actor.has_bitfield.then(|| actor.bitfield.clone()),
+            uploaded_bytes: actor.stats.uploaded_bytes,
+            downloaded_bytes: actor.stats.downloaded_bytes,
+            upload_speed: actor.stats.upload_speed,
+            download_speed: actor.stats.download_speed,
+            avg_upload_speed: actor.stats.avg_upload_speed,
+            avg_download_speed: actor.stats.avg_download_speed,
+            am_choking: actor.stats.am_choking,
+            peer_choking: actor.stats.peer_choking,
+            seeder: Some(actor.seeder),
+            connection_duration_secs: actor.stats.connection_duration_secs(),
+            last_data_age_secs: actor
+                .stats
+                .last_data_time
+                .map_or(actor.stats.age().as_secs(), |time| time.elapsed().as_secs()),
+            is_snubbed: actor.stats.is_snubbed,
+            is_banned: actor.stats.is_banned,
+        })
         .collect();
     group.set_bt_connection_count(snapshots.len());
     group.set_bt_peer_snapshots(snapshots);

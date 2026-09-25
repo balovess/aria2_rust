@@ -1,57 +1,50 @@
 use std::collections::HashMap;
 
-use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_message_handler::{PeerCommand, PeerSwarm};
 use crate::engine::choking_algorithm::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::engine::peer_stats::PeerStats;
 
 use super::BtDownloadCommand;
 
 impl BtDownloadCommand {
-    pub(crate) async fn apply_upload_choke_round(&mut self, active_connections: &mut [BtPeerConn]) {
+    pub(crate) async fn apply_upload_choke_round_swarm(&mut self, swarm: &mut PeerSwarm) {
         let Some(algo) = self.choking_algo.as_mut() else {
             return;
         };
 
-        let connection_indices = active_connections.iter().enumerate().fold(
-            HashMap::with_capacity(active_connections.len()),
-            |mut map, (index, connection)| {
-                map.entry(PeerIdentity::from(&connection.stats))
-                    .or_insert(index);
-                map
-            },
-        );
+        let actor_ids = swarm
+            .iter()
+            .filter(|actor| !actor.dead)
+            .map(|actor| (PeerIdentity::from(&actor.stats), actor.actor_id))
+            .collect::<HashMap<_, _>>();
         algo.sync_peers_by_identity(
-            active_connections
+            swarm
                 .iter()
-                .map(|connection| &connection.stats),
+                .filter(|actor| !actor.dead)
+                .map(|actor| &actor.stats),
         );
-        let actions = algo.rotate_choke_by_identity();
-        let next_optimistic = algo.optimistically_unchoke_by_identity();
-        for action in &actions {
-            let identity = action.identity();
-            let Some(connection) = connection_indices
-                .get(&identity)
-                .and_then(|&index| active_connections.get_mut(index))
-            else {
-                continue;
-            };
-            let result = match action {
-                IdentityChokeAction::Choke(_) => connection.choke_upload_peer().await,
-                IdentityChokeAction::Unchoke(_) => connection.unchoke_upload_peer().await,
-                IdentityChokeAction::NoChange(_) => Ok(()),
-            };
-            if let Err(error) = result {
-                tracing::debug!(%error, peer = %identity.addr, "Failed to apply BT upload choke decision");
-            }
+        let mut actions = algo.rotate_choke_by_identity();
+        if let Some(identity) = algo.optimistically_unchoke_by_identity() {
+            actions.push(IdentityChokeAction::Unchoke(identity));
         }
 
-        if let Some(next) = next_optimistic
-            && let Some(connection) = connection_indices
-                .get(&next)
-                .and_then(|&index| active_connections.get_mut(index))
-            && let Err(error) = connection.unchoke_upload_peer().await
-        {
-            tracing::debug!(%error, peer = %next.addr, "Failed to apply optimistic unchoke");
+        let mut disconnected = Vec::new();
+        for action in actions {
+            let identity = action.identity();
+            let Some(actor_id) = actor_ids.get(&identity).copied() else {
+                continue;
+            };
+            let command = match action {
+                IdentityChokeAction::Choke(_) => PeerCommand::ChokeUpload,
+                IdentityChokeAction::Unchoke(_) => PeerCommand::UnchokeUpload,
+                IdentityChokeAction::NoChange(_) => continue,
+            };
+            if swarm.send_to(actor_id, command).await.is_err() {
+                disconnected.push(actor_id);
+            }
+        }
+        for actor_id in disconnected {
+            swarm.mark_dead(actor_id);
         }
     }
 

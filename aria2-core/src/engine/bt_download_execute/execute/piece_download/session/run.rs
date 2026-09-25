@@ -2,8 +2,12 @@ use std::time::Instant;
 use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_download_execute::execute::incoming::PeerActorUploadContext;
+use crate::engine::bt_download_execute::types::PeerKey;
+use crate::engine::bt_message_handler::{PeerCommand, PeerEvent};
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_selector::BtPieceSelector;
+use crate::engine::choking_algorithm::PeerIdentity;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::{
     ActiveConnectionGuard, BtPeerSource, DownloadResultCode, HaltReason,
@@ -81,38 +85,32 @@ impl PieceDownloadSession<'_> {
                 .recover()
                 .options()
                 .split
-                .unwrap_or(crate::constants::DEFAULT_SPLIT as u16)
+                .unwrap_or(crate::constants::DEFAULT_SPLIT)
                 .clamp(1, MAX_WEB_SEED_PIECES_IN_FLIGHT as u16) as usize;
         self.announce_available_pieces().await;
-        self.command
-            .apply_upload_choke_round(self.active_connections)
-            .await;
-        self.last_upload_choke_round = Instant::now();
+        self.apply_upload_choke_round().await;
         loop {
             self.refresh_upload_stats();
-            let choke_interval = self
-                .command
-                .choking_algo
-                .as_ref()
-                .map(|algo| algo.config().choke_rotation_interval_secs)
-                .unwrap_or(0);
-            if choke_interval > 0
-                && self.last_upload_choke_round.elapsed().as_secs() >= choke_interval
+            if !self.swarm.is_empty()
+                && self
+                    .command
+                    .choking_algo
+                    .as_ref()
+                    .is_some_and(|algo| algo.choke_rotation_due(Instant::now()))
             {
-                self.command
-                    .apply_upload_choke_round(self.active_connections)
-                    .await;
-                self.last_upload_choke_round = Instant::now();
+                self.apply_upload_choke_round().await;
             }
-            self.command.drain_incoming_peers(
-                self.active_connections,
+            self.command.drain_incoming_peers_to_swarm(
+                self.swarm,
                 self.piece_length,
                 self.num_pieces,
                 self.total_size,
+                PeerActorUploadContext {
+                    provider: std::sync::Arc::clone(&self.upload_provider),
+                    upload_counter: std::sync::Arc::clone(&self.upload_counter),
+                },
             );
-            self.command
-                .bt_runtime
-                .set_connections(self.active_connections.len());
+            self.command.bt_runtime.set_connections(self.swarm.len());
 
             let (halt_requested, stop_timeout_elapsed) = {
                 let group = self.command.group.recover();
@@ -221,76 +219,50 @@ impl PieceDownloadSession<'_> {
             }
 
             // G1: Periodic snub detection via extracted helper
-            self.command.check_and_mark_snubbed_peers(
-                &mut self.last_snub_check,
-                &self.peer_last_data_time,
-                self.active_connections,
-            );
+            self.check_and_mark_swarm_peers_snubbed();
             {
                 let group = self.command.group.recover();
-                super::super::sync_peer_snapshots(&group, self.active_connections);
+                super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
             }
 
             // PEX Integration: Periodic PEX message sending (BEP 11)
-            super::super::super::pex::send_periodic_pex(
+            super::super::super::pex::send_periodic_pex_to_swarm(
                 self.command,
-                self.active_connections,
+                self.swarm,
                 self.pex_enabled_peers,
                 self.last_pex_send,
                 self.pex_send_interval_secs,
             )
             .await;
 
-            // PEX Integration: Drain inbound PEX peers from all connections.
-            // Peers are accumulated during block reads and stashed on
-            // BtPeerConn::pending_pex_peers. Here we drain them and add to
-            // our known-peers list.
-            let mut all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
-                Vec::new();
-            for conn in self.active_connections.iter_mut() {
-                let peers = conn.drain_pex_peers();
-                if !peers.is_empty() {
-                    for peer in &peers {
-                        self.command.add_pex_peer(peer.clone());
-                    }
-                    all_new_pex_peers.extend(peers);
-                }
-            }
+            // PEX peers arrive as actor events during block reads or idle waits.
+            // Connect only to endpoints not already owned by this Swarm.
+            let all_new_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
+                std::mem::take(&mut self.pending_pex_peers);
             if !all_new_pex_peers.is_empty() {
+                for peer in &all_new_pex_peers {
+                    self.command.add_pex_peer(peer.clone());
+                }
                 info!(
                     "[PEX] Drained {} inbound peers from connections, attempting to connect",
                     all_new_pex_peers.len()
                 );
                 // Attempt to connect to PEX-discovered peers
-                let new_connections = self
-                    .command
-                    .connect_to_discovered_peers(
-                        &all_new_pex_peers,
-                        BtPeerSource::Pex,
-                        &self.meta.network_info_hash(),
-                        self.num_pieces,
-                        self.active_connections,
-                        self.piece_length,
-                        self.total_size,
-                    )
+                let connected = self
+                    .connect_to_discovered_swarm_peers(&all_new_pex_peers, BtPeerSource::Pex)
                     .await;
-                let connected = self.append_new_connections(new_connections);
                 if connected > 0 {
                     self.announce_available_pieces().await;
                     info!("[PEX] Successfully connected to {} new peers", connected);
                     let group = self.command.group.recover();
-                    super::super::sync_peer_snapshots(&group, self.active_connections);
+                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
                 }
             }
 
             // Keep tracker numwant aligned with the live peer command count,
             // then re-announce when the tracker interval permits it.
-            self.command
-                .update_tracker_peer_state(self.active_connections.len());
-            if self
-                .command
-                .should_discover_more_peers(self.active_connections.len())
-            {
+            self.command.update_tracker_peer_state(self.swarm.len());
+            if self.command.should_discover_more_peers(self.swarm.len()) {
                 let new_peers = self
                     .command
                     .periodic_tracker_announce(
@@ -306,24 +278,14 @@ impl PieceDownloadSession<'_> {
                         new_peers.len()
                     );
                     // Connect to newly discovered peers
-                    let new_connections = self
-                        .command
-                        .connect_to_discovered_peers(
-                            &new_peers,
-                            BtPeerSource::Tracker,
-                            &self.meta.network_info_hash(),
-                            self.num_pieces,
-                            self.active_connections,
-                            self.piece_length,
-                            self.total_size,
-                        )
+                    let connected = self
+                        .connect_to_discovered_swarm_peers(&new_peers, BtPeerSource::Tracker)
                         .await;
-                    let connected = self.append_new_connections(new_connections);
                     if connected > 0 {
                         self.announce_available_pieces().await;
                         info!("[BT] Connected to {} new peers", connected);
                         let group = self.command.group.recover();
-                        super::super::sync_peer_snapshots(&group, self.active_connections);
+                        super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
                     }
                 }
             }
@@ -340,7 +302,7 @@ impl PieceDownloadSession<'_> {
                 &mut self.command.dht_periodic_lookup,
                 self.command.dht_engine.as_ref(),
                 &self.meta.network_info_hash(),
-                self.active_connections.len(),
+                self.swarm.len(),
                 &mut dht_peers,
             )
             .await;
@@ -350,24 +312,14 @@ impl PieceDownloadSession<'_> {
                     discovered = dht_peers.len(),
                     "[BT] Periodic DHT lookup found new peers"
                 );
-                let new_connections = self
-                    .command
-                    .connect_to_discovered_peers(
-                        &dht_peers,
-                        BtPeerSource::Dht,
-                        &self.meta.network_info_hash(),
-                        self.num_pieces,
-                        self.active_connections,
-                        self.piece_length,
-                        self.total_size,
-                    )
+                let connected = self
+                    .connect_to_discovered_swarm_peers(&dht_peers, BtPeerSource::Dht)
                     .await;
-                let connected = self.append_new_connections(new_connections);
                 if connected > 0 {
                     self.announce_available_pieces().await;
                     info!("[BT] Connected to {} DHT-discovered peers", connected);
                     let group = self.command.group.recover();
-                    super::super::sync_peer_snapshots(&group, self.active_connections);
+                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
                 }
             }
             if self
@@ -384,7 +336,7 @@ impl PieceDownloadSession<'_> {
             // DHT, PEX, or incoming-peer discovery. The wait is driven by a
             // socket/message event, a lifecycle notification, a completed DHT
             // lookup, or the next protocol/stop-timeout deadline.
-            if self.active_connections.is_empty()
+            if self.swarm.is_empty()
                 && web_seed_tasks.is_empty()
                 && (self
                     .web_seed_manager
@@ -393,24 +345,20 @@ impl PieceDownloadSession<'_> {
                     || web_seed_scan_cursor >= self.num_pieces)
             {
                 debug!("[BT] No peers available, waiting for peer discovery...");
-                let peer_deadline = self.command.next_peer_event_deadline(
-                    self.active_connections,
-                    self.stop_timeout.deadline(),
-                );
-                let deadline = web_seed_retries
+                let peer_deadline = self
+                    .command
+                    .next_peer_event_deadline(self.swarm.len(), self.stop_timeout.deadline());
+                let protocol_deadline = web_seed_retries
                     .next_deadline()
                     .map_or(peer_deadline, |retry_deadline| {
                         peer_deadline.min(retry_deadline)
                     });
+                let deadline = protocol_deadline.min(self.next_snub_check_deadline());
                 let (uri_generation, uri_notifier) = {
                     let group = self.command.group.recover();
                     (group.uri_generation_handle(), group.uri_notifier())
                 };
-                let peer_event = self.command.wait_for_peer_event(
-                    self.active_connections,
-                    deadline,
-                    Some(std::sync::Arc::clone(&self.upload_provider)),
-                );
+                let peer_event = self.command.wait_for_swarm_peer_event(self.swarm, deadline);
                 let event = tokio::select! {
                     event = peer_event => Some(event),
                     _ = wait_for_uri_generation(
@@ -422,29 +370,35 @@ impl PieceDownloadSession<'_> {
                 let Some(event) = event else {
                     continue;
                 };
-                let incoming = BtDownloadCommand::apply_peer_wait_event(
-                    event,
-                    self.active_connections,
-                    &mut self.peer_tracker,
-                    self.pex_enabled_peers,
-                    &mut self.peer_last_data_time,
-                    &mut self.command.allowed_fast_sent_peers,
-                    &mut self.command.suggest_sent_counts,
-                    &mut self.endgame_state,
-                    self.command.choking_algo.as_mut(),
-                    &self.command.peer_storage,
-                );
+                let actor_interest_changed = match &event {
+                    super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
+                        self.apply_swarm_peer_event(actor_event)
+                    }
+                    _ => false,
+                };
+                let interest_changed = actor_interest_changed;
+                let incoming = match event {
+                    super::super::peer_events::PeerWaitEvent::Incoming(incoming) => Some(incoming),
+                    _ => None,
+                };
                 if let Some(incoming) = incoming {
-                    self.command.admit_incoming_peer(
-                        self.active_connections,
+                    self.command.admit_incoming_peer_to_swarm(
+                        self.swarm,
                         incoming,
                         self.piece_length,
                         self.num_pieces,
                         self.total_size,
+                        &PeerActorUploadContext {
+                            provider: std::sync::Arc::clone(&self.upload_provider),
+                            upload_counter: std::sync::Arc::clone(&self.upload_counter),
+                        },
                     );
                     self.announce_available_pieces().await;
                 }
-                BtDownloadCommand::send_due_keepalives(self.active_connections).await;
+                if interest_changed {
+                    self.apply_upload_choke_round().await;
+                }
+                self.remove_dead_swarm_peers().await;
                 continue;
             }
 
@@ -481,46 +435,62 @@ impl PieceDownloadSession<'_> {
                         continue;
                     }
                     tracing::debug!("[BT] No piece available, waiting...");
-                    let peer_deadline = self.command.next_peer_event_deadline(
-                        self.active_connections,
-                        self.stop_timeout.deadline(),
-                    );
-                    let deadline = web_seed_retries
+                    let peer_deadline = self
+                        .command
+                        .next_peer_event_deadline(self.swarm.len(), self.stop_timeout.deadline());
+                    let protocol_deadline = web_seed_retries
                         .next_deadline()
                         .map_or(peer_deadline, |retry_deadline| {
                             peer_deadline.min(retry_deadline)
                         });
+                    let choke_deadline = (!self.swarm.is_empty())
+                        .then(|| {
+                            self.command
+                                .choking_algo
+                                .as_ref()
+                                .and_then(|algo| algo.next_choke_rotation_deadline())
+                        })
+                        .flatten();
+                    let deadline = choke_deadline
+                        .map_or(protocol_deadline, |choke_deadline| {
+                            protocol_deadline.min(choke_deadline)
+                        })
+                        .min(self.next_snub_check_deadline());
                     let event = self
                         .command
-                        .wait_for_peer_event(
-                            self.active_connections,
-                            deadline,
-                            Some(std::sync::Arc::clone(&self.upload_provider)),
-                        )
+                        .wait_for_swarm_peer_event(self.swarm, deadline)
                         .await;
-                    let incoming = BtDownloadCommand::apply_peer_wait_event(
-                        event,
-                        self.active_connections,
-                        &mut self.peer_tracker,
-                        self.pex_enabled_peers,
-                        &mut self.peer_last_data_time,
-                        &mut self.command.allowed_fast_sent_peers,
-                        &mut self.command.suggest_sent_counts,
-                        &mut self.endgame_state,
-                        self.command.choking_algo.as_mut(),
-                        &self.command.peer_storage,
-                    );
+                    let actor_interest_changed = match &event {
+                        super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
+                            self.apply_swarm_peer_event(actor_event)
+                        }
+                        _ => false,
+                    };
+                    let interest_changed = actor_interest_changed;
+                    let incoming = match event {
+                        super::super::peer_events::PeerWaitEvent::Incoming(incoming) => {
+                            Some(incoming)
+                        }
+                        _ => None,
+                    };
                     if let Some(incoming) = incoming {
-                        self.command.admit_incoming_peer(
-                            self.active_connections,
+                        self.command.admit_incoming_peer_to_swarm(
+                            self.swarm,
                             incoming,
                             self.piece_length,
                             self.num_pieces,
                             self.total_size,
+                            &PeerActorUploadContext {
+                                provider: std::sync::Arc::clone(&self.upload_provider),
+                                upload_counter: std::sync::Arc::clone(&self.upload_counter),
+                            },
                         );
                         self.announce_available_pieces().await;
                     }
-                    BtDownloadCommand::send_due_keepalives(self.active_connections).await;
+                    if interest_changed {
+                        self.apply_upload_choke_round().await;
+                    }
+                    self.remove_dead_swarm_peers().await;
                     continue;
                 }
             };
@@ -556,6 +526,125 @@ impl PieceDownloadSession<'_> {
         );
 
         Ok(())
+    }
+
+    pub(super) fn apply_swarm_peer_event(&mut self, event: &PeerEvent) -> bool {
+        match event {
+            PeerEvent::InterestChanged { snapshot, .. }
+            | PeerEvent::ChokeStateChanged { snapshot, .. }
+            | PeerEvent::UploadBytes { snapshot, .. }
+            | PeerEvent::UploadQueueChanged { snapshot, .. } => {
+                self.command.track_peer_for_upload_choking(snapshot);
+                matches!(event, PeerEvent::InterestChanged { .. })
+            }
+            PeerEvent::PeerChokingChanged { actor_id, .. } => {
+                if let Some(actor) = self.swarm.actor(*actor_id) {
+                    self.command.track_peer_for_upload_choking(&actor.stats);
+                }
+                false
+            }
+            PeerEvent::PeerAvailabilityChanged {
+                actor_id,
+                piece_index,
+                has_piece,
+            } => {
+                if let Some(actor) = self.swarm.actor(*actor_id) {
+                    let peer = actor.endpoint.to_string();
+                    if self
+                        .peer_tracker
+                        .update_peer_piece(&peer, *piece_index, *has_piece)
+                    {
+                        self.peer_last_data_time
+                            .insert(PeerKey::new(actor.endpoint), Instant::now());
+                    }
+                }
+                false
+            }
+            PeerEvent::PeerAvailabilitySnapshot {
+                actor_id,
+                bitfield,
+                seeder,
+            } => {
+                if let Some(actor) = self.swarm.actor(*actor_id) {
+                    let peer = actor.endpoint.to_string();
+                    let bitfield = if *seeder {
+                        vec![0xff; (self.num_pieces as usize).div_ceil(8)]
+                    } else {
+                        bitfield.clone()
+                    };
+                    self.peer_tracker.update_peer_bitfield(&peer, &bitfield);
+                    self.peer_last_data_time
+                        .insert(PeerKey::new(actor.endpoint), Instant::now());
+                }
+                false
+            }
+            PeerEvent::PexPeers { peers } => {
+                self.pending_pex_peers.extend(peers.iter().cloned());
+                false
+            }
+            PeerEvent::Message {
+                actor_id,
+                message: aria2_protocol::bittorrent::message::types::BtMessage::Piece { .. },
+                stats: Some(snapshot),
+                ..
+            } => {
+                self.command.track_peer_for_upload_choking(snapshot);
+                if let Some(actor) = self.swarm.actor(*actor_id) {
+                    self.peer_last_data_time
+                        .insert(PeerKey::new(actor.endpoint), Instant::now());
+                }
+                false
+            }
+            PeerEvent::Disconnected { .. }
+            | PeerEvent::RequestFailed { .. }
+            | PeerEvent::AvailabilityChanged { .. }
+            | PeerEvent::Message { .. } => false,
+        }
+    }
+
+    pub(super) async fn remove_dead_swarm_peers(&mut self) {
+        let dead = self
+            .swarm
+            .iter()
+            .filter(|actor| actor.dead)
+            .map(|actor| {
+                (
+                    PeerIdentity::from(&actor.stats),
+                    actor.endpoint,
+                    PeerKey::new(actor.endpoint),
+                )
+            })
+            .collect::<Vec<_>>();
+        if dead.is_empty() {
+            return;
+        }
+
+        let identities = dead
+            .iter()
+            .map(|(identity, _, _)| *identity)
+            .collect::<Vec<_>>();
+        if let Some(choking) = self.command.choking_algo.as_mut() {
+            choking.remove_peers_by_identity(&identities);
+        }
+        let peer_keys = dead.iter().map(|(_, _, key)| *key).collect::<Vec<_>>();
+        self.endgame_state.remove_peers(&peer_keys);
+        for (_, endpoint, peer_key) in &dead {
+            self.peer_tracker.remove_peer(&endpoint.to_string());
+            self.peer_last_data_time.remove(peer_key);
+            self.pex_enabled_peers.remove(peer_key);
+            self.command.allowed_fast_sent_peers.remove(peer_key);
+            self.command.suggest_sent_counts.remove(peer_key);
+        }
+
+        let removed = self.swarm.remove_dead().await;
+        let mut peer_storage = self
+            .command
+            .peer_storage
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, endpoint) in removed {
+            peer_storage.return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
+        }
     }
 
     fn schedule_web_seed_pieces(
@@ -689,49 +778,190 @@ mod tests {
 }
 
 impl PieceDownloadSession<'_> {
+    async fn connect_to_discovered_swarm_peers(
+        &mut self,
+        peers: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
+        source: BtPeerSource,
+    ) -> usize {
+        let max_peers = self.command.group.recover().options().bt_max_peers;
+        let attempt_limit = self
+            .command
+            .peer_coordinator
+            .available_slots(self.swarm.len());
+        let connected_endpoints = self
+            .swarm
+            .iter()
+            .filter(|actor| !actor.dead)
+            .map(|actor| actor.endpoint)
+            .collect::<std::collections::HashSet<_>>();
+        let candidates = peers
+            .iter()
+            .filter(|peer| {
+                peer.ip.parse::<std::net::IpAddr>().ok().is_none_or(|ip| {
+                    !connected_endpoints.contains(&std::net::SocketAddr::new(ip, peer.port))
+                })
+            })
+            .take(attempt_limit)
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return 0;
+        }
+        let info_hash = self.meta.network_info_hash();
+        let mut connected = 0;
+        for peer in candidates {
+            if self.command.group.recover().is_halt_requested() {
+                break;
+            }
+            let new_connection = self
+                .command
+                .connect_to_discovered_peers(
+                    std::slice::from_ref(&peer),
+                    source,
+                    &info_hash,
+                    self.num_pieces,
+                    &[],
+                    self.piece_length,
+                    self.total_size,
+                )
+                .await;
+            connected += self.append_new_connections(new_connection);
+            if max_peers > 0 && self.swarm.len() >= max_peers {
+                break;
+            }
+        }
+        connected
+    }
+
+    pub(super) async fn apply_upload_choke_round(&mut self) {
+        self.command
+            .apply_upload_choke_round_swarm(self.swarm)
+            .await;
+    }
+
     fn append_new_connections(&mut self, new_connections: Vec<BtPeerConn>) -> usize {
         let mut new_connections = new_connections;
         let max_peers = self.command.group.recover().options().bt_max_peers;
         let caretaker_id = self.command.group.recover().gid().value();
         let is_private = self.command.is_private;
-        for connection in &mut new_connections {
-            self.command.configure_upload_connection(
-                connection,
-                self.piece_length,
-                self.num_pieces,
-            );
+        {
+            new_connections.retain(|connection| {
+                let Some(endpoint) = connection.remote_endpoint() else {
+                    return false;
+                };
+                !self.swarm.has_endpoint(endpoint)
+                    && !connection
+                        .remote_peer_id()
+                        .is_some_and(|peer_id| self.swarm.has_peer_id(peer_id))
+                    && connection.remote_peer_id() != Some(self.command.local_peer_id)
+            });
+            let remaining_slots =
+                (max_peers != 0).then(|| max_peers.saturating_sub(self.swarm.len()));
+            if remaining_slots == Some(0) {
+                return 0;
+            }
+            for connection in &mut new_connections {
+                self.command.configure_upload_connection(
+                    connection,
+                    self.piece_length,
+                    self.num_pieces,
+                );
+            }
+            let mut accepted = Vec::new();
+            {
+                let mut context = NewPeerConnectionsContext {
+                    peer_last_data_time: &mut self.peer_last_data_time,
+                    pex_enabled_peers: self.pex_enabled_peers,
+                    allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
+                    suggest_sent_counts: &mut self.command.suggest_sent_counts,
+                    peer_tracker: &mut self.peer_tracker,
+                    choking_algo: &mut self.command.choking_algo,
+                };
+                BtDownloadCommand::append_new_connections(
+                    &mut accepted,
+                    new_connections,
+                    remaining_slots.unwrap_or(usize::MAX),
+                    is_private,
+                    &mut context,
+                    &self.command.peer_storage,
+                    caretaker_id,
+                );
+            }
+
+            let mut connected = 0;
+            let dht_engine = self.command.dht_engine.clone();
+            let provider = std::sync::Arc::clone(&self.upload_provider);
+            for mut connection in accepted {
+                let Some(endpoint) = connection.remote_endpoint() else {
+                    continue;
+                };
+                connection.set_upload_counter(std::sync::Arc::clone(&self.upload_counter));
+                connection.set_upload_progress(std::sync::Arc::clone(&self.command.progress));
+                if self
+                    .swarm
+                    .spawn_peer(
+                        connection,
+                        dht_engine.clone(),
+                        std::sync::Arc::clone(&provider),
+                    )
+                    .is_err()
+                {
+                    self.command.release_peer_endpoint(endpoint);
+                } else {
+                    connected += 1;
+                }
+            }
+            self.command.bt_runtime.set_connections(self.swarm.len());
+            self.command
+                .group
+                .recover()
+                .set_bt_connection_count(self.swarm.len());
+            connected
         }
-        let mut context = NewPeerConnectionsContext {
-            peer_last_data_time: &mut self.peer_last_data_time,
-            pex_enabled_peers: self.pex_enabled_peers,
-            allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
-            suggest_sent_counts: &mut self.command.suggest_sent_counts,
-            peer_tracker: &mut self.peer_tracker,
-            choking_algo: &mut self.command.choking_algo,
-        };
-        BtDownloadCommand::append_new_connections(
-            self.active_connections,
-            new_connections,
-            max_peers,
-            is_private,
-            &mut context,
-            &self.command.peer_storage,
-            caretaker_id,
-        )
     }
 
     async fn announce_available_pieces(&mut self) {
-        let bitfield = self
-            .completed_bitfield
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        for connection in self.active_connections.iter_mut() {
-            connection.set_upload_counter(std::sync::Arc::clone(&self.upload_counter));
-            connection.set_upload_progress(std::sync::Arc::clone(&self.command.progress));
-            if let Err(error) = connection.send_bitfield(bitfield.clone()).await {
-                tracing::debug!(%error, "Failed to announce BT upload availability");
+        let actor_ids = self
+            .swarm
+            .iter()
+            .filter(|actor| !actor.dead)
+            .map(|actor| actor.actor_id)
+            .collect::<Vec<_>>();
+        for actor_id in actor_ids {
+            if self
+                .swarm
+                .send_to(actor_id, PeerCommand::AnnounceAvailability)
+                .await
+                .is_err()
+            {
+                self.swarm.mark_dead(actor_id);
             }
         }
+    }
+
+    fn check_and_mark_swarm_peers_snubbed(&mut self) {
+        const CHECK_INTERVAL: Duration = Duration::from_secs(10);
+        if self.last_snub_check.elapsed() < CHECK_INTERVAL {
+            return;
+        }
+        self.last_snub_check = Instant::now();
+        let timeout = self
+            .command
+            .group
+            .recover()
+            .options()
+            .bt_snubbed_timeout
+            .unwrap_or(60);
+        for actor in self.swarm.iter_mut().filter(|actor| !actor.dead) {
+            if actor.stats.check_snubbed(timeout) {
+                debug!(peer = %actor.endpoint, timeout, "Marked peer actor as snubbed");
+            }
+        }
+    }
+
+    fn next_snub_check_deadline(&self) -> Instant {
+        self.last_snub_check
+            .checked_add(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now)
     }
 }

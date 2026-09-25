@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_piece::{PeerBitfieldTracker, PieceManager, PiecePicker};
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::engine::bt_web_seed::WebSeedManager;
@@ -15,19 +15,21 @@ use crate::engine::bt_download_execute::types::{EndgameState, PeerKey};
 use super::BtStopTimeoutState;
 use crate::engine::bt_download_execute::execute::peer_session::TorrentSession;
 
+mod availability;
 mod initialization;
 mod piece;
 mod run;
 
 pub(super) struct PieceDownloadSession<'a> {
     pub(super) command: &'a mut BtDownloadCommand,
-    pub(super) active_connections: &'a mut Vec<BtPeerConn>,
+    pub(super) swarm: &'a mut PeerSwarm,
     pub(super) meta: &'a aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
     pub(super) piece_length: u32,
     pub(super) total_size: u64,
     pub(super) num_pieces: u32,
     pub(super) web_seed_manager: Option<Arc<WebSeedManager>>,
     pub(super) pex_enabled_peers: &'a mut HashSet<PeerKey>,
+    pub(super) pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     pub(super) last_pex_send: &'a mut Instant,
     pub(super) pex_send_interval_secs: u64,
     pub(super) writer: Box<dyn SeekableDiskWriter>,
@@ -35,7 +37,6 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) last_speed_update: Instant,
     pub(super) last_completed: u64,
     pub(super) last_upload_speed_update: Instant,
-    pub(super) last_upload_choke_round: Instant,
     pub(super) last_uploaded: u64,
     pub(super) upload_counter: Arc<std::sync::atomic::AtomicU64>,
     pub(super) last_progress_save: Instant,
@@ -78,7 +79,8 @@ impl BtDownloadCommand {
         }
         let session = PieceDownloadSession::new(
             self,
-            &mut torrent_session.active_connections,
+            &mut torrent_session.pending_connections,
+            &mut torrent_session.swarm,
             meta,
             piece_length,
             total_size,
@@ -88,7 +90,12 @@ impl BtDownloadCommand {
             &mut torrent_session.last_pex_send,
             pex_send_interval_secs,
             verified_piece_indices,
-        )?;
-        session.run().await
+        )
+        .await?;
+        let result = session.run().await;
+        if result.is_err() {
+            torrent_session.swarm.shutdown_all().await;
+        }
+        result
     }
 }

@@ -275,15 +275,26 @@ async fn test_bt_seeder_does_not_send_short_piece_for_oversized_request() {
         request.extend_from_slice(&(16 * 1024u32).to_be_bytes());
         stream.write_all(&request).await.unwrap();
 
-        assert!(
-            tokio::time::timeout(
-                std::time::Duration::from_millis(250),
-                read_bt_frame(&mut stream)
-            )
-            .await
-            .is_err(),
-            "seeder must not send a short Piece response"
-        );
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            read_bt_frame(&mut stream),
+        )
+        .await
+        {
+            Err(_) => {}
+            Ok(frame) => {
+                // Handshake::new advertises BEP 6, so the correct response is
+                // Reject (id 16), never a truncated Piece payload.
+                assert_eq!(frame.first(), Some(&16), "unexpected response: {frame:?}");
+                assert_eq!(frame.len(), 13);
+                assert_eq!(u32::from_be_bytes(frame[1..5].try_into().unwrap()), 0);
+                assert_eq!(u32::from_be_bytes(frame[5..9].try_into().unwrap()), 0);
+                assert_eq!(
+                    u32::from_be_bytes(frame[9..13].try_into().unwrap()),
+                    16 * 1024
+                );
+            }
+        }
     });
 
     let (server_stream, _) = listener.accept().await.unwrap();

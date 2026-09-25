@@ -1,5 +1,6 @@
 use crate::error::{Aria2Error, Result};
-use crate::filesystem::disk_adaptor::DiskAdaptor;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 use super::strategies;
 
@@ -82,8 +83,8 @@ pub(crate) fn try_enable_volume_privilege() -> bool {
 /// warning is emitted. Requires `SE_MANAGE_VOLUME_PRIVILEGE`; if the privilege
 /// is not held (or the call fails for any other reason), it falls back to the
 /// sparse file produced by `set_len` (SetEndOfFile).
-pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
-    adaptor: &mut D,
+pub(crate) async fn fallocate_windows(
+    writer: &mut PositionedDiskWriter,
     length: u64,
     secure: bool,
 ) -> Result<()> {
@@ -95,9 +96,9 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
     // The zero-fill (which may await) happens AFTER the handle goes out of
     // scope, using a boolean flag to carry the result across the scope
     // boundary.
-    let existing_length = adaptor.size().await?.min(length);
-    adaptor.truncate(length).await?;
-    let valid_data_succeeded: bool = if let Some(handle) = adaptor.windows_raw_handle() {
+    let existing_length = writer.len().await?.min(length);
+    writer.truncate(length).await?;
+    let valid_data_succeeded: bool = if let Some(handle) = writer.raw_handle() {
         // Validate length fits in i64 for SetFileValidData
         if length > i64::MAX as u64 {
             return Err(Aria2Error::Io(
@@ -189,7 +190,7 @@ pub(crate) async fn fallocate_windows<D: DiskAdaptor>(
     // safe (no non-Send raw handle is live across the suspension point).
     if valid_data_succeeded {
         if secure {
-            strategies::async_zero_fill_from(adaptor, existing_length, length).await
+            strategies::async_zero_fill_from(writer, existing_length, length).await
         } else {
             super::SECURE_FALLOC_WARN_ONCE.call_once(|| {
                 tracing::warn!(

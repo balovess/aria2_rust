@@ -162,7 +162,7 @@ name = "io_uring_positioned_write_bench"
 harness = false
 
 # ── Phase F performance benchmarks ──────────────────────────────────────
-# F1: PositionedDiskWriter vs old Arc<Mutex<DirectDiskAdaptor>> for concurrent writes.
+# F1: independent PositionedDiskWriter instances vs mutex-serialized writes.
 [[bench]]
 name = "positioned_write_bench"
 harness = false

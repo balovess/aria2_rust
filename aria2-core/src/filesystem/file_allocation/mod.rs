@@ -10,7 +10,7 @@ mod tests;
 pub use crate::filesystem::disk_space::{check_disk_space, check_disk_space_async};
 pub use strategies::get_available_space;
 
-use super::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
+use super::positioned_disk_writer::PositionedDiskWriter;
 use crate::error::{Aria2Error, FatalError, Result};
 use std::path::Path;
 
@@ -60,16 +60,14 @@ impl AllocationStrategy {
 /// - `mmap`: use native allocation before the memory-mapped writer opens
 ///
 /// # Arguments
-/// * `adaptor` - Disk adaptor for file operations
-/// * `path` - Path to the file (used for error messages)
+/// * `writer` - Open positioned writer for the file
 /// * `length` - Desired file length in bytes
 /// * `strategy` - Allocation strategy to use
 /// * `secure` - When `true`, zero-fill allocated blocks on platforms that
 ///   don't zero-fill (macOS, Windows). No-op on Linux where `fallocate(2)`
 ///   always returns zeroed blocks.
-pub async fn allocate_file<D: DiskAdaptor>(
-    adaptor: &mut D,
-    _path: &Path,
+pub async fn allocate_file(
+    writer: &mut PositionedDiskWriter,
     length: u64,
     strategy: AllocationStrategy,
     secure: bool,
@@ -77,12 +75,12 @@ pub async fn allocate_file<D: DiskAdaptor>(
     match strategy {
         AllocationStrategy::None => Ok(()),
         AllocationStrategy::Prealloc | AllocationStrategy::Falloc => {
-            falloc::fallocate(adaptor, length, secure).await
+            falloc::fallocate(writer, length, secure).await
         }
-        AllocationStrategy::Trunc => strategies::truncate(adaptor, length).await,
+        AllocationStrategy::Trunc => strategies::truncate(writer, length).await,
         // Mmap uses fallocate to ensure blocks are allocated before mapping;
         // the actual mmap is performed by MmapDiskWriter at open time.
-        AllocationStrategy::Mmap => falloc::fallocate(adaptor, length, secure).await,
+        AllocationStrategy::Mmap => falloc::fallocate(writer, length, secure).await,
     }
 }
 
@@ -140,9 +138,9 @@ where
         cb(0, length);
     }
 
-    let mut adaptor = DirectDiskAdaptor::new();
-    adaptor.open(path).await?;
-    allocate_file(&mut adaptor, path, length, alloc_strategy, secure).await?;
+    let mut adaptor = PositionedDiskWriter::new(path, None);
+    crate::filesystem::disk_writer::SeekableDiskWriter::open(&mut adaptor).await?;
+    allocate_file(&mut adaptor, length, alloc_strategy, secure).await?;
 
     if let Some(cb) = on_progress
         && length >= PROGRESS_THRESHOLD
@@ -150,5 +148,5 @@ where
         cb(length, length);
     }
 
-    adaptor.close().await
+    adaptor.close_without_sync("file allocation close").await
 }

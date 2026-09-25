@@ -1,5 +1,6 @@
 use super::*;
-use crate::filesystem::disk_adaptor::DirectDiskAdaptor;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 #[test]
 fn test_allocation_strategy_from_str() {
@@ -369,13 +370,13 @@ async fn test_async_zero_fill() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test_zero_fill.bin");
 
-    let mut adaptor = DirectDiskAdaptor::new();
-    adaptor.open(&path).await.unwrap();
-    adaptor.truncate(5 * 1024 * 1024).await.unwrap(); // 5 MiB
-    strategies::async_zero_fill(&mut adaptor, 5 * 1024 * 1024)
+    let mut writer = PositionedDiskWriter::new(&path, None);
+    writer.open().await.unwrap();
+    writer.truncate(5 * 1024 * 1024).await.unwrap(); // 5 MiB
+    strategies::async_zero_fill(&mut writer, 5 * 1024 * 1024)
         .await
         .unwrap();
-    adaptor.close().await.unwrap();
+    writer.close_without_sync("test close").await.unwrap();
 
     // Verify size
     let metadata = tokio::fs::metadata(&path).await.unwrap();
@@ -395,13 +396,13 @@ async fn test_async_zero_fill_from_preserves_existing_prefix() {
     let prefix = vec![0x5Au8; 4096];
     tokio::fs::write(&path, &prefix).await.unwrap();
 
-    let mut adaptor = DirectDiskAdaptor::new();
-    adaptor.open(&path).await.unwrap();
-    adaptor.truncate(8192).await.unwrap();
-    strategies::async_zero_fill_from(&mut adaptor, 4096, 8192)
+    let mut writer = PositionedDiskWriter::new(&path, None);
+    writer.open().await.unwrap();
+    writer.truncate(8192).await.unwrap();
+    strategies::async_zero_fill_from(&mut writer, 4096, 8192)
         .await
         .unwrap();
-    adaptor.close().await.unwrap();
+    writer.close_without_sync("test close").await.unwrap();
 
     let content = tokio::fs::read(&path).await.unwrap();
     assert_eq!(&content[..prefix.len()], prefix.as_slice());

@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
@@ -41,6 +41,25 @@ use aria2_protocol::bittorrent::peer::connection::PeerAddr;
 // ---------------------------------------------------------------------------
 
 impl BtDownloadCommand {
+    /// Build one actor-owned peer's BEP 11 payload. The download session owns
+    /// the periodic deadline; unlike the legacy connection helper, this does
+    /// not mutate the command-wide PEX rate-limit timestamp per peer.
+    pub(super) fn build_pex_message_for_actor(
+        &self,
+        remote_peer_addr: &PeerAddr,
+        remote_ut_pex_id: u8,
+    ) -> Option<Vec<u8>> {
+        if !self.peer_exchange_enabled() || self.pex_known_peers.is_empty() {
+            return None;
+        }
+        let bencode = PexHandler::build_pex_added(
+            &self.pex_known_peers,
+            remote_peer_addr,
+            PexHandler::DEFAULT_MAX_PEERS,
+        );
+        Some(serialize_extended(remote_ut_pex_id, bencode.encode()))
+    }
+
     /// Build a complete wire-format PEX extended message for one remote peer.
     ///
     /// Returns `None` when PEX should not be sent (private torrent, interval
@@ -223,23 +242,10 @@ impl BtDownloadCommand {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Periodic PEX sender — called from the download loop each iteration
-// ---------------------------------------------------------------------------
-
-/// Send periodic PEX messages to connected peers (BEP 11).
-///
-/// For each peer in `pex_enabled_peers` that supports ut_pex (determined
-/// by the BEP 10 extension handshake), this function:
-/// 1. Gets the peer's remote address from `BtPeerConn`
-/// 2. Builds a PEX Extended message via `PexHandler::build_pex_added`
-/// 3. Queues the serialized message into the connection's send buffer
-/// 4. Flushes the send buffer
-///
-/// The caller is responsible for checking the interval timer before calling.
-pub(super) async fn send_periodic_pex(
-    cmd: &mut BtDownloadCommand,
-    active_connections: &mut [BtPeerConn],
+/// Send periodic BEP 11 messages through each peer's bounded actor mailbox.
+pub(super) async fn send_periodic_pex_to_swarm(
+    cmd: &BtDownloadCommand,
+    swarm: &mut crate::engine::bt_message_handler::PeerSwarm,
     pex_enabled_peers: &HashSet<PeerKey>,
     last_pex_send: &mut Instant,
     pex_send_interval_secs: u64,
@@ -252,66 +258,46 @@ pub(super) async fn send_periodic_pex(
     }
 
     *last_pex_send = Instant::now();
-    let pex_peers_count = cmd.pex_known_peers.len();
-    let mut sent_count = 0usize;
-
-    for &peer_key in pex_enabled_peers.iter() {
-        if let Some(conn) = active_connections
-            .iter_mut()
-            .find(|conn| PeerKey::from_peer(&conn.ip_addr, conn.port) == Some(peer_key))
+    let peers = swarm
+        .iter()
+        .filter(|actor| !actor.dead)
+        .filter_map(|actor| {
+            let key = PeerKey::new(actor.endpoint);
+            pex_enabled_peers.contains(&key).then_some((
+                actor.actor_id,
+                actor.endpoint,
+                actor.ut_pex_id?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    let mut sent_count = 0;
+    let mut disconnected = Vec::new();
+    for (actor_id, endpoint, remote_ut_pex_id) in peers {
+        let remote_addr = PeerAddr::new(&endpoint.ip().to_string(), endpoint.port());
+        let Some(wire_bytes) = cmd.build_pex_message_for_actor(&remote_addr, remote_ut_pex_id)
+        else {
+            continue;
+        };
+        if swarm
+            .send_to(
+                actor_id,
+                crate::engine::bt_message_handler::PeerCommand::SendPex(wire_bytes),
+            )
+            .await
+            .is_err()
         {
-            if !conn.is_pex_enabled() {
-                continue;
-            }
-
-            // Get the remote peer's address to exclude it from the added list.
-            let remote_addr = PeerAddr::new(&conn.ip_addr, conn.port);
-
-            // BEP 10 assigns extension IDs independently on every peer. The
-            // wire message must use the ID advertised by this remote peer.
-            let Some(remote_ut_pex_id) = conn.peer_extension_id("ut_pex") else {
-                trace!(
-                    "[PEX] Skipping peer {}: ut_pex was not negotiated",
-                    peer_key.address()
-                );
-                continue;
-            };
-
-            // Build PEX Extended message for this peer.
-            if let Some(wire_bytes) = cmd.build_pex_extended_message(&remote_addr, remote_ut_pex_id)
-            {
-                conn.queue_message(wire_bytes);
-
-                // Flush this peer's send buffer immediately.
-                if let Err(e) = conn.flush_send_buffer().await {
-                    warn!(
-                        "[PEX] Failed to flush send buffer for peer {} ({}:{}): {}",
-                        peer_key.address(),
-                        conn.ip_addr,
-                        conn.port,
-                        e
-                    );
-                    continue;
-                }
-
-                sent_count += 1;
-                trace!(
-                    "[PEX] Sent PEX to peer {} ({}:{}) with {} known peers",
-                    peer_key.address(),
-                    conn.ip_addr,
-                    conn.port,
-                    pex_peers_count
-                );
-            }
+            disconnected.push(actor_id);
+        } else {
+            sent_count += 1;
         }
     }
-
+    for actor_id in disconnected {
+        swarm.mark_dead(actor_id);
+    }
     if sent_count > 0 {
         info!(
-            "[PEX] Periodic PEX exchange: sent to {}/{} enabled peers, {} known peers",
             sent_count,
-            pex_enabled_peers.len(),
-            pex_peers_count
+            "[PEX] Sent periodic BEP 11 messages through peer actors"
         );
     }
 }

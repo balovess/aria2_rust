@@ -18,7 +18,8 @@
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::filesystem::disk_adaptor::DiskAdaptor;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 /// Chunk size for single-file zero-fill allocation.
 /// Matches the C++ constant `BUFSIZE = 256_k` (256 KiB).
@@ -65,24 +66,24 @@ pub trait FileAllocationIterator: Send {
 ///
 /// This iterator is the fallback when `fallocate` is not available or
 /// not supported by the filesystem.
-pub struct SingleFileAllocationIterator<D: DiskAdaptor> {
-    adaptor: D,
+pub struct SingleFileAllocationIterator {
+    writer: PositionedDiskWriter,
     offset: u64,
     total_length: u64,
     /// Zero-fill buffer (reused across chunks). Allocated on first use.
     buffer: Option<Vec<u8>>,
 }
 
-impl<D: DiskAdaptor + Default> SingleFileAllocationIterator<D> {
+impl SingleFileAllocationIterator {
     /// Create a new single-file allocation iterator.
     ///
     /// # Arguments
-    /// * `adaptor` — disk adaptor for write operations (must have an open file)
+    /// * `writer` — positioned writer for the file (must be open)
     /// * `offset` — starting offset (current file size, typically 0)
     /// * `total_length` — target file size
-    pub fn new(adaptor: D, offset: u64, total_length: u64) -> Self {
+    pub fn new(writer: PositionedDiskWriter, offset: u64, total_length: u64) -> Self {
         Self {
-            adaptor,
+            writer,
             offset,
             total_length,
             buffer: None,
@@ -98,31 +99,31 @@ impl<D: DiskAdaptor + Default> SingleFileAllocationIterator<D> {
         }
     }
 
-    /// Get a mutable reference to the underlying adaptor.
-    pub fn adaptor_mut(&mut self) -> &mut D {
-        &mut self.adaptor
+    /// Get a mutable reference to the positioned writer.
+    pub fn writer_mut(&mut self) -> &mut PositionedDiskWriter {
+        &mut self.writer
     }
 
-    /// Recover the owned adaptor after allocation has completed.
-    pub fn into_inner(self) -> D {
-        self.adaptor
+    /// Recover the owned writer after allocation has completed.
+    pub fn into_inner(self) -> PositionedDiskWriter {
+        self.writer
     }
 }
 
 #[async_trait]
-impl<D: DiskAdaptor + Default> FileAllocationIterator for SingleFileAllocationIterator<D> {
+impl FileAllocationIterator for SingleFileAllocationIterator {
     async fn allocate_chunk(&mut self) -> Result<()> {
         let buf = self.buffer.as_deref().unwrap_or_else(|| {
             static EMPTY: &[u8] = &[0u8; BUF_SIZE];
             EMPTY
         });
 
-        self.adaptor.write(self.offset, buf).await?;
+        self.writer.write_at(self.offset, buf).await?;
         self.offset += BUF_SIZE as u64;
 
         // If we wrote past the target length, truncate back.
         if self.total_length < self.offset {
-            self.adaptor.truncate(self.total_length).await?;
+            self.writer.truncate(self.total_length).await?;
             self.offset = self.total_length;
         }
 
@@ -151,41 +152,41 @@ impl<D: DiskAdaptor + Default> FileAllocationIterator for SingleFileAllocationIt
 ///
 /// This is the Rust equivalent of C++ `FallocFileAllocationIterator`.
 /// It completes in a single `allocate_chunk()` call by invoking the
-/// platform-native preallocation syscall through the `DiskAdaptor`.
+/// platform-native preallocation syscall on the underlying positioned writer.
 ///
 /// On Linux, this calls `fallocate(2)` which allocates zeroed blocks.
 /// On macOS, this calls `fcntl(F_PREALLOCATE)` which may not zero-fill.
 /// On Windows, this calls `SetFileValidData` which does not zero-fill.
-pub struct FallocFileAllocationIterator<D: DiskAdaptor> {
-    adaptor: D,
+pub struct FallocFileAllocationIterator {
+    writer: PositionedDiskWriter,
     offset: u64,
     total_length: u64,
     secure_falloc: bool,
     done: bool,
 }
 
-impl<D: DiskAdaptor> FallocFileAllocationIterator<D> {
+impl FallocFileAllocationIterator {
     /// Create a new falloc iterator.
     ///
     /// # Arguments
-    /// * `adaptor` — disk adaptor for allocation operations (must have an open
+    /// * `writer` — positioned writer for allocation operations (must have an open
     ///   file with a raw fd/handle available)
     /// * `offset` — current file size
     /// * `total_length` — target file size
-    pub fn new(adaptor: D, offset: u64, total_length: u64) -> Self {
-        Self::new_with_secure_falloc(adaptor, offset, total_length, false)
+    pub fn new(writer: PositionedDiskWriter, offset: u64, total_length: u64) -> Self {
+        Self::new_with_secure_falloc(writer, offset, total_length, false)
     }
 
     /// Create a fallocate iterator with the platform security policy used by
     /// `--secure-falloc`.
     pub fn new_with_secure_falloc(
-        adaptor: D,
+        writer: PositionedDiskWriter,
         offset: u64,
         total_length: u64,
         secure_falloc: bool,
     ) -> Self {
         Self {
-            adaptor,
+            writer,
             offset,
             total_length,
             secure_falloc,
@@ -193,28 +194,26 @@ impl<D: DiskAdaptor> FallocFileAllocationIterator<D> {
         }
     }
 
-    /// Get a mutable reference to the underlying adaptor.
-    pub fn adaptor_mut(&mut self) -> &mut D {
-        &mut self.adaptor
+    /// Get a mutable reference to the positioned writer.
+    pub fn writer_mut(&mut self) -> &mut PositionedDiskWriter {
+        &mut self.writer
     }
 
-    /// Recover the owned adaptor after allocation has completed.
-    pub fn into_inner(self) -> D {
-        self.adaptor
+    /// Recover the owned writer after allocation has completed.
+    pub fn into_inner(self) -> PositionedDiskWriter {
+        self.writer
     }
 }
 
 #[async_trait]
-impl<D: DiskAdaptor> FileAllocationIterator for FallocFileAllocationIterator<D> {
+impl FileAllocationIterator for FallocFileAllocationIterator {
     async fn allocate_chunk(&mut self) -> Result<()> {
         if self.offset < self.total_length {
-            // Use the DiskAdaptor's fallocate path via write-and-allocate.
-            // We invoke the full allocate_file pipeline which handles
+            // Use the full allocation pipeline which handles
             // platform-specific fallocate with fallbacks.
             let length = self.total_length;
             crate::filesystem::file_allocation::allocate_file(
-                &mut self.adaptor,
-                std::path::Path::new(""),
+                &mut self.writer,
                 length,
                 crate::filesystem::file_allocation::AllocationStrategy::Falloc,
                 self.secure_falloc,
@@ -223,7 +222,7 @@ impl<D: DiskAdaptor> FileAllocationIterator for FallocFileAllocationIterator<D> 
             self.offset = self.total_length;
         } else {
             // File is already at least total_length; just ensure size is exact.
-            self.adaptor.truncate(self.total_length).await?;
+            self.writer.truncate(self.total_length).await?;
             self.offset = self.total_length;
         }
         self.done = true;
@@ -253,43 +252,43 @@ impl<D: DiskAdaptor> FileAllocationIterator for FallocFileAllocationIterator<D> 
 /// It completes in a single `allocate_chunk()` call by truncating the
 /// file to the target length. This creates a sparse file — blocks are
 /// not physically allocated until written.
-pub struct TruncFileAllocationIterator<D: DiskAdaptor> {
-    adaptor: D,
+pub struct TruncFileAllocationIterator {
+    writer: PositionedDiskWriter,
     offset: u64,
     total_length: u64,
     done: bool,
 }
 
-impl<D: DiskAdaptor> TruncFileAllocationIterator<D> {
+impl TruncFileAllocationIterator {
     /// Create a new truncation iterator.
     ///
     /// # Arguments
-    /// * `adaptor` — disk adaptor for truncation (must have an open file)
+    /// * `writer` — positioned writer for truncation (must have an open file)
     /// * `offset` — current file size
     /// * `total_length` — target file size
-    pub fn new(adaptor: D, offset: u64, total_length: u64) -> Self {
+    pub fn new(writer: PositionedDiskWriter, offset: u64, total_length: u64) -> Self {
         Self {
-            adaptor,
+            writer,
             offset,
             total_length,
             done: false,
         }
     }
 
-    /// Get a mutable reference to the underlying adaptor.
-    pub fn adaptor_mut(&mut self) -> &mut D {
-        &mut self.adaptor
+    /// Get a mutable reference to the positioned writer.
+    pub fn writer_mut(&mut self) -> &mut PositionedDiskWriter {
+        &mut self.writer
     }
 }
 
 #[async_trait]
-impl<D: DiskAdaptor> FileAllocationIterator for TruncFileAllocationIterator<D> {
+impl FileAllocationIterator for TruncFileAllocationIterator {
     async fn allocate_chunk(&mut self) -> Result<()> {
         // C++ TruncFileAllocationIterator calls stream->allocate(0, totalLength_, true)
         // which maps to ftruncate. In Rust we use set_len via truncate().
-        self.adaptor.truncate(self.total_length).await?;
+        self.writer.truncate(self.total_length).await?;
         // Flush to ensure metadata is persisted before the caller checks file size.
-        self.adaptor.flush().await?;
+        self.writer.flush().await?;
         self.offset = self.total_length;
         self.done = true;
         Ok(())
@@ -326,42 +325,42 @@ impl<D: DiskAdaptor> FileAllocationIterator for TruncFileAllocationIterator<D> {
 ///
 /// On platforms without `fallocate` (or when no raw fd is available),
 /// the zero-fill path is used directly.
-pub struct AdaptiveFileAllocationIterator<D: DiskAdaptor + Default> {
-    adaptor: D,
+pub struct AdaptiveFileAllocationIterator {
+    writer: Option<PositionedDiskWriter>,
     offset: u64,
     total_length: u64,
     secure_falloc: bool,
     /// Inner iterator selected after the fallocate probe.
-    inner: Option<AdaptiveInner<D>>,
+    inner: Option<AdaptiveInner>,
 }
 
 /// Inner iterator variant after the adaptive probe decides the strategy.
-enum AdaptiveInner<D: DiskAdaptor + Default> {
-    Falloc(FallocFileAllocationIterator<D>),
-    Single(SingleFileAllocationIterator<D>),
+enum AdaptiveInner {
+    Falloc(FallocFileAllocationIterator),
+    Single(SingleFileAllocationIterator),
 }
 
-impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
+impl AdaptiveFileAllocationIterator {
     /// Create a new adaptive iterator.
     ///
     /// # Arguments
-    /// * `adaptor` — disk adaptor (must have an open file)
+    /// * `writer` — positioned writer (must have an open file)
     /// * `offset` — current file size
     /// * `total_length` — target file size
-    pub fn new(adaptor: D, offset: u64, total_length: u64) -> Self {
-        Self::new_with_secure_falloc(adaptor, offset, total_length, false)
+    pub fn new(writer: PositionedDiskWriter, offset: u64, total_length: u64) -> Self {
+        Self::new_with_secure_falloc(writer, offset, total_length, false)
     }
 
     /// Create an adaptive iterator with the platform security policy used by
     /// `--secure-falloc`.
     pub fn new_with_secure_falloc(
-        adaptor: D,
+        writer: PositionedDiskWriter,
         offset: u64,
         total_length: u64,
         secure_falloc: bool,
     ) -> Self {
         Self {
-            adaptor,
+            writer: Some(writer),
             offset,
             total_length,
             secure_falloc,
@@ -393,8 +392,7 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
         // function which handles platform-specific fallocate with EOPNOTSUPP
         // fallback.
         let probe_result = crate::filesystem::file_allocation::allocate_file(
-            &mut self.adaptor,
-            std::path::Path::new(""),
+            self.writer.as_mut().expect("adaptive writer is present"),
             self.offset + probe_len,
             crate::filesystem::file_allocation::AllocationStrategy::Falloc,
             self.secure_falloc,
@@ -413,7 +411,7 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
                 // Continue with fallocate for the remaining region.
                 self.inner = Some(AdaptiveInner::Falloc(
                     FallocFileAllocationIterator::new_with_secure_falloc(
-                        std::mem::take(&mut self.adaptor),
+                        self.writer.take().expect("adaptive writer is present"),
                         self.offset,
                         self.total_length,
                         self.secure_falloc,
@@ -424,7 +422,7 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
                 // fallocate failed — fall back to zero-fill.
                 tracing::debug!("Adaptive: fallocate probe failed, falling back to zero-fill");
                 let mut single = SingleFileAllocationIterator::new(
-                    std::mem::take(&mut self.adaptor),
+                    self.writer.take().expect("adaptive writer is present"),
                     self.offset,
                     self.total_length,
                 );
@@ -438,7 +436,7 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
 }
 
 #[async_trait]
-impl<D: DiskAdaptor + Default> FileAllocationIterator for AdaptiveFileAllocationIterator<D> {
+impl FileAllocationIterator for AdaptiveFileAllocationIterator {
     async fn allocate_chunk(&mut self) -> Result<()> {
         if self.inner.is_none() {
             self.probe_and_select().await?;
@@ -475,22 +473,38 @@ impl<D: DiskAdaptor + Default> FileAllocationIterator for AdaptiveFileAllocation
     }
 }
 
-impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
-    /// Recover the owned adaptor after allocation has completed.
-    pub fn into_inner(self) -> D {
+impl AdaptiveFileAllocationIterator {
+    /// Recover the owned writer after allocation has completed.
+    pub fn into_inner(self) -> PositionedDiskWriter {
         match self.inner {
             Some(AdaptiveInner::Falloc(iterator)) => iterator.into_inner(),
             Some(AdaptiveInner::Single(iterator)) => iterator.into_inner(),
-            None => self.adaptor,
+            None => self.writer.expect("adaptive writer is present"),
         }
     }
 
     /// Close the file held by the selected inner iterator.
     pub async fn close(&mut self) -> Result<()> {
         match &mut self.inner {
-            Some(AdaptiveInner::Falloc(iterator)) => iterator.adaptor_mut().close().await,
-            Some(AdaptiveInner::Single(iterator)) => iterator.adaptor_mut().close().await,
-            None => self.adaptor.close().await,
+            Some(AdaptiveInner::Falloc(iterator)) => {
+                iterator
+                    .writer_mut()
+                    .close_without_sync("adaptive allocation close")
+                    .await
+            }
+            Some(AdaptiveInner::Single(iterator)) => {
+                iterator
+                    .writer_mut()
+                    .close_without_sync("adaptive allocation close")
+                    .await
+            }
+            None => {
+                self.writer
+                    .as_mut()
+                    .expect("adaptive writer is present")
+                    .close_without_sync("adaptive allocation close")
+                    .await
+            }
         }
     }
 }
@@ -498,15 +512,14 @@ impl<D: DiskAdaptor + Default> AdaptiveFileAllocationIterator<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filesystem::disk_adaptor::DirectDiskAdaptor;
-
+    use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
     #[tokio::test]
     async fn test_trunc_iterator_completes_in_one_chunk() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_trunc_iter.bin");
 
-        let mut adaptor = DirectDiskAdaptor::new();
-        adaptor.open(&path).await.unwrap();
+        let mut adaptor = PositionedDiskWriter::new(&path, None);
+        adaptor.open().await.unwrap();
 
         let mut iter = TruncFileAllocationIterator::new(adaptor, 0, 4096);
         assert!(!iter.finished());
@@ -525,8 +538,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_single_iter.bin");
 
-        let mut adaptor = DirectDiskAdaptor::new();
-        adaptor.open(&path).await.unwrap();
+        let mut adaptor = PositionedDiskWriter::new(&path, None);
+        adaptor.open().await.unwrap();
         adaptor.truncate(0).await.unwrap();
 
         // Allocate 512 KiB (2 chunks of 256 KiB)
@@ -548,8 +561,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_overshoot.bin");
 
-        let mut adaptor = DirectDiskAdaptor::new();
-        adaptor.open(&path).await.unwrap();
+        let mut adaptor = PositionedDiskWriter::new(&path, None);
+        adaptor.open().await.unwrap();
         adaptor.truncate(0).await.unwrap();
 
         // 1 byte more than a single chunk — second write overshoots
@@ -570,8 +583,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test_adaptive.bin");
 
-        let mut adaptor = DirectDiskAdaptor::new();
-        adaptor.open(&path).await.unwrap();
+        let mut adaptor = PositionedDiskWriter::new(&path, None);
+        adaptor.open().await.unwrap();
         adaptor.truncate(0).await.unwrap();
 
         // On any platform, adaptive should complete allocation.
@@ -591,8 +604,8 @@ mod tests {
         // Pre-create a file with some content
         tokio::fs::write(&path, b"hello").await.unwrap();
 
-        let mut adaptor = DirectDiskAdaptor::new();
-        adaptor.open(&path).await.unwrap();
+        let mut adaptor = PositionedDiskWriter::new(&path, None);
+        adaptor.open().await.unwrap();
 
         let mut iter = TruncFileAllocationIterator::new(adaptor, 5, 1024);
         iter.allocate_chunk().await.unwrap();

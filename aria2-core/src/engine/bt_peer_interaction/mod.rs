@@ -39,7 +39,6 @@ use tracing::{debug, error, info, warn};
 /// through the handshake phase until they're ready for data transfer.
 pub struct BtPeerInteraction;
 
-const HAVE_BROADCAST_CONCURRENCY: usize = 64;
 const PEER_CONNECTION_DELAY_MS: u64 = crate::constants::BT_PEER_CONNECTION_DELAY_MS;
 const PEER_MESSAGE_TIMEOUT_SECS: u64 = crate::constants::BT_PEER_MESSAGE_TIMEOUT_SECS;
 
@@ -340,7 +339,7 @@ impl BtPeerInteraction {
                 conn.stats.peer_choking = false;
                 return true;
             }
-            BtMessage::AllowedFast { index } => conn.add_allowed_fast(index),
+            BtMessage::AllowedFast { index } => conn.add_peer_allowed_fast(index),
             _ => {}
         }
         false
@@ -417,27 +416,6 @@ impl BtPeerInteraction {
             addr.ip, addr.port, 1
         );
         Ok(()) // Continue anyway; the piece loop can receive it later.
-    }
-
-    /// Broadcast a HAVE message to all connected peers
-    ///
-    /// Notifies all peers that we have completed downloading a piece.
-    ///
-    /// # Arguments
-    /// * `connections` - Mutable slice of active peer connections
-    /// * `piece_index` - Index of the completed piece
-    pub(crate) async fn broadcast_have(connections: &mut [BtPeerConn], piece_index: u32) {
-        let frame = aria2_protocol::bittorrent::message::serializer::serialize_have(piece_index);
-        stream::iter(connections.iter_mut())
-            .for_each_concurrent(HAVE_BROADCAST_CONCURRENCY, |conn| {
-                let frame = &frame;
-                async move {
-                    if let Err(e) = conn.send_have_frame(frame).await {
-                        warn!("[BT] Failed to send HAVE to peer: {}", e);
-                    }
-                }
-            })
-            .await;
     }
 
     /// Return the stable key used by the peer bitfield tracker.

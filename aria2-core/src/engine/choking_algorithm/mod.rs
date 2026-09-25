@@ -10,6 +10,7 @@ mod optimistic;
 mod selection;
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use super::peer_stats::PeerStats;
 
@@ -85,6 +86,8 @@ pub struct ChokingAlgorithm {
     pub(crate) current_optimistic_peer: Option<PeerIdentity>,
     /// Round-robin counter for optimistic unchoke rotation.
     pub(crate) optimistic_rotation_counter: usize,
+    /// Time of the last regular choke decision.
+    last_choke_rotation: Instant,
 }
 
 impl ChokingAlgorithm {
@@ -96,6 +99,7 @@ impl ChokingAlgorithm {
             snubbed_peers: HashSet::new(),
             current_optimistic_peer: None,
             optimistic_rotation_counter: 0,
+            last_choke_rotation: Instant::now(),
         }
     }
 
@@ -174,7 +178,21 @@ impl ChokingAlgorithm {
 
     /// Rotate choke state while returning stable peer identities.
     pub fn rotate_choke_by_identity(&mut self) -> Vec<IdentityChokeAction> {
+        self.last_choke_rotation = Instant::now();
         selection::rotate_choke_by_identity(self)
+    }
+
+    /// Return the next scheduled choke decision deadline, if periodic
+    /// rotation is enabled.
+    pub fn next_choke_rotation_deadline(&self) -> Option<Instant> {
+        let interval = self.config.choke_rotation_interval_secs;
+        (interval > 0).then(|| self.last_choke_rotation + Duration::from_secs(interval))
+    }
+
+    /// Whether the scheduled choke decision is due at `now`.
+    pub fn choke_rotation_due(&self, now: Instant) -> bool {
+        self.next_choke_rotation_deadline()
+            .is_some_and(|deadline| now >= deadline)
     }
 
     /// Select an optimistic-un choke target using stable identity.

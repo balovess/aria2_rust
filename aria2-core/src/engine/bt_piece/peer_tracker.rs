@@ -73,6 +73,37 @@ impl PeerBitfieldTracker {
         }
     }
 
+    /// Update one piece availability bit without rescanning the peer's full
+    /// bitfield. Returns whether the tracked availability actually changed.
+    pub fn update_peer_piece(&mut self, peer_id: &str, piece_index: u32, has_piece: bool) -> bool {
+        let index = piece_index as usize;
+        if index >= self.piece_peer_count.len() {
+            return false;
+        }
+
+        let entry = self
+            .peers
+            .entry(peer_id.into())
+            .or_insert_with(|| PeerBitfieldEntry {
+                have_pieces: Bitfield::new(self.piece_peer_count.len()),
+                last_updated: Instant::now(),
+            });
+        let previously_had_piece = entry.have_pieces.test(index);
+        if previously_had_piece == has_piece {
+            return false;
+        }
+
+        if has_piece {
+            entry.have_pieces.set(index);
+            self.piece_peer_count[index] = self.piece_peer_count[index].saturating_add(1);
+        } else {
+            entry.have_pieces.clear(index);
+            self.piece_peer_count[index] = self.piece_peer_count[index].saturating_sub(1);
+        }
+        entry.last_updated = Instant::now();
+        true
+    }
+
     pub fn remove_peer(&mut self, peer_id: &str) {
         if let Some(entry) = self.peers.remove(peer_id) {
             for i in entry.have_pieces.iter_set() {

@@ -102,7 +102,7 @@ impl BtDownloadCommand {
 
         for piece_idx in new_pieces {
             peer_conn.queue_message(serializer::serialize_allowed_fast(piece_idx));
-            peer_conn.add_allowed_fast(piece_idx);
+            peer_conn.add_am_allowed_fast(piece_idx);
         }
         peer_conn.flush_send_buffer().await?;
         Ok(count)
@@ -122,7 +122,7 @@ impl BtDownloadCommand {
             let msg_bytes = serializer::serialize_allowed_fast(piece_idx);
             peer_conn.queue_message(msg_bytes);
             already_sent.insert(piece_idx);
-            peer_conn.add_allowed_fast(piece_idx);
+            peer_conn.add_am_allowed_fast(piece_idx);
 
             debug!("[BEP6] Queued AllowedFast for piece {}", piece_idx);
         }

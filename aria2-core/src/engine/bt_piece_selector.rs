@@ -260,13 +260,13 @@ impl BtPieceSelector {
         remaining: usize,
     ) -> PieceSelectionResult {
         // If peer is choked BUT has allowed us some pieces, prefer those
-        if is_choked && !peer_conn.allowed_fast_set().is_empty() {
+        if is_choked && !peer_conn.peer_allowed_fast_set().is_empty() {
             debug!(
                 "[BT] Peer is choked but has {} allowed fast pieces, checking...",
-                peer_conn.allowed_fast_set().len()
+                peer_conn.peer_allowed_fast_set().len()
             );
 
-            for &fast_idx in peer_conn.allowed_fast_set() {
+            for &fast_idx in peer_conn.peer_allowed_fast_set() {
                 // Check if piece is needed and peer has it
                 if piece_picker.is_allowed(fast_idx)
                     && let Some(info) = piece_picker.get_piece_info(fast_idx)

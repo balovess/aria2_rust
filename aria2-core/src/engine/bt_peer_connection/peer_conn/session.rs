@@ -27,7 +27,22 @@ impl BtPeerConn {
     /// Pieces in the allowed_fast set can be requested even when the peer
     /// is choked (BEP 6 / Fast Extension).
     pub fn add_allowed_fast(&mut self, index: u32) {
-        self.allowed_fast.insert(index);
+        self.add_peer_allowed_fast(index);
+    }
+
+    /// Record a piece the remote peer has allowed us to request while choked.
+    pub fn add_peer_allowed_fast(&mut self, index: u32) {
+        self.peer_allowed_fast.insert(index);
+    }
+
+    /// Record a piece we have allowed the remote peer to request while choked.
+    pub fn add_am_allowed_fast(&mut self, index: u32) {
+        self.am_allowed_fast.insert(index);
+    }
+
+    /// Check whether we granted the remote peer fast access to this piece.
+    pub(crate) fn am_allowed_fast(&self, index: u32) -> bool {
+        self.am_allowed_fast.contains(&index)
     }
 
     /// Get a reference to the full AllowedFast set.
@@ -35,7 +50,12 @@ impl BtPeerConn {
     /// Returns all piece indices that this peer has allowed us to request
     /// via BEP 6 Fast Extension, even when choked.
     pub fn allowed_fast_set(&self) -> &HashSet<u32> {
-        &self.allowed_fast
+        &self.peer_allowed_fast
+    }
+
+    /// Get pieces the remote peer allowed us to request while choked.
+    pub fn peer_allowed_fast_set(&self) -> &HashSet<u32> {
+        &self.peer_allowed_fast
     }
 
     // -----------------------------------------------------------------------

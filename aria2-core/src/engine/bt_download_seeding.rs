@@ -1,6 +1,7 @@
 use tracing::info;
 
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_downloader::FileBackedPieceProvider;
 use crate::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
@@ -26,12 +27,31 @@ impl BtDownloadCommand {
         num_pieces: u32,
         info_hash: [u8; 20],
     ) -> Result<()> {
-        let file_provider = std::sync::Arc::new(FileBackedPieceProvider::new(
-            self.output_path.clone(),
+        self.run_seeding_phase_with_swarm(
+            connections,
+            PeerSwarm::new(64),
             piece_length,
             num_pieces,
-            self.multi_file_layout.clone(),
-        ));
+            info_hash,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_seeding_phase_with_swarm(
+        &mut self,
+        connections: Vec<BtPeerConn>,
+        mut swarm: PeerSwarm,
+        piece_length: u32,
+        num_pieces: u32,
+        info_hash: [u8; 20],
+    ) -> Result<()> {
+        let file_provider: std::sync::Arc<dyn crate::engine::bt_upload_session::PieceDataProvider> =
+            std::sync::Arc::new(FileBackedPieceProvider::new(
+                self.output_path.clone(),
+                piece_length,
+                num_pieces,
+                self.multi_file_layout.clone(),
+            ));
 
         let upload_limit = { self.group.recover().options().max_upload_limit };
         let config = BtSeedingConfig {
@@ -40,6 +60,28 @@ impl BtDownloadCommand {
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };
+
+        // Promote the completed download's still-connected peers into the
+        // TorrentSession-owned registry before transferring that same
+        // registry to the seeding coordinator.
+        let upload_counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        for mut connection in connections {
+            connection.configure_upload_with_auto_unchoke(&config, num_pieces, piece_length, false);
+            connection.stats.am_choking = true;
+            connection.set_upload_counter(std::sync::Arc::clone(&upload_counter));
+            if let Err(connection) =
+                swarm.spawn_peer(connection, None, std::sync::Arc::clone(&file_provider))
+            {
+                swarm.shutdown_all().await;
+                return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
+                    format!(
+                        "failed to admit completed torrent peer into its swarm: {}:{}",
+                        connection.remote_ip(),
+                        connection.remote_port()
+                    ),
+                )));
+            }
+        }
 
         let exit_cond = match (self.seed_time, self.seed_ratio) {
             (Some(t), Some(r)) => SeedExitCondition {
@@ -62,9 +104,9 @@ impl BtDownloadCommand {
         let announcer = self.tracker_announcer.take();
         let peer_id = self.local_peer_id;
 
-        let mut manager = BtSeedManager::new_with_transports(
+        let mut manager = BtSeedManager::new_with_swarm(
             info_hash,
-            connections,
+            swarm,
             file_provider,
             config,
             exit_cond,
@@ -72,6 +114,7 @@ impl BtDownloadCommand {
             announcer,
             peer_id,
             self.incoming_peers.take(),
+            upload_counter,
         );
         self.attach_seed_observers(&mut manager);
         let lifecycle_notifier = self.group.recover().lifecycle_notifier();

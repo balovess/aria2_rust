@@ -20,7 +20,8 @@
 //! 1. Check cancellation / exit conditions
 //! 2. Admit incoming peers or process one ready peer message
 //! 3. Sync peer-worker state -> PeerStats
-//! 4. Run the seeder-state choking algorithm when its deadline expires
+//! 4. Run the seeder-state choking algorithm on its deadline, peer-state
+//!    mismatch, or return of an unchoked and interested peer
 //! 5. Apply choke/unchoke decisions through peer-worker command channels
 //! 6. Remove dead sessions and report progress
 //!
@@ -33,7 +34,6 @@
 //! | `BtSeederStateChoke` | `BtSeederStateChoke` |
 
 mod constructors;
-mod peer_actor;
 mod seeding_loop;
 #[cfg(test)]
 mod tests;
@@ -42,7 +42,6 @@ pub mod types;
 // Re-export the exit-condition type from the types submodule for convenience.
 pub use types::SeedExitCondition;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
@@ -50,12 +49,11 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
+use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
-use crate::engine::peer_stats::PeerStats;
 use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
-use peer_actor::{PeerActorId, SeedPeerActor};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -84,13 +82,7 @@ pub struct BtSeedManager {
     /// Connections admitted before the long-lived peer workers start.
     upload_sessions: Vec<BtPeerConn>,
     /// Long-lived I/O owners after the seeding loop starts.
-    seed_peer_actors: Vec<SeedPeerActor>,
-    /// Stable actor ID to the actor/statistics slot used by incoming events.
-    seed_peer_actor_indices: HashMap<PeerActorId, usize>,
-    seed_peer_event_tx: Option<tokio::sync::mpsc::Sender<peer_actor::PeerEvent>>,
-    seed_peer_event_rx: Option<tokio::sync::mpsc::Receiver<peer_actor::PeerEvent>>,
-    /// Peer statistics synced with the choking algorithm
-    peer_stats: Vec<PeerStats>,
+    swarm: PeerSwarm,
     /// Piece data provider for reading completed pieces from disk
     piece_provider: Option<Arc<dyn PieceDataProvider>>,
     /// Seeding configuration (rate limits, unchoke settings)
@@ -212,7 +204,7 @@ impl BtSeedManager {
 
     /// Return the number of connected peers owned by this manager.
     pub fn num_sessions(&self) -> usize {
-        self.upload_sessions.len() + self.seed_peer_actors.len()
+        self.upload_sessions.len() + self.swarm.len()
     }
 
     /// Record bytes uploaded to a peer.
@@ -280,73 +272,61 @@ impl BtSeedManager {
         let mut snapshots = self
             .upload_sessions
             .iter()
-            .enumerate()
-            .filter_map(|(index, session)| {
+            .filter_map(|session| {
                 let addr = session.remote_endpoint()?;
-                let stats = self.peer_stats.get(index);
                 Some(BtPeerSnapshot {
                     peer_id: session.remote_peer_id().unwrap_or([0; 20]),
                     addr,
-                    is_incoming: true,
-                    source: crate::request::request_group::BtPeerSource::Incoming,
+                    is_incoming: session.incoming,
+                    source: session.source,
                     bitfield: None,
                     uploaded_bytes: session.stats.uploaded_bytes,
                     downloaded_bytes: 0,
-                    upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),
+                    upload_speed: session.stats.upload_speed,
                     download_speed: 0.0,
-                    avg_upload_speed: stats.map_or(0, |stats| stats.avg_upload_speed),
+                    avg_upload_speed: session.stats.avg_upload_speed,
                     avg_download_speed: 0,
                     am_choking: session.stats.am_choking,
                     peer_choking: false,
                     seeder: Some(false),
-                    connection_duration_secs: stats
-                        .map_or(0, |stats| stats.connection_duration_secs()),
-                    last_data_age_secs: stats.map_or(0, |stats| {
-                        stats
-                            .last_data_time
-                            .map(|time| time.elapsed().as_secs())
-                            .unwrap_or_else(|| stats.connection_duration_secs())
-                    }),
-                    is_snubbed: stats.is_some_and(|stats| stats.is_snubbed),
+                    connection_duration_secs: session.stats.connection_duration_secs(),
+                    last_data_age_secs: session
+                        .stats
+                        .last_data_time
+                        .map(|time| time.elapsed().as_secs())
+                        .unwrap_or_else(|| session.stats.connection_duration_secs()),
+                    is_snubbed: session.stats.is_snubbed,
                     is_banned: false,
                 })
             })
             .collect::<Vec<_>>();
-        snapshots.extend(
-            self.seed_peer_actors
-                .iter()
-                .enumerate()
-                .map(|(index, actor)| {
-                    let addr = actor.endpoint;
-                    let stats = self.peer_stats.get(index);
-                    BtPeerSnapshot {
-                        peer_id: stats.map_or([0; 20], |stats| stats.peer_id),
-                        addr,
-                        is_incoming: true,
-                        source: crate::request::request_group::BtPeerSource::Incoming,
-                        bitfield: None,
-                        uploaded_bytes: stats.map_or(0, |stats| stats.uploaded_bytes),
-                        downloaded_bytes: 0,
-                        upload_speed: stats.map_or(0.0, |stats| stats.upload_speed),
-                        download_speed: 0.0,
-                        avg_upload_speed: stats.map_or(0, |stats| stats.avg_upload_speed),
-                        avg_download_speed: 0,
-                        am_choking: stats.is_none_or(|stats| stats.am_choking),
-                        peer_choking: false,
-                        seeder: Some(false),
-                        connection_duration_secs: stats
-                            .map_or(0, |stats| stats.connection_duration_secs()),
-                        last_data_age_secs: stats.map_or(0, |stats| {
-                            stats
-                                .last_data_time
-                                .map(|time| time.elapsed().as_secs())
-                                .unwrap_or_else(|| stats.connection_duration_secs())
-                        }),
-                        is_snubbed: stats.is_some_and(|stats| stats.is_snubbed),
-                        is_banned: false,
-                    }
-                }),
-        );
+        snapshots.extend(self.swarm.iter().map(|actor| {
+            let addr = actor.endpoint;
+            let stats = &actor.stats;
+            BtPeerSnapshot {
+                peer_id: stats.peer_id,
+                addr,
+                is_incoming: actor.incoming,
+                source: actor.source,
+                bitfield: actor.has_bitfield.then(|| actor.bitfield.clone()),
+                uploaded_bytes: stats.uploaded_bytes,
+                downloaded_bytes: stats.downloaded_bytes,
+                upload_speed: stats.upload_speed,
+                download_speed: stats.download_speed,
+                avg_upload_speed: stats.avg_upload_speed,
+                avg_download_speed: stats.avg_download_speed,
+                am_choking: stats.am_choking,
+                peer_choking: stats.peer_choking,
+                seeder: Some(actor.seeder),
+                connection_duration_secs: stats.connection_duration_secs(),
+                last_data_age_secs: stats
+                    .last_data_time
+                    .map(|time| time.elapsed().as_secs())
+                    .unwrap_or_else(|| stats.connection_duration_secs()),
+                is_snubbed: stats.is_snubbed,
+                is_banned: false,
+            }
+        }));
         snapshots
     }
 

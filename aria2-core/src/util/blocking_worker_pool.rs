@@ -93,6 +93,40 @@ mod tests {
         assert_ne!(worker_thread, runtime_thread);
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn slow_blocking_operation_does_not_stall_runtime_timers() {
+        let pool = Arc::new(BlockingWorkerPool::new("test-slow-disk", 1, 1));
+        let started = Arc::new(Notify::new());
+        let operation_finished = Arc::new(AtomicBool::new(false));
+        let operation_pool = Arc::clone(&pool);
+        let operation_started = Arc::clone(&started);
+        let operation_finished_flag = Arc::clone(&operation_finished);
+
+        let operation = tokio::spawn(async move {
+            operation_pool
+                .run(
+                    move || {
+                        operation_started.notify_one();
+                        std::thread::sleep(Duration::from_millis(100));
+                        operation_finished_flag.store(true, Ordering::SeqCst);
+                        Ok(())
+                    },
+                    "slow operation",
+                )
+                .await
+        });
+
+        started.notified().await;
+        tokio::time::timeout(
+            Duration::from_millis(40),
+            tokio::time::sleep(Duration::from_millis(5)),
+        )
+        .await
+        .expect("slow blocking work must not stall the Tokio runtime");
+        assert!(!operation_finished.load(Ordering::SeqCst));
+        operation.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn full_queue_backpressures_and_cancelled_sender_does_not_run() {
         let pool = Arc::new(BlockingWorkerPool::new("test-bounded", 1, 1));

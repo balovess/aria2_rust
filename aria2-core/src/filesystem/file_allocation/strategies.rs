@@ -1,5 +1,6 @@
 use crate::error::{Aria2Error, Result};
-use crate::filesystem::disk_adaptor::DiskAdaptor;
+use crate::filesystem::disk_writer::SeekableDiskWriter;
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -14,8 +15,8 @@ fn path_to_cstring(path: &Path) -> Option<std::ffi::CString> {
 /// - Unix: ftruncate system call
 /// - Windows: SetEndOfFile API
 /// - macOS: ftruncate
-pub(crate) async fn truncate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
-    adaptor.truncate(length).await
+pub(crate) async fn truncate(writer: &mut PositionedDiskWriter, length: u64) -> Result<()> {
+    writer.truncate(length).await
 }
 
 /// Zero-fill a file region in async 1 MiB chunks.
@@ -27,8 +28,8 @@ pub(crate) async fn truncate<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Re
 /// Uses `tokio::task::yield_now()` between chunks to avoid blocking the
 /// reactor. The zero buffer is allocated once and reused.
 #[cfg(test)]
-pub(crate) async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64) -> Result<()> {
-    async_zero_fill_from(adaptor, 0, length).await
+pub(crate) async fn async_zero_fill(writer: &mut PositionedDiskWriter, length: u64) -> Result<()> {
+    async_zero_fill_from(writer, 0, length).await
 }
 
 /// Zero-fill only the newly allocated region `[offset, length)`.
@@ -36,8 +37,8 @@ pub(crate) async fn async_zero_fill<D: DiskAdaptor>(adaptor: &mut D, length: u64
 /// Existing bytes must remain untouched when allocation resumes a partial
 /// download. This is also the correct security behavior after a platform
 /// preallocation call that does not clear newly allocated blocks.
-pub(crate) async fn async_zero_fill_from<D: DiskAdaptor>(
-    adaptor: &mut D,
+pub(crate) async fn async_zero_fill_from(
+    writer: &mut PositionedDiskWriter,
     offset: u64,
     length: u64,
 ) -> Result<()> {
@@ -48,7 +49,7 @@ pub(crate) async fn async_zero_fill_from<D: DiskAdaptor>(
 
     while remaining > 0 {
         let write_len = remaining.min(CHUNK_SIZE as u64) as usize;
-        adaptor.write(position, &zero_chunk[..write_len]).await?;
+        writer.write_at(position, &zero_chunk[..write_len]).await?;
         position += write_len as u64;
         remaining -= write_len as u64;
 

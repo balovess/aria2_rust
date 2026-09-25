@@ -390,6 +390,12 @@ impl BtPeerConn {
         if result.is_ok() {
             self.on_message_received();
         }
+        if let Ok(Some(aria2_protocol::bittorrent::message::types::BtMessage::Piece {
+            data, ..
+        })) = &result
+        {
+            self.stats.on_data_received(data.len() as u64);
+        }
         result
     }
 
@@ -473,6 +479,14 @@ impl BtPeerConn {
 
 #[async_trait::async_trait]
 impl crate::engine::bt_upload_session::BtUploadTransport for BtPeerConn {
+    fn supports_fast_extension(&self) -> bool {
+        self.remote_supports_fast_extension()
+    }
+
+    fn am_allowed_fast(&self, piece_index: u32) -> bool {
+        BtPeerConn::am_allowed_fast(self, piece_index)
+    }
+
     async fn send_upload_message(
         &mut self,
         message: &BtMessage,

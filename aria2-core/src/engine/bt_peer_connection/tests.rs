@@ -336,6 +336,13 @@ async fn test_bt_peer_conn_initializes_fast_extension_from_handshake() {
     connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
 
     assert!(connection.is_fast_extension_enabled());
+    connection.add_peer_allowed_fast(0);
+    connection.add_am_allowed_fast(1);
+    assert!(connection.peer_allowed_fast_set().contains(&0));
+    assert!(!connection.peer_allowed_fast_set().contains(&1));
+    assert!(connection.allowed_fast_set().contains(&0));
+    assert!(connection.am_allowed_fast(1));
+    assert!(!connection.am_allowed_fast(0));
 }
 
 // -----------------------------------------------------------------------

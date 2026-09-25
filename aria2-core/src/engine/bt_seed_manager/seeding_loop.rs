@@ -6,8 +6,8 @@ use tracing::{debug, info, warn};
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::peer_stats::PeerStats;
 
-use super::peer_actor::{PeerActorId, PeerCommand, PeerEvent, SeedPeerActor};
 use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS};
+use crate::engine::bt_message_handler::{PeerCommand, PeerEvent};
 
 enum SeedWaitEvent {
     Incoming(crate::engine::bt_peer_listener::IncomingPeer),
@@ -34,9 +34,9 @@ impl BtSeedManager {
             self.upload_sessions.len()
         );
 
-        self.remove_dead_sessions();
+        self.remove_dead_sessions().await;
         self.start_seed_peer_actors();
-        for actor in &mut self.seed_peer_actors {
+        for actor in self.swarm.iter_mut() {
             if let Err(error) = actor.try_send(PeerCommand::AnnounceAvailability) {
                 actor.dead = true;
                 warn!(%error, actor_id = actor.actor_id.0, "Failed to queue seed availability announcement");
@@ -92,17 +92,17 @@ impl BtSeedManager {
             self.drain_incoming_peers().await;
 
             // -- Process state changes observed since the last event ---------
-            self.remove_dead_sessions();
+            let removed_peer_needs_choke_round = self.remove_dead_sessions().await;
             self.sync_sessions_to_stats();
             self.publish_connection_state();
-            let interested_peer_needs_decision = self.any_interested_peer_is_choked();
-            if self.last_choke_time.elapsed().as_secs() >= CHOKE_ROUND_INTERVAL_SECS
-                || interested_peer_needs_decision
+            let peer_choke_state_needs_decision = self.any_peer_choke_state_mismatch();
+            if removed_peer_needs_choke_round
+                || self.last_choke_time.elapsed().as_secs() >= CHOKE_ROUND_INTERVAL_SECS
+                || peer_choke_state_needs_decision
             {
-                self.run_choke_round();
+                self.run_choke_round().await;
                 self.last_choke_time = Instant::now();
             }
-            self.apply_choke_decisions().await;
 
             // Park until a socket message, an incoming peer, cancellation, or
             // a protocol/seed deadline wakes the manager. There is no fixed
@@ -128,16 +128,9 @@ impl BtSeedManager {
             }
         }
 
-        // Release the event receiver so actors blocked on a full queue can exit;
-        // the shared atomic remains authoritative for final accounting.
-        self.seed_peer_event_rx = None;
-        for actor in &mut self.seed_peer_actors {
-            actor.shutdown().await;
-        }
-        self.seed_peer_actors.clear();
-        self.seed_peer_actor_indices.clear();
-        self.seed_peer_event_tx = None;
-        self.seed_peer_event_rx = None;
+        // The swarm closes event delivery, prevents new actors, and joins all
+        // peer tasks; the shared atomic remains authoritative for accounting.
+        self.swarm.shutdown_all().await;
         self.total_uploaded = self
             .upload_counter
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -193,7 +186,7 @@ impl BtSeedManager {
         let deadline_wait = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
         tokio::pin!(deadline_wait);
         let incoming_receiver = &mut self.incoming_peers;
-        let event_receiver = &mut self.seed_peer_event_rx;
+        let mut event_receiver = self.swarm.lease_event_receiver();
 
         let event = tokio::select! {
             incoming = async {
@@ -207,7 +200,7 @@ impl BtSeedManager {
             },
             peer_event = async {
                 match event_receiver.as_mut() {
-                    Some(receiver) => receiver.recv().await,
+                    Some(receiver) => receiver.recv_unapplied().await,
                     None => std::future::pending().await,
                 }
             } => {
@@ -221,79 +214,57 @@ impl BtSeedManager {
     }
 
     fn start_seed_peer_actors(&mut self) {
-        if self.seed_peer_event_tx.is_some() {
-            return;
-        }
         let Some(provider) = self.piece_provider.as_ref().cloned() else {
             return;
         };
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
-        self.seed_peer_event_tx = Some(event_tx.clone());
-        self.seed_peer_event_rx = Some(event_rx);
         let sessions = std::mem::take(&mut self.upload_sessions);
         for connection in sessions {
-            let actor_id = connection.actor_id;
-            let actor_index = self.seed_peer_actors.len();
-            self.seed_peer_actors.push(SeedPeerActor::spawn(
-                actor_id,
-                connection,
-                Arc::clone(&provider),
-                event_tx.clone(),
-            ));
-            self.seed_peer_actor_indices.insert(actor_id, actor_index);
+            if let Err(connection) = self
+                .swarm
+                .spawn_peer(connection, None, Arc::clone(&provider))
+            {
+                let endpoint = connection.remote_endpoint();
+                drop(connection);
+                if let Some(endpoint) = endpoint {
+                    self.release_peer(endpoint);
+                }
+            }
         }
     }
 
-    fn any_interested_peer_is_choked(&self) -> bool {
-        self.peer_stats
+    pub(super) fn any_peer_choke_state_mismatch(&self) -> bool {
+        self.upload_sessions
             .iter()
-            .any(|stats| stats.peer_interested && stats.am_choking)
+            .map(|connection| &connection.stats)
+            .chain(self.swarm.iter().map(|actor| &actor.stats))
+            .any(|stats| stats.peer_interested == stats.am_choking)
     }
 
-    fn apply_peer_event(&mut self, event: PeerEvent) {
+    pub(super) fn apply_peer_event(&mut self, event: PeerEvent) {
+        self.swarm.apply_event(&event);
         match event {
-            PeerEvent::UploadBytes {
-                actor_id, snapshot, ..
-            } => {
-                self.update_actor_stats(actor_id, *snapshot);
+            PeerEvent::UploadBytes { .. } => {
                 self.total_uploaded = self
                     .upload_counter
                     .load(std::sync::atomic::Ordering::Relaxed);
                 self.publish_upload_stats();
             }
-            PeerEvent::InterestChanged {
-                actor_id, snapshot, ..
-            } => {
-                self.update_actor_stats(actor_id, *snapshot);
-            }
-            PeerEvent::Disconnected { actor_id, .. } => {
-                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
-                    && let Some(actor) = self.seed_peer_actors.get_mut(actor_index)
-                {
-                    actor.dead = true;
-                }
-            }
-            PeerEvent::RequestFailed { actor_id, .. } => {
-                if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
-                    && let Some(actor) = self.seed_peer_actors.get_mut(actor_index)
-                {
-                    actor.dead = true;
-                }
-            }
+            PeerEvent::InterestChanged { .. }
+            | PeerEvent::ChokeStateChanged { .. }
+            | PeerEvent::PeerChokingChanged { .. }
+            | PeerEvent::UploadQueueChanged { .. }
+            | PeerEvent::AvailabilityChanged { .. }
+            | PeerEvent::PeerAvailabilityChanged { .. }
+            | PeerEvent::PeerAvailabilitySnapshot { .. }
+            | PeerEvent::PexPeers { .. }
+            | PeerEvent::Disconnected { .. }
+            | PeerEvent::RequestFailed { .. } => {}
             PeerEvent::Message { actor_id, .. } => {
                 tracing::trace!(
                     actor_id = actor_id.0,
                     "Ignoring block message while seeding"
                 );
             }
-        }
-    }
-
-    fn update_actor_stats(&mut self, actor_id: PeerActorId, snapshot: PeerStats) {
-        if let Some(&actor_index) = self.seed_peer_actor_indices.get(&actor_id)
-            && let Some(stats) = self.peer_stats.get_mut(actor_index)
-        {
-            *stats = snapshot;
         }
     }
 
@@ -345,17 +316,11 @@ impl BtSeedManager {
                     .upload_sessions
                     .iter()
                     .any(|active| active.remote_peer_id() == Some(peer_id))
-                || self
-                    .seed_peer_actors
-                    .iter()
-                    .any(|actor| actor.endpoint == endpoint)
+                || self.swarm.has_peer_id(peer_id)
         }) || self.upload_sessions.iter().any(|active| {
             active.remote_ip() == endpoint.ip().to_string()
                 && active.remote_port() == endpoint.port()
-        }) || self
-            .seed_peer_actors
-            .iter()
-            .any(|actor| actor.endpoint == endpoint);
+        }) || self.swarm.has_endpoint(endpoint);
 
         if duplicate {
             debug!(%endpoint, remote_peer_id = ?remote_peer_id, "Rejected duplicate or self BitTorrent seed peer");
@@ -363,30 +328,32 @@ impl BtSeedManager {
             return;
         }
 
-        let peer_stats = connection.stats.clone();
-        if let (Some(provider), Some(event_tx)) = (
-            self.piece_provider.as_ref(),
-            self.seed_peer_event_tx.as_ref(),
-        ) {
-            let actor_id = connection.actor_id;
-            let actor_index = self.seed_peer_actors.len();
-            self.seed_peer_actors.push(SeedPeerActor::spawn(
-                actor_id,
-                connection,
-                std::sync::Arc::clone(provider),
-                event_tx.clone(),
-            ));
-            self.seed_peer_actor_indices.insert(actor_id, actor_index);
-            if let Some(actor) = self.seed_peer_actors.last_mut()
+        if let Some(provider) = self.piece_provider.as_ref().cloned() {
+            let Some(mut coordinator) = self.swarm.lease_event_receiver() else {
+                self.release_peer(endpoint);
+                self.publish_connection_state();
+                return;
+            };
+            let actor_id = match coordinator.spawn_peer(connection, None, provider) {
+                Ok(actor_id) => actor_id,
+                Err(connection) => {
+                    drop(coordinator);
+                    drop(connection);
+                    self.release_peer(endpoint);
+                    self.publish_connection_state();
+                    return;
+                }
+            };
+            if let Some(actor) = coordinator.actor_mut(actor_id)
                 && let Err(error) = actor.try_send(PeerCommand::AnnounceAvailability)
             {
                 actor.dead = true;
                 debug!(%endpoint, %error, "Failed to queue seed peer availability announcement");
             }
+            drop(coordinator);
         } else {
             self.upload_sessions.push(connection);
         }
-        self.peer_stats.push(peer_stats);
         self.publish_connection_state();
         info!(%endpoint, "Admitted incoming BitTorrent seed peer");
     }
@@ -400,33 +367,24 @@ impl BtSeedManager {
         }
     }
 
-    /// Remove disconnected peer workers or not-yet-started connections.
-    fn remove_dead_sessions(&mut self) {
-        if !self.seed_peer_actors.is_empty() || self.seed_peer_event_tx.is_some() {
-            let before = self.seed_peer_actors.len();
-            let mut index = self.seed_peer_actors.len();
-            while index > 0 {
-                index -= 1;
-                let actor = &self.seed_peer_actors[index];
-                if actor.dead {
-                    self.release_peer(actor.endpoint);
-                    self.seed_peer_actor_indices.remove(&actor.actor_id);
-                    self.seed_peer_actors.remove(index);
-                    if index < self.peer_stats.len() {
-                        self.peer_stats.remove(index);
-                    }
-                }
+    /// Remove disconnected peers and report whether upstream requires an
+    /// immediate choke round for a returned unchoked, interested peer.
+    pub(super) async fn remove_dead_sessions(&mut self) -> bool {
+        if !self.swarm.is_empty() {
+            let before = self.swarm.len();
+            let needs_choke_round = self
+                .swarm
+                .iter()
+                .any(|actor| actor.dead && actor.stats.peer_interested && !actor.stats.am_choking);
+            let removed = self.swarm.remove_dead().await;
+            for (_, endpoint) in &removed {
+                self.release_peer(*endpoint);
             }
-            self.peer_stats.truncate(self.seed_peer_actors.len());
-            for (actor_index, actor) in self.seed_peer_actors.iter().enumerate() {
-                self.seed_peer_actor_indices
-                    .insert(actor.actor_id, actor_index);
+            let removed_count = before - self.swarm.len();
+            if removed_count > 0 {
+                debug!("Removed {} dead seeding peer actors", removed_count);
             }
-            let removed = before - self.seed_peer_actors.len();
-            if removed > 0 {
-                debug!("Removed {} dead seeding peer actors", removed);
-            }
-            return;
+            return needs_choke_round;
         }
         let before = self.upload_sessions.len();
         // Collect indices of dead sessions
@@ -437,6 +395,10 @@ impl BtSeedManager {
             .filter(|(_, connection)| !connection.is_connected())
             .map(|(i, _)| i)
             .collect();
+        let needs_choke_round = dead_indices.iter().any(|&index| {
+            let stats = &self.upload_sessions[index].stats;
+            stats.peer_interested && !stats.am_choking
+        });
 
         // Remove in reverse order to keep indices stable
         for idx in dead_indices.into_iter().rev() {
@@ -449,90 +411,78 @@ impl BtSeedManager {
                     .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
             }
             self.upload_sessions.remove(idx);
-            if idx < self.peer_stats.len() {
-                self.peer_stats.remove(idx);
-            }
         }
-
-        // Keep the parallel statistics vector aligned even if it was already
-        // out of sync before dead sessions were removed.
-        self.peer_stats.truncate(self.upload_sessions.len());
 
         let removed = before - self.upload_sessions.len();
         if removed > 0 {
             debug!("Removed {} dead upload sessions", removed);
         }
+        needs_choke_round
     }
 
-    /// Sync state from pre-worker connections and peer events to PeerStats.
-    ///
-    /// Peer connections own the authoritative `peer_interested` and
-    /// `uploaded_bytes` values. Events update the corresponding peer stats
-    /// before the choking algorithm runs.
+    /// Refresh speed estimates from the authoritative connection and actor stats.
     fn sync_sessions_to_stats(&mut self) {
-        let len = self.num_sessions().min(self.peer_stats.len());
-        for i in 0..len {
-            let (interested, uploaded_bytes) = if let Some(session) = self.upload_sessions.get(i) {
-                (session.stats.peer_interested, session.stats.uploaded_bytes)
-            } else {
-                let stats = &self.peer_stats[i];
-                (stats.peer_interested, stats.uploaded_bytes)
-            };
-            let stats = &mut self.peer_stats[i];
-            stats.peer_interested = interested;
-            stats.uploaded_bytes = uploaded_bytes;
-            // Estimate upload speed from session's bytes and elapsed time
-            let elapsed = self.seeding_start_time.elapsed().as_secs_f64();
-            if elapsed > 0.0 {
-                stats.upload_speed = uploaded_bytes as f64 / elapsed;
+        let elapsed = self.seeding_start_time.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            for connection in &mut self.upload_sessions {
+                connection.stats.upload_speed = connection.stats.uploaded_bytes as f64 / elapsed;
+            }
+            for actor in self.swarm.iter_mut() {
+                actor.stats.upload_speed = actor.stats.uploaded_bytes as f64 / elapsed;
             }
         }
     }
 
-    /// Run one round of the seeder-state choking algorithm.
-    fn run_choke_round(&mut self) {
-        // Take ownership of peer_stats temporarily so the choking algorithm
-        // can modify them through &mut references without aliasing self.
-        let mut peer_stats = std::mem::take(&mut self.peer_stats);
-
-        // Build mutable slice references for the choking algorithm
-        let mut peers_mut: Vec<&mut PeerStats> = peer_stats.iter_mut().collect();
+    /// Compute choke decisions from actor-owned stats and apply the results.
+    async fn run_choke_round(&mut self) {
+        let mut desired_stats = self
+            .upload_sessions
+            .iter()
+            .map(|connection| connection.stats.clone())
+            .chain(self.swarm.iter().map(|actor| actor.stats.clone()))
+            .collect::<Vec<_>>();
+        let mut peers_mut: Vec<&mut PeerStats> = desired_stats.iter_mut().collect();
         self.seeder_choke.execute_choke(&mut peers_mut[..]);
 
-        // Restore peer_stats
-        self.peer_stats = peer_stats;
-    }
-
-    /// Apply choke/unchoke decisions from PeerStats to peer workers.
-    ///
-    /// After the choking algorithm sets `am_choking` on PeerStats, send the
-    /// corresponding Choke/Unchoke commands through each worker channel.
-    async fn apply_choke_decisions(&mut self) {
-        let len = self.num_sessions().min(self.peer_stats.len());
-        for i in 0..len {
-            let stats_am_choking = self.peer_stats[i].am_choking;
-            if let Some(connection) = self.upload_sessions.get_mut(i) {
-                if stats_am_choking && !connection.stats.am_choking {
-                    if let Err(error) = connection.choke_upload_peer().await {
-                        warn!("Failed to choke peer: {}", error);
-                    }
-                } else if !stats_am_choking
-                    && connection.stats.am_choking
-                    && let Err(error) = connection.unchoke_upload_peer().await
-                {
-                    warn!("Failed to unchoke peer: {}", error);
+        let desired_choking = desired_stats
+            .into_iter()
+            .map(|stats| stats.am_choking)
+            .collect::<Vec<_>>();
+        let upload_count = self.upload_sessions.len();
+        for (connection, desired) in self
+            .upload_sessions
+            .iter_mut()
+            .zip(desired_choking.iter().copied())
+        {
+            if desired && !connection.stats.am_choking {
+                if let Err(error) = connection.choke_upload_peer().await {
+                    warn!("Failed to choke peer: {}", error);
                 }
+            } else if !desired
+                && connection.stats.am_choking
+                && let Err(error) = connection.unchoke_upload_peer().await
+            {
+                warn!("Failed to unchoke peer: {}", error);
+            }
+        }
+        for (actor, desired) in self
+            .swarm
+            .iter()
+            .zip(desired_choking.into_iter().skip(upload_count))
+        {
+            if desired == actor.stats.am_choking {
                 continue;
             }
-            if let Some(actor) = self.seed_peer_actors.get(i - self.upload_sessions.len()) {
-                let command = if stats_am_choking {
-                    PeerCommand::ChokeUpload
-                } else {
-                    PeerCommand::UnchokeUpload
-                };
-                if let Err(error) = actor.send(command).await {
-                    warn!("Failed to send choke decision to peer actor: {}", error);
-                }
+            let command = if desired {
+                PeerCommand::ChokeUpload
+            } else {
+                PeerCommand::UnchokeUpload
+            };
+            if let Err(error) = self.swarm.send_to(actor.actor_id, command).await {
+                warn!(
+                    actor_id = actor.actor_id.0,
+                    "Failed to send choke decision to peer actor: {}", error
+                );
             }
         }
     }

@@ -255,10 +255,11 @@ impl Command for BtDownloadCommand {
         if self.seed_enabled {
             info!(
                 "Starting seeding phase with {} peers...",
-                session.active_connections.len()
+                session.swarm.len()
             );
-            self.run_seeding_phase(
-                session.active_connections,
+            self.run_seeding_phase_with_swarm(
+                std::mem::take(&mut session.pending_connections),
+                session.swarm,
                 piece_length,
                 num_pieces,
                 network_info_hash,
@@ -266,6 +267,7 @@ impl Command for BtDownloadCommand {
             .await?;
         } else {
             info!("Skipping seeding (enabled={})", self.seed_enabled,);
+            session.swarm.shutdown_all().await;
         }
 
         let started_at = self.started_at.unwrap_or_else(Instant::now);

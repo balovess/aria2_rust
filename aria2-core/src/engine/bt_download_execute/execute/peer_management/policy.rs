@@ -1,10 +1,4 @@
-use std::collections::HashMap;
-use std::time::Instant;
-
-use tracing::debug;
-
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::util::rwlock_ext::RwLockRecover;
 
@@ -48,60 +42,6 @@ impl BtDownloadCommand {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .count_all_peers()
-    }
-
-    /// Check all tracked peers for snubbing (no data received within timeout).
-    /// Called periodically from the download loop.
-    pub(in crate::engine::bt_download_execute::execute) fn check_and_mark_snubbed_peers(
-        &mut self,
-        last_snub_check: &mut Instant,
-        peer_last_data_time: &HashMap<PeerKey, Instant>,
-        active_connections: &[BtPeerConn],
-    ) {
-        const SNUB_CHECK_INTERVAL_SECS: u64 = 10;
-        const SNUB_TIMEOUT_SECS: u64 = 30;
-
-        if last_snub_check.elapsed().as_secs() < SNUB_CHECK_INTERVAL_SECS {
-            return;
-        }
-        *last_snub_check = Instant::now();
-
-        let mut connection_indices = HashMap::with_capacity(active_connections.len());
-        for (index, connection) in active_connections.iter().enumerate() {
-            if let Some(peer_id) = PeerKey::from_peer(&connection.ip_addr, connection.port) {
-                connection_indices.entry(peer_id).or_insert(index);
-            }
-        }
-
-        let mut newly_snubbed = Vec::new();
-        for (&peer_id, &last_time) in peer_last_data_time {
-            if last_time.elapsed().as_secs() > SNUB_TIMEOUT_SECS {
-                if let Some(&index) = connection_indices.get(&peer_id) {
-                    self.mark_peer_snubbed(index);
-                }
-                newly_snubbed.push(peer_id);
-                debug!(
-                    "[BT] Peer {} marked as snubbed (no data for {}s)",
-                    peer_id.address(),
-                    last_time.elapsed().as_secs()
-                );
-            }
-        }
-        if !newly_snubbed.is_empty() {
-            debug!(
-                "[BT] Snub check: {} peers newly snubbed",
-                newly_snubbed.len()
-            );
-        }
-
-        // Also run the PeerStats-level snub check (timeout-based)
-        let stats_snubbed = self.check_snubbed_peers();
-        if !stats_snubbed.is_empty() {
-            debug!(
-                "[BT] PeerStats snub check: {} peers timed out",
-                stats_snubbed.len()
-            );
-        }
     }
 
     /// Update tracker demand from the live connection count.

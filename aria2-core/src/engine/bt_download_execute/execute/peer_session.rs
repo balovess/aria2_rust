@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_download_execute::types::PeerKey;
+use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError};
 use crate::http::client_identity::ClientTlsConfig;
@@ -15,7 +16,11 @@ use super::environment::parse_listen_ports;
 
 /// Torrent-scoped swarm state retained from peer discovery through seeding.
 pub(super) struct TorrentSession {
-    pub(super) active_connections: Vec<BtPeerConn>,
+    /// Handshaken peers waiting for the download-side actor context to be ready.
+    /// They are drained into `swarm` before piece scheduling begins.
+    pub(super) pending_connections: Vec<BtPeerConn>,
+    /// Registry handed directly from download-session lifetime into seeding.
+    pub(super) swarm: PeerSwarm,
     pub(super) web_seed_manager: Option<Arc<crate::engine::bt_web_seed::WebSeedManager>>,
     pub(super) pex_enabled_peers: HashSet<PeerKey>,
     pub(super) last_pex_send: Instant,
@@ -241,7 +246,7 @@ impl BtDownloadCommand {
         // Admit handshaken incoming peers before the first piece cycle. Later
         // cycles drain the receiver below, preserving PeerListenCommand's
         // long-lived listener semantics.
-        self.drain_incoming_peers(
+        self.stage_incoming_peers(
             &mut active_connections,
             piece_length,
             num_pieces,
@@ -250,7 +255,8 @@ impl BtDownloadCommand {
 
         // Download pieces from the connected peers, using web seeds and PEX as configured.
         Ok(TorrentSession {
-            active_connections,
+            pending_connections: active_connections,
+            swarm: PeerSwarm::new(64),
             web_seed_manager,
             pex_enabled_peers,
             last_pex_send,

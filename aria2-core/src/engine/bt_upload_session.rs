@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use std::collections::VecDeque;
 use tracing::{debug, warn};
 
 use crate::error::Result;
@@ -7,6 +8,7 @@ use crate::rate_limiter::RateLimiterConfig;
 
 use crate::engine::bt_message_validation::BtMessageValidator;
 use aria2_protocol::bittorrent::message::types::BtMessage;
+use aria2_protocol::bittorrent::message::types::PieceBlockRequest;
 use aria2_protocol::bittorrent::peer::connection::PeerConnection;
 
 #[async_trait]
@@ -51,10 +53,26 @@ pub(crate) struct BtUploadState {
     global_upload_limiter: Option<RateLimiter>,
     message_validator: Option<BtMessageValidator>,
     upload_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    outbound: VecDeque<PendingUploadMessage>,
+}
+
+const MAX_PENDING_UPLOAD_MESSAGES: usize = 64;
+
+enum PendingUploadMessage {
+    /// Piece data is loaded only when the queue is flushed, so a matching
+    /// inbound Cancel can invalidate this item first.
+    Piece(PieceBlockRequest),
+    Message(BtMessage),
 }
 
 #[async_trait]
 pub(crate) trait BtUploadTransport {
+    fn supports_fast_extension(&self) -> bool {
+        false
+    }
+    fn am_allowed_fast(&self, _piece_index: u32) -> bool {
+        false
+    }
     async fn send_upload_message(&mut self, message: &BtMessage)
     -> std::result::Result<(), String>;
     async fn send_upload_choke(&mut self) -> std::result::Result<(), String>;
@@ -63,6 +81,10 @@ pub(crate) trait BtUploadTransport {
 
 #[async_trait]
 impl BtUploadTransport for PeerConnection {
+    fn supports_fast_extension(&self) -> bool {
+        self.remote_supports_fast_extension()
+    }
+
     async fn send_upload_message(
         &mut self,
         message: &BtMessage,
@@ -95,6 +117,7 @@ impl BtUploadState {
             global_upload_limiter: config.global_limiter.clone(),
             message_validator: None,
             upload_counter: None,
+            outbound: VecDeque::new(),
         }
     }
 
@@ -149,7 +172,6 @@ impl BtUploadState {
         message: BtMessage,
         provider: &dyn PieceDataProvider,
     ) -> Result<u64> {
-        let round_uploaded = self.uploaded_bytes;
         if let Some(validator) = &self.message_validator {
             validator.validate(&message).map_err(|error| {
                 crate::error::Aria2Error::Fatal(crate::error::FatalError::Config(format!(
@@ -160,62 +182,25 @@ impl BtUploadState {
 
         match message {
             BtMessage::Request { request } => {
-                if !self.am_choke_state && self.peer_interested {
+                let allowed_while_choked = transport.am_allowed_fast(request.index);
+                let has_piece = provider.has_piece(request.index);
+                if (!self.am_choke_state || allowed_while_choked) && has_piece {
                     debug!(
                         "Upload request: piece={}, offset={}, len={}",
                         request.index, request.begin, request.length
                     );
-                    if let Some(piece_data) = provider.has_piece(request.index).then(|| {
-                        provider.get_piece_data(request.index, request.begin, request.length)
-                    }) {
-                        if let Some(piece_data) = piece_data.await {
-                            let data_len = piece_data.len() as u64;
-                            if data_len != request.length as u64 {
-                                warn!(
-                                    "Piece provider returned {} bytes for a {}-byte request (piece={}, offset={})",
-                                    data_len, request.length, request.index, request.begin
-                                );
-                            } else {
-                                if let Some(ref limiter) = self.upload_limiter {
-                                    limiter.acquire_upload(data_len).await;
-                                }
-                                if let Some(ref limiter) = self.global_upload_limiter
-                                    && limiter.is_upload_limited()
-                                {
-                                    limiter.acquire_upload(data_len).await;
-                                }
-                                transport
-                                    .send_upload_message(&BtMessage::Piece {
-                                        index: request.index,
-                                        begin: request.begin,
-                                        data: piece_data.into(),
-                                    })
-                                    .await
-                                    .map_err(|error| {
-                                        crate::error::Aria2Error::Recoverable(
-                                            crate::error::RecoverableError::TemporaryNetworkFailure {
-                                                message: error,
-                                            },
-                                        )
-                                    })?;
-                                self.uploaded_bytes += data_len;
-                                if let Some(counter) = &self.upload_counter {
-                                    counter
-                                        .fetch_add(data_len, std::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
-                        }
-                    } else {
-                        warn!(
-                            "No data for piece {} at offset {}",
-                            request.index, request.begin
-                        );
+                    if self.outbound.len() < MAX_PENDING_UPLOAD_MESSAGES {
+                        self.outbound
+                            .push_back(PendingUploadMessage::Piece(request));
                     }
                 } else {
                     debug!(
-                        "Ignoring request: choked={} interested={}",
-                        self.am_choke_state, self.peer_interested
+                        piece = request.index,
+                        choked = self.am_choke_state && !allowed_while_choked,
+                        has_piece,
+                        "Cannot queue upload response for request"
                     );
+                    self.queue_reject_if_fast(transport, &request);
                 }
             }
             BtMessage::Interested => {
@@ -228,10 +213,22 @@ impl BtUploadState {
             BtMessage::Choke => debug!("Peer choked us"),
             BtMessage::Unchoke => debug!("Peer unchoked us"),
             BtMessage::Have { piece_index } => debug!("Peer has piece {}", piece_index),
-            BtMessage::Cancel { request } => debug!(
-                "Peer cancelled request for piece {} offset {}",
-                request.index, request.begin
-            ),
+            BtMessage::Cancel { request } => {
+                let before = self.outbound.len();
+                self.outbound.retain(|message| {
+                    !matches!(message, PendingUploadMessage::Piece(pending) if pending == &request)
+                });
+                let canceled = before != self.outbound.len();
+                debug!(
+                    piece = request.index,
+                    offset = request.begin,
+                    canceled,
+                    "Peer cancelled queued upload response"
+                );
+                if canceled {
+                    self.queue_reject_if_fast(transport, &request);
+                }
+            }
             BtMessage::Piece { .. } => debug!("Unexpected Piece from peer during upload"),
             BtMessage::Bitfield { .. }
             | BtMessage::KeepAlive
@@ -244,7 +241,91 @@ impl BtUploadState {
             | BtMessage::Extended { .. } => {}
         }
 
-        Ok(self.uploaded_bytes - round_uploaded)
+        Ok(0)
+    }
+
+    pub(crate) fn has_pending_messages(&self) -> bool {
+        !self.outbound.is_empty()
+    }
+
+    pub(crate) fn outstanding_upload_count(&self) -> usize {
+        self.outbound
+            .iter()
+            .filter(|message| matches!(message, PendingUploadMessage::Piece(_)))
+            .count()
+    }
+
+    pub(crate) async fn flush_pending_messages<T: BtUploadTransport>(
+        &mut self,
+        transport: &mut T,
+        provider: &dyn PieceDataProvider,
+    ) -> Result<u64> {
+        let uploaded_before = self.uploaded_bytes;
+        while let Some(message) = self.outbound.pop_front() {
+            match message {
+                PendingUploadMessage::Message(message) => {
+                    send_upload_message(transport, &message).await?;
+                }
+                PendingUploadMessage::Piece(request) => {
+                    let Some(data) = provider
+                        .get_piece_data(request.index, request.begin, request.length)
+                        .await
+                    else {
+                        warn!(
+                            piece = request.index,
+                            offset = request.begin,
+                            "No data for queued upload request"
+                        );
+                        self.queue_reject_if_fast(transport, &request);
+                        continue;
+                    };
+                    let data_len = data.len() as u64;
+                    if data_len != request.length as u64 {
+                        warn!(
+                            "Piece provider returned {} bytes for a {}-byte request (piece={}, offset={})",
+                            data_len, request.length, request.index, request.begin
+                        );
+                        self.queue_reject_if_fast(transport, &request);
+                        continue;
+                    }
+                    if let Some(ref limiter) = self.upload_limiter {
+                        limiter.acquire_upload(data_len).await;
+                    }
+                    if let Some(ref limiter) = self.global_upload_limiter
+                        && limiter.is_upload_limited()
+                    {
+                        limiter.acquire_upload(data_len).await;
+                    }
+                    let message = BtMessage::Piece {
+                        index: request.index,
+                        begin: request.begin,
+                        data: data.into(),
+                    };
+                    send_upload_message(transport, &message).await?;
+                    self.uploaded_bytes += data_len;
+                    if let Some(counter) = &self.upload_counter {
+                        counter.fetch_add(data_len, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        Ok(self.uploaded_bytes - uploaded_before)
+    }
+
+    fn queue_reject_if_fast<T: BtUploadTransport>(
+        &mut self,
+        transport: &T,
+        request: &PieceBlockRequest,
+    ) {
+        if transport.supports_fast_extension() && self.outbound.len() < MAX_PENDING_UPLOAD_MESSAGES
+        {
+            self.outbound
+                .push_back(PendingUploadMessage::Message(BtMessage::Reject {
+                    index: request.index,
+                    offset: request.begin,
+                    length: request.length,
+                }));
+        }
     }
 
     pub(crate) async fn unchoke_peer<T: BtUploadTransport>(
@@ -290,6 +371,21 @@ impl BtUploadState {
     }
 }
 
+async fn send_upload_message<T: BtUploadTransport>(
+    transport: &mut T,
+    message: &BtMessage,
+) -> Result<()> {
+    transport
+        .send_upload_message(message)
+        .await
+        .map_err(|message| {
+            crate::error::Aria2Error::Recoverable(
+                crate::error::RecoverableError::TemporaryNetworkFailure { message },
+            )
+        })?;
+    Ok(())
+}
+
 pub struct BtUploadSession {
     conn: PeerConnection,
     state: BtUploadState,
@@ -333,29 +429,54 @@ impl BtUploadSession {
             return Ok(0);
         }
 
-        let round_uploaded = self.state.uploaded_bytes();
-        match self.conn.read_message().await {
-            Ok(Some(msg)) => {
-                if let Err(error) = self
-                    .state
-                    .handle_message(&mut self.conn, msg, provider)
-                    .await
-                {
-                    warn!("Invalid BitTorrent upload message: {}", error);
+        let uploaded_before = self.state.uploaded_bytes();
+        let mut flush_deadline: Option<tokio::time::Instant> = None;
+        loop {
+            let incoming = if let Some(deadline) = flush_deadline {
+                tokio::select! {
+                    biased;
+                    message = self.conn.read_message() => message,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        if let Err(error) = self.state.flush_pending_messages(&mut self.conn, provider).await {
+                            warn!("Failed to flush queued BitTorrent upload responses: {}", error);
+                            self.is_dead = true;
+                            return Ok(0);
+                        }
+                        return Ok(self.state.uploaded_bytes() - uploaded_before);
+                    }
+                }
+            } else {
+                self.conn.read_message().await
+            };
+
+            match incoming {
+                Ok(Some(message)) => {
+                    if let Err(error) = self
+                        .state
+                        .handle_message(&mut self.conn, message, provider)
+                        .await
+                    {
+                        warn!("Invalid BitTorrent upload message: {}", error);
+                        self.is_dead = true;
+                        return Ok(0);
+                    }
+                    if !self.state.has_pending_messages() {
+                        return Ok(self.state.uploaded_bytes() - uploaded_before);
+                    }
+                    flush_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + std::time::Duration::from_millis(2)
+                    });
+                }
+                Ok(None) => {
+                    debug!("EOF from peer, marking session as dead");
                     self.is_dead = true;
                     return Ok(0);
                 }
-                Ok(self.state.uploaded_bytes() - round_uploaded)
-            }
-            Ok(None) => {
-                debug!("EOF from peer, marking session as dead");
-                self.is_dead = true;
-                Ok(0)
-            }
-            Err(e) => {
-                warn!("Read error from upload peer: {}, marking dead", e);
-                self.is_dead = true;
-                Ok(0)
+                Err(error) => {
+                    warn!("Read error from upload peer: {}, marking dead", error);
+                    self.is_dead = true;
+                    return Ok(0);
+                }
             }
         }
     }
@@ -477,12 +598,23 @@ impl PieceDataProvider for InMemoryPieceProvider {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
     struct TestUploadTransport {
         sent: Vec<BtMessage>,
+        supports_fast_extension: bool,
+        am_allowed_fast: std::collections::HashSet<u32>,
     }
 
     #[async_trait]
     impl BtUploadTransport for TestUploadTransport {
+        fn supports_fast_extension(&self) -> bool {
+            self.supports_fast_extension
+        }
+
+        fn am_allowed_fast(&self, piece_index: u32) -> bool {
+            self.am_allowed_fast.contains(&piece_index)
+        }
+
         async fn send_upload_message(
             &mut self,
             message: &BtMessage,
@@ -500,6 +632,54 @@ mod tests {
             self.sent.push(BtMessage::Unchoke);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn outstanding_upload_count_tracks_queued_piece_responses() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x5a; 32]);
+        let request = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+            index: 0,
+            begin: 4,
+            length: 8,
+        };
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        let mut transport = TestUploadTransport::default();
+
+        state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: request.clone(),
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.outstanding_upload_count(), 1);
+
+        state
+            .handle_message(
+                &mut transport,
+                BtMessage::Cancel {
+                    request: request.clone(),
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.outstanding_upload_count(), 0);
+
+        state
+            .handle_message(&mut transport, BtMessage::Request { request }, &provider)
+            .await
+            .unwrap();
+        assert_eq!(state.outstanding_upload_count(), 1);
+        state
+            .flush_pending_messages(&mut transport, &provider)
+            .await
+            .unwrap();
+        assert_eq!(state.outstanding_upload_count(), 0);
     }
 
     #[test]
@@ -587,7 +767,7 @@ mod tests {
         let mut provider = InMemoryPieceProvider::new(32, 2);
         provider.set_piece_data(0, vec![0x5a; 32]);
         let mut state = BtUploadState::new(&BtSeedingConfig::default());
-        let mut transport = TestUploadTransport { sent: Vec::new() };
+        let mut transport = TestUploadTransport::default();
 
         state
             .handle_message(&mut transport, BtMessage::Interested, &provider)
@@ -607,6 +787,11 @@ mod tests {
             )
             .await
             .unwrap();
+        let uploaded = uploaded
+            + state
+                .flush_pending_messages(&mut transport, &provider)
+                .await
+                .unwrap();
 
         assert_eq!(uploaded, 8);
         assert!(matches!(transport.sent.first(), Some(BtMessage::Unchoke)));
@@ -623,7 +808,7 @@ mod tests {
         provider.set_piece_data(0, vec![0x3c; 32]);
         let mut state = BtUploadState::new(&BtSeedingConfig::default());
         state.set_auto_unchoke(false);
-        let mut transport = TestUploadTransport { sent: Vec::new() };
+        let mut transport = TestUploadTransport::default();
 
         state
             .handle_message(&mut transport, BtMessage::Interested, &provider)
@@ -647,5 +832,271 @@ mod tests {
         assert_eq!(uploaded, 0);
         assert!(state.is_peer_choked());
         assert!(transport.sent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn choked_peer_can_request_piece_granted_by_allowed_fast() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x7b; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        state.set_auto_unchoke(false);
+        let mut transport = TestUploadTransport {
+            am_allowed_fast: [0].into_iter().collect(),
+            ..Default::default()
+        };
+
+        let uploaded = state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+                        index: 0,
+                        begin: 0,
+                        length: 8,
+                    },
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        let uploaded = uploaded
+            + state
+                .flush_pending_messages(&mut transport, &provider)
+                .await
+                .unwrap();
+
+        assert_eq!(uploaded, 8);
+        assert!(matches!(
+            transport.sent.as_slice(),
+            [BtMessage::Piece { index: 0, begin: 0, data }] if data.as_ref() == &[0x7b; 8]
+        ));
+    }
+
+    #[tokio::test]
+    async fn choked_fast_peer_receives_reject_for_unallowed_piece_request() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x7b; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        state.set_auto_unchoke(false);
+        let mut transport = TestUploadTransport {
+            supports_fast_extension: true,
+            ..Default::default()
+        };
+
+        let uploaded = state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+                        index: 0,
+                        begin: 4,
+                        length: 8,
+                    },
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        state
+            .flush_pending_messages(&mut transport, &provider)
+            .await
+            .unwrap();
+
+        assert_eq!(uploaded, 0);
+        assert!(matches!(
+            transport.sent.as_slice(),
+            [BtMessage::Reject {
+                index: 0,
+                offset: 4,
+                length: 8
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_removes_queued_piece_and_queues_fast_reject() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x6d; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        let mut transport = TestUploadTransport {
+            supports_fast_extension: true,
+            ..Default::default()
+        };
+        let request = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+            index: 0,
+            begin: 8,
+            length: 8,
+        };
+
+        state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: request.clone(),
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        state
+            .handle_message(&mut transport, BtMessage::Cancel { request }, &provider)
+            .await
+            .unwrap();
+
+        assert_eq!(transport.sent.len(), 0);
+        assert!(state.has_pending_messages());
+        state
+            .flush_pending_messages(&mut transport, &provider)
+            .await
+            .unwrap();
+        assert!(matches!(
+            transport.sent.as_slice(),
+            [BtMessage::Reject {
+                index: 0,
+                offset: 8,
+                length: 8
+            }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_does_not_reject_when_fast_extension_is_unavailable() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x6d; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        let mut transport = TestUploadTransport::default();
+        let request = aria2_protocol::bittorrent::message::types::PieceBlockRequest {
+            index: 0,
+            begin: 0,
+            length: 8,
+        };
+
+        state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: request.clone(),
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        state
+            .handle_message(&mut transport, BtMessage::Cancel { request }, &provider)
+            .await
+            .unwrap();
+        state
+            .flush_pending_messages(&mut transport, &provider)
+            .await
+            .unwrap();
+
+        assert!(transport.sent.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_only_removes_an_exact_queued_piece_request() {
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x6d; 32]);
+        let mut state = BtUploadState::new(&BtSeedingConfig::default());
+        let mut transport = TestUploadTransport::default();
+        let request = PieceBlockRequest::new(0, 0, 8);
+
+        state
+            .handle_message(
+                &mut transport,
+                BtMessage::Request {
+                    request: request.clone(),
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        state
+            .handle_message(
+                &mut transport,
+                BtMessage::Cancel {
+                    request: PieceBlockRequest::new(0, 8, 8),
+                },
+                &provider,
+            )
+            .await
+            .unwrap();
+        state
+            .flush_pending_messages(&mut transport, &provider)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            transport.sent.as_slice(),
+            [BtMessage::Piece {
+                index: 0,
+                begin: 0,
+                data
+            }] if data.as_ref() == &[0x6d; 8]
+        ));
+    }
+
+    #[tokio::test]
+    async fn upload_session_consumes_cancel_before_flushing_piece_response() {
+        use aria2_protocol::bittorrent::message::serializer::serialize;
+        use tokio::io::AsyncWriteExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let sender = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let peer = PeerConnection::from_stream_with_peer(server, [0; 20], false, true);
+        let mut session = BtUploadSession::new(peer, &BtSeedingConfig::default());
+        let mut provider = InMemoryPieceProvider::new(32, 1);
+        provider.set_piece_data(0, vec![0x4a; 32]);
+        let request = PieceBlockRequest::new(0, 8, 8);
+        let mut input = serialize(&BtMessage::Request {
+            request: request.clone(),
+        });
+        input.extend_from_slice(&serialize(&BtMessage::Cancel { request }));
+        let mut sender = sender;
+        sender.write_all(&input).await.unwrap();
+        let mut receiver = PeerConnection::from_stream_with_peer(sender, [1; 20], false, false);
+
+        let uploaded = session.handle_incoming_messages(&provider).await.unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            receiver.read_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(uploaded, 0);
+        assert_eq!(
+            response,
+            BtMessage::Reject {
+                index: 0,
+                offset: 8,
+                length: 8,
+            }
+        );
+
+        let request = PieceBlockRequest::new(0, 16, 8);
+        receiver
+            .send_message(&BtMessage::Request { request })
+            .await
+            .unwrap();
+        let uploaded = session.handle_incoming_messages(&provider).await.unwrap();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            receiver.read_message(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!(uploaded, 8);
+        assert!(matches!(
+            response,
+            BtMessage::Piece { index: 0, begin: 16, ref data }
+                if data.as_ref() == &[0x4a; 8]
+        ));
     }
 }

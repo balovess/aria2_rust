@@ -6,11 +6,12 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::error::{Aria2Error, FatalError, Result};
-use crate::filesystem::disk_adaptor::{DirectDiskAdaptor, DiskAdaptor};
+use crate::filesystem::disk_writer::SeekableDiskWriter;
 use crate::filesystem::file_allocation::{self, AllocationStrategy};
 use crate::filesystem::file_allocation_iterator::{
     AdaptiveFileAllocationIterator, FileAllocationIterator,
 };
+use crate::filesystem::positioned_disk_writer::PositionedDiskWriter;
 
 use super::cancelled_error;
 use super::queue::{AllocationKind, FileAllocationEntry, FileAllocationMan};
@@ -166,8 +167,8 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
         return Ok(());
     }
 
-    let mut adaptor = DirectDiskAdaptor::new();
-    adaptor.open(path).await?;
+    let mut adaptor = PositionedDiskWriter::new(path, None);
+    crate::filesystem::disk_writer::SeekableDiskWriter::open(&mut adaptor).await?;
     let mut adaptor = Some(adaptor);
 
     let allocation_result: Result<()> = async {
@@ -217,7 +218,6 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
                 }
                 file_allocation::allocate_file(
                     adaptor.as_mut().expect("open adaptor is present"),
-                    path,
                     length,
                     AllocationStrategy::Falloc,
                     entry.secure_falloc,
@@ -234,7 +234,7 @@ async fn allocate_single_file(path: &Path, length: u64, entry: &FileAllocationEn
     .await;
 
     let close_result = match adaptor.as_mut() {
-        Some(adaptor) => adaptor.close().await,
+        Some(adaptor) => adaptor.close_without_sync("file allocation close").await,
         None => Ok(()),
     };
     match (allocation_result, close_result) {

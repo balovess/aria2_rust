@@ -1,9 +1,8 @@
 use std::time::Instant;
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_message_handler::BtMessageHandler;
 use crate::engine::bt_message_handler::types::BLOCK_SIZE;
-use crate::engine::bt_peer_interaction::BtPeerInteraction;
+use crate::engine::bt_message_handler::{download_piece_blocks, download_piece_blocks_endgame};
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::DownloadResultCode;
@@ -85,11 +84,7 @@ impl PieceDownloadSession<'_> {
                 accounted_bytes,
             )
             .await?;
-        crate::engine::bt_peer_interaction::BtPeerInteraction::broadcast_have(
-            self.active_connections,
-            piece_index,
-        )
-        .await;
+        self.swarm.broadcast_have(piece_index).await;
         self.command.maybe_save_progress(
             self.meta,
             &self.completed_bitfield,
@@ -175,38 +170,34 @@ impl PieceDownloadSession<'_> {
         let piece_download = async {
             if self.endgame_state.is_endgame_active() {
                 info!(
-                    "[BT] Endgame: downloading piece {} with duplicate requests ({} peers available)",
+                    "[BT] Endgame: downloading piece {} with duplicate requests ({} swarm peers available)",
                     next_piece_idx,
-                    self.active_connections.len()
+                    self.swarm.len()
                 );
-                BtMessageHandler::download_piece_blocks_endgame_with_sources_and_activity_with_timeout_and_max_attempts_and_provider_and_choking(
-                                self.active_connections,
-                                next_piece_idx as u32,
-                                actual_piece_len,
-                                num_blocks,
-                                &mut self.endgame_state,
-                                self.command.dht_engine.clone(),
-                                Some(std::sync::Arc::clone(&self.upload_provider)),
-                                Some(self.command.progress.as_ref()),
-                                self.request_timeout,
-                                max_attempts,
-                                self.command.choking_algo.as_mut(),
-                            )
-                            .await
+                download_piece_blocks_endgame(
+                    self.swarm,
+                    next_piece_idx as u32,
+                    actual_piece_len,
+                    num_blocks,
+                    &mut self.endgame_state,
+                    Some(self.command.progress.as_ref()),
+                    self.request_timeout,
+                    max_attempts,
+                    self.command.choking_algo.as_mut(),
+                )
+                .await
             } else {
-                BtMessageHandler::download_piece_blocks_with_sources_and_activity_with_timeout_and_max_attempts_and_provider_and_choking(
-                                self.active_connections,
-                                next_piece_idx as u32,
-                                actual_piece_len,
-                                num_blocks,
-                                self.command.dht_engine.clone(),
-                                Some(std::sync::Arc::clone(&self.upload_provider)),
-                                Some(self.command.progress.as_ref()),
-                                self.request_timeout,
-                                max_attempts,
-                                self.command.choking_algo.as_mut(),
-                            )
-                            .await
+                download_piece_blocks(
+                    self.swarm,
+                    next_piece_idx as u32,
+                    actual_piece_len,
+                    num_blocks,
+                    Some(self.command.progress.as_ref()),
+                    self.request_timeout,
+                    max_attempts,
+                    self.command.choking_algo.as_mut(),
+                )
+                .await
             }
         };
         let download_result = tokio::select! {
@@ -252,63 +243,56 @@ impl PieceDownloadSession<'_> {
         };
 
         match download_result {
-            Ok(piece_result) => {
+            Ok(actor_aware_result) => {
+                let peer_actor_ids = actor_aware_result.peer_actor_ids;
+                let availability_changed_actor_ids =
+                    actor_aware_result.availability_changed_actor_ids;
+                self.pending_pex_peers.extend(actor_aware_result.pex_peers);
+                let piece_result = actor_aware_result.piece;
                 let piece_data = piece_result.data;
                 let piece_data_len = piece_data.len();
 
-                // Consume peer indices before failed connections are removed and the Vec compacts.
-                for peer_download in &piece_result.peer_bytes {
-                    let Some(conn) = self.active_connections.get(peer_download.peer_index) else {
+                // Apply receive-time attribution before failed peers are removed.
+                for (peer_download, actor_id) in piece_result.peer_bytes.iter().zip(peer_actor_ids)
+                {
+                    let Some(actor) = self.swarm.actor(actor_id) else {
                         tracing::debug!(
-                            peer_index = peer_download.peer_index,
+                            actor_id = actor_id.0,
                             peer = %peer_download.peer,
-                            "Discarding peer byte accounting for stale connection index"
+                            "Discarding byte accounting for a retired peer actor"
                         );
                         continue;
                     };
-                    let Some(address) = format!("{}:{}", conn.ip_addr, conn.port)
-                        .parse::<std::net::SocketAddr>()
-                        .ok()
-                    else {
-                        continue;
-                    };
-                    if address != peer_download.peer {
-                        tracing::debug!(
-                            peer_index = peer_download.peer_index,
-                            expected = %peer_download.peer,
-                            actual = %address,
-                            "Discarding peer byte accounting for mismatched connection"
-                        );
+                    if actor.endpoint != peer_download.peer {
+                        tracing::debug!(actor_id = actor_id.0, peer = %peer_download.peer, "Discarding byte accounting for mismatched peer actor");
                         continue;
                     }
-                    let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) else {
-                        continue;
-                    };
-                    self.active_connections[peer_download.peer_index]
-                        .stats
-                        .on_data_received(peer_download.bytes);
-                    self.command
-                        .on_data_received_from_peer(peer_download.peer_index, peer_download.bytes);
-                    self.peer_last_data_time.insert(peer_key, Instant::now());
+                    self.peer_last_data_time
+                        .insert(PeerKey::new(actor.endpoint), Instant::now());
                 }
 
-                BtDownloadCommand::remove_failed_peers(
-                    self.active_connections,
-                    &piece_result.failed_peers,
-                    self.command.choking_algo.as_mut(),
-                    self.pex_enabled_peers,
-                    &mut self.peer_last_data_time,
-                    &mut self.command.allowed_fast_sent_peers,
-                    &mut self.command.suggest_sent_counts,
-                    &mut self.endgame_state,
+                super::availability::sync_swarm_actor_availability(
+                    self.swarm,
+                    &availability_changed_actor_ids,
                     &mut self.peer_tracker,
-                    &self.command.peer_storage,
+                    &mut self.peer_last_data_time,
                 );
-                self.command
-                    .update_tracker_peer_state(self.active_connections.len());
+                let mut choke_round_needed = false;
+                for actor in self.swarm.iter_mut() {
+                    if piece_result.failed_peers.contains(&actor.endpoint) {
+                        choke_round_needed |=
+                            actor.stats.peer_interested && !actor.stats.am_choking;
+                        actor.dead = true;
+                    }
+                }
+                self.remove_dead_swarm_peers().await;
+                if choke_round_needed {
+                    self.apply_upload_choke_round().await;
+                }
+                self.command.update_tracker_peer_state(self.swarm.len());
                 {
                     let group = self.command.group.recover();
-                    super::super::sync_peer_snapshots(&group, self.active_connections);
+                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
                 }
 
                 tracing::info!(
@@ -375,11 +359,7 @@ impl PieceDownloadSession<'_> {
                         )
                         .await?;
 
-                    BtPeerInteraction::broadcast_have(
-                        self.active_connections,
-                        next_piece_idx as u32,
-                    )
-                    .await;
+                    self.swarm.broadcast_have(next_piece_idx as u32).await;
                     piece_ok = true;
 
                     // P1 integration: periodically save download progress
@@ -415,23 +395,20 @@ impl PieceDownloadSession<'_> {
                             piece = next_piece_idx,
                             "Rejected and removed peer after a piece hash mismatch"
                         );
-                        BtDownloadCommand::remove_failed_peers(
-                            self.active_connections,
-                            &[peer],
-                            self.command.choking_algo.as_mut(),
-                            self.pex_enabled_peers,
-                            &mut self.peer_last_data_time,
-                            &mut self.command.allowed_fast_sent_peers,
-                            &mut self.command.suggest_sent_counts,
-                            &mut self.endgame_state,
-                            &mut self.peer_tracker,
-                            &self.command.peer_storage,
-                        );
-                        self.command
-                            .update_tracker_peer_state(self.active_connections.len());
-                        super::super::sync_peer_snapshots(
+                        let mut choke_round_needed = false;
+                        for actor in self.swarm.iter_mut().filter(|actor| actor.endpoint == peer) {
+                            choke_round_needed |=
+                                actor.stats.peer_interested && !actor.stats.am_choking;
+                            actor.dead = true;
+                        }
+                        self.remove_dead_swarm_peers().await;
+                        if choke_round_needed {
+                            self.apply_upload_choke_round().await;
+                        }
+                        self.command.update_tracker_peer_state(self.swarm.len());
+                        super::super::sync_peer_snapshots_with_swarm(
                             &self.command.group.recover(),
-                            self.active_connections,
+                            self.swarm,
                         );
                     } else {
                         tracing::debug!(
@@ -479,12 +456,21 @@ impl PieceDownloadSession<'_> {
 
             if !piece_ok {
                 let source_count =
-                    super::super::count_piece_sources(self.active_connections, next_piece_idx);
+                    self.swarm
+                        .iter()
+                        .filter(|actor| {
+                            !actor.dead
+                                && (actor.seeder
+                                    || actor.bitfield.get(next_piece_idx / 8).is_some_and(|byte| {
+                                        byte & (0x80 >> (next_piece_idx % 8)) != 0
+                                    }))
+                        })
+                        .count();
                 let failure_message = if source_count == 0 {
                     format!(
                         "Piece {} has no source among {} connected peers",
                         next_piece_idx,
-                        self.active_connections.len()
+                        self.swarm.len()
                     )
                 } else {
                     format!(

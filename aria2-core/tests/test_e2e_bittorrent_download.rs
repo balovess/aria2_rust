@@ -1500,6 +1500,7 @@ async fn test_e2e_bt_halt_then_immediate_resume_uses_checkpoint() {
     );
     let options = DownloadOptions {
         seed_time: Some(0.0),
+        split: Some(1),
         enable_dht: false,
         enable_public_trackers: false,
         ..DownloadOptions::default()
@@ -1783,6 +1784,7 @@ async fn test_e2e_bt_save_session_flushes_requested_checkpoint() {
     );
     let options = DownloadOptions {
         seed_time: Some(0.0),
+        split: Some(1),
         enable_dht: false,
         enable_public_trackers: false,
         ..DownloadOptions::default()

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
+use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_piece_selector::BtPieceSelector;
@@ -18,9 +19,10 @@ use crate::engine::bt_download_execute::types::{EndgameState, PeerKey};
 
 impl<'a> PieceDownloadSession<'a> {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
+    pub(super) async fn new(
         command: &'a mut BtDownloadCommand,
         active_connections: &'a mut Vec<BtPeerConn>,
+        swarm: &'a mut PeerSwarm,
         meta: &'a mut aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
@@ -285,15 +287,53 @@ impl<'a> PieceDownloadSession<'a> {
                 peer_last_data_time.insert(key, Instant::now());
             }
         }
+
+        let initial_peer_count = active_connections.len();
+        let initial_endpoints = active_connections
+            .iter()
+            .filter_map(BtPeerConn::remote_endpoint)
+            .collect::<Vec<_>>();
+        let upload_progress = std::sync::Arc::clone(&command.progress);
+        let dht_engine = command.dht_engine.clone();
+        let provider = std::sync::Arc::clone(&upload_provider);
+        for mut connection in std::mem::take(active_connections) {
+            connection.set_upload_progress(std::sync::Arc::clone(&upload_progress));
+            command.track_peer_for_upload_choking(&connection.stats);
+            if let Err(_connection) = swarm.spawn_peer(
+                connection,
+                dht_engine.clone(),
+                std::sync::Arc::clone(&provider),
+            ) {
+                swarm.shutdown_all().await;
+                let mut peer_storage = command
+                    .peer_storage
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for endpoint in &initial_endpoints {
+                    peer_storage
+                        .return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
+                }
+                return Err(Aria2Error::DownloadFailed(
+                    "Failed to transfer an initial BitTorrent peer to its swarm actor".into(),
+                ));
+            }
+        }
+        if initial_peer_count > 0 {
+            command.bt_runtime.set_connections(swarm.len());
+            let group = command.group.recover();
+            super::super::sync_peer_snapshots_with_swarm(&group, swarm);
+        }
+
         Ok(Self {
             command,
-            active_connections,
+            swarm,
             meta,
             piece_length,
             total_size,
             num_pieces,
             web_seed_manager,
             pex_enabled_peers,
+            pending_pex_peers: Vec::new(),
             last_pex_send,
             pex_send_interval_secs,
             writer,
@@ -301,7 +341,6 @@ impl<'a> PieceDownloadSession<'a> {
             last_speed_update,
             last_completed,
             last_upload_speed_update: Instant::now(),
-            last_upload_choke_round: Instant::now(),
             last_uploaded: 0,
             upload_counter,
             last_progress_save,
