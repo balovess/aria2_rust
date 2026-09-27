@@ -1,18 +1,22 @@
 //! Peer metadata captured for one piece attempt and updated from actor events.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
+use super::super::types::DEFAULT_MAX_OUTSTANDING_REQUEST;
 use super::peer_registry::PeerSwarm;
 use crate::engine::bt_peer_connection::PeerActorId;
 use crate::engine::choking_algorithm::PeerIdentity;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct PeerSchedulingEntry {
     actor_id: PeerActorId,
     pub(super) address: Option<SocketAddr>,
     pub(super) has_piece: bool,
+    peer_choking: bool,
+    peer_allowed_fast: HashSet<u32>,
+    max_outstanding_requests: usize,
     identity: PeerIdentity,
 }
 
@@ -43,6 +47,9 @@ impl PeerSchedulingSnapshot {
                 actor_id: actor.actor_id,
                 address: Some(actor.endpoint),
                 has_piece,
+                peer_choking: actor.stats.peer_choking,
+                peer_allowed_fast: actor.peer_allowed_fast.clone(),
+                max_outstanding_requests: actor.max_outstanding_requests,
                 identity,
             });
             indices_by_actor_id.insert(actor.actor_id, index);
@@ -100,6 +107,45 @@ impl PeerSchedulingSnapshot {
         }
     }
 
+    pub(super) fn peer_can_request(&self, index: usize) -> bool {
+        self.peers.get(index).is_some_and(|peer| {
+            !peer.peer_choking || peer.peer_allowed_fast.contains(&self.piece_index)
+        })
+    }
+
+    pub(super) fn request_window(&self, index: usize) -> usize {
+        self.peers
+            .get(index)
+            .map_or(DEFAULT_MAX_OUTSTANDING_REQUEST, |peer| {
+                peer.max_outstanding_requests
+            })
+    }
+
+    pub(super) fn update_request_window(&mut self, actor_id: PeerActorId, limit: usize) {
+        if let Some(index) = self.peer_index_by_actor_id(actor_id)
+            && let Some(peer) = self.peers.get_mut(index)
+        {
+            peer.max_outstanding_requests = limit;
+        }
+    }
+
+    pub(super) fn update_peer_choking(&mut self, actor_id: PeerActorId, peer_choking: bool) {
+        if let Some(index) = self.peer_index_by_actor_id(actor_id)
+            && let Some(peer) = self.peers.get_mut(index)
+        {
+            peer.peer_choking = peer_choking;
+        }
+    }
+
+    pub(super) fn add_peer_allowed_fast(&mut self, actor_id: PeerActorId, piece_index: u32) {
+        if piece_index == self.piece_index
+            && let Some(index) = self.peer_index_by_actor_id(actor_id)
+            && let Some(peer) = self.peers.get_mut(index)
+        {
+            peer.peer_allowed_fast.insert(piece_index);
+        }
+    }
+
     pub(super) fn update_peer_bitfield(&mut self, actor_id: PeerActorId, bitfield: &[u8]) {
         let piece_index = self.piece_index as usize;
         let has_piece = bitfield
@@ -147,12 +193,18 @@ mod tests {
                     actor_id,
                     address: Some(address),
                     has_piece: false,
+                    peer_choking: false,
+                    peer_allowed_fast: HashSet::new(),
+                    max_outstanding_requests: DEFAULT_MAX_OUTSTANDING_REQUEST,
                     identity,
                 },
                 PeerSchedulingEntry {
                     actor_id: other_id,
                     address: Some(other_address),
                     has_piece: false,
+                    peer_choking: false,
+                    peer_allowed_fast: HashSet::new(),
+                    max_outstanding_requests: DEFAULT_MAX_OUTSTANDING_REQUEST,
                     identity: other_identity,
                 },
             ],

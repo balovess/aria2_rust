@@ -357,6 +357,87 @@ impl CoreRpcBackend {
         Ok(BackendResult::response(BackendResponse::Peers(peers)))
     }
 
+    pub(super) fn get_peer_stats(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No peer data is available for GID#{gid}")))?;
+        let peers = group
+            .recover()
+            .status_snapshot()
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default();
+        let peer_count = peers.len();
+        let seeders = peers
+            .iter()
+            .filter(|peer| peer.seeder == Some(true))
+            .count();
+        let leechers = peers
+            .iter()
+            .filter(|peer| peer.seeder == Some(false))
+            .count();
+        Ok(BackendResult::response(BackendResponse::PeerStats(
+            aria2_rpc::PeerStats {
+                peer_count,
+                seeders,
+                leechers,
+                unknown: peer_count - seeders - leechers,
+            },
+        )))
+    }
+
+    pub(super) fn get_peer_details(&self, gid: String) -> Result<BackendResult, BackendError> {
+        let gid = self.parse_gid(&gid)?.to_hex_string();
+        let group = self
+            .group_man
+            .group_by_hex(&gid)
+            .ok_or_else(|| Self::execution(format!("No peer data is available for GID#{gid}")))?;
+        let snapshot = group.recover().status_snapshot();
+        let num_pieces = snapshot.bt.as_ref().map_or(0, |bt| bt.num_pieces);
+        let peers = snapshot
+            .bt
+            .map(|bt| bt.peers)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|peer| aria2_rpc::PeerDetails {
+                peer_id: super::rpc_peer_id(&peer.peer_id),
+                ip: peer.addr.ip().to_string(),
+                source: peer.source.as_str().to_string(),
+                port: rpc_peer_port(peer.addr, peer.is_incoming),
+                client: peer.client,
+                bitfield: peer
+                    .bitfield
+                    .as_ref()
+                    .map(|bits| bits.iter().map(|byte| format!("{byte:02x}")).collect()),
+                progress_percent: peer_progress_percent(
+                    peer.seeder,
+                    peer.bitfield.as_deref(),
+                    num_pieces,
+                ),
+                seeder: peer.seeder,
+                flags: Some(aria2_rpc::PeerFlags {
+                    am_choking: peer.am_choking,
+                    peer_choking: peer.peer_choking,
+                    am_interested: peer.am_interested,
+                    peer_interested: peer.peer_interested,
+                    snubbed: peer.is_snubbed,
+                    incoming: peer.is_incoming,
+                }),
+                uploaded_bytes: Some(peer.uploaded_bytes.to_string()),
+                downloaded_bytes: Some(peer.downloaded_bytes.to_string()),
+                download_speed: peer.download_speed.max(0.0) as u64,
+                upload_speed: peer.upload_speed.max(0.0) as u64,
+                avg_download_speed: peer.avg_download_speed,
+                avg_upload_speed: peer.avg_upload_speed,
+                outstanding_requests_to_peer: Some(peer.outstanding_download_requests),
+                outstanding_requests_from_peer: Some(peer.outstanding_upload_requests),
+            })
+            .collect();
+        Ok(BackendResult::response(BackendResponse::PeerDetails(peers)))
+    }
+
     #[cfg(feature = "bittorrent")]
     pub(super) fn get_trackers(&self, gid: String) -> Result<BackendResult, BackendError> {
         let gid = self.parse_gid(&gid)?.value();
@@ -419,6 +500,7 @@ impl CoreRpcBackend {
                     },
                     seeders: None,
                     leechers: None,
+                    downloaded: None,
                     tracker_id: if current.as_deref() == Some(uri.as_str()) {
                         current_announce.tracker_id().to_string()
                     } else {
@@ -428,6 +510,15 @@ impl CoreRpcBackend {
                         current_announce.seconds_since_last_success()
                     } else {
                         None
+                    },
+                    last_success_at_unix_millis: None,
+                    snapshot_at_unix_millis: unix_millis(std::time::SystemTime::now()).to_string(),
+                    status: if current.as_deref() == Some(uri.as_str())
+                        && announce.is_announce_ready()
+                    {
+                        "ready".to_string()
+                    } else {
+                        "unknown".to_string()
                     },
                 });
                 entry += 1;
@@ -622,6 +713,41 @@ impl CoreRpcBackend {
     }
 }
 
+fn peer_progress_percent(
+    seeder: Option<bool>,
+    bitfield: Option<&[u8]>,
+    num_pieces: u32,
+) -> Option<f64> {
+    if seeder == Some(true) {
+        return Some(100.0);
+    }
+    let bitfield = bitfield?;
+    if num_pieces == 0 {
+        return None;
+    }
+    let full_bytes = (num_pieces / 8) as usize;
+    let mut completed = bitfield
+        .iter()
+        .take(full_bytes)
+        .map(|byte| byte.count_ones())
+        .sum::<u32>();
+    let remaining_bits = num_pieces % 8;
+    if remaining_bits > 0 {
+        let mask = 0xff << (8 - remaining_bits);
+        completed += bitfield
+            .get(full_bytes)
+            .map_or(0, |byte| (byte & mask).count_ones());
+    }
+    Some((f64::from(completed.min(num_pieces)) * 100.0) / f64::from(num_pieces))
+}
+
+fn unix_millis(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 #[cfg(feature = "bittorrent")]
 fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rpc::TrackerInfo> {
     if !snapshot.trackers.is_empty() {
@@ -640,8 +766,14 @@ fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rp
                 min_interval: tracker.min_interval_secs,
                 seeders: tracker.seeders,
                 leechers: tracker.leechers,
+                downloaded: tracker.downloaded.map(|value| value.to_string()),
                 tracker_id: tracker.tracker_id.clone(),
                 seconds_since_last_success: tracker.seconds_since_last_success,
+                last_success_at_unix_millis: tracker
+                    .last_success_at_unix_millis
+                    .map(|value| value.to_string()),
+                snapshot_at_unix_millis: tracker.snapshot_at_unix_millis.to_string(),
+                status: tracker.status.clone(),
             })
             .collect();
     }
@@ -676,6 +808,7 @@ fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rp
                 },
                 seeders: None,
                 leechers: None,
+                downloaded: None,
                 tracker_id: if snapshot.current_url.as_deref() == Some(uri.as_str()) {
                     snapshot.tracker_id.clone()
                 } else {
@@ -686,6 +819,17 @@ fn tracker_infos_from_runtime(snapshot: &TrackerRuntimeSnapshot) -> Vec<aria2_rp
                     snapshot.seconds_since_last_success
                 } else {
                     None
+                },
+                last_success_at_unix_millis: None,
+                snapshot_at_unix_millis: unix_millis(std::time::SystemTime::now()).to_string(),
+                status: if snapshot.in_flight > 0 {
+                    "announcing".to_string()
+                } else if snapshot.all_failed {
+                    "failed".to_string()
+                } else if snapshot.last_attempt_url.as_deref() == Some(uri.as_str()) {
+                    "succeeded".to_string()
+                } else {
+                    "unknown".to_string()
                 },
             })
         })

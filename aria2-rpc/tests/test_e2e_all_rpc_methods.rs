@@ -855,8 +855,8 @@ async fn e2e_system_list_methods_returns_array() {
     );
 
     let methods = resp["result"].as_array().unwrap();
-    let expected_method_count = 35
-        + usize::from(cfg!(feature = "bittorrent")) * 6
+    let expected_method_count = 36
+        + usize::from(cfg!(feature = "bittorrent")) * 8
         + usize::from(cfg!(feature = "metalink"));
     assert_eq!(
         methods.len(),
@@ -1134,6 +1134,10 @@ async fn e2e_remove_download_result_returns_ok() {
     let _ = rpc_call(&client, &base, "aria2.remove", json![[&gid]]).await;
     let stopped = wait_for_stopped_gid(&client, &base, &gid).await;
     assert_success(&stopped);
+
+    let cleanup = rpc_call(&client, &base, "aria2.removeDownloadFiles", json![[&gid]]).await;
+    assert_jsonrpc_format(&cleanup, "aria2-removeDownloadFiles");
+    assert_success(&cleanup);
 
     let resp = rpc_call(&client, &base, "aria2.removeDownloadResult", json![[&gid]]).await;
 

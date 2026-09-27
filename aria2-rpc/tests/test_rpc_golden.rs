@@ -149,8 +149,12 @@ fn primitive_wire_models_match_golden_fixture() {
         min_interval: 0,
         seeders: Some(0),
         leechers: Some(0),
+        downloaded: Some("0".into()),
         tracker_id: String::new(),
         seconds_since_last_success: Some(12),
+        last_success_at_unix_millis: Some("1720000000000".into()),
+        snapshot_at_unix_millis: "1720000001000".into(),
+        status: "succeeded".into(),
     };
     assert_eq!(
         serde_json::to_value(tracker).unwrap(),
@@ -404,6 +408,19 @@ async fn all_enabled_rpc_method_families_match_golden_contracts() {
         result(
             &call(
                 &engine,
+                "aria2.removeDownloadFiles",
+                json!([main_gid]),
+                "remove-files"
+            )
+            .await,
+            "removeDownloadFiles"
+        ),
+        "OK"
+    );
+    assert_eq!(
+        result(
+            &call(
+                &engine,
                 "aria2.clearBrowserContext",
                 json!([]),
                 "clear-context"
@@ -455,6 +472,32 @@ async fn all_enabled_rpc_method_families_match_golden_contracts() {
             result(
                 &call(&engine, "aria2.getPeers", json!([main_gid]), "peers").await,
                 "getPeers"
+            ),
+            &json!([])
+        );
+        assert_eq!(
+            result(
+                &call(
+                    &engine,
+                    "aria2.getPeerStats",
+                    json!([main_gid]),
+                    "peer-stats"
+                )
+                .await,
+                "getPeerStats"
+            ),
+            &json!({"peerCount":"0", "seeders":"0", "leechers":"0", "unknown":"0"})
+        );
+        assert_eq!(
+            result(
+                &call(
+                    &engine,
+                    "aria2.getPeerDetails",
+                    json!([main_gid]),
+                    "peer-details"
+                )
+                .await,
+                "getPeerDetails"
             ),
             &json!([])
         );

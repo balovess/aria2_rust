@@ -7,6 +7,315 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 #[tokio::test]
+async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
+    let info_hash = [0x71; 20];
+    let mut endpoints = Vec::new();
+    let mut peers = Vec::new();
+    for remote_peer_id in [[0x72; 20], [0x74; 20]] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        endpoints.push(listener.local_addr().unwrap());
+        peers.push(tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                if let Ok(connection) =
+                    PeerConnection::from_incoming_stream(stream, &info_hash, &remote_peer_id).await
+                {
+                    return connection;
+                }
+            }
+        }));
+    }
+
+    let options = crate::request::request_group::DownloadOptions {
+        enable_utp: false,
+        enable_peer_exchange: true,
+        bt_max_peers: 2,
+        ..crate::request::request_group::DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            crate::request::request_group::GroupId::new(704),
+            Vec::new(),
+            options.clone(),
+        ),
+    ));
+    let peer_storage = Arc::new(std::sync::Mutex::new(
+        crate::engine::bt_peer_storage::DefaultPeerStorage::new(),
+    ));
+    let connection_options =
+        crate::engine::bt_peer_interaction::BtPeerConnectionOptions::from_download_options(
+            &options, [0x73; 20],
+        );
+    let discovery = super::SeedPeerDiscovery {
+        group,
+        dht_engine: None,
+        dht_lookup: crate::engine::bt_download_execute::execute::DhtPeriodicLookup::new(),
+        connection_options,
+        total_size: 16,
+        utp_socket: None,
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        enable_peer_exchange: true,
+    };
+    let provider = Arc::new(crate::engine::bt_upload_session::InMemoryPieceProvider::new(16, 1));
+    let provider_dyn: Arc<dyn crate::engine::bt_upload_session::PieceDataProvider> = provider;
+    let mut manager = BtSeedManager::new_with_transports(
+        info_hash,
+        Vec::new(),
+        provider_dyn,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        16,
+        None,
+        [0x73; 20],
+        None,
+    )
+    .with_peer_storage(Arc::clone(&peer_storage))
+    .with_peer_discovery(discovery);
+
+    manager.store_tracker_peers(vec![(endpoints[0].ip().to_string(), endpoints[0].port())]);
+    manager.apply_peer_event(crate::engine::bt_message_handler::PeerEvent::PexPeers {
+        peers: vec![aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
+            &endpoints[1].ip().to_string(),
+            endpoints[1].port(),
+        )],
+    });
+    assert_eq!(peer_storage.lock().unwrap().count_all_peers(), 2);
+
+    manager.start_peer_connection_attempt();
+    let result = {
+        let attempt = manager.pending_peer_connection.as_mut().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), &mut attempt.task)
+            .await
+            .expect("seeding peer connection attempt timed out")
+    };
+    manager.finish_peer_connection_attempt(result);
+
+    assert_eq!(manager.swarm.len(), 2);
+    for endpoint in endpoints {
+        assert!(
+            peer_storage
+                .lock()
+                .unwrap()
+                .get_peer(&endpoint.ip().to_string(), endpoint.port())
+                .is_some_and(|peer| peer.is_active)
+        );
+    }
+
+    manager.swarm.shutdown_all().await;
+    for peer in peers {
+        drop(peer.await.unwrap());
+    }
+}
+
+#[tokio::test]
+async fn slow_tracker_announce_does_not_block_seeding_peer_events() {
+    let tracker_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tracker_address = tracker_listener.local_addr().unwrap();
+    let response_body = b"d8:intervali60e5:peers0:e".to_vec();
+    let (announce_started_tx, announce_started_rx) = tokio::sync::oneshot::channel();
+    let (release_announce_tx, release_announce_rx) = tokio::sync::oneshot::channel();
+    let tracker = tokio::spawn(async move {
+        let mut announce_started_tx = Some(announce_started_tx);
+        let mut release_announce_rx = Some(release_announce_rx);
+        for request_index in 0..2 {
+            let (mut socket, _) = tracker_listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let read = socket.read(&mut request).await.unwrap();
+            assert!(read > 0);
+            if request_index == 0 {
+                announce_started_tx
+                    .take()
+                    .expect("initial announce notification sender missing")
+                    .send(())
+                    .unwrap();
+                release_announce_rx
+                    .take()
+                    .expect("initial announce release receiver missing")
+                    .await
+                    .unwrap();
+            }
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(&response_body).await.unwrap();
+        }
+    });
+
+    let mut announcer = crate::engine::bt_tracker_comm::TrackerAnnouncer::new(
+        &[vec![format!("http://{tracker_address}/announce")]],
+        &None,
+    );
+    announcer.set_timeouts(Duration::from_secs(3), Duration::from_secs(2));
+    announcer.set_stopped_timeout(Duration::from_secs(1));
+
+    let info_hash = [0x81; 20];
+    let local_peer_id = [0x82; 20];
+    let mut provider = crate::engine::bt_upload_session::InMemoryPieceProvider::new(16, 1);
+    provider.set_piece_data(0, vec![0x5a; 16]);
+    let provider = Arc::new(provider);
+    let (incoming_sender, incoming_receiver) = mpsc::channel(2);
+    let mut manager = BtSeedManager::new_with_transports(
+        info_hash,
+        Vec::new(),
+        provider,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        16,
+        Some(announcer),
+        local_peer_id,
+        Some(incoming_receiver),
+    );
+    let cancellation = manager.cancellation_token();
+    let manager_task = tokio::spawn(async move { manager.run_seeding_loop().await });
+
+    tokio::time::timeout(Duration::from_secs(2), announce_started_rx)
+        .await
+        .expect("seeding loop did not start the tracker announce")
+        .expect("tracker request start notification was dropped");
+
+    let peer_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer_address = peer_listener.local_addr().unwrap();
+    let client_task = tokio::spawn(async move { TcpStream::connect(peer_address).await.unwrap() });
+    let (server_stream, endpoint) = peer_listener.accept().await.unwrap();
+    incoming_sender
+        .send(crate::engine::bt_peer_listener::IncomingPeer {
+            connection: IncomingConnection::Plain(Box::new(PeerConnection::from_stream_with_peer(
+                server_stream,
+                [0x83; 20],
+                false,
+                false,
+            ))),
+            endpoint,
+        })
+        .await
+        .unwrap();
+
+    let mut client = PeerConnection::from_stream_with_peer(
+        client_task.await.unwrap(),
+        local_peer_id,
+        false,
+        false,
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), client.read_message())
+            .await
+            .expect("peer availability was blocked by the tracker request")
+            .unwrap(),
+        Some(aria2_protocol::bittorrent::message::types::BtMessage::Bitfield { .. })
+    ));
+
+    release_announce_tx.send(()).unwrap();
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(3), manager_task)
+        .await
+        .expect("seeding shutdown did not finish after tracker response")
+        .unwrap()
+        .unwrap();
+    tracker.await.unwrap();
+}
+
+#[tokio::test]
+async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
+    let dht_engine = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(
+        aria2_protocol::bittorrent::dht::engine::DhtEngineConfig {
+            query_timeout: Duration::from_secs(3),
+            ..aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local()
+        },
+    )
+    .await
+    .unwrap();
+    let dht_probe = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let options = crate::request::request_group::DownloadOptions {
+        enable_utp: false,
+        bt_max_peers: 4,
+        ..crate::request::request_group::DownloadOptions::default()
+    };
+    let group = Arc::new(std::sync::RwLock::new(
+        crate::request::request_group::RequestGroup::new(
+            crate::request::request_group::GroupId::new(705),
+            Vec::new(),
+            options.clone(),
+        ),
+    ));
+    let discovery = super::SeedPeerDiscovery {
+        group,
+        dht_engine: Some(Arc::clone(&dht_engine)),
+        dht_lookup: crate::engine::bt_download_execute::execute::DhtPeriodicLookup::new(),
+        connection_options:
+            crate::engine::bt_peer_interaction::BtPeerConnectionOptions::from_download_options(
+                &options, [0x86; 20],
+            ),
+        total_size: 16,
+        utp_socket: None,
+        outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+        enable_peer_exchange: false,
+    };
+    let provider = Arc::new(crate::engine::bt_upload_session::InMemoryPieceProvider::new(16, 1));
+    let (incoming_sender, incoming_receiver) = mpsc::channel(2);
+    let mut manager = BtSeedManager::new_with_transports(
+        [0x84; 20],
+        Vec::new(),
+        provider,
+        BtSeedingConfig::default(),
+        SeedExitCondition::infinite(),
+        16,
+        None,
+        [0x85; 20],
+        Some(incoming_receiver),
+    )
+    .with_peer_discovery(discovery);
+    let cancellation = manager.cancellation_token();
+    let manager_task = tokio::spawn(async move { manager.run_seeding_loop().await });
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let client_task = tokio::spawn(async move { TcpStream::connect(endpoint).await.unwrap() });
+    let (server_stream, endpoint) = listener.accept().await.unwrap();
+    incoming_sender
+        .send(crate::engine::bt_peer_listener::IncomingPeer {
+            connection: IncomingConnection::Plain(Box::new(PeerConnection::from_stream_with_peer(
+                server_stream,
+                [0x87; 20],
+                false,
+                false,
+            ))),
+            endpoint,
+        })
+        .await
+        .unwrap();
+    let mut peer =
+        PeerConnection::from_stream_with_peer(client_task.await.unwrap(), [0x85; 20], false, false);
+    peer.send_message(
+        &aria2_protocol::bittorrent::message::types::BtMessage::Port {
+            port: dht_probe.local_addr().unwrap().port(),
+        },
+    )
+    .await
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if dht_engine.stats().await.pending_transactions > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("incoming seed actor did not forward the peer's DHT port");
+
+    cancellation.cancel();
+    tokio::time::timeout(Duration::from_secs(3), manager_task)
+        .await
+        .expect("seeding loop did not shut down")
+        .unwrap()
+        .unwrap();
+    dht_engine.shutdown_async().await;
+}
+
+#[tokio::test]
 async fn seeding_choke_decision_runs_when_interest_and_choke_state_mismatch() {
     let (mut manager, _client) = manager_with_dead_seed_peer(true, false).await;
     let actor_id = manager.swarm.iter().next().unwrap().actor_id;
@@ -48,7 +357,13 @@ async fn seeding_manager_adopts_the_existing_torrent_peer_actor() {
         endpoint,
     );
     connection.allocate_session_resource(16, 1, 16);
-    connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 1, 16, false);
+    connection.configure_upload_with_auto_unchoke(
+        &BtSeedingConfig::default(),
+        crate::rate_limiter::RateLimiter::unlimited(),
+        1,
+        16,
+        false,
+    );
     connection.stats.am_choking = true;
     let actor_id = connection.actor_id;
     let mut swarm = PeerSwarm::new(8);
@@ -121,7 +436,7 @@ async fn seeding_manager_actorizes_pending_connections_when_swarm_is_already_pop
 
     let pending_client = tokio::spawn(async move { TcpStream::connect(address).await.unwrap() });
     let (pending_stream, pending_endpoint) = listener.accept().await.unwrap();
-    manager.upload_sessions.push(
+    manager.pending_connections.push(
         crate::engine::bt_peer_connection::BtPeerConn::from_incoming_plain(
             PeerConnection::from_stream_with_peer(pending_stream, [3u8; 20], false, false),
             pending_endpoint,
@@ -132,7 +447,7 @@ async fn seeding_manager_actorizes_pending_connections_when_swarm_is_already_pop
     manager.cancel();
     manager.run_seeding_loop().await.unwrap();
 
-    assert!(manager.upload_sessions.is_empty());
+    assert!(manager.pending_connections.is_empty());
     assert_eq!(manager.num_sessions(), 0);
     drop(existing_client.await.unwrap());
     drop(pending_client.await.unwrap());
@@ -571,7 +886,7 @@ async fn incoming_seed_peer_receives_piece_availability_before_interested() {
         "incoming connection must join swarm registry"
     );
     assert!(
-        manager.upload_sessions.is_empty(),
+        manager.pending_connections.is_empty(),
         "actorized peer must not remain a raw session"
     );
 
@@ -620,7 +935,7 @@ async fn incoming_seed_peer_is_not_kept_as_a_raw_connection_when_swarm_is_closed
     manager.drain_incoming_peers().await;
 
     assert!(manager.swarm.is_empty());
-    assert!(manager.upload_sessions.is_empty());
+    assert!(manager.pending_connections.is_empty());
     drop(client.await.unwrap());
 }
 
@@ -642,14 +957,14 @@ async fn initial_seed_peer_is_not_kept_raw_when_actor_startup_is_closed() {
         PeerConnection::from_stream_with_peer(server, [0x72u8; 20], false, false),
         endpoint,
     );
-    manager.upload_sessions.push(connection);
+    manager.pending_connections.push(connection);
     manager.swarm.close_event_receiver();
     manager.swarm.close_event_sender();
     manager.cancellation_token().cancel();
 
     manager.run_seeding_loop().await.unwrap();
 
-    assert!(manager.upload_sessions.is_empty());
+    assert!(manager.pending_connections.is_empty());
     assert!(manager.swarm.is_empty());
     drop(client.await.unwrap());
 }

@@ -225,7 +225,10 @@ async fn test_bt_download_to_seed_upload_and_ratio_exit_over_tcp() {
     assert_eq!(manager.total_uploaded(), piece_len as u64);
     let (upload_length, upload_speed) = manager.get_upload_stats();
     assert!(upload_length > 0, "seeder uploadLength should increase");
-    assert!(upload_speed > 0, "seeder uploadSpeed should increase");
+    assert_eq!(
+        upload_speed, 0,
+        "instantaneous uploadSpeed should reset after peer actors shut down"
+    );
     assert!(manager.halt_requested(), "ratio exit should request halt");
     assert!(!manager.is_active(), "ratio exit should end seeding");
 }

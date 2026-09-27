@@ -78,9 +78,9 @@ pub use server::{
     AuthConfig, CorsConfig, RpcAuthMiddleware, RpcServer, ServerConfig, TlsConfig, TlsError,
 };
 pub use types::{
-    BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat, PeerInfo,
-    ServerInfo, ServerInfoIndex, SessionInfo, StatusInfo, TrackerInfo, UriEntry, UriStatus,
-    VersionInfo, create_gid,
+    BittorrentInfo, BittorrentMetaInfo, DhtStatus, DownloadStatus, FileInfo, GlobalStat,
+    PeerDetails, PeerFlags, PeerInfo, PeerStats, ServerInfo, ServerInfoIndex, SessionInfo,
+    StatusInfo, TrackerInfo, UriEntry, UriStatus, VersionInfo, create_gid,
 };
 pub use websocket::{
     DownloadEvent, EventPublisher, EventType, NotificationBatcher, WsConfig, WsSession,

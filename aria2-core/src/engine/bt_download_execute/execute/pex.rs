@@ -20,12 +20,10 @@
 //!   e
 //! ```
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{debug, info, trace};
 
-use super::super::types::PeerKey;
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
@@ -111,19 +109,18 @@ impl BtDownloadCommand {
 
     /// Connect to peers discovered via PEX.
     ///
-    /// Filters out already-connected peers and attempts to establish
-    /// connections up to a reasonable limit per batch.
+    /// Completes handshakes for discovered candidates. The caller immediately
+    /// transfers each result into the torrent-owned peer swarm.
     ///
     /// # Returns
-    /// The successfully connected peers, ready for piece scheduling.
+    /// Handshake-complete connections awaiting actor admission.
     #[allow(clippy::too_many_arguments)]
-    pub async fn connect_to_discovered_peers(
+    pub(in crate::engine::bt_download_execute::execute) async fn connect_to_discovered_peers(
         &mut self,
         new_peers: &[PeerAddr],
         source: BtPeerSource,
         info_hash_raw: &[u8; 20],
         num_pieces: u32,
-        active_connections: &[BtPeerConn],
         piece_length: u32,
         total_size: u64,
     ) -> Vec<BtPeerConn> {
@@ -135,15 +132,10 @@ impl BtDownloadCommand {
             return Vec::new();
         }
 
-        let already_connected: HashSet<(String, u16)> = active_connections
+        let peers_to_connect: Vec<PeerAddr> = new_peers
             .iter()
-            .map(|conn| (conn.ip_addr.clone(), conn.port))
-            .collect();
-        let peers_to_connect: Vec<PeerAddr> = self
-            .peer_coordinator
-            .select_candidates(new_peers, &already_connected)
-            .into_iter()
             .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
+            .cloned()
             .collect();
 
         if peers_to_connect.is_empty() {
@@ -246,12 +238,11 @@ impl BtDownloadCommand {
 pub(super) async fn send_periodic_pex_to_swarm(
     cmd: &BtDownloadCommand,
     swarm: &mut crate::engine::bt_message_handler::PeerSwarm,
-    pex_enabled_peers: &HashSet<PeerKey>,
     last_pex_send: &mut Instant,
     pex_send_interval_secs: u64,
 ) {
     if last_pex_send.elapsed().as_secs() < pex_send_interval_secs
-        || pex_enabled_peers.is_empty()
+        || !cmd.peer_exchange_enabled()
         || cmd.pex_known_peers.is_empty()
     {
         return;
@@ -261,14 +252,7 @@ pub(super) async fn send_periodic_pex_to_swarm(
     let peers = swarm
         .iter()
         .filter(|actor| !actor.dead)
-        .filter_map(|actor| {
-            let key = PeerKey::new(actor.endpoint);
-            pex_enabled_peers.contains(&key).then_some((
-                actor.actor_id,
-                actor.endpoint,
-                actor.ut_pex_id?,
-            ))
-        })
+        .filter_map(|actor| Some((actor.actor_id, actor.endpoint, actor.ut_pex_id?)))
         .collect::<Vec<_>>();
     let mut sent_count = 0;
     let mut disconnected = Vec::new();

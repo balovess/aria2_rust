@@ -165,22 +165,34 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
         upload_length > 0,
         "real seeder uploadLength should increase"
     );
-    assert!(upload_speed > 0, "real seeder uploadSpeed should increase");
+    assert_eq!(
+        upload_speed, 0,
+        "instantaneous uploadSpeed should reset after the seeding actors shut down"
+    );
+
+    // The RPC peer snapshot is seeded with a deterministic live-rate sample;
+    // the real transfer above independently verifies cumulative byte accounting.
+    let peer_upload_speed = 16_384;
 
     let peer_snapshot = BtPeerSnapshot {
         peer_id,
+        client: Some("fixture-peer/1.0".to_string()),
         addr: peer_addr,
         is_incoming: true,
         source: BtPeerSource::Incoming,
         bitfield: Some(vec![0x80]),
         uploaded_bytes: upload_length,
         downloaded_bytes: 0,
-        upload_speed: upload_speed as f64,
+        upload_speed: peer_upload_speed as f64,
         download_speed: 0.0,
-        avg_upload_speed: upload_speed,
+        avg_upload_speed: peer_upload_speed,
         avg_download_speed: 0,
         am_choking: false,
         peer_choking: false,
+        am_interested: false,
+        peer_interested: false,
+        outstanding_upload_requests: 0,
+        outstanding_download_requests: 0,
         seeder: Some(false),
         connection_duration_secs: 1,
         last_data_age_secs: 0,
@@ -225,8 +237,37 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(peers[0]["bitfield"], "80");
     assert_eq!(peers[0]["amChoking"], "false");
     assert_eq!(peers[0]["peerChoking"], "false");
-    assert_eq!(peers[0]["uploadSpeed"], upload_speed.to_string());
+    assert_eq!(peers[0]["uploadSpeed"], peer_upload_speed.to_string());
     assert_eq!(peers[0]["seeder"], "false");
+
+    let peer_stats_resp = engine
+        .handle_request(&make_request(
+            "aria2.getPeerStats",
+            serde_json::json!([gid]),
+        ))
+        .await;
+    assert_success(&peer_stats_resp);
+    let peer_stats = peer_stats_resp.result.unwrap();
+    assert_eq!(peer_stats["peerCount"], "1");
+    assert_eq!(peer_stats["seeders"], "0");
+    assert_eq!(peer_stats["leechers"], "1");
+    assert_eq!(peer_stats["unknown"], "0");
+
+    let peer_details_resp = engine
+        .handle_request(&make_request(
+            "aria2.getPeerDetails",
+            serde_json::json!([gid]),
+        ))
+        .await;
+    assert_success(&peer_details_resp);
+    let peer_details = peer_details_resp.result.unwrap();
+    assert_eq!(peer_details[0]["source"], "incoming");
+    assert_eq!(peer_details[0]["client"], "fixture-peer/1.0");
+    assert_eq!(peer_details[0]["progressPercent"], 100.0);
+    assert_eq!(peer_details[0]["uploadedBytes"], upload_length.to_string());
+    assert_eq!(peer_details[0]["flags"]["incoming"], true);
+    assert_eq!(peer_details[0]["outstandingRequestsToPeer"], 0);
+    assert_eq!(peer_details[0]["outstandingRequestsFromPeer"], 0);
 
     let trackers_resp = engine
         .handle_request(&make_request("aria2.getTrackers", serde_json::json!([gid])))
@@ -241,6 +282,8 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(trackers[0]["interval"], "300");
     assert_eq!(trackers[0]["seeders"], 1);
     assert_eq!(trackers[0]["leechers"], 1);
+    assert_eq!(trackers[0]["downloaded"], serde_json::Value::Null);
+    assert!(trackers[0]["snapshotAtUnixMillis"].as_str().is_some());
 
     let dht_resp = engine
         .handle_request(&make_request("aria2.getDhtStatus", serde_json::json!([])))

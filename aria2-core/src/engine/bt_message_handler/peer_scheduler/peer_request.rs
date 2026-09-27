@@ -26,6 +26,10 @@ pub(super) struct PeerRequestLedger {
 }
 
 impl PeerRequestLedger {
+    pub(super) fn len(&self) -> usize {
+        self.requests.len()
+    }
+
     pub(super) fn contains(&self, piece_index: u32, request: BlockRequest) -> bool {
         self.requests.contains_key(&(piece_index, request.offset))
     }
@@ -123,12 +127,14 @@ mod tests {
         let current_generation = RequestGeneration(11);
         let mut ledger = PeerRequestLedger::default();
         ledger.record(current_generation, 4, request());
+        assert_eq!(ledger.len(), 1);
 
         assert!(!ledger.cancel(old_generation, 4, request()));
         assert_eq!(
             ledger.complete(4, request().offset),
             Some(current_generation)
         );
+        assert_eq!(ledger.len(), 0);
     }
 
     #[test]

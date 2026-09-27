@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::engine::bt_peer_interaction::BtPeerInteraction;
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::disk_writer::{CachedDiskWriter, SeekableDiskWriter};
@@ -21,14 +20,15 @@ impl<'a> PieceDownloadSession<'a> {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn new(
         command: &'a mut BtDownloadCommand,
-        active_connections: &'a mut Vec<BtPeerConn>,
+        initial_peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+        network_info_hash: [u8; 20],
         swarm: &'a mut PeerSwarm,
+        upload_counter: Arc<std::sync::atomic::AtomicU64>,
         meta: &'a mut aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
         num_pieces: u32,
         web_seed_manager: Option<Arc<crate::engine::bt_web_seed::WebSeedManager>>,
-        pex_enabled_peers: &'a mut HashSet<PeerKey>,
         last_pex_send: &'a mut Instant,
         pex_send_interval_secs: u64,
         verified_piece_indices: &[usize],
@@ -41,13 +41,16 @@ impl<'a> PieceDownloadSession<'a> {
         // coalesces adjacent pieces before flushing (C++ WrDiskCache usage).
         // Multi-file torrents go through the coalesced per-file writer below.
         let cache_size_bytes = command.group.recover().options().disk_cache_size_bytes();
+        let mut upload_write_cache = None;
         let raw_writer: Box<dyn SeekableDiskWriter> = if command.multi_file_layout.is_none() {
-            Box::new(CachedDiskWriter::new_with_mmap_bytes(
+            let cached_writer = CachedDiskWriter::new_with_mmap_bytes(
                 &command.output_path,
                 Some(total_size),
                 cache_size_bytes,
                 false,
-            ))
+            );
+            upload_write_cache = cached_writer.cache_handle();
+            Box::new(cached_writer)
         } else {
             Box::new(
                 crate::filesystem::positioned_disk_writer::PositionedDiskWriter::new(
@@ -214,13 +217,6 @@ impl<'a> PieceDownloadSession<'a> {
             piece_picker.set_priority_pieces(prioritized_pieces);
         }
 
-        let mut peer_tracker = crate::engine::bt_piece::PeerBitfieldTracker::new(num_pieces);
-        BtPeerInteraction::initialize_peer_tracking(
-            active_connections,
-            num_pieces,
-            &mut peer_tracker,
-        );
-
         for &index in verified_piece_indices {
             if index < num_pieces as usize {
                 piece_picker.mark_completed(index as u32);
@@ -242,18 +238,30 @@ impl<'a> PieceDownloadSession<'a> {
                     num_pieces,
                     command.multi_file_layout.clone(),
                     Arc::clone(&completed_bitfield),
-                ),
+                )
+                .with_write_cache(upload_write_cache),
             );
+        let mut active_connections = command
+            .connect_to_peers(
+                &initial_peer_addrs,
+                &network_info_hash,
+                meta.info_hash_v2,
+                num_pieces,
+                piece_length,
+                total_size,
+            )
+            .await?;
+        let peer_tracker = crate::engine::bt_piece::PeerBitfieldTracker::new(num_pieces);
         let upload_config = crate::engine::bt_upload_session::BtSeedingConfig {
             max_upload_bytes_per_sec: command.group.recover().options().max_upload_limit,
             global_limiter: command.global_limiter.clone(),
             max_peers_to_unchoke: 4,
             optimistic_unchoke_interval_secs: 30,
         };
-        let upload_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         for connection in active_connections.iter_mut() {
             connection.configure_upload_with_auto_unchoke(
                 &upload_config,
+                command.torrent_upload_limiter.clone(),
                 num_pieces,
                 piece_length,
                 command.choking_algo.is_none(),
@@ -294,9 +302,10 @@ impl<'a> PieceDownloadSession<'a> {
             .filter_map(BtPeerConn::remote_endpoint)
             .collect::<Vec<_>>();
         let upload_progress = std::sync::Arc::clone(&command.progress);
+        let last_uploaded = command.total_uploaded;
         let dht_engine = command.dht_engine.clone();
         let provider = std::sync::Arc::clone(&upload_provider);
-        for mut connection in std::mem::take(active_connections) {
+        for mut connection in active_connections {
             connection.set_upload_progress(std::sync::Arc::clone(&upload_progress));
             command.track_peer_for_upload_choking(&connection.stats);
             if let Err(_connection) = swarm.spawn_peer(
@@ -318,6 +327,22 @@ impl<'a> PieceDownloadSession<'a> {
                 ));
             }
         }
+        command
+            .drain_incoming_peers_to_swarm(
+                swarm,
+                piece_length,
+                num_pieces,
+                total_size,
+                crate::engine::bt_download_execute::execute::incoming::PeerActorUploadContext {
+                    provider: std::sync::Arc::clone(&upload_provider),
+                    upload_counter: std::sync::Arc::clone(&upload_counter),
+                },
+            )
+            .await;
+        {
+            let group = command.group.recover();
+            swarm.attach_peer_snapshot_store(group.bt_peer_snapshot_store());
+        }
         if initial_peer_count > 0 {
             command.bt_runtime.set_connections(swarm.len());
             let group = command.group.recover();
@@ -332,7 +357,6 @@ impl<'a> PieceDownloadSession<'a> {
             total_size,
             num_pieces,
             web_seed_manager,
-            pex_enabled_peers,
             pending_pex_peers: Vec::new(),
             last_pex_send,
             pex_send_interval_secs,
@@ -341,7 +365,7 @@ impl<'a> PieceDownloadSession<'a> {
             last_speed_update,
             last_completed,
             last_upload_speed_update: Instant::now(),
-            last_uploaded: 0,
+            last_uploaded,
             upload_counter,
             last_progress_save,
             piece_selector,

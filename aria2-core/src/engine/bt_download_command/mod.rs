@@ -2,7 +2,6 @@ mod choke_api;
 mod constructor;
 mod integration_api;
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -179,16 +178,6 @@ pub struct BtDownloadCommand {
     /// Interval between PEX messages (default 60 seconds)
     pub(crate) pex_send_interval: Duration,
 
-    // BEP 6 (Fast Extension): track AllowedFast messages sent to peers
-    /// Track which AllowedFast pieces have been sent to each peer
-    /// Key: stable peer identity.
-    #[allow(dead_code)]
-    pub(crate) allowed_fast_sent_peers:
-        HashMap<super::bt_download_execute::types::PeerKey, HashSet<u32>>,
-
-    /// Track suggest counts per peer to avoid spamming.
-    pub(crate) suggest_sent_counts: HashMap<super::bt_download_execute::types::PeerKey, usize>,
-
     // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
     /// Tracks timing and retry state for periodic DHT get_peers lookups.
     /// C++: DHTGetPeersCommand runs as a per-torrent command that
@@ -222,6 +211,9 @@ pub struct BtDownloadCommand {
     /// piece writes share a single bandwidth ceiling with all concurrent
     /// downloads.
     pub(crate) global_limiter: Option<RateLimiter>,
+    /// Torrent-scoped upload limiter shared by every peer actor. The request
+    /// group retains the same handle so RPC option updates affect live peers.
+    pub(crate) torrent_upload_limiter: RateLimiter,
     /// Process-wide outbound TCP policy for tracker/peer protocol adapters.
     pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
 
@@ -235,8 +227,7 @@ pub struct BtDownloadCommand {
         std::sync::Arc<std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>>,
 
     /// Receiver for incoming peers routed by the engine-owned listener.
-    pub(crate) incoming_peers:
-        Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
+    pub(crate) incoming_peers: Option<crate::engine::bt_peer_listener::IncomingPeerReceiver>,
     /// Shared uTP socket for outbound peers in this download task.
     pub(crate) utp_socket:
         Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,

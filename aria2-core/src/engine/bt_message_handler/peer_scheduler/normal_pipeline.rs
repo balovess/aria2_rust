@@ -9,7 +9,8 @@ use tracing::{debug, trace, warn};
 use crate::engine::choking_algorithm::ChokingAlgorithm;
 use crate::request::request_group::AtomicProgress;
 
-use super::super::types::{BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST, PeerDownloadBytes};
+use super::super::types::{BLOCK_SIZE, MAX_OUTSTANDING_REQUEST, PeerDownloadBytes};
+use super::download_speed::DownloadSpeedSampler;
 use super::peer_actor::{PeerEvent, PeerGeneration, apply_choke_round, apply_interest_change};
 use super::peer_registry::PeerSwarmEventLease;
 use super::peer_snapshot::PeerSchedulingSnapshot;
@@ -47,18 +48,12 @@ fn select_peer(
         return None;
     }
 
-    let prefer_known_piece = peers
-        .peers()
-        .iter()
-        .enumerate()
-        .any(|(index, peer)| peer.has_piece && !dead[index]);
-
     for step in 0..in_flight.len() {
         let index = (*cursor + step) % in_flight.len();
-        if dead[index] || in_flight[index] >= DEFAULT_MAX_OUTSTANDING_REQUEST {
+        if dead[index] || in_flight[index] >= peers.request_window(index) {
             continue;
         }
-        if prefer_known_piece && !peers.peers()[index].has_piece {
+        if !peers.peers()[index].has_piece || !peers.peer_can_request(index) {
             continue;
         }
         *cursor = (index + 1) % in_flight.len();
@@ -134,6 +129,22 @@ fn mark_peer_failed(
     }
     dead[peer_index] = true;
 
+    let retry = requeue_peer_requests(peer_index, pending, remaining, in_flight);
+    workers.cancel_peer_requests(actor_id, &retry, piece_index);
+
+    if let Some(address) = peer_address
+        && !failed_peers.contains(&address)
+    {
+        failed_peers.push(address);
+    }
+}
+
+fn requeue_peer_requests(
+    peer_index: usize,
+    pending: &mut HashMap<(u32, u32), PendingRequest>,
+    remaining: &mut VecDeque<BlockRequest>,
+    in_flight: &mut [usize],
+) -> Vec<BlockRequest> {
     let entries = std::mem::take(pending);
     let mut retry = Vec::new();
     for (key, entry) in entries {
@@ -148,13 +159,7 @@ fn mark_peer_failed(
     for request in retry.iter().rev() {
         remaining.push_front(*request);
     }
-    workers.cancel_peer_requests(actor_id, &retry, piece_index);
-
-    if let Some(address) = peer_address
-        && !failed_peers.contains(&address)
-    {
-        failed_peers.push(address);
-    }
+    retry
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -197,8 +202,10 @@ pub(super) async fn run_attempt(
     let mut piece_data = vec![0u8; piece_length as usize];
     let mut peer_cursor = 0usize;
     let mut completed_blocks = 0u32;
+    let mut responses_since_window_growth = vec![0usize; peers.len()];
     let mut peer_bytes = Vec::new();
     let mut failed_peers = Vec::new();
+    let mut download_speed = DownloadSpeedSampler::new();
 
     loop {
         fill_request_window(
@@ -222,10 +229,7 @@ pub(super) async fn run_attempt(
             };
         }
 
-        if pending.is_empty()
-            && (remaining.is_empty()
-                || select_peer(&mut peer_cursor, &in_flight, &dead, peers).is_none())
-        {
+        if pending.is_empty() && remaining.is_empty() {
             break;
         }
 
@@ -237,9 +241,14 @@ pub(super) async fn run_attempt(
         let choke_deadline = choking_algo
             .as_deref()
             .and_then(ChokingAlgorithm::next_choke_rotation_deadline);
-        let next_deadline = choke_deadline.map_or(next_request_deadline, |deadline| {
+        let mut next_deadline = choke_deadline.map_or(next_request_deadline, |deadline| {
             deadline.min(next_request_deadline)
         });
+        if network_activity.is_some()
+            && let Some(deadline) = download_speed.next_deadline()
+        {
+            next_deadline = next_deadline.min(deadline);
+        }
         let wait = next_deadline.saturating_duration_since(Instant::now());
         tokio::select! {
             event = event_rx.recv() => {
@@ -260,10 +269,29 @@ pub(super) async fn run_attempt(
                             continue;
                         }
                     }
-                    PeerEvent::PeerChokingChanged { actor_id, .. } => {
-                        if peers.peer_index_by_actor_id(actor_id).is_none() {
+                    PeerEvent::PeerChokingChanged {
+                        actor_id,
+                        peer_choking,
+                    } => {
+                        let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
                             continue;
+                        };
+                        peers.update_peer_choking(actor_id, peer_choking);
+                        if peer_choking && !peers.peer_can_request(peer_index) {
+                            let actor_id = peers
+                                .actor_id(peer_index)
+                                .expect("peer snapshot has stable ID");
+                            let retry = requeue_peer_requests(
+                                peer_index,
+                                &mut pending,
+                                &mut remaining,
+                                &mut in_flight,
+                            );
+                            workers.cancel_peer_requests(actor_id, &retry, piece_index);
                         }
+                    }
+                    PeerEvent::AllowedFast { actor_id, piece_index: allowed_piece } => {
+                        peers.add_peer_allowed_fast(actor_id, allowed_piece);
                     }
                     PeerEvent::AvailabilityChanged {
                         actor_id,
@@ -289,6 +317,7 @@ pub(super) async fn run_attempt(
                         peers.update_peer_bitfield(actor_id, &bitfield);
                     }
                     PeerEvent::PexPeers { peers, .. } => workers.record_pex_peers(peers),
+                    PeerEvent::PexNegotiated { .. } => {}
                     PeerEvent::InterestChanged { actor_id, snapshot } => {
                         if peers.peer_index_by_actor_id(actor_id).is_none() {
                             continue;
@@ -300,6 +329,7 @@ pub(super) async fn run_attempt(
                             *snapshot,
                         ).await;
                     }
+                    PeerEvent::AmInterestChanged { .. } => {}
                     PeerEvent::Message {
                         actor_id,
                         generation,
@@ -364,6 +394,7 @@ pub(super) async fn run_attempt(
                                     && let Some(progress) = network_activity
                                 {
                                     progress.record_network_activity();
+                                    download_speed.record(data.len() as u64);
                                 }
                                 piece_data[start..end].copy_from_slice(&data);
                                 completed[entry.request.block_index as usize] = true;
@@ -380,6 +411,25 @@ pub(super) async fn run_attempt(
                                             bytes,
                                         });
                                     }
+                                }
+
+                                responses_since_window_growth[peer_index] += 1;
+                                let current_window = peers.request_window(peer_index);
+                                let growth_threshold = current_window.div_ceil(4);
+                                if current_window < MAX_OUTSTANDING_REQUEST
+                                    && responses_since_window_growth[peer_index] >= growth_threshold
+                                    && let Some(actor_id) = peers.actor_id(peer_index)
+                                    && let Some(new_window) =
+                                        event_rx.increase_request_window(actor_id)
+                                {
+                                    peers.update_request_window(actor_id, new_window);
+                                    responses_since_window_growth[peer_index] = 0;
+                                    trace!(
+                                        actor_id = actor_id.0,
+                                        previous_window = current_window,
+                                        new_window,
+                                        "Increased BT peer request window after successful blocks"
+                                    );
                                 }
                             }
                             BtMessage::Reject { index, offset, .. }
@@ -449,6 +499,11 @@ pub(super) async fn run_attempt(
             }
             _ = tokio::time::sleep(wait) => {
                 let now = Instant::now();
+                if let Some(progress) = network_activity
+                    && download_speed.next_deadline().is_some_and(|deadline| now >= deadline)
+                {
+                    progress.set_download_speed(download_speed.sample(now));
+                }
                 if choking_algo
                     .as_deref()
                     .is_some_and(|algo| algo.choke_rotation_due(now))
@@ -460,6 +515,9 @@ pub(super) async fn run_attempt(
                     .filter(|request| now >= block_request_deadline(request.sent_at, request_timeout))
                     .map(|request| request.peer_index)
                     .collect::<HashSet<_>>();
+                if pending.is_empty() && !remaining.is_empty() {
+                    break;
+                }
                 for peer_index in expired {
                     warn!(peer_index, "BT block request window timed out");
                     mark_peer_failed(

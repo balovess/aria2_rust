@@ -316,6 +316,24 @@ impl TokenBucket {
         }
     }
 
+    /// Return previously acquired tokens after a queued transfer is canceled.
+    /// The balance is capped at the configured burst capacity.
+    pub fn refund(&self, bytes: u64) {
+        if self.unlimited.load(Ordering::Relaxed) {
+            return;
+        }
+        let refunded_milli = bytes.saturating_mul(1000);
+        let _ = self
+            .tokens_milli
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(
+                    current
+                        .saturating_add(refunded_milli)
+                        .min(self.capacity_milli),
+                )
+            });
+    }
+
     /// Update the refill rate dynamically. Takes effect on the next refill cycle.
     /// `rate_bytes_per_sec` of 0 effectively pauses the bucket (no new tokens).
     pub fn set_rate(&self, rate_bytes_per_sec: u64) {

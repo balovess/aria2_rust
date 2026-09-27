@@ -306,7 +306,10 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     connection.allocate_session_resource(16 * 1024, 1, 16 * 1024);
 
     let mut handshake = aria2_protocol::bittorrent::message::extension::ExtensionHandshake::new();
-    handshake.with_ut_metadata(7).with_ut_pex(9);
+    handshake
+        .with_version("remote-agent/2.3")
+        .with_ut_metadata(7)
+        .with_ut_pex(9);
     let frame = aria2_protocol::bittorrent::message::serializer::serialize(
         &aria2_protocol::bittorrent::message::types::BtMessage::Extended {
             ext_id: 0,
@@ -320,6 +323,13 @@ async fn test_bt_peer_conn_registers_remote_extension_ids() {
     assert!(connection.read_message().await.unwrap().is_some());
     assert_eq!(connection.peer_extension_id("ut_metadata"), Some(7));
     assert_eq!(connection.peer_extension_id("ut_pex"), Some(9));
+    assert_eq!(
+        *connection
+            .remote_client
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        Some("remote-agent/2.3".to_string())
+    );
 }
 
 #[tokio::test]

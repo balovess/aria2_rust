@@ -130,6 +130,10 @@ impl CachedDiskWriter {
         }
     }
 
+    pub(crate) fn cache_handle(&self) -> Option<Arc<WrDiskCache>> {
+        self.cache.as_ref().map(Arc::clone)
+    }
+
     fn record_direct_write(&mut self, bytes: usize) {
         self.direct_write_count += 1;
         self.direct_write_bytes += bytes as u64;

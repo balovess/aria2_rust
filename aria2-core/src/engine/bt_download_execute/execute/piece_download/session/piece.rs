@@ -1,10 +1,11 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_message_handler::types::BLOCK_SIZE;
 use crate::engine::bt_message_handler::{download_piece_blocks, download_piece_blocks_endgame};
 use crate::engine::bt_piece_selector::BtPieceSelector;
-use crate::error::{Aria2Error, FatalError, Result};
+use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadResultCode;
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::info;
@@ -72,6 +73,9 @@ impl PieceDownloadSession<'_> {
         };
         self.piece_manager.mark_piece_complete(piece_index);
         self.piece_picker.mark_completed(piece_index);
+        self.swarm
+            .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()))
+            .await;
         self.command.completed_bytes = self.command.completed_bytes.saturating_add(accounted_bytes);
         self.command
             .group
@@ -145,6 +149,9 @@ impl PieceDownloadSession<'_> {
         next_piece_idx: usize,
     ) -> Result<PieceLoopAction> {
         tracing::info!("[BT] Downloading piece {}...", next_piece_idx);
+        self.swarm
+            .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()))
+            .await;
 
         let actual_piece_len = self.actual_piece_length(next_piece_idx);
 
@@ -359,6 +366,9 @@ impl PieceDownloadSession<'_> {
                         )
                         .await?;
 
+                    self.swarm
+                        .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()))
+                        .await;
                     self.swarm.broadcast_have(next_piece_idx as u32).await;
                     piece_ok = true;
 
@@ -418,13 +428,14 @@ impl PieceDownloadSession<'_> {
                     }
                 }
             }
-            Err(_) => {
+            Err(Aria2Error::Network(error)) => {
                 tracing::warn!(
-                    "[BT] Incomplete piece {}, needed {} blocks",
+                    "[BT] Piece {} did not complete after its network attempts: {}",
                     next_piece_idx,
-                    num_blocks
+                    error,
                 );
             }
+            Err(error) => return Err(error),
         }
 
         if !piece_ok {
@@ -474,8 +485,8 @@ impl PieceDownloadSession<'_> {
                     )
                 } else {
                     format!(
-                        "Piece {} failed after {} retries; {} connected peer(s) advertise it",
-                        next_piece_idx, max_attempts, source_count
+                        "Piece {} was advertised by {} connected peer(s), but no peer completed the transfer",
+                        next_piece_idx, source_count
                     )
                 };
                 self.command
@@ -486,14 +497,10 @@ impl PieceDownloadSession<'_> {
                     "[BT] {} (peers and web seeds); waiting for discovery",
                     failure_message
                 );
-                if source_count == 0 {
-                    // A peer snapshot is not a swarm-wide availability proof. The
-                    // missing piece may become available after the next tracker,
-                    // DHT, PEX, or incoming-peer event, so keep the download
-                    // resumable and let bt-stop-timeout provide the final bound.
-                    return Ok(PieceLoopAction::Retry);
-                }
-                return Err(Aria2Error::Fatal(FatalError::Config(failure_message)));
+                // Advertised availability does not prove that a peer can or will
+                // transfer the piece. Keep the task alive so tracker, DHT, PEX,
+                // incoming peers, and later unchoke events can make progress.
+                return Ok(PieceLoopAction::Retry);
             }
         }
         Ok(PieceLoopAction::RefreshProgress)

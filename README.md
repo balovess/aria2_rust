@@ -3,8 +3,13 @@
 中文：[`README_CN.md`](README_CN.md)
 
 > **Version Notice:** aria2-rust is currently in a period of rapid iteration.
-> Older versions may retain various issues and basic functionality is not
-> guaranteed. Please use the latest version as soon as possible.
+> It is far from production-ready. Features may be incomplete, unstable, or
+> unusable, and functionality is not guaranteed. Do not rely on it for
+> production workloads or important data.
+
+<p align="center">
+  <img src="https://img.shields.io/badge/STATUS-IN%20DEVELOPMENT-red?style=for-the-badge" alt="In development — not production ready" />
+</p>
 
 ## Documentation
 

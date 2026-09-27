@@ -564,9 +564,11 @@ mod tests {
             peer.ip()
         });
 
-        let mut proxy = FtpProxyConfig::default();
-        proxy.proxy_host = "127.0.0.1".to_string();
-        proxy.proxy_port = address.port();
+        let proxy = FtpProxyConfig {
+            proxy_host: "127.0.0.1".to_string(),
+            proxy_port: address.port(),
+            ..FtpProxyConfig::default()
+        };
         let response = execute_proxy_get_with_policy(
             Url::parse("ftp://ftp.example.com/file.bin").expect("valid FTP URL"),
             &proxy,

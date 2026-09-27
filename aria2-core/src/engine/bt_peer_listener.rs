@@ -18,6 +18,8 @@ pub struct IncomingPeer {
     pub endpoint: SocketAddr,
 }
 
+pub(crate) type IncomingPeerReceiver = Arc<tokio::sync::Mutex<mpsc::Receiver<IncomingPeer>>>;
+
 struct SharedRoute {
     id: u64,
     local_peer_id: [u8; 20],

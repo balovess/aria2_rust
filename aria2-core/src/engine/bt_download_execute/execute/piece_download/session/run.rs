@@ -1,7 +1,6 @@
 use std::time::Instant;
 use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
-use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_download_execute::execute::incoming::PeerActorUploadContext;
 use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_message_handler::{PeerCommand, PeerEvent};
@@ -15,7 +14,6 @@ use crate::request::request_group::{
 use crate::util::rwlock_ext::RwLockRecover;
 use tracing::{debug, info, warn};
 
-use super::super::peer_events::NewPeerConnectionsContext;
 use super::{PieceDownloadSession, PieceLoopAction};
 
 const MAX_WEB_SEED_PIECES_IN_FLIGHT: usize = 4;
@@ -72,6 +70,31 @@ async fn wait_for_uri_generation(
     }
 }
 
+enum NoPeerWaitEvent {
+    Peer(super::super::peer_events::PeerWaitEvent),
+    WebSeed(WebSeedTaskCompletion),
+    UriChanged,
+}
+
+type WebSeedTaskCompletion = Option<
+    std::result::Result<(u32, std::result::Result<Vec<u8>, String>), tokio::task::JoinError>,
+>;
+
+enum PieceDownloadWait {
+    Completed(PieceLoopAction),
+    Incoming(Option<crate::engine::bt_peer_listener::IncomingPeer>),
+    StopTimeout,
+}
+
+async fn wait_for_incoming_peer(
+    receiver: Option<crate::engine::bt_peer_listener::IncomingPeerReceiver>,
+) -> Option<crate::engine::bt_peer_listener::IncomingPeer> {
+    match receiver {
+        Some(receiver) => receiver.lock().await.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
 impl PieceDownloadSession<'_> {
     pub(super) async fn run(mut self) -> Result<()> {
         let mut web_seed_tasks = tokio::task::JoinSet::new();
@@ -100,16 +123,18 @@ impl PieceDownloadSession<'_> {
             {
                 self.apply_upload_choke_round().await;
             }
-            self.command.drain_incoming_peers_to_swarm(
-                self.swarm,
-                self.piece_length,
-                self.num_pieces,
-                self.total_size,
-                PeerActorUploadContext {
-                    provider: std::sync::Arc::clone(&self.upload_provider),
-                    upload_counter: std::sync::Arc::clone(&self.upload_counter),
-                },
-            );
+            self.command
+                .drain_incoming_peers_to_swarm(
+                    self.swarm,
+                    self.piece_length,
+                    self.num_pieces,
+                    self.total_size,
+                    PeerActorUploadContext {
+                        provider: std::sync::Arc::clone(&self.upload_provider),
+                        upload_counter: std::sync::Arc::clone(&self.upload_counter),
+                    },
+                )
+                .await;
             self.command.bt_runtime.set_connections(self.swarm.len());
 
             let (halt_requested, stop_timeout_elapsed) = {
@@ -229,7 +254,6 @@ impl PieceDownloadSession<'_> {
             super::super::super::pex::send_periodic_pex_to_swarm(
                 self.command,
                 self.swarm,
-                self.pex_enabled_peers,
                 self.last_pex_send,
                 self.pex_send_interval_secs,
             )
@@ -336,14 +360,7 @@ impl PieceDownloadSession<'_> {
             // DHT, PEX, or incoming-peer discovery. The wait is driven by a
             // socket/message event, a lifecycle notification, a completed DHT
             // lookup, or the next protocol/stop-timeout deadline.
-            if self.swarm.is_empty()
-                && web_seed_tasks.is_empty()
-                && (self
-                    .web_seed_manager
-                    .as_ref()
-                    .is_none_or(|manager| manager.is_empty())
-                    || web_seed_scan_cursor >= self.num_pieces)
-            {
+            if self.swarm.is_empty() {
                 debug!("[BT] No peers available, waiting for peer discovery...");
                 let peer_deadline = self
                     .command
@@ -360,15 +377,36 @@ impl PieceDownloadSession<'_> {
                 };
                 let peer_event = self.command.wait_for_swarm_peer_event(self.swarm, deadline);
                 let event = tokio::select! {
-                    event = peer_event => Some(event),
+                    event = peer_event => NoPeerWaitEvent::Peer(event),
+                    joined = web_seed_tasks.join_next(), if !web_seed_tasks.is_empty() => {
+                        NoPeerWaitEvent::WebSeed(joined)
+                    }
                     _ = wait_for_uri_generation(
                         uri_generation,
                         uri_notifier,
                         observed_uri_generation,
-                    ) => None,
+                    ) => NoPeerWaitEvent::UriChanged,
                 };
-                let Some(event) = event else {
-                    continue;
+                let event = match event {
+                    NoPeerWaitEvent::WebSeed(Some(Ok((piece_index, result)))) => {
+                        active_web_seed_pieces.remove(&piece_index);
+                        if self.complete_web_seed_piece(piece_index, result).await? {
+                            self.refresh_download_progress();
+                        } else {
+                            self.schedule_web_seed_retry(piece_index, &mut web_seed_retries);
+                        }
+                        continue;
+                    }
+                    NoPeerWaitEvent::WebSeed(Some(Err(error))) => {
+                        warn!(%error, "WebSeed worker terminated unexpectedly");
+                        web_seed_tasks.abort_all();
+                        for piece_index in active_web_seed_pieces.drain() {
+                            self.piece_picker.mark_reserved(piece_index, false);
+                        }
+                        continue;
+                    }
+                    NoPeerWaitEvent::WebSeed(None) | NoPeerWaitEvent::UriChanged => continue,
+                    NoPeerWaitEvent::Peer(event) => event,
                 };
                 let actor_interest_changed = match &event {
                     super::super::peer_events::PeerWaitEvent::Actor(actor_event) => {
@@ -497,7 +535,52 @@ impl PieceDownloadSession<'_> {
 
             self.piece_picker
                 .mark_in_progress(next_piece_idx as u32, true);
-            let action = self.download_piece(next_piece_idx).await?;
+            let incoming_receiver = self.command.incoming_peers.clone();
+            let wait = if let Some(deadline) = self.stop_timeout.deadline() {
+                tokio::select! {
+                    action = self.download_piece(next_piece_idx) => PieceDownloadWait::Completed(action?),
+                    incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming),
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        PieceDownloadWait::StopTimeout
+                    }
+                }
+            } else {
+                tokio::select! {
+                    action = self.download_piece(next_piece_idx) => PieceDownloadWait::Completed(action?),
+                    incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming),
+                }
+            };
+            let action = match wait {
+                PieceDownloadWait::Completed(action) => action,
+                PieceDownloadWait::Incoming(Some(incoming)) => {
+                    self.command.admit_incoming_peer_to_swarm(
+                        self.swarm,
+                        incoming,
+                        self.piece_length,
+                        self.num_pieces,
+                        self.total_size,
+                        &PeerActorUploadContext {
+                            provider: std::sync::Arc::clone(&self.upload_provider),
+                            upload_counter: std::sync::Arc::clone(&self.upload_counter),
+                        },
+                    );
+                    self.announce_available_pieces().await;
+                    self.piece_picker
+                        .mark_in_progress(next_piece_idx as u32, false);
+                    continue;
+                }
+                PieceDownloadWait::Incoming(None) => {
+                    self.command.incoming_peers = None;
+                    self.piece_picker
+                        .mark_in_progress(next_piece_idx as u32, false);
+                    continue;
+                }
+                PieceDownloadWait::StopTimeout => {
+                    self.piece_picker
+                        .mark_in_progress(next_piece_idx as u32, false);
+                    continue;
+                }
+            };
             if matches!(action, PieceLoopAction::Retry) {
                 self.piece_picker
                     .mark_in_progress(next_piece_idx as u32, false);
@@ -537,6 +620,7 @@ impl PieceDownloadSession<'_> {
                 self.command.track_peer_for_upload_choking(snapshot);
                 matches!(event, PeerEvent::InterestChanged { .. })
             }
+            PeerEvent::AmInterestChanged { .. } => false,
             PeerEvent::PeerChokingChanged { actor_id, .. } => {
                 if let Some(actor) = self.swarm.actor(*actor_id) {
                     self.command.track_peer_for_upload_choking(&actor.stats);
@@ -582,6 +666,8 @@ impl PieceDownloadSession<'_> {
                 self.pending_pex_peers.extend(peers.iter().cloned());
                 false
             }
+            PeerEvent::AllowedFast { .. } => false,
+            PeerEvent::PexNegotiated { .. } => false,
             PeerEvent::Message {
                 actor_id,
                 message: aria2_protocol::bittorrent::message::types::BtMessage::Piece { .. },
@@ -631,9 +717,6 @@ impl PieceDownloadSession<'_> {
         for (_, endpoint, peer_key) in &dead {
             self.peer_tracker.remove_peer(&endpoint.to_string());
             self.peer_last_data_time.remove(peer_key);
-            self.pex_enabled_peers.remove(peer_key);
-            self.command.allowed_fast_sent_peers.remove(peer_key);
-            self.command.suggest_sent_counts.remove(peer_key);
         }
 
         let removed = self.swarm.remove_dead().await;
@@ -752,85 +835,38 @@ impl PieceDownloadSession<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::WebSeedRetries;
-    use std::time::{Duration, Instant};
-
-    #[test]
-    fn web_seed_retries_are_delayed_and_limited() {
-        let now = Instant::now();
-        let mut delayed = WebSeedRetries::default();
-        delayed.schedule(7, 2, Duration::from_secs(60));
-        assert_eq!(delayed.pop_ready(now), None);
-        assert!(delayed.next_deadline().is_some());
-
-        let mut retries = WebSeedRetries::default();
-        retries.schedule(7, 2, Duration::ZERO);
-        assert_eq!(retries.pop_ready(Instant::now()), Some(7));
-
-        retries.schedule(7, 2, Duration::ZERO);
-        assert_eq!(retries.pop_ready(Instant::now()), Some(7));
-
-        retries.schedule(7, 2, Duration::ZERO);
-        assert_eq!(retries.pop_ready(Instant::now()), None);
-    }
-}
-
 impl PieceDownloadSession<'_> {
     async fn connect_to_discovered_swarm_peers(
         &mut self,
         peers: &[aria2_protocol::bittorrent::peer::connection::PeerAddr],
         source: BtPeerSource,
     ) -> usize {
-        let max_peers = self.command.group.recover().options().bt_max_peers;
-        let attempt_limit = self
-            .command
-            .peer_coordinator
-            .available_slots(self.swarm.len());
-        let connected_endpoints = self
+        let active_peers = self
             .swarm
             .iter()
             .filter(|actor| !actor.dead)
-            .map(|actor| actor.endpoint)
+            .map(|actor| (actor.endpoint.ip().to_string(), actor.endpoint.port()))
             .collect::<std::collections::HashSet<_>>();
-        let candidates = peers
-            .iter()
-            .filter(|peer| {
-                peer.ip.parse::<std::net::IpAddr>().ok().is_none_or(|ip| {
-                    !connected_endpoints.contains(&std::net::SocketAddr::new(ip, peer.port))
-                })
-            })
-            .take(attempt_limit)
-            .cloned()
-            .collect::<Vec<_>>();
+        let candidates = self
+            .command
+            .peer_coordinator
+            .select_candidates(peers, &active_peers);
         if candidates.is_empty() {
             return 0;
         }
         let info_hash = self.meta.network_info_hash();
-        let mut connected = 0;
-        for peer in candidates {
-            if self.command.group.recover().is_halt_requested() {
-                break;
-            }
-            let new_connection = self
-                .command
-                .connect_to_discovered_peers(
-                    std::slice::from_ref(&peer),
-                    source,
-                    &info_hash,
-                    self.num_pieces,
-                    &[],
-                    self.piece_length,
-                    self.total_size,
-                )
-                .await;
-            connected += self.append_new_connections(new_connection);
-            if max_peers > 0 && self.swarm.len() >= max_peers {
-                break;
-            }
-        }
-        connected
+        let connections = self
+            .command
+            .connect_to_discovered_peers(
+                &candidates,
+                source,
+                &info_hash,
+                self.num_pieces,
+                self.piece_length,
+                self.total_size,
+            )
+            .await;
+        self.admit_connected_peers(connections)
     }
 
     pub(super) async fn apply_upload_choke_round(&mut self) {
@@ -839,85 +875,92 @@ impl PieceDownloadSession<'_> {
             .await;
     }
 
-    fn append_new_connections(&mut self, new_connections: Vec<BtPeerConn>) -> usize {
-        let mut new_connections = new_connections;
+    fn admit_connected_peers(&mut self, new_connections: Vec<BtPeerConn>) -> usize {
         let max_peers = self.command.group.recover().options().bt_max_peers;
         let caretaker_id = self.command.group.recover().gid().value();
-        let is_private = self.command.is_private;
-        {
-            new_connections.retain(|connection| {
-                let Some(endpoint) = connection.remote_endpoint() else {
-                    return false;
-                };
-                !self.swarm.has_endpoint(endpoint)
-                    && !connection
-                        .remote_peer_id()
-                        .is_some_and(|peer_id| self.swarm.has_peer_id(peer_id))
-                    && connection.remote_peer_id() != Some(self.command.local_peer_id)
-            });
-            let remaining_slots =
-                (max_peers != 0).then(|| max_peers.saturating_sub(self.swarm.len()));
-            if remaining_slots == Some(0) {
-                return 0;
+        let mut seen_endpoints = std::collections::HashSet::with_capacity(new_connections.len());
+        let dht_engine = self.command.dht_engine.clone();
+        let provider = std::sync::Arc::clone(&self.upload_provider);
+        let mut admitted = 0;
+
+        for mut connection in new_connections {
+            if max_peers > 0 && self.swarm.len() >= max_peers {
+                break;
             }
-            for connection in &mut new_connections {
-                self.command.configure_upload_connection(
-                    connection,
-                    self.piece_length,
-                    self.num_pieces,
-                );
-            }
-            let mut accepted = Vec::new();
+            let Some(endpoint) = connection.remote_endpoint() else {
+                tracing::debug!("[BT] Dropping new peer without a remote endpoint");
+                continue;
+            };
+            if endpoint.ip().is_unspecified()
+                || endpoint.port() == 0
+                || !seen_endpoints.insert(endpoint)
+                || self.swarm.has_endpoint(endpoint)
+                || connection
+                    .remote_peer_id()
+                    .is_some_and(|peer_id| self.swarm.has_peer_id(peer_id))
+                || connection.remote_peer_id() == Some(self.command.local_peer_id)
             {
-                let mut context = NewPeerConnectionsContext {
-                    peer_last_data_time: &mut self.peer_last_data_time,
-                    pex_enabled_peers: self.pex_enabled_peers,
-                    allowed_fast_sent_peers: &mut self.command.allowed_fast_sent_peers,
-                    suggest_sent_counts: &mut self.command.suggest_sent_counts,
-                    peer_tracker: &mut self.peer_tracker,
-                    choking_algo: &mut self.command.choking_algo,
-                };
-                BtDownloadCommand::append_new_connections(
-                    &mut accepted,
-                    new_connections,
-                    remaining_slots.unwrap_or(usize::MAX),
-                    is_private,
-                    &mut context,
-                    &self.command.peer_storage,
-                    caretaker_id,
-                );
+                tracing::debug!(peer = %endpoint, "Dropping duplicate or invalid discovered peer");
+                continue;
             }
 
-            let mut connected = 0;
-            let dht_engine = self.command.dht_engine.clone();
-            let provider = std::sync::Arc::clone(&self.upload_provider);
-            for mut connection in accepted {
-                let Some(endpoint) = connection.remote_endpoint() else {
-                    continue;
-                };
-                connection.set_upload_counter(std::sync::Arc::clone(&self.upload_counter));
-                connection.set_upload_progress(std::sync::Arc::clone(&self.command.progress));
-                if self
-                    .swarm
-                    .spawn_peer(
-                        connection,
-                        dht_engine.clone(),
-                        std::sync::Arc::clone(&provider),
-                    )
-                    .is_err()
-                {
-                    self.command.release_peer_endpoint(endpoint);
-                } else {
-                    connected += 1;
-                }
+            let entry = crate::engine::bt_peer_storage::PeerEntry::new(
+                endpoint.ip().to_string(),
+                endpoint.port(),
+            );
+            let checked_out = self
+                .command
+                .peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .add_and_checkout_peer(entry, caretaker_id)
+                .is_some();
+            if !checked_out {
+                continue;
             }
+
+            self.command.configure_upload_connection(
+                &mut connection,
+                self.piece_length,
+                self.num_pieces,
+            );
+            connection.set_upload_counter(std::sync::Arc::clone(&self.upload_counter));
+            connection.set_upload_progress(std::sync::Arc::clone(&self.command.progress));
+            let peer_key = PeerKey::new(endpoint);
+            let stats = connection.stats.clone();
+
+            if self
+                .swarm
+                .spawn_peer(
+                    connection,
+                    dht_engine.clone(),
+                    std::sync::Arc::clone(&provider),
+                )
+                .is_err()
+            {
+                self.command.release_peer_endpoint(endpoint);
+                continue;
+            }
+
+            self.command
+                .peer_storage
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_peer_active(&endpoint.ip().to_string(), endpoint.port(), true);
+            self.peer_last_data_time.insert(peer_key, Instant::now());
+            self.command.track_peer_for_upload_choking(&stats);
+            admitted += 1;
+        }
+
+        if admitted > 0 {
+            tracing::debug!(admitted, "[BT] Admitted discovered peers to the swarm");
             self.command.bt_runtime.set_connections(self.swarm.len());
             self.command
                 .group
                 .recover()
                 .set_bt_connection_count(self.swarm.len());
-            connected
         }
+        admitted
     }
 
     async fn announce_available_pieces(&mut self) {
@@ -963,5 +1006,30 @@ impl PieceDownloadSession<'_> {
         self.last_snub_check
             .checked_add(Duration::from_secs(10))
             .unwrap_or_else(Instant::now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebSeedRetries;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn web_seed_retries_are_delayed_and_limited() {
+        let now = Instant::now();
+        let mut delayed = WebSeedRetries::default();
+        delayed.schedule(7, 2, Duration::from_secs(60));
+        assert_eq!(delayed.pop_ready(now), None);
+        assert!(delayed.next_deadline().is_some());
+
+        let mut retries = WebSeedRetries::default();
+        retries.schedule(7, 2, Duration::ZERO);
+        assert_eq!(retries.pop_ready(Instant::now()), Some(7));
+
+        retries.schedule(7, 2, Duration::ZERO);
+        assert_eq!(retries.pop_ready(Instant::now()), Some(7));
+
+        retries.schedule(7, 2, Duration::ZERO);
+        assert_eq!(retries.pop_ready(Instant::now()), None);
     }
 }

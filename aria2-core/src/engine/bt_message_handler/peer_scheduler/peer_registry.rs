@@ -1,8 +1,9 @@
 //! Owned peer actors and stable-ID routing for a torrent swarm.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
 use tokio::sync::mpsc;
 
@@ -10,6 +11,7 @@ use crate::engine::bt_peer_connection::{BtPeerConn, PeerActorId};
 use crate::engine::bt_upload_session::PieceDataProvider;
 use crate::engine::peer_stats::PeerStats;
 
+use super::super::types::{DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_OUTSTANDING_REQUEST};
 use super::{PeerActorControl, PeerActorTask, PeerCommand, PeerEvent};
 
 /// One long-lived I/O owner for a handshaken BitTorrent connection.
@@ -19,9 +21,13 @@ pub(crate) struct PeerActorEntry {
     pub(crate) dead: bool,
     pub(crate) incoming: bool,
     pub(crate) source: crate::request::request_group::BtPeerSource,
+    pub(crate) client: Arc<std::sync::RwLock<Option<String>>>,
+    pub(crate) pending_download_requests: Arc<AtomicUsize>,
+    pub(crate) max_outstanding_requests: usize,
     pub(crate) stats: PeerStats,
     pub(crate) has_bitfield: bool,
     pub(crate) bitfield: Vec<u8>,
+    pub(crate) peer_allowed_fast: HashSet<u32>,
     pub(crate) seeder: bool,
     pub(crate) ut_pex_id: Option<u8>,
     actor: PeerActorTask,
@@ -30,6 +36,7 @@ pub(crate) struct PeerActorEntry {
 impl PeerActorEntry {
     pub(crate) fn spawn(
         actor_id: PeerActorId,
+        endpoint: SocketAddr,
         connection: BtPeerConn,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         provider: Arc<dyn PieceDataProvider>,
@@ -39,21 +46,22 @@ impl PeerActorEntry {
         let seeder = connection.seeder;
         let incoming = connection.incoming;
         let source = connection.source;
+        let client = connection.remote_client.clone();
+        let pending_download_requests = Arc::new(AtomicUsize::new(0));
         let ut_pex_id = connection.peer_extension_id("ut_pex");
         let has_bitfield = connection.session_resource.is_some();
         let bitfield = connection
             .session_resource
             .as_ref()
             .map_or_else(Vec::new, |resource| resource.bitfield().to_vec());
-        let endpoint = format!("{}:{}", connection.remote_ip(), connection.remote_port())
-            .parse()
-            .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
+        let peer_allowed_fast = connection.peer_allowed_fast_set().clone();
         let actor = PeerActorTask::spawn_owned(
             actor_id,
             connection,
             event_tx,
             dht_engine,
             Some(provider),
+            Arc::clone(&pending_download_requests),
             16,
         );
 
@@ -63,9 +71,13 @@ impl PeerActorEntry {
             dead: false,
             incoming,
             source,
+            client,
+            pending_download_requests,
+            max_outstanding_requests: DEFAULT_MAX_OUTSTANDING_REQUEST,
             stats,
             has_bitfield,
             bitfield,
+            peer_allowed_fast,
             seeder,
             ut_pex_id,
             actor,
@@ -110,6 +122,9 @@ pub(crate) struct PeerSwarm {
     indices: HashMap<PeerActorId, usize>,
     peer_id_counts: HashMap<[u8; 20], usize>,
     endpoint_counts: HashMap<SocketAddr, usize>,
+    wanted_pieces: Arc<[u8]>,
+    peer_snapshot_store:
+        Option<Arc<std::sync::RwLock<Vec<crate::request::request_group::BtPeerSnapshot>>>>,
     pub(crate) event_tx: Option<mpsc::Sender<PeerEvent>>,
     pub(crate) event_rx: Option<mpsc::Receiver<PeerEvent>>,
 }
@@ -163,6 +178,15 @@ impl PeerSwarmEventLease<'_> {
     pub(crate) fn actor_mut(&mut self, actor_id: PeerActorId) -> Option<&mut PeerActorEntry> {
         self.swarm.actor_mut(actor_id)
     }
+
+    pub(crate) fn increase_request_window(&mut self, actor_id: PeerActorId) -> Option<usize> {
+        let actor = self.swarm.actor_mut(actor_id)?;
+        actor.max_outstanding_requests = actor
+            .max_outstanding_requests
+            .saturating_mul(2)
+            .min(MAX_OUTSTANDING_REQUEST);
+        Some(actor.max_outstanding_requests)
+    }
 }
 
 impl Drop for PeerSwarmEventLease<'_> {
@@ -181,6 +205,8 @@ impl PeerSwarm {
             indices: HashMap::new(),
             peer_id_counts: HashMap::new(),
             endpoint_counts: HashMap::new(),
+            wanted_pieces: Arc::from([]),
+            peer_snapshot_store: None,
             event_tx: Some(event_tx),
             event_rx: Some(event_rx),
         }
@@ -217,10 +243,21 @@ impl PeerSwarm {
         let Some(event_tx) = self.event_sender() else {
             return Err(Box::new(connection));
         };
+        let Some(endpoint) = connection.remote_endpoint() else {
+            return Err(Box::new(connection));
+        };
         let actor_id = connection.actor_id;
+        let wanted_pieces = Arc::clone(&self.wanted_pieces);
         self.insert(PeerActorEntry::spawn(
-            actor_id, connection, dht_engine, provider, event_tx,
+            actor_id, endpoint, connection, dht_engine, provider, event_tx,
         ));
+        if self
+            .try_send_to(actor_id, PeerCommand::SetWantedPieces(wanted_pieces))
+            .is_err()
+        {
+            self.mark_dead(actor_id);
+        }
+        self.publish_peer_snapshots();
         Ok(actor_id)
     }
 
@@ -309,8 +346,94 @@ impl PeerSwarm {
     }
 
     pub(crate) fn mark_dead(&mut self, actor_id: PeerActorId) {
-        if let Some(actor) = self.actor_mut(actor_id) {
+        let marked = if let Some(actor) = self.actor_mut(actor_id) {
             actor.dead = true;
+            true
+        } else {
+            false
+        };
+        if marked {
+            self.publish_peer_snapshots();
+        }
+    }
+
+    pub(crate) fn attach_peer_snapshot_store(
+        &mut self,
+        store: Arc<std::sync::RwLock<Vec<crate::request::request_group::BtPeerSnapshot>>>,
+    ) {
+        self.peer_snapshot_store = Some(store);
+        self.publish_peer_snapshots();
+    }
+
+    pub(crate) fn peer_snapshots(&self) -> Vec<crate::request::request_group::BtPeerSnapshot> {
+        self.actors
+            .iter()
+            .filter(|actor| !actor.dead)
+            .map(|actor| crate::request::request_group::BtPeerSnapshot {
+                peer_id: actor.stats.peer_id,
+                client: actor
+                    .client
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
+                addr: actor.endpoint,
+                is_incoming: actor.incoming,
+                source: actor.source,
+                bitfield: actor.has_bitfield.then(|| actor.bitfield.clone()),
+                uploaded_bytes: actor.stats.uploaded_bytes,
+                downloaded_bytes: actor.stats.downloaded_bytes,
+                upload_speed: actor.stats.upload_speed,
+                download_speed: actor.stats.download_speed,
+                avg_upload_speed: actor.stats.avg_upload_speed,
+                avg_download_speed: actor.stats.avg_download_speed,
+                am_choking: actor.stats.am_choking,
+                peer_choking: actor.stats.peer_choking,
+                am_interested: actor.stats.am_interested,
+                peer_interested: actor.stats.peer_interested,
+                outstanding_upload_requests: actor.stats.outstanding_upload_count,
+                outstanding_download_requests: actor
+                    .pending_download_requests
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                seeder: Some(actor.seeder),
+                connection_duration_secs: actor.stats.connection_duration_secs(),
+                last_data_age_secs: actor
+                    .stats
+                    .last_data_time
+                    .map_or(actor.stats.age().as_secs(), |time| time.elapsed().as_secs()),
+                is_snubbed: actor.stats.is_snubbed,
+                is_banned: actor.stats.is_banned,
+            })
+            .collect()
+    }
+
+    fn publish_peer_snapshots(&self) {
+        let Some(store) = &self.peer_snapshot_store else {
+            return;
+        };
+        *store
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = self.peer_snapshots();
+    }
+
+    pub(crate) async fn set_wanted_pieces(&mut self, wanted_pieces: Arc<[u8]>) {
+        if self.wanted_pieces.as_ref() == wanted_pieces.as_ref() {
+            return;
+        }
+        self.wanted_pieces = Arc::clone(&wanted_pieces);
+        let actors = self
+            .actors
+            .iter()
+            .filter(|actor| !actor.dead)
+            .map(|actor| (actor.actor_id, actor.handle()))
+            .collect::<Vec<_>>();
+        for (actor_id, control) in actors {
+            if control
+                .send(PeerCommand::SetWantedPieces(Arc::clone(&wanted_pieces)))
+                .await
+                .is_err()
+            {
+                self.mark_dead(actor_id);
+            }
         }
     }
 
@@ -318,6 +441,9 @@ impl PeerSwarm {
     pub(crate) fn apply_event(&mut self, event: &PeerEvent) {
         match event {
             PeerEvent::InterestChanged {
+                actor_id, snapshot, ..
+            }
+            | PeerEvent::AmInterestChanged {
                 actor_id, snapshot, ..
             }
             | PeerEvent::ChokeStateChanged {
@@ -370,12 +496,31 @@ impl PeerSwarm {
                     actor.stats.peer_choking = *peer_choking;
                 }
             }
+            PeerEvent::AllowedFast {
+                actor_id,
+                piece_index,
+            } => {
+                if let Some(actor) = self.actor_mut(*actor_id) {
+                    actor.peer_allowed_fast.insert(*piece_index);
+                }
+            }
+            PeerEvent::PexNegotiated {
+                actor_id,
+                ut_pex_id,
+            } => {
+                if let Some(actor) = self.actor_mut(*actor_id) {
+                    actor.ut_pex_id = *ut_pex_id;
+                }
+            }
             PeerEvent::Disconnected { actor_id } | PeerEvent::RequestFailed { actor_id, .. } => {
                 self.mark_dead(*actor_id);
             }
             PeerEvent::AvailabilityChanged { .. }
             | PeerEvent::Message { stats: None, .. }
             | PeerEvent::PexPeers { .. } => {}
+        }
+        if matches!(event, PeerEvent::AmInterestChanged { .. }) {
+            self.publish_peer_snapshots();
         }
     }
 
@@ -440,6 +585,30 @@ mod tests {
     use tokio::time::{Duration, timeout};
 
     #[tokio::test]
+    async fn swarm_registry_preserves_ipv6_peer_endpoints() {
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (local_stream, endpoint) = listener.accept().await.unwrap();
+        let connection = BtPeerConn::from_incoming_plain(
+            PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
+            endpoint,
+        );
+        let actor_id = connection.actor_id;
+        let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let mut swarm = PeerSwarm::new(8);
+        assert_eq!(
+            swarm.spawn_peer(connection, None, provider).ok(),
+            Some(actor_id)
+        );
+
+        assert_eq!(swarm.actor(actor_id).unwrap().endpoint, endpoint);
+
+        swarm.shutdown_all().await;
+        drop(remote_stream);
+    }
+
+    #[tokio::test]
     async fn swarm_coordinator_lease_can_admit_a_peer_without_releasing_event_ownership() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -480,6 +649,7 @@ mod tests {
         let actor_id = connection.actor_id;
         connection.configure_upload_with_auto_unchoke(
             &crate::engine::bt_upload_session::BtSeedingConfig::default(),
+            crate::rate_limiter::RateLimiter::unlimited(),
             1,
             16,
             false,
@@ -672,6 +842,7 @@ mod tests {
         let provider: Arc<dyn PieceDataProvider> = Arc::new(piece_provider);
         connection.configure_upload_with_auto_unchoke(
             &crate::engine::bt_upload_session::BtSeedingConfig::default(),
+            crate::rate_limiter::RateLimiter::unlimited(),
             1,
             16,
             true,
@@ -732,7 +903,9 @@ mod tests {
 
     #[tokio::test]
     async fn peer_actor_forwards_negotiated_pex_peers_as_a_swarm_event() {
-        use aria2_protocol::bittorrent::message::extension::{CompactPeerV4, UtPexMessage};
+        use aria2_protocol::bittorrent::message::extension::{
+            CompactPeerV4, ExtensionHandshake, UtPexMessage,
+        };
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -744,7 +917,6 @@ mod tests {
         );
         connection.allocate_session_resource(16, 1, 16);
         connection.set_pex_enabled(true);
-        connection.register_peer_extension("ut_pex", 9);
         let actor_id = connection.actor_id;
         let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
         let mut swarm = PeerSwarm::new(8);
@@ -755,6 +927,31 @@ mod tests {
 
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
+        let mut extension_handshake = ExtensionHandshake::new();
+        extension_handshake.with_ut_pex(9);
+        remote
+            .send_message(&BtMessage::Extended {
+                ext_id: 0,
+                payload: extension_handshake.to_bytes(),
+            })
+            .await
+            .unwrap();
+        let negotiation = {
+            let mut events = swarm.lease_event_receiver().unwrap();
+            timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert!(matches!(
+            negotiation,
+            PeerEvent::PexNegotiated {
+                actor_id: event_actor,
+                ut_pex_id: Some(9),
+            } if event_actor == actor_id
+        ));
+        assert_eq!(swarm.actor(actor_id).unwrap().ut_pex_id, Some(9));
+
         let mut pex = UtPexMessage::new();
         pex.added.push(CompactPeerV4([127, 0, 0, 1, 0x1a, 0xe1]));
         remote
@@ -845,7 +1042,7 @@ mod tests {
         let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
         let mut registry = PeerSwarm::new(8);
         registry.insert(PeerActorEntry::spawn(
-            actor_id, connection, None, provider, event_tx,
+            actor_id, endpoint, connection, None, provider, event_tx,
         ));
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
@@ -1075,7 +1272,7 @@ mod tests {
         let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
         let mut registry = PeerSwarm::new(8);
         registry.insert(PeerActorEntry::spawn(
-            actor_id, connection, None, provider, event_tx,
+            actor_id, endpoint, connection, None, provider, event_tx,
         ));
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
@@ -1152,8 +1349,15 @@ mod tests {
         );
         let actor_id = connection.actor_id;
         let (event_tx, mut event_rx) = mpsc::channel(1);
-        let mut actor =
-            PeerActorTask::spawn_owned(actor_id, connection, event_tx.clone(), None, None, 4);
+        let mut actor = PeerActorTask::spawn_owned(
+            actor_id,
+            connection,
+            event_tx.clone(),
+            None,
+            None,
+            Arc::new(AtomicUsize::new(0)),
+            4,
+        );
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
 
@@ -1227,6 +1431,7 @@ mod tests {
             endpoints.push(endpoint);
             registry.insert(PeerActorEntry::spawn(
                 connection.actor_id,
+                endpoint,
                 connection,
                 None,
                 Arc::clone(&provider),

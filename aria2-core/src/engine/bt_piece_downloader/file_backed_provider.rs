@@ -19,6 +19,9 @@ pub struct FileBackedPieceProvider {
     /// so upload eligibility must follow the verified piece bitfield rather
     /// than assuming that the file is a complete seed.
     shared_pieces: Option<std::sync::Arc<std::sync::RwLock<Vec<u8>>>>,
+    /// Write-back cache shared with the active single-file download writer.
+    /// Verified data must be served from here before it reaches the file.
+    write_cache: Option<std::sync::Arc<crate::filesystem::disk_cache::WrDiskCache>>,
 }
 
 impl FileBackedPieceProvider {
@@ -38,6 +41,7 @@ impl FileBackedPieceProvider {
             multi_file_layout,
             pieces,
             shared_pieces: None,
+            write_cache: None,
         }
     }
 
@@ -65,6 +69,7 @@ impl FileBackedPieceProvider {
             multi_file_layout,
             pieces: available,
             shared_pieces: None,
+            write_cache: None,
         }
     }
 
@@ -85,7 +90,16 @@ impl FileBackedPieceProvider {
             multi_file_layout,
             pieces: Bitfield::new(num_pieces as usize),
             shared_pieces: Some(shared_pieces),
+            write_cache: None,
         }
+    }
+
+    pub(crate) fn with_write_cache(
+        mut self,
+        write_cache: Option<std::sync::Arc<crate::filesystem::disk_cache::WrDiskCache>>,
+    ) -> Self {
+        self.write_cache = write_cache;
+        self
     }
 
     /// Mark a piece as available (completed).
@@ -167,6 +181,11 @@ impl PieceDataProvider for FileBackedPieceProvider {
             Some(result)
         } else {
             let file_pos = piece_index as u64 * self.piece_length as u64 + offset as u64;
+            if let Some(cache) = &self.write_cache
+                && let Ok(Some(data)) = cache.read(file_pos, u64::from(length)).await
+            {
+                return Some(data.to_vec());
+            }
             Self::read_file_range(&self.file_path, file_pos, length).await
         }
     }

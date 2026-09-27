@@ -1,7 +1,5 @@
 use super::*;
-use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_download_execute::types::PeerKey;
-use std::collections::HashSet;
 
 #[test]
 fn tracker_tiers_are_deduplicated_without_reordering() {
@@ -75,6 +73,24 @@ fn test_endgame_track_request() {
     assert!(targets.contains(&PeerKey::from(0)));
     assert!(targets.contains(&PeerKey::from(1)));
     assert!(targets.contains(&PeerKey::from(2)));
+}
+
+#[test]
+fn test_endgame_request_ownership_can_be_queried_and_removed_per_peer() {
+    let mut es = EndgameState::new();
+    let first = PeerKey::from(0);
+    let second = PeerKey::from(1);
+    es.track_request(3, 16_384, 16_384, first);
+    es.track_request(3, 16_384, 16_384, second);
+
+    assert!(es.has_peer_request(3, 16_384, 16_384, first));
+    es.remove_peer_request(3, 16_384, 16_384, first);
+    assert!(!es.has_peer_request(3, 16_384, 16_384, first));
+    assert!(es.has_peer_request(3, 16_384, 16_384, second));
+    assert_eq!(es.get_cancel_targets(3, 16_384, 16_384), vec![second]);
+
+    es.remove_peer_request(3, 16_384, 16_384, second);
+    assert_eq!(es.tracked_count(), 0);
 }
 
 #[test]
@@ -217,94 +233,4 @@ fn test_endgame_remove_nonexistent_is_noop() {
     // Remove something that was never tracked - should not panic
     es.remove_request(999, 999, 999);
     assert_eq!(es.tracked_count(), 0);
-}
-
-// ==================== BEP 6 Fast Extension Tests ====================
-
-#[test]
-fn test_is_bitfield_set_basic() {
-    // Test bitfield: [0b11000000] = pieces 0 and 1 set (MSB first)
-    let bf = vec![0xC0];
-    assert!(BtDownloadCommand::is_bitfield_set(&bf, 0));
-    assert!(BtDownloadCommand::is_bitfield_set(&bf, 1));
-    assert!(!BtDownloadCommand::is_bitfield_set(&bf, 2));
-    assert!(!BtDownloadCommand::is_bitfield_set(&bf, 7));
-}
-
-#[test]
-fn test_is_bitfield_set_multi_byte() {
-    // Bitfield for 16 pieces: all set
-    let bf = vec![0xFF, 0xFF];
-    for i in 0..16u32 {
-        assert!(
-            BtDownloadCommand::is_bitfield_set(&bf, i),
-            "Piece {} should be set",
-            i
-        );
-    }
-}
-
-#[test]
-fn test_is_bitfield_set_out_of_range() {
-    let bf = vec![0xFF];
-    assert!(!BtDownloadCommand::is_bitfield_set(&bf, 8)); // Beyond bitfield length
-    assert!(!BtDownloadCommand::is_bitfield_set(&bf, 100));
-}
-
-#[test]
-fn test_calculate_fast_set_basic() {
-    let needed = vec![0u32, 1, 2, 3, 4, 5];
-    let peer_bf = vec![0b11111100]; // Peer has pieces 0-5
-
-    let already_sent = HashSet::new();
-    let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
-
-    assert_eq!(fast_set.len(), 6); // All pieces should be selected (<10 limit)
-    assert!(fast_set.contains(&0));
-    assert!(fast_set.contains(&5));
-}
-
-#[test]
-fn test_calculate_fast_set_respects_max_limit() {
-    // Create 15 needed pieces
-    let needed: Vec<u32> = (0..15).collect();
-    let peer_bf = vec![0xFF, 0xFF]; // Peer has first 16 pieces
-
-    let already_sent = HashSet::new();
-    let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
-
-    assert_eq!(fast_set.len(), 10); // Should cap at MAX_ALLOWED_FAST_PER_PEER
-}
-
-#[test]
-fn test_calculate_fast_set_excludes_already_sent() {
-    let needed = vec![0u32, 1, 2, 3, 4];
-    let peer_bf = vec![0b11111000];
-
-    let mut already_sent = HashSet::new();
-    already_sent.insert(0);
-    already_sent.insert(1);
-
-    let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
-
-    assert_eq!(fast_set.len(), 3); // Only 2,3,4 should be selected
-    assert!(!fast_set.contains(&0));
-    assert!(!fast_set.contains(&1));
-    assert!(fast_set.contains(&2));
-}
-
-#[test]
-fn test_calculate_fast_set_filters_by_peer_bitfield() {
-    let needed = vec![0u32, 1, 2, 3, 4];
-    let peer_bf = vec![0b00011000]; // bitfield byte: bits 3 and 4 set (pieces 3,4)
-
-    let already_sent = HashSet::new();
-    let fast_set = BtDownloadCommand::calculate_fast_set(&needed, &peer_bf, &already_sent);
-
-    assert_eq!(fast_set.len(), 2); // Only pieces that peer has
-    assert!(fast_set.contains(&3));
-    assert!(fast_set.contains(&4));
-    assert!(!fast_set.contains(&0));
-    assert!(!fast_set.contains(&1));
-    assert!(!fast_set.contains(&2));
 }

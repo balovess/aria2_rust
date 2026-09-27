@@ -1,9 +1,9 @@
 //! Event-driven endgame block scheduling over torrent-owned peer actors.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::constants;
 use crate::engine::bt_download_execute::{EndgameState, types::PeerKey};
@@ -12,7 +12,13 @@ use crate::error::{Aria2Error, FatalError, Result};
 use crate::request::request_group::AtomicProgress;
 
 use super::super::types::{
-    ActorAwarePieceDownloadResult, BLOCK_SIZE, PeerDownloadBytes, PieceDownloadResult,
+    ActorAwarePieceDownloadResult, BLOCK_SIZE, DEFAULT_MAX_OUTSTANDING_REQUEST,
+    MAX_OUTSTANDING_REQUEST, PeerDownloadBytes, PieceDownloadResult,
+};
+use super::download_speed::DownloadSpeedSampler;
+use super::endgame_requests::{
+    PendingRequest, cancel_attempt_requests, cancel_completed_block_duplicates,
+    fill_request_windows, record_failed_peer, take_peer_pending,
 };
 use super::normal_pipeline::piece_attempt_budget_exhausted;
 use super::peer_actor::{PeerEvent, PeerGeneration, apply_choke_round, apply_interest_change};
@@ -42,15 +48,27 @@ pub(crate) async fn download_piece_blocks_endgame(
         );
     }
 
+    let block_requests = (0..block_count)
+        .map(|block_index| {
+            let offset = block_index * BLOCK_SIZE;
+            BlockRequest {
+                block_index,
+                offset,
+                length: (piece_length - offset).min(BLOCK_SIZE),
+            }
+        })
+        .collect::<Vec<_>>();
     let mut attempts = 0u32;
     let mut availability_changed_actor_ids = HashSet::new();
     let mut peers = PeerSchedulingSnapshot::capture(swarm, piece_index);
     let mut workers = PeerGeneration::from_swarm(swarm, piece_index).await;
+    let mut download_speed = DownloadSpeedSampler::new();
     let Some(mut event_rx) = swarm.lease_event_receiver() else {
         return Err(Aria2Error::Fatal(FatalError::Config(
             "torrent peer event receiver is already leased".to_string(),
         )));
     };
+
     loop {
         attempts = attempts.saturating_add(1);
         let mut live = (0..peers.len())
@@ -63,283 +81,372 @@ pub(crate) async fn download_piece_blocks_endgame(
         let mut piece_data = vec![0u8; piece_length as usize];
         let mut peer_bytes = Vec::<PeerDownloadBytes>::new();
         let mut failed_peers = Vec::new();
-        let mut complete = true;
+        let mut pending = HashMap::<(u32, usize), PendingRequest>::new();
+        let mut in_flight = vec![0usize; peers.len()];
+        let mut rejected = (0..peers.len())
+            .map(|_| HashSet::<u32>::new())
+            .collect::<Vec<_>>();
+        let mut completed = vec![false; block_count as usize];
+        let mut next_block = (0..peers.len())
+            .map(|peer_index| {
+                peer_index.saturating_mul(DEFAULT_MAX_OUTSTANDING_REQUEST)
+                    % block_requests.len().max(1)
+            })
+            .collect::<Vec<_>>();
+        let mut responses_since_window_growth = vec![0usize; peers.len()];
+        let mut completed_blocks = 0u32;
+        let mut last_activity = Instant::now();
+        let mut complete = false;
 
-        for block_index in 0..block_count {
-            let offset = block_index * BLOCK_SIZE;
-            let request = BlockRequest {
-                block_index,
-                offset,
-                length: (piece_length - offset).min(BLOCK_SIZE),
-            };
-            let mut requested = vec![false; peers.len()];
-            let mut rejected = vec![false; peers.len()];
-
-            for peer_index in 0..peers.len() {
-                if !live[peer_index] {
-                    continue;
-                }
-                let sent = peers
-                    .actor_id(peer_index)
-                    .is_some_and(|actor_id| workers.try_request(actor_id, piece_index, request));
-                if sent {
-                    requested[peer_index] = true;
-                    if let Some(address) = peers.peer(peer_index).and_then(|peer| peer.address) {
-                        endgame_state.track_request(
-                            piece_index,
-                            request.offset,
-                            request.length,
-                            PeerKey::new(address),
-                        );
-                    }
-                } else {
-                    live[peer_index] = false;
-                    if let Some(address) = peers.peer(peer_index).and_then(|peer| peer.address)
-                        && !failed_peers.contains(&address)
-                    {
-                        failed_peers.push(address);
-                    }
-                }
+        loop {
+            let queue_blocked = fill_request_windows(
+                &mut workers,
+                &block_requests,
+                &completed,
+                &rejected,
+                &mut pending,
+                &mut in_flight,
+                &mut live,
+                &peers,
+                &mut next_block,
+                piece_index,
+                endgame_state,
+                &mut failed_peers,
+            );
+            if completed_blocks == block_count {
+                complete = true;
+                break;
             }
 
-            let mut winner = None;
-            let deadline = Instant::now() + request_timeout;
-            while winner.is_none() {
-                if !(0..live.len()).any(|index| live[index] && requested[index] && !rejected[index])
-                {
-                    break;
-                }
-                let choke_deadline = choking_algo
-                    .as_deref()
-                    .and_then(ChokingAlgorithm::next_choke_rotation_deadline);
-                let wake_deadline =
-                    choke_deadline.map_or(deadline, |choke_deadline| deadline.min(choke_deadline));
-                let wait = wake_deadline.saturating_duration_since(Instant::now());
-                if wait.is_zero() {
-                    break;
-                }
-                tokio::select! {
-                    event = event_rx.recv() => {
-                        let Some(event) = event else { break };
-                        match event {
-                            PeerEvent::UploadBytes { actor_id, .. } => {
-                                if peers.peer_index_by_actor_id(actor_id).is_none() {
-                                    continue;
-                                }
+            let request_deadline = pending
+                .values()
+                .map(|request| request.sent_at + request_timeout)
+                .min()
+                .unwrap_or(last_activity + request_timeout);
+            let choke_deadline = choking_algo
+                .as_deref()
+                .and_then(ChokingAlgorithm::next_choke_rotation_deadline);
+            let mut wake_deadline =
+                choke_deadline.map_or(request_deadline, |deadline| deadline.min(request_deadline));
+            if network_activity.is_some()
+                && let Some(deadline) = download_speed.next_deadline()
+            {
+                wake_deadline = wake_deadline.min(deadline);
+            }
+            if queue_blocked {
+                wake_deadline = wake_deadline.min(Instant::now() + Duration::from_millis(10));
+            }
+            let wait = wake_deadline.saturating_duration_since(Instant::now());
+
+            tokio::select! {
+                event = event_rx.recv() => {
+                    let Some(event) = event else { break };
+                    match event {
+                        PeerEvent::UploadBytes { actor_id, .. }
+                        | PeerEvent::UploadQueueChanged { actor_id, .. }
+                        | PeerEvent::ChokeStateChanged { actor_id, .. } => {
+                            if peers.peer_index_by_actor_id(actor_id).is_none() {
+                                continue;
                             }
-                            PeerEvent::UploadQueueChanged { actor_id, .. } => {
-                                if peers.peer_index_by_actor_id(actor_id).is_none() {
-                                    continue;
-                                }
-                            }
-                            PeerEvent::ChokeStateChanged { actor_id, .. } => {
-                                if peers.peer_index_by_actor_id(actor_id).is_none() {
-                                    continue;
-                                }
-                            }
-                            PeerEvent::PeerChokingChanged { actor_id, .. } => {
-                                if peers.peer_index_by_actor_id(actor_id).is_none() {
-                                    continue;
-                                }
-                            }
-                            PeerEvent::AvailabilityChanged {
-                                actor_id,
-                                generation,
-                                has_piece,
-                            } => {
-                                if generation == workers.generation() {
-                                    peers.update_peer_availability(
-                                        actor_id,
-                                        piece_index,
-                                        has_piece,
-                                    );
-                                }
-                            }
-                            PeerEvent::PeerAvailabilityChanged {
-                                actor_id,
-                                piece_index: changed_piece,
-                                has_piece,
-                            } => {
-                                workers.record_availability_change(actor_id);
-                                peers.update_peer_availability(
-                                    actor_id,
-                                    changed_piece,
-                                    has_piece,
-                                );
-                            }
-                            PeerEvent::PeerAvailabilitySnapshot {
-                                actor_id, bitfield, ..
-                            } => {
-                                workers.record_availability_change(actor_id);
-                                peers.update_peer_bitfield(actor_id, &bitfield);
-                            }
-                            PeerEvent::PexPeers { peers, .. } => {
-                                workers.record_pex_peers(peers);
-                            }
-                            PeerEvent::InterestChanged { actor_id, snapshot } => {
-                                if peers.peer_index_by_actor_id(actor_id).is_none() {
-                                    continue;
-                                }
-                                apply_interest_change(
-                                    &mut workers,
+                        }
+                        PeerEvent::PeerChokingChanged { actor_id, peer_choking } => {
+                            let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
+                                continue;
+                            };
+                            peers.update_peer_choking(actor_id, peer_choking);
+                            if peer_choking && !peers.peer_can_request(peer_index) {
+                                let cancelled = take_peer_pending(
+                                    peer_index,
+                                    &mut pending,
+                                    &mut in_flight,
+                                    piece_index,
+                                    endgame_state,
                                     &peers,
-                                    choking_algo.as_deref_mut(),
-                                    *snapshot,
-                                ).await;
+                                );
+                                workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
+                            } else if !peer_choking {
+                                rejected[peer_index].clear();
                             }
-                            PeerEvent::Message {
-                                actor_id,
-                                generation,
-                                message,
-                                ..
-                            } => {
-                                if generation != workers.generation() {
-                                    continue;
+                            last_activity = Instant::now();
+                        }
+                        PeerEvent::AllowedFast { actor_id, piece_index: allowed_piece } => {
+                            let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
+                                continue;
+                            };
+                            peers.add_peer_allowed_fast(actor_id, allowed_piece);
+                            if peers.peer_can_request(peer_index) {
+                                rejected[peer_index].clear();
+                            }
+                            last_activity = Instant::now();
+                        }
+                        PeerEvent::AvailabilityChanged { actor_id, generation, has_piece } => {
+                            if generation == workers.generation() {
+                                peers.update_peer_availability(actor_id, piece_index, has_piece);
+                                if let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) {
+                                    if has_piece {
+                                        rejected[peer_index].clear();
+                                    } else {
+                                        let cancelled = take_peer_pending(
+                                            peer_index,
+                                            &mut pending,
+                                            &mut in_flight,
+                                            piece_index,
+                                            endgame_state,
+                                            &peers,
+                                        );
+                                        workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
+                                    }
                                 }
-                                let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
-                                    continue;
-                                };
-                                tracing::trace!(actor_id = actor_id.0, peer_index, "Received BT peer event");
-                                use aria2_protocol::bittorrent::message::types::BtMessage;
-                                if let BtMessage::Piece { data, .. } = &message
-                                    && let Some(identity) = peers.peer_identity(peer_index)
-                                    && let Some(algo) = choking_algo.as_deref_mut()
-                                {
-                                    algo.on_data_received_by_identity(
-                                        identity,
-                                        data.len() as u64,
-                                    );
-                                }
-                                match message {
-                                    BtMessage::Piece { index, begin, data }
-                                        if index == piece_index
-                                            && begin == request.offset
-                                            && requested.get(peer_index).copied().unwrap_or(false) =>
-                                    {
-                                        if data.len() == request.length as usize {
-                                            winner = Some((peer_index, data));
-                                        } else {
-                                            rejected[peer_index] = true;
-                                            warn!(piece_index, offset = begin, expected = request.length,
-                                                actual = data.len(), "Discarding malformed BT endgame block");
+                                last_activity = Instant::now();
+                            }
+                        }
+                        PeerEvent::PeerAvailabilityChanged { actor_id, piece_index: changed_piece, has_piece } => {
+                            workers.record_availability_change(actor_id);
+                            peers.update_peer_availability(actor_id, changed_piece, has_piece);
+                            if changed_piece == piece_index {
+                                if let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) {
+                                    if has_piece {
+                                        rejected[peer_index].clear();
+                                    } else {
+                                        let cancelled = take_peer_pending(
+                                            peer_index,
+                                            &mut pending,
+                                            &mut in_flight,
+                                            piece_index,
+                                            endgame_state,
+                                            &peers,
+                                        );
+                                        if let Some(actor_id) = peers.actor_id(peer_index) {
+                                            workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
                                         }
                                     }
-                                    BtMessage::Reject { index, offset, .. }
-                                        if index == piece_index && offset == request.offset => {
-                                        rejected[peer_index] = true;
+                                }
+                                last_activity = Instant::now();
+                            }
+                        }
+                        PeerEvent::PeerAvailabilitySnapshot { actor_id, bitfield, .. } => {
+                            workers.record_availability_change(actor_id);
+                            peers.update_peer_bitfield(actor_id, &bitfield);
+                            if let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) {
+                                if peers.peers()[peer_index].has_piece {
+                                    rejected[peer_index].clear();
+                                } else {
+                                    let cancelled = take_peer_pending(
+                                        peer_index,
+                                        &mut pending,
+                                        &mut in_flight,
+                                        piece_index,
+                                        endgame_state,
+                                        &peers,
+                                    );
+                                    if let Some(actor_id) = peers.actor_id(peer_index) {
+                                        workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
                                     }
-                                    _ => {}
                                 }
-                            }
-                            PeerEvent::RequestFailed {
-                                actor_id,
-                                generation,
-                                ..
-                            } => {
-                                if generation != workers.generation() {
-                                    continue;
-                                }
-                                let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
-                                    continue;
-                                };
-                                live[peer_index] = false;
-                                if let Some(address) = peers.peer(peer_index).and_then(|peer| peer.address)
-                                    && !failed_peers.contains(&address)
-                                {
-                                    failed_peers.push(address);
-                                }
-                            }
-                            PeerEvent::Disconnected { actor_id } => {
-                                let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
-                                    continue;
-                                };
-                                live[peer_index] = false;
-                                if let Some(address) = peers.peer(peer_index).and_then(|peer| peer.address)
-                                    && !failed_peers.contains(&address)
-                                {
-                                    failed_peers.push(address);
-                                }
+                                last_activity = Instant::now();
                             }
                         }
-                    }
-                    _ = tokio::time::sleep(wait) => {
-                        let now = Instant::now();
-                        if now >= deadline {
-                            break;
-                        }
-                        if choking_algo
-                            .as_deref()
-                            .is_some_and(|algo| algo.choke_rotation_due(now))
-                        {
-                            apply_choke_round(
+                        PeerEvent::PexPeers { peers, .. } => workers.record_pex_peers(peers),
+                        PeerEvent::PexNegotiated { .. } => {}
+                        PeerEvent::InterestChanged { actor_id, snapshot } => {
+                            if peers.peer_index_by_actor_id(actor_id).is_none() {
+                                continue;
+                            }
+                            apply_interest_change(
                                 &mut workers,
                                 &peers,
                                 choking_algo.as_deref_mut(),
-                            )
-                            .await;
+                                *snapshot,
+                            ).await;
                         }
-                    },
-                }
-            }
+                        PeerEvent::AmInterestChanged { .. } => {}
+                        PeerEvent::Message { actor_id, generation, message, .. } => {
+                            if generation != workers.generation() {
+                                continue;
+                            }
+                            let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
+                                continue;
+                            };
+                            use aria2_protocol::bittorrent::message::types::BtMessage;
+                            if let BtMessage::Piece { data, .. } = &message
+                                && let Some(identity) = peers.peer_identity(peer_index)
+                                && let Some(algo) = choking_algo.as_deref_mut()
+                            {
+                                algo.on_data_received_by_identity(identity, data.len() as u64);
+                            }
+                            match message {
+                                BtMessage::Piece { index, begin, data } if index == piece_index => {
+                                    let block_index = begin / BLOCK_SIZE;
+                                    let Some(request) = block_requests.get(block_index as usize).copied()
+                                        .filter(|request| request.offset == begin)
+                                    else {
+                                        continue;
+                                    };
+                                    if completed[block_index as usize]
+                                        || !pending.contains_key(&(block_index, peer_index))
+                                    {
+                                        continue;
+                                    }
+                                    if data.len() != request.length as usize {
+                                        warn!(piece_index, offset = begin, expected = request.length, actual = data.len(), "Discarding malformed BT endgame block");
+                                        let cancelled = take_peer_pending(
+                                            peer_index,
+                                            &mut pending,
+                                            &mut in_flight,
+                                            piece_index,
+                                            endgame_state,
+                                            &peers,
+                                        );
+                                        workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
+                                        record_failed_peer(peer_index, &mut live, &peers, &mut failed_peers);
+                                        last_activity = Instant::now();
+                                        continue;
+                                    }
 
-            if let Some((winner_index, data)) = winner {
-                if !data.is_empty()
-                    && let Some(progress) = network_activity
-                {
-                    progress.record_network_activity();
-                }
-                let start = request.offset as usize;
-                piece_data[start..start + data.len()].copy_from_slice(&data);
-                if let Some(address) = peers.peer(winner_index).and_then(|peer| peer.address) {
-                    let bytes = data.len() as u64;
-                    if let Some(entry) = peer_bytes
-                        .iter_mut()
-                        .find(|entry| entry.peer_index == winner_index)
-                    {
-                        entry.bytes += bytes;
-                    } else {
-                        peer_bytes.push(PeerDownloadBytes {
-                            peer_index: winner_index,
-                            peer: address,
-                            bytes,
-                        });
+                                    if !data.is_empty()
+                                        && let Some(progress) = network_activity
+                                    {
+                                        progress.record_network_activity();
+                                        download_speed.record(data.len() as u64);
+                                    }
+                                    let start = request.offset as usize;
+                                    piece_data[start..start + data.len()].copy_from_slice(&data);
+                                    completed[block_index as usize] = true;
+                                    completed_blocks += 1;
+                                    cancel_completed_block_duplicates(
+                                        block_index,
+                                        peer_index,
+                                        piece_index,
+                                        request,
+                                        &mut workers,
+                                        &peers,
+                                        &mut pending,
+                                        &mut in_flight,
+                                        endgame_state,
+                                    );
+
+                                    if let Some(address) = peers.peer(peer_index).and_then(|peer| peer.address) {
+                                        let bytes = data.len() as u64;
+                                        if let Some(entry) = peer_bytes.iter_mut().find(|entry| entry.peer_index == peer_index) {
+                                            entry.bytes += bytes;
+                                        } else {
+                                            peer_bytes.push(PeerDownloadBytes { peer_index, peer: address, bytes });
+                                        }
+                                    }
+
+                                    responses_since_window_growth[peer_index] += 1;
+                                    let current_window = peers.request_window(peer_index);
+                                    let growth_threshold = current_window.div_ceil(4);
+                                    if current_window < MAX_OUTSTANDING_REQUEST
+                                        && responses_since_window_growth[peer_index] >= growth_threshold
+                                        && let Some(new_window) = event_rx.increase_request_window(actor_id)
+                                    {
+                                        peers.update_request_window(actor_id, new_window);
+                                        responses_since_window_growth[peer_index] = 0;
+                                        trace!(actor_id = actor_id.0, previous_window = current_window, new_window, "Increased BT endgame peer request window after successful blocks");
+                                    }
+                                    last_activity = Instant::now();
+                                }
+                                BtMessage::Reject { index, offset, .. } if index == piece_index => {
+                                    let block_index = offset / BLOCK_SIZE;
+                                    if block_requests.get(block_index as usize).is_some_and(|request| request.offset == offset)
+                                        && let Some(entry) = pending.remove(&(block_index, peer_index))
+                                    {
+                                        in_flight[peer_index] = in_flight[peer_index].saturating_sub(1);
+                                        if let Some(address) = peers.peer(peer_index).and_then(|peer| peer.address) {
+                                            endgame_state.remove_peer_request(piece_index, entry.request.offset, entry.request.length, PeerKey::new(address));
+                                        }
+                                        rejected[peer_index].insert(block_index);
+                                        last_activity = Instant::now();
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        PeerEvent::RequestFailed { actor_id, generation, request } => {
+                            if generation != workers.generation() {
+                                continue;
+                            }
+                            let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
+                                continue;
+                            };
+                            trace!(peer_index, offset = request.offset, "BT endgame request send failed");
+                            let cancelled = take_peer_pending(
+                                peer_index,
+                                &mut pending,
+                                &mut in_flight,
+                                piece_index,
+                                endgame_state,
+                                &peers,
+                            );
+                            workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
+                            record_failed_peer(peer_index, &mut live, &peers, &mut failed_peers);
+                            last_activity = Instant::now();
+                        }
+                        PeerEvent::Disconnected { actor_id } => {
+                            let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
+                                continue;
+                            };
+                            let cancelled = take_peer_pending(
+                                peer_index,
+                                &mut pending,
+                                &mut in_flight,
+                                piece_index,
+                                endgame_state,
+                                &peers,
+                            );
+                            workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
+                            record_failed_peer(peer_index, &mut live, &peers, &mut failed_peers);
+                            last_activity = Instant::now();
+                        }
                     }
                 }
-                let winner_key = peers
-                    .peer(winner_index)
-                    .and_then(|peer| peer.address)
-                    .map(PeerKey::new);
-                let cancel_targets = winner_key
-                    .map(|key| {
-                        endgame_state.take_cancel_targets(
-                            piece_index,
-                            request.offset,
-                            request.length,
-                            key,
+                _ = tokio::time::sleep(wait) => {
+                    let now = Instant::now();
+                    if let Some(progress) = network_activity
+                        && download_speed.next_deadline().is_some_and(|deadline| now >= deadline)
+                    {
+                        progress.set_download_speed(download_speed.sample(now));
+                    }
+                    if choking_algo
+                        .as_deref()
+                        .is_some_and(|algo| algo.choke_rotation_due(now))
+                    {
+                        apply_choke_round(
+                            &mut workers,
+                            &peers,
+                            choking_algo.as_deref_mut(),
                         )
-                    })
-                    .unwrap_or_default();
-                for key in cancel_targets {
-                    if let Some(peer_index) = peers.peer_index_at(key.address())
-                        && peer_index != winner_index
-                        && let Some(actor_id) = peers.actor_id(peer_index)
+                        .await;
+                    }
+                    let expired_peers = pending
+                        .iter()
+                        .filter_map(|((_, peer_index), request)| {
+                            (now >= request.sent_at + request_timeout).then_some(*peer_index)
+                        })
+                        .collect::<HashSet<_>>();
+                    for peer_index in expired_peers {
+                        warn!(peer_index, "BT endgame request window timed out");
+                        let cancelled = take_peer_pending(
+                            peer_index,
+                            &mut pending,
+                            &mut in_flight,
+                            piece_index,
+                            endgame_state,
+                            &peers,
+                        );
+                        if let Some(actor_id) = peers.actor_id(peer_index) {
+                            workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
+                        }
+                        record_failed_peer(peer_index, &mut live, &peers, &mut failed_peers);
+                    }
+                    if pending.is_empty()
+                        && !queue_blocked
+                        && now >= last_activity + request_timeout
                     {
-                        let _ = workers.cancel(actor_id, piece_index, request).await;
+                        break;
                     }
                 }
-            } else {
-                let targets =
-                    endgame_state.get_cancel_targets(piece_index, request.offset, request.length);
-                endgame_state.remove_request(piece_index, request.offset, request.length);
-                for key in targets {
-                    if let Some(peer_index) = peers.peer_index_at(key.address())
-                        && let Some(actor_id) = peers.actor_id(peer_index)
-                    {
-                        let _ = workers.cancel(actor_id, piece_index, request).await;
-                    }
-                }
-                complete = false;
-                break;
             }
         }
 
@@ -367,6 +474,16 @@ pub(crate) async fn download_piece_blocks_endgame(
                 pex_peers: workers.take_pex_peers(),
             });
         }
+
+        cancel_attempt_requests(
+            piece_index,
+            &mut workers,
+            &peers,
+            &mut pending,
+            &mut in_flight,
+            endgame_state,
+            &block_requests,
+        );
         if piece_attempt_budget_exhausted(attempts, max_attempts) {
             workers.finish_generation(&mut event_rx).await;
             availability_changed_actor_ids.extend(workers.take_availability_changes());
@@ -376,7 +493,7 @@ pub(crate) async fn download_piece_blocks_endgame(
         workers.advance_generation(piece_index).await;
     }
 
-    Err(Aria2Error::Fatal(FatalError::Config(format!(
+    Err(Aria2Error::Network(format!(
         "Failed to download piece {} after {} endgame attempts",
         piece_index,
         if max_attempts == 0 {
@@ -384,5 +501,5 @@ pub(crate) async fn download_piece_blocks_endgame(
         } else {
             max_attempts
         }
-    ))))
+    )))
 }

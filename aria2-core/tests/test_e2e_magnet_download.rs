@@ -14,6 +14,7 @@ use aria2_protocol::bittorrent::magnet::MagnetLink;
 use aria2_protocol::bittorrent::message::extension::{ExtensionHandshake, UtMetadataMessage};
 use aria2_protocol::bittorrent::torrent::parser::TorrentMeta;
 use fixtures::mock_bt_peer::MockBtPeerServer;
+use fixtures::mock_udp_tracker::MockUdpTracker;
 use fixtures::test_torrent_builder::build_test_torrent;
 use std::net::SocketAddr;
 use tracing::info;
@@ -376,6 +377,66 @@ async fn test_e2e_metadata_exchange_over_peer_wire() {
         .expect("metadata exchange should complete over the peer wire");
 
     assert_eq!(received, info_metadata);
+}
+
+#[tokio::test]
+async fn test_e2e_magnet_metadata_resolution_with_udp_only_tracker() {
+    use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
+
+    let torrent_data = build_test_torrent(
+        "udp_only_magnet",
+        512,
+        256,
+        "http://tracker.invalid/announce",
+    );
+    let meta = TorrentMeta::parse(&torrent_data).expect("parse test torrent");
+    let (root, consumed) = BencodeValue::decode(&torrent_data).expect("decode test torrent");
+    assert_eq!(consumed, torrent_data.len());
+    let info_metadata = root
+        .dict_get(b"info")
+        .expect("test torrent should contain info dictionary")
+        .encode();
+    let peer = MockBtPeerServer::start_with_metadata(
+        meta.info_hash.bytes,
+        Vec::new(),
+        Some(info_metadata),
+    )
+    .await;
+    let tracker = MockUdpTracker::start_with_peers(vec![peer.addr()]).await;
+    let dir = tmp_dir();
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&dn=udp_only_magnet&tr={}",
+        meta.info_hash.as_hex(),
+        tracker.url()
+    );
+    let options = DownloadOptions {
+        enable_dht: false,
+        bt_metadata_only: true,
+        bt_save_metadata: true,
+        bt_tracker_timeout: 3,
+        bt_tracker_connect_timeout: 3,
+        ..DownloadOptions::default()
+    };
+    let mut command =
+        MagnetDownloadCommand::new(GroupId::new(7001), &magnet, &options, dir.path().to_str())
+            .expect("create UDP-only magnet command");
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), command.execute())
+        .await
+        .expect("UDP-only metadata lookup should finish promptly")
+        .expect("UDP tracker should discover the metadata peer");
+
+    let saved_metadata = dir
+        .path()
+        .join(format!("{}.torrent", meta.info_hash.as_hex()));
+    let saved = std::fs::read(saved_metadata).expect("metadata should be saved");
+    assert_eq!(
+        TorrentMeta::parse(&saved)
+            .expect("saved metadata should parse")
+            .info_hash
+            .bytes,
+        meta.info_hash.bytes
+    );
 }
 
 #[tokio::test]

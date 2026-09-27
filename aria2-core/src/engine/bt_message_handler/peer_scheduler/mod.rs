@@ -6,7 +6,9 @@
 //! Piece schedulers borrow the torrent's peer swarm and never own connection
 //! lifetimes.
 
+mod download_speed;
 mod endgame_pipeline;
+mod endgame_requests;
 mod normal;
 mod normal_pipeline;
 mod peer_actor;

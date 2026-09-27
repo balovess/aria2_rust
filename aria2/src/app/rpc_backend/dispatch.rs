@@ -99,6 +99,7 @@ impl RpcBackend for CoreRpcBackend {
                 }
                 Ok(BackendResult::response(BackendResponse::Text("OK".into())))
             }
+            BackendRequest::RemoveDownloadFiles { gid } => self.remove_download_files(gid).await,
             BackendRequest::GetGlobalOption => {
                 let options = self.global_options().await;
                 let options =
@@ -111,6 +112,8 @@ impl RpcBackend for CoreRpcBackend {
             BackendRequest::GetOption { gid } => self.get_option(gid).await,
             BackendRequest::ChangeOption { gid, options } => self.change_option(gid, options),
             BackendRequest::GetPeers { gid } => self.get_peers(gid),
+            BackendRequest::GetPeerStats { gid } => self.get_peer_stats(gid),
+            BackendRequest::GetPeerDetails { gid } => self.get_peer_details(gid),
             #[cfg(feature = "bittorrent")]
             BackendRequest::GetTrackers { gid } => self.get_trackers(gid),
             #[cfg(not(feature = "bittorrent"))]

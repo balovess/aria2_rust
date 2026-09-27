@@ -8,6 +8,8 @@ pub struct TrackerResponse {
     pub seeders: Option<u32>,
     /// Tracker swarm leechers, when the response included `incomplete`.
     pub leechers: Option<u32>,
+    /// Number of completed torrents reported by an HTTP tracker response.
+    pub downloaded: Option<u64>,
     /// Peers from the "peers" key (compact or dictionary format, typically IPv4).
     pub peers: Vec<PeerInfo>,
     /// IPv6 peers from the "peers6" key (compact format, 18 bytes per peer).
@@ -52,6 +54,7 @@ impl TrackerResponse {
                 min_interval: None,
                 seeders: None,
                 leechers: None,
+                downloaded: None,
                 peers: vec![],
                 peers6: vec![],
                 tracker_id: None,
@@ -65,6 +68,9 @@ impl TrackerResponse {
         let min_interval = root.dict_get_int("min interval").map(|n| n as u32);
         let seeders = root.dict_get_int("complete").map(|n| n as u32);
         let leechers = root.dict_get_int("incomplete").map(|n| n as u32);
+        let downloaded = root
+            .dict_get_int("downloaded")
+            .and_then(|value| u64::try_from(value).ok());
         let warning_message = root.dict_get_str("warning message").map(|s| s.to_string());
         let tracker_id = root.dict_get_str("tracker id").map(|s| s.to_string());
         let announce_list = Self::parse_announce_list(&root);
@@ -77,10 +83,11 @@ impl TrackerResponse {
         let peers6 = Self::parse_peers6(&root)?;
 
         debug!(
-            "Tracker response: interval={}s, seeders={:?}, leechers={:?}, peers={}, peers6={}, tracker_id={:?}, announce_list={:?}",
+            "Tracker response: interval={}s, seeders={:?}, leechers={:?}, downloaded={:?}, peers={}, peers6={}, tracker_id={:?}, announce_list={:?}",
             interval,
             seeders,
             leechers,
+            downloaded,
             peers.len(),
             peers6.len(),
             tracker_id,
@@ -92,6 +99,7 @@ impl TrackerResponse {
             min_interval,
             seeders,
             leechers,
+            downloaded,
             peers,
             peers6,
             tracker_id,
@@ -281,6 +289,7 @@ mod tests {
         assert_eq!(parsed.peers[0].port, 6881);
         assert_eq!(parsed.seeders, None);
         assert_eq!(parsed.leechers, None);
+        assert_eq!(parsed.downloaded, None);
         assert!(parsed.announce_list.is_empty());
     }
 
@@ -312,6 +321,7 @@ mod tests {
         );
         resp_dict.insert(b"complete".to_vec(), BencodeValue::Int(0));
         resp_dict.insert(b"incomplete".to_vec(), BencodeValue::Int(0));
+        resp_dict.insert(b"downloaded".to_vec(), BencodeValue::Int(0));
 
         let root = BencodeValue::Dict(resp_dict);
         let encoded = root.encode();
@@ -320,6 +330,7 @@ mod tests {
         assert_eq!(parsed.tracker_id.as_deref(), Some("my-tracker-42"));
         assert_eq!(parsed.seeders, Some(0));
         assert_eq!(parsed.leechers, Some(0));
+        assert_eq!(parsed.downloaded, Some(0));
     }
 
     #[test]

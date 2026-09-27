@@ -159,9 +159,10 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
     );
     let meta =
         aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent_data).unwrap();
-    let peer = MockBtPeerServer::start(
+    let peer = MockBtPeerServer::start_with_response_delay(
         meta.info_hash.bytes,
         vec![expected_piece_data(0, 16 * 1024, 1024 * 1024); 64],
+        std::time::Duration::from_millis(250),
     )
     .await;
     let tracker = MockTrackerServer::start(peer.addr().port()).await;
@@ -182,7 +183,13 @@ async fn test_e2e_bt_halt_sends_stopped_announce() {
     .unwrap();
     let group = cmd.group_handle();
     let task = tokio::spawn(async move { cmd.execute().await });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while peer.requested_pieces().await.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("peer never received a request before the halt");
     {
         use aria2_core::util::rwlock_ext::RwLockRecover;
         group.recover().request_halt(HaltReason::UserRequest);
@@ -461,18 +468,19 @@ async fn test_e2e_engine_bt_multi_file_force_halt_preserves_layout() {
         group.recover().create_download_result().code,
         DownloadResultCode::InProgress
     );
+    let torrent_dir = dir.path().join("engine-multi-force-halt");
     assert!(
-        dir.path().join("part-0.bin").is_file() && dir.path().join("part-1.bin").is_file(),
+        torrent_dir.join("part-0.bin").is_file() && torrent_dir.join("part-1.bin").is_file(),
         "multi-file allocation should have created every payload file"
     );
     assert_eq!(
-        std::fs::metadata(dir.path().join("part-0.bin"))
+        std::fs::metadata(torrent_dir.join("part-0.bin"))
             .expect("first multi-file payload metadata should be readable")
             .len(),
         file_lengths[0]
     );
     assert_eq!(
-        std::fs::metadata(dir.path().join("part-1.bin"))
+        std::fs::metadata(torrent_dir.join("part-1.bin"))
             .expect("second multi-file payload metadata should be readable")
             .len(),
         file_lengths[1]
@@ -574,7 +582,6 @@ async fn test_e2e_bt_missing_tail_piece_waits_for_discovery_timeout() {
         cmd.group().get_last_error_code(),
         DownloadResultCode::TimeOut
     );
-    peer.shutdown().await;
     tracker.wait_for_event("stopped").await;
 }
 
@@ -661,6 +668,80 @@ async fn test_e2e_bt_corrupt_tail_peer_is_removed_before_timeout() {
         DownloadResultCode::TimeOut
     );
     corrupt_peer.shutdown().await;
+    tracker.wait_for_event("stopped").await;
+}
+
+#[tokio::test]
+async fn test_e2e_bt_advertised_choked_peer_waits_for_stop_timeout() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let torrent_data = build_test_torrent(
+        "choked-peer.bin",
+        512,
+        512,
+        &tracker_placeholder.announce_url(),
+    );
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent_data)
+        .expect("choked-peer torrent should parse");
+    let peer = MockBtPeerServer::start_staying_choked(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, 512, 512)],
+    )
+    .await;
+    drop(tracker_placeholder);
+
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent("choked-peer.bin", 512, 512, &tracker.announce_url());
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(113),
+        &torrent_data,
+        &DownloadOptions {
+            max_retries: 1,
+            bt_request_timeout: 1,
+            bt_stop_timeout: Some(2),
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_public_trackers: false,
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+
+    let group = cmd.group_handle();
+    let started = std::time::Instant::now();
+    let task = tokio::spawn(async move { cmd.execute().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if !peer.accepted_peers().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("advertising peer did not connect");
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), task)
+        .await
+        .expect("choked-peer download did not reach its stop timeout")
+        .expect("choked-peer task panicked");
+    assert!(
+        result.is_err(),
+        "choked peer must not produce a completed file"
+    );
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(1800),
+        "advertised availability was treated as a fatal configuration error"
+    );
+    assert_eq!(group.recover().get_halt_reason(), HaltReason::Timeout);
+    assert_eq!(
+        group.recover().get_last_error_code(),
+        DownloadResultCode::TimeOut
+    );
+    assert!(peer.requested_pieces().await.is_empty());
+
     tracker.wait_for_event("stopped").await;
 }
 
@@ -923,8 +1004,10 @@ async fn test_e2e_bt_multi_file_integrity_repairs_piece_crossing_file_boundary()
     let torrent_data =
         build_multi_file_test_torrent("multi-integrity", &[4, 6], 6, &tracker.announce_url());
     let output_dir = dir.path();
-    let first_path = output_dir.join("part-0.bin");
-    let second_path = output_dir.join("part-1.bin");
+    let torrent_dir = output_dir.join("multi-integrity");
+    std::fs::create_dir_all(&torrent_dir).unwrap();
+    let first_path = torrent_dir.join("part-0.bin");
+    let second_path = torrent_dir.join("part-1.bin");
     std::fs::write(&first_path, [0, 1, 2, 3]).unwrap();
     std::fs::write(&second_path, [0xff, 5, 6, 7, 8, 9]).unwrap();
 
@@ -976,8 +1059,9 @@ async fn test_e2e_bt_select_file_downloads_cross_boundary_piece_and_removes_unse
     let torrent_data =
         build_multi_file_test_torrent("multi-selective", &[4, 6], 6, &tracker.announce_url());
     let output_dir = dir.path();
-    let unselected_path = output_dir.join("part-0.bin");
-    let selected_path = output_dir.join("part-1.bin");
+    let torrent_dir = output_dir.join("multi-selective");
+    let unselected_path = torrent_dir.join("part-0.bin");
+    let selected_path = torrent_dir.join("part-1.bin");
     let options = DownloadOptions {
         seed_time: Some(0.0),
         enable_dht: false,
@@ -1984,6 +2068,74 @@ async fn test_e2e_bt_parse_torrent() {
     assert_eq!(meta.info.piece_length, 512);
 }
 
+#[tokio::test]
+async fn test_e2e_bt_failed_initial_peer_keeps_discovery_alive() {
+    let dir = tmp_dir();
+    let failing_peer = MockBtPeerServer::start_failing().await;
+    let tracker = MockTrackerServer::start(failing_peer.addr().port()).await;
+    let torrent_data = build_test_torrent("retry.bin", 512, 512, &tracker.announce_url());
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(119),
+        &torrent_data,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_utp: false,
+            enable_public_trackers: false,
+            bt_stop_timeout: Some(1),
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.execute())
+        .await
+        .expect("failed peer did not reach discovery timeout");
+    assert_eq!(cmd.group().get_halt_reason(), HaltReason::Timeout);
+}
+
+#[tokio::test]
+async fn test_e2e_bt_strict_peer_accepts_single_early_availability() {
+    let dir = tmp_dir();
+    let tracker_placeholder = MockTrackerServer::start(0).await;
+    let torrent_data =
+        build_test_torrent("strict.bin", 512, 512, &tracker_placeholder.announce_url());
+    let meta =
+        aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent_data).unwrap();
+    let peer = MockBtPeerServer::start_strict_availability(
+        meta.info_hash.bytes,
+        vec![expected_piece_data(0, 512, 512)],
+    )
+    .await;
+    drop(tracker_placeholder);
+    let tracker = MockTrackerServer::start(peer.addr().port()).await;
+    let torrent_data = build_test_torrent("strict.bin", 512, 512, &tracker.announce_url());
+    let mut cmd = BtDownloadCommand::new(
+        GroupId::new(120),
+        &torrent_data,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_utp: false,
+            enable_public_trackers: false,
+            bt_stop_timeout: Some(2),
+            file_allocation: Some("none".to_string()),
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), cmd.execute())
+        .await
+        .expect("strict peer download timed out")
+        .expect("strict peer rejected the connection");
+    assert_eq!(
+        std::fs::read(dir.path().join("strict.bin")).unwrap(),
+        expected_piece_data(0, 512, 512)
+    );
+}
+
 /// A failed initial peer must not abort the batch: the healthy candidate is
 /// attempted next and the torrent completes without a second tracker round.
 #[tokio::test]
@@ -2045,6 +2197,73 @@ async fn test_e2e_bt_failed_peer_is_replaced_by_healthy_peer() {
             .await
             .iter()
             .any(|query| query.contains("event=completed"))
+    );
+}
+
+#[tokio::test]
+async fn test_e2e_bt_pex_discovery_connects_and_schedules_new_peer() {
+    let dir = tmp_dir();
+    let placeholder_tracker = MockTrackerServer::start(0).await;
+    let total_size = 256 * 1024;
+    let piece_length = 16 * 1024;
+    let torrent = build_test_torrent(
+        "pex-join.bin",
+        total_size,
+        piece_length,
+        &placeholder_tracker.announce_url(),
+    );
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&torrent).unwrap();
+    let pieces: Vec<_> = (0..meta.num_pieces())
+        .map(|piece| expected_piece_data(piece as u32, piece_length, total_size))
+        .collect();
+    let discovered_peer = MockBtPeerServer::start(meta.info_hash.bytes, pieces.clone()).await;
+    let pex_peer = MockBtPeerServer::start_advertising_pex_peer(
+        meta.info_hash.bytes,
+        pieces,
+        discovered_peer.addr(),
+        std::time::Duration::from_millis(100),
+    )
+    .await;
+    drop(placeholder_tracker);
+
+    let tracker = MockTrackerServer::start(pex_peer.addr().port()).await;
+    let torrent = build_test_torrent(
+        "pex-join.bin",
+        total_size,
+        piece_length,
+        &tracker.announce_url(),
+    );
+    let mut command = BtDownloadCommand::new(
+        GroupId::new(125),
+        &torrent,
+        &DownloadOptions {
+            seed_time: Some(0.0),
+            enable_dht: false,
+            enable_utp: false,
+            enable_public_trackers: false,
+            enable_peer_exchange: true,
+            bt_max_peers: 2,
+            ..DownloadOptions::default()
+        },
+        Some(dir.path().to_str().unwrap()),
+    )
+    .unwrap();
+
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("PEX-discovered peer download timed out")
+        .expect("PEX-discovered peer download failed");
+
+    assert!(
+        !discovered_peer.requested_pieces().await.is_empty(),
+        "PEX-discovered peer never received a piece request"
+    );
+    let expected: Vec<u8> = (0..meta.num_pieces())
+        .flat_map(|piece| expected_piece_data(piece as u32, piece_length, total_size))
+        .collect();
+    assert_eq!(
+        std::fs::read(dir.path().join("pex-join.bin")).unwrap(),
+        expected
     );
 }
 
@@ -2214,11 +2433,11 @@ async fn test_e2e_bt_v2_multi_file_download_respects_alignment() {
         .expect("multi-file v2 download failed");
 
     assert_eq!(
-        std::fs::read(dir.path().join("one.bin")).unwrap(),
+        std::fs::read(dir.path().join("v2-multi").join("one.bin")).unwrap(),
         pieces[0]
     );
     assert_eq!(
-        std::fs::read(dir.path().join("two.bin")).unwrap(),
+        std::fs::read(dir.path().join("v2-multi").join("two.bin")).unwrap(),
         pieces[1]
     );
     assert!(peer.requested_pieces().await.contains(&0));
@@ -2259,14 +2478,14 @@ async fn test_e2e_bt_hybrid_multi_file_verifies_without_writing_padding() {
         .expect("hybrid multi-file download failed");
 
     assert_eq!(
-        std::fs::read(dir.path().join("one.bin")).unwrap(),
+        std::fs::read(dir.path().join("hybrid-multi").join("one.bin")).unwrap(),
         content[0]
     );
     assert_eq!(
-        std::fs::read(dir.path().join("two.bin")).unwrap(),
+        std::fs::read(dir.path().join("hybrid-multi").join("two.bin")).unwrap(),
         content[1]
     );
-    assert!(!dir.path().join(".pad").exists());
+    assert!(!dir.path().join("hybrid-multi").join(".pad").exists());
     assert!(peer.requested_pieces().await.contains(&0));
     assert!(peer.requested_pieces().await.contains(&1));
 }

@@ -40,6 +40,8 @@ pub(crate) fn rpc_method_is_read_only(method: &str) -> bool {
             | "aria2.getGlobalOption"
             | "aria2.getOption"
             | "aria2.getPeers"
+            | "aria2.getPeerStats"
+            | "aria2.getPeerDetails"
             | "aria2.getVersion"
             | "aria2.getSessionInfo"
             | "system.listMethods"
@@ -59,6 +61,7 @@ pub(crate) fn rpc_method_is_mutating(method: &str) -> bool {
             | "aria2.unpause"
             | "aria2.purgeDownloadResult"
             | "aria2.removeDownloadResult"
+            | "aria2.removeDownloadFiles"
             | "aria2.changeGlobalOption"
             | "aria2.changeOption"
             | "aria2.pauseAll"
@@ -376,11 +379,16 @@ impl RpcEngine {
             "aria2.removeDownloadResult" => {
                 handlers::bittorrent::parse_remove_download_result(&mut req)
             }
+            "aria2.removeDownloadFiles" => {
+                handlers::bittorrent::parse_remove_download_files(&mut req)
+            }
             "aria2.getGlobalOption" => Ok(handlers::options::parse_get_global_option(&mut req)),
             "aria2.changeGlobalOption" => handlers::options::parse_change_global_option(&mut req),
             "aria2.getOption" => handlers::options::parse_get_option(&mut req),
             "aria2.changeOption" => handlers::options::parse_change_option(&mut req),
             "aria2.getPeers" => handlers::bittorrent::parse_get_peers(&mut req),
+            "aria2.getPeerStats" => handlers::bittorrent::parse_get_peer_stats(&mut req),
+            "aria2.getPeerDetails" => handlers::bittorrent::parse_get_peer_details(&mut req),
             "aria2.getTrackers" => handlers::bittorrent::parse_get_trackers(&mut req),
             "aria2.getDhtStatus" => handlers::bittorrent::parse_get_dht_status(&mut req),
             "aria2.saveDhtState" => handlers::bittorrent::parse_save_dht_state(&mut req),

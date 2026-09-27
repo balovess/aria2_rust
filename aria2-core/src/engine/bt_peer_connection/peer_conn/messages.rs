@@ -114,7 +114,7 @@ impl BtPeerConn {
     }
 
     pub async fn send_interested(&mut self) -> Result<()> {
-        match &mut self.inner {
+        let result = match &mut self.inner {
             InnerConnection::Plain(c) => c.send_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
@@ -127,11 +127,14 @@ impl BtPeerConn {
                 let msg = BtMessage::Interested;
                 c.send_message(&serialize(&msg)).await
             }
-        }
+        };
+        result?;
+        self.stats.am_interested = true;
+        Ok(())
     }
 
     pub async fn send_not_interested(&mut self) -> Result<()> {
-        match &mut self.inner {
+        let result = match &mut self.inner {
             InnerConnection::Plain(c) => c.send_not_interested().await.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure { message: e })
             }),
@@ -144,7 +147,10 @@ impl BtPeerConn {
                 let msg = BtMessage::NotInterested;
                 c.send_message(&serialize(&msg)).await
             }
-        }
+        };
+        result?;
+        self.stats.am_interested = false;
+        Ok(())
     }
 
     /// Send the BEP 5 DHT port message.
@@ -377,6 +383,14 @@ impl BtPeerConn {
                         payload,
                     )
             {
+                *self
+                    .remote_client
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = handshake
+                    .v()
+                    .map(str::trim)
+                    .filter(|client| !client.is_empty())
+                    .map(str::to_owned);
                 if let Some(id) = handshake.ut_metadata_id() {
                     self.register_peer_extension("ut_metadata", id);
                 }

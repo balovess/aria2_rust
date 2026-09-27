@@ -1,3 +1,4 @@
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
@@ -9,7 +10,9 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
 
-use super::{BtSeedManager, CHOKE_ROUND_INTERVAL_SECS, PeerSwarm, SeedExitCondition};
+use super::{
+    BtSeedManager, CHOKE_ROUND_INTERVAL_SECS, PeerSwarm, SeedExitCondition, SeedPeerDiscovery,
+};
 
 impl BtSeedManager {
     /// Create a new seed manager with basic parameters.
@@ -24,12 +27,7 @@ impl BtSeedManager {
     ) -> Self {
         Self::build(
             [0u8; 20],
-            connections
-                .into_iter()
-                .map(|connection| {
-                    configure_upload_peer(connection, &config, piece_provider.as_ref())
-                })
-                .collect(),
+            connections.into_iter().map(wrap_peer_connection).collect(),
             piece_provider,
             config,
             exit_condition,
@@ -38,7 +36,7 @@ impl BtSeedManager {
             None,
             None,
             [0u8; 20],
-            None,
+            PeerSwarm::new(64),
         )
     }
 
@@ -54,12 +52,7 @@ impl BtSeedManager {
     ) -> Self {
         Self::build(
             info_hash,
-            connections
-                .into_iter()
-                .map(|connection| {
-                    configure_upload_peer(connection, &config, piece_provider.as_ref())
-                })
-                .collect(),
+            connections.into_iter().map(wrap_peer_connection).collect(),
             piece_provider,
             config,
             exit_condition,
@@ -68,7 +61,7 @@ impl BtSeedManager {
             None,
             None,
             [0u8; 20],
-            None,
+            PeerSwarm::new(64),
         )
     }
 
@@ -88,12 +81,7 @@ impl BtSeedManager {
     ) -> Self {
         Self::build(
             info_hash,
-            connections
-                .into_iter()
-                .map(|connection| {
-                    configure_upload_peer(connection, &config, piece_provider.as_ref())
-                })
-                .collect(),
+            connections.into_iter().map(wrap_peer_connection).collect(),
             piece_provider,
             config,
             exit_condition,
@@ -102,7 +90,7 @@ impl BtSeedManager {
             None,
             announcer,
             peer_id,
-            None,
+            PeerSwarm::new(64),
         )
     }
 
@@ -119,12 +107,7 @@ impl BtSeedManager {
     ) -> Self {
         Self::build(
             info_hash,
-            connections
-                .into_iter()
-                .map(|connection| {
-                    configure_upload_peer(connection, &config, piece_provider.as_ref())
-                })
-                .collect(),
+            connections.into_iter().map(wrap_peer_connection).collect(),
             piece_provider,
             config,
             exit_condition,
@@ -133,7 +116,7 @@ impl BtSeedManager {
             None,
             None,
             [0u8; 20],
-            None,
+            PeerSwarm::new(64),
         )
     }
 
@@ -161,10 +144,10 @@ impl BtSeedManager {
             exit_condition,
             total_downloaded,
             CancellationToken::new(),
-            incoming_peers,
+            incoming_peers.map(|receiver| std::sync::Arc::new(tokio::sync::Mutex::new(receiver))),
             announcer,
             peer_id,
-            None,
+            PeerSwarm::new(64),
         )
     }
 
@@ -180,9 +163,7 @@ impl BtSeedManager {
         total_downloaded: u64,
         announcer: Option<TrackerAnnouncer>,
         peer_id: [u8; 20],
-        incoming_peers: Option<
-            tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>,
-        >,
+        incoming_peers: Option<crate::engine::bt_peer_listener::IncomingPeerReceiver>,
         upload_counter: Arc<AtomicU64>,
     ) -> Self {
         let mut manager = Self::build(
@@ -196,7 +177,7 @@ impl BtSeedManager {
             incoming_peers,
             announcer,
             peer_id,
-            Some(swarm),
+            swarm,
         );
         manager.upload_counter = upload_counter;
         manager
@@ -206,22 +187,25 @@ impl BtSeedManager {
     #[allow(clippy::too_many_arguments)]
     fn build(
         info_hash: [u8; 20],
-        mut connections: Vec<BtPeerConn>,
+        mut pending_connections: Vec<BtPeerConn>,
         piece_provider: Arc<dyn PieceDataProvider>,
         config: BtSeedingConfig,
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
         cancel_token: CancellationToken,
-        incoming_peers: Option<
-            tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>,
-        >,
+        incoming_peers: Option<crate::engine::bt_peer_listener::IncomingPeerReceiver>,
         announcer: Option<TrackerAnnouncer>,
         peer_id: [u8; 20],
-        swarm: Option<PeerSwarm>,
+        swarm: PeerSwarm,
     ) -> Self {
-        for connection in &mut connections {
+        let torrent_upload_limiter = RateLimiter::new(&RateLimiterConfig::new(
+            None,
+            config.max_upload_bytes_per_sec,
+        ));
+        for connection in &mut pending_connections {
             connection.configure_upload_with_auto_unchoke(
                 &config,
+                torrent_upload_limiter.clone(),
                 piece_provider.num_pieces(),
                 piece_provider.piece_length(),
                 false,
@@ -231,31 +215,35 @@ impl BtSeedManager {
 
         let seeder_choke = BtSeederStateChoke::with_slots(config.max_peers_to_unchoke);
         let upload_counter = Arc::new(AtomicU64::new(0));
-        for connection in &mut connections {
+        for connection in &mut pending_connections {
             connection.set_upload_counter(Arc::clone(&upload_counter));
         }
 
         Self {
             info_hash,
-            upload_sessions: connections,
-            swarm: swarm.unwrap_or_else(|| PeerSwarm::new(64)),
-            piece_provider: Some(piece_provider),
+            pending_connections,
+            swarm,
+            piece_provider,
             config,
             exit_condition,
             total_downloaded,
             total_uploaded: 0,
             upload_counter,
+            torrent_upload_limiter,
             seeding_start_time: Instant::now(),
             is_active: true,
             seeder_choke,
             cancel_token,
             peer_storage: None,
+            peer_discovery: None,
+            pending_peer_connection: None,
             halt_requested: false,
             // Run the first choke round immediately after the first peer state
             // update.  A newly admitted interested peer should not wait for
             // the full rotation interval before receiving an unchoke.
             last_choke_time: Instant::now() - Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS),
-            announcer,
+            announcer: announcer.map(|announcer| Arc::new(tokio::sync::Mutex::new(announcer))),
+            pending_tracker_announce: None,
             peer_id,
             incoming_peers,
             upload_progress: None,
@@ -274,23 +262,23 @@ impl BtSeedManager {
         self.peer_storage = Some(peer_storage);
         self
     }
+
+    pub(crate) fn with_torrent_upload_limiter(mut self, limiter: RateLimiter) -> Self {
+        self.torrent_upload_limiter = limiter;
+        self
+    }
+
+    pub(crate) fn with_peer_discovery(mut self, discovery: SeedPeerDiscovery) -> Self {
+        self.peer_discovery = Some(discovery);
+        self
+    }
 }
 
-fn configure_upload_peer(
+fn wrap_peer_connection(
     connection: aria2_protocol::bittorrent::peer::connection::PeerConnection,
-    config: &BtSeedingConfig,
-    provider: &dyn PieceDataProvider,
 ) -> BtPeerConn {
     let endpoint = connection
         .remote_addr()
         .unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 0)));
-    let mut peer = BtPeerConn::from_incoming_plain(connection, endpoint);
-    peer.configure_upload_with_auto_unchoke(
-        config,
-        provider.num_pieces(),
-        provider.piece_length(),
-        false,
-    );
-    peer.stats.am_choking = true;
-    peer
+    BtPeerConn::from_incoming_plain(connection, endpoint)
 }

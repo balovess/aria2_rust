@@ -17,6 +17,7 @@ mod session;
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::engine::peer_stats::PeerStats;
@@ -45,6 +46,14 @@ pub(crate) enum InnerConnection {
     Plain(aria2_protocol::bittorrent::peer::connection::PeerConnection),
     Encrypted(aria2_protocol::bittorrent::peer::encrypted_connection::EncryptedConnection),
     Utp(UtpPeerConnection),
+}
+
+/// Post-handshake messages sent by the owning peer actor exactly once.
+pub(crate) struct PeerActorStartup {
+    pub(crate) peer_agent: String,
+    pub(crate) listen_port: Option<u16>,
+    pub(crate) dht_enabled: bool,
+    pub(crate) allowed_fast: Vec<u32>,
 }
 
 /// Identity that remains attached to one peer connection across worker restarts.
@@ -88,6 +97,8 @@ pub struct BtPeerConn {
     pub(crate) port: u16,
     /// 20-byte peer ID (set after handshake).
     pub(crate) peer_id: Option<[u8; 20]>,
+    /// Client name learned from the remote BEP 10 extension handshake.
+    pub(crate) remote_client: Arc<RwLock<Option<String>>>,
     /// Whether this was an incoming (accepted) connection.
     pub(crate) incoming: bool,
     /// Discovery mechanism that supplied this peer address.
@@ -163,6 +174,7 @@ pub struct BtPeerConn {
     pub(crate) upload_state: Option<crate::engine::bt_upload_session::BtUploadState>,
     pub(crate) upload_progress:
         Option<std::sync::Arc<crate::request::request_group::AtomicProgress>>,
+    pub(crate) actor_startup: Option<PeerActorStartup>,
 }
 
 impl BtPeerConn {
@@ -196,11 +208,15 @@ impl BtPeerConn {
     pub(crate) fn configure_upload_with_auto_unchoke(
         &mut self,
         config: &crate::engine::bt_upload_session::BtSeedingConfig,
+        upload_limiter: crate::rate_limiter::RateLimiter,
         num_pieces: u32,
         piece_length: u32,
         auto_unchoke: bool,
     ) {
-        let mut state = crate::engine::bt_upload_session::BtUploadState::new(config);
+        let mut state = crate::engine::bt_upload_session::BtUploadState::new_with_limiter(
+            config,
+            upload_limiter,
+        );
         state.configure_message_validator(num_pieces, piece_length);
         state.set_auto_unchoke(auto_unchoke);
         self.upload_state = Some(state);
@@ -242,6 +258,13 @@ impl BtPeerConn {
         self.upload_state
             .as_ref()
             .is_some_and(|state| state.has_pending_messages())
+    }
+
+    pub(crate) fn discard_pending_upload_messages(&mut self) {
+        if let Some(state) = self.upload_state.as_mut() {
+            state.discard_pending_messages();
+            self.stats.outstanding_upload_count = state.outstanding_upload_count();
+        }
     }
 
     pub(crate) async fn flush_upload_messages(

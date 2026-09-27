@@ -66,6 +66,21 @@ fn test_multi_file_layout_created_for_multi_torrent() {
     assert!(layout.is_multi_file());
     assert_eq!(layout.num_files(), 2);
     assert_eq!(layout.total_size(), 1024);
+    let expected_path = std::path::PathBuf::from("d:/tmp/multitest")
+        .join("multitest")
+        .join("dir1/file1.txt");
+    assert_eq!(layout.file_absolute_path(0).unwrap(), &expected_path);
+
+    let context = cmd
+        .group
+        .read()
+        .expect("request group lock")
+        .get_download_context()
+        .expect("BT context");
+    assert_eq!(
+        context.get_file_entries()[0].path(),
+        expected_path.to_string_lossy()
+    );
 }
 
 #[test]

@@ -17,7 +17,10 @@ pub use session::{
     DhtStatus, GlobalStat, SessionInfo, VersionInfo, create_gid, generate_session_id,
 };
 pub use status::{BittorrentInfo, BittorrentMetaInfo, DownloadStatus, FileInfo, StatusInfo};
-pub use transfer::{PeerInfo, ServerInfo, ServerInfoIndex, TrackerInfo, UriEntry, UriStatus};
+pub use transfer::{
+    PeerDetails, PeerFlags, PeerInfo, PeerStats, ServerInfo, ServerInfoIndex, TrackerInfo,
+    UriEntry, UriStatus,
+};
 
 #[cfg(test)]
 #[path = "types_tests/basic.rs"]

@@ -9,6 +9,14 @@ pub struct MockBtPeerServer {
     accepted_peers: std::sync::Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
 }
 
+#[derive(Clone, Copy, Default)]
+struct MockBtPeerBehavior {
+    piece_response_delay: Option<std::time::Duration>,
+    strict_availability: bool,
+    pex_peer: Option<SocketAddr>,
+    stay_choked: bool,
+}
+
 impl std::fmt::Debug for MockBtPeerServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockBtPeerServer")
@@ -22,12 +30,38 @@ impl MockBtPeerServer {
         Self::start_with_metadata(info_hash, piece_data, None).await
     }
 
+    pub async fn start_strict_availability(info_hash: [u8; 20], piece_data: Vec<Vec<u8>>) -> Self {
+        Self::start_with_policy(info_hash, piece_data, None, None, true).await
+    }
+
+    pub async fn start_staying_choked(info_hash: [u8; 20], piece_data: Vec<Vec<u8>>) -> Self {
+        Self::start_with_policy_and_pex(info_hash, piece_data, None, None, false, None, true).await
+    }
+
     pub async fn start_with_response_delay(
         info_hash: [u8; 20],
         piece_data: Vec<Vec<u8>>,
         delay: std::time::Duration,
     ) -> Self {
         Self::start_with_metadata_and_delay(info_hash, piece_data, None, Some(delay)).await
+    }
+
+    pub async fn start_advertising_pex_peer(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        discovered_peer: SocketAddr,
+        piece_response_delay: std::time::Duration,
+    ) -> Self {
+        Self::start_with_policy_and_pex(
+            info_hash,
+            piece_data,
+            None,
+            Some(piece_response_delay),
+            false,
+            Some(discovered_peer),
+            false,
+        )
+        .await
     }
 
     pub async fn start_failing() -> Self {
@@ -68,6 +102,44 @@ impl MockBtPeerServer {
         torrent_metadata: Option<Vec<u8>>,
         piece_response_delay: Option<std::time::Duration>,
     ) -> Self {
+        Self::start_with_policy(
+            info_hash,
+            piece_data,
+            torrent_metadata,
+            piece_response_delay,
+            false,
+        )
+        .await
+    }
+
+    async fn start_with_policy(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        torrent_metadata: Option<Vec<u8>>,
+        piece_response_delay: Option<std::time::Duration>,
+        strict_availability: bool,
+    ) -> Self {
+        Self::start_with_policy_and_pex(
+            info_hash,
+            piece_data,
+            torrent_metadata,
+            piece_response_delay,
+            strict_availability,
+            None,
+            false,
+        )
+        .await
+    }
+
+    async fn start_with_policy_and_pex(
+        info_hash: [u8; 20],
+        piece_data: Vec<Vec<u8>>,
+        torrent_metadata: Option<Vec<u8>>,
+        piece_response_delay: Option<std::time::Duration>,
+        strict_availability: bool,
+        pex_peer: Option<SocketAddr>,
+        stay_choked: bool,
+    ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = tokio::net::TcpListener::bind(addr)
             .await
@@ -97,7 +169,12 @@ impl MockBtPeerServer {
                                         &pd,
                                         md.as_deref(),
                                         requests,
-                                        piece_response_delay,
+                                        MockBtPeerBehavior {
+                                            piece_response_delay,
+                                            strict_availability,
+                                            pex_peer,
+                                            stay_choked,
+                                        },
                                     )
                                     .await;
                                 });
@@ -136,8 +213,14 @@ impl MockBtPeerServer {
         piece_data: &[Vec<u8>],
         torrent_metadata: Option<&[u8]>,
         requested_pieces: std::sync::Arc<tokio::sync::Mutex<Vec<u32>>>,
-        piece_response_delay: Option<std::time::Duration>,
+        behavior: MockBtPeerBehavior,
     ) {
+        let MockBtPeerBehavior {
+            piece_response_delay,
+            strict_availability,
+            pex_peer,
+            stay_choked,
+        } = behavior;
         const PROTOCOL_STR: &[u8] = b"BitTorrent protocol";
 
         let mut handshake_buf = [0u8; 68];
@@ -175,12 +258,15 @@ impl MockBtPeerServer {
             && last_byte_bits < 8
             && let Some(last) = bitfield.last_mut()
         {
-            *last = !((1 << last_byte_bits) - 1);
+            *last = 0xff << (8 - last_byte_bits);
         }
 
         let msg_bitfield = build_message(5, &bitfield);
         stream.write_all(&msg_bitfield).await.ok();
         let mut client_ut_metadata_id = 1u8;
+        let mut availability_sent = false;
+        let mut control_sent = false;
+        let mut pex_sent = false;
 
         loop {
             let mut len_buf = [0u8; 4];
@@ -201,11 +287,24 @@ impl MockBtPeerServer {
                 break;
             }
 
-            match payload.first().copied() {
+            let message_id = payload.first().copied();
+            if strict_availability {
+                if matches!(message_id, Some(5 | 14 | 15)) {
+                    if availability_sent || control_sent {
+                        break;
+                    }
+                    availability_sent = true;
+                } else if !matches!(message_id, Some(20)) {
+                    control_sent = true;
+                }
+            }
+            match message_id {
                 Some(2) => {
-                    let unchoke_msg = build_message(1, &[]);
-                    stream.write_all(&unchoke_msg).await.ok();
-                    stream.flush().await.ok();
+                    if !stay_choked {
+                        let unchoke_msg = build_message(1, &[]);
+                        stream.write_all(&unchoke_msg).await.ok();
+                        stream.flush().await.ok();
+                    }
                 }
                 Some(3) => {}
                 Some(6) => {
@@ -244,6 +343,35 @@ impl MockBtPeerServer {
                     }
                 }
                 Some(20) => {
+                    if !pex_sent
+                        && payload.get(1) == Some(&0)
+                        && let Some(discovered_peer) = pex_peer
+                        && let std::net::IpAddr::V4(ip) = discovered_peer.ip()
+                    {
+                        use aria2_protocol::bittorrent::message::extension::{
+                            CompactPeerV4, ExtensionHandshake, UtPexMessage,
+                        };
+
+                        let mut extension_handshake = ExtensionHandshake::new();
+                        extension_handshake.with_ut_pex(17);
+                        let handshake = build_extended_message(0, &extension_handshake.to_bytes());
+
+                        let mut pex = UtPexMessage::new();
+                        let mut compact = [0u8; 6];
+                        compact[..4].copy_from_slice(&ip.octets());
+                        compact[4..].copy_from_slice(&discovered_peer.port().to_be_bytes());
+                        let pex_message = {
+                            pex.added.push(CompactPeerV4(compact));
+                            build_extended_message(17, &pex.to_payload())
+                        };
+
+                        if stream.write_all(&handshake).await.is_err()
+                            || stream.write_all(&pex_message).await.is_err()
+                        {
+                            break;
+                        }
+                        pex_sent = true;
+                    }
                     if let Some(meta) = torrent_metadata
                         && payload.len() > 2
                         && let Some(ext_dict) = parse_bencode_from_slice(&payload[2..])

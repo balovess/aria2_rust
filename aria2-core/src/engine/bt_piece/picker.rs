@@ -82,7 +82,7 @@ impl PiecePicker {
     /// Create a new picker for a torrent with `num_pieces` pieces.
     pub fn new(num_pieces: u32) -> Self {
         let n = num_pieces as usize;
-        Self {
+        let mut picker = Self {
             num_pieces,
             strategy: PieceSelectionStrategy::RarestFirst,
             priority_mode: PiecePriorityMode::RarestFirst,
@@ -102,7 +102,9 @@ impl PiecePicker {
             tail_cursor: n,
             endgame_threshold: DEFAULT_ENDGAME_THRESHOLD,
             rng_state: Self::seed(),
-        }
+        };
+        picker.refresh_endgame_candidates();
+        picker
     }
 
     /// Derive a non-zero RNG seed from the standard library's randomised
@@ -396,6 +398,20 @@ impl PiecePicker {
     /// Export completed pieces as a bitfield byte vector (MSB-first).
     pub fn export_bitfield(&self) -> Vec<u8> {
         self.completed.as_bytes().to_vec()
+    }
+
+    /// Export the currently wanted piece set as an MSB-first bitfield.
+    ///
+    /// In-progress and reserved pieces remain wanted: a peer may still be a
+    /// useful source for retry, end-game, or WebSeed-shared work. Only pieces
+    /// excluded by selection or already verified are removed.
+    pub(crate) fn missing_pieces_bitfield(&self) -> Vec<u8> {
+        self.allowed
+            .as_bytes()
+            .iter()
+            .zip(self.completed.as_bytes())
+            .map(|(allowed, completed)| *allowed & !*completed)
+            .collect()
     }
 
     /// Check if all pieces are completed. O(1).

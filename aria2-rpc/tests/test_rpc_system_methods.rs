@@ -34,6 +34,7 @@ fn expected_methods() -> Vec<String> {
         "aria2.changeGlobalOption",
         "aria2.purgeDownloadResult",
         "aria2.removeDownloadResult",
+        "aria2.removeDownloadFiles",
         "aria2.getVersion",
         "aria2.getSessionInfo",
         "aria2.shutdown",
@@ -56,6 +57,8 @@ fn expected_methods() -> Vec<String> {
         [
             "aria2.addTorrent",
             "aria2.getPeers",
+            "aria2.getPeerStats",
+            "aria2.getPeerDetails",
             "aria2.getTrackers",
             "aria2.getDhtStatus",
             "aria2.saveDhtState",

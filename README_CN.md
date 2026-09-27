@@ -2,8 +2,13 @@
 
 English: [`README.md`](README.md)
 
-> **版本提示：** aria2-rust 当前处于快速迭代阶段，旧版本可能遗留各类问题，
-> 无法保证基本功能的可用性。请及时使用最新版本。
+> **重要提示：** aria2-rust 当前仍处于开发迭代和持续完善阶段，距离生产级别
+> 还有很大差距。功能可能不完整、不稳定，甚至无法使用；我们不保证功能可用性，
+> 请勿将其用于生产环境或重要数据场景。
+
+<p align="center">
+  <img src="https://img.shields.io/badge/状态-开发迭代中-red?style=for-the-badge" alt="开发迭代中，尚未达到生产级别" />
+</p>
 
 ## 文档导览
 
@@ -33,7 +38,8 @@ English: [`README.md`](README.md)
 ***
 
 **aria2_rust** 是知名下载工具 [aria2](https://aria2.github.io/) 的 Rust
-实现，核心实现迁移已基本完成，目前进入最终兼容性验收阶段。默认构建支持
+实现，项目仍在持续开发和完善中，尚未达到生产级别，也不保证所有功能可用。
+默认构建支持
 HTTP/HTTPS、FTP、BitTorrent 协议，并提供
 JSON-RPC/XML-RPC/WebSocket 远程控制接口；完成度以
 [docs/compatibility-status.md](docs/compatibility-status.md) 为准。

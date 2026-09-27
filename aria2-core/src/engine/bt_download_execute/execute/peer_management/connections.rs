@@ -9,7 +9,7 @@ use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_peer_interaction::{BtPeerConnectionOptions, BtPeerInteraction};
 use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::peer_stats::PeerStats;
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::error::{Aria2Error, Result};
 use crate::util::rwlock_ext::RwLockRecover;
 
 impl BtDownloadCommand {
@@ -170,14 +170,6 @@ impl BtDownloadCommand {
             }
         }
         let eligible_peers: Vec<_> = checked_out.iter().map(|(peer, _)| peer.clone()).collect();
-        if eligible_peers.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: "No available peers after PeerStorage checkout".into(),
-                },
-            ));
-        }
-
         if self.group.recover().is_halt_requested() {
             self.return_checked_out_peers(&checked_out);
             self.persist_checkpoint_for_halt().await?;
@@ -252,14 +244,6 @@ impl BtDownloadCommand {
         self.group
             .recover()
             .set_bt_connection_count(active_connections.len());
-
-        if active_connections.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: "All peer connections failed or were filtered".into(),
-                },
-            ));
-        }
 
         {
             let options = self.group.recover().options_arc();

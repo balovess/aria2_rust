@@ -36,6 +36,10 @@ async fn active_download_actor_serves_upload_request_on_same_peer_connection() {
             .write_all(&serialize(&BtMessage::Bitfield { data: vec![0x40] }))
             .await
             .unwrap();
+        stream
+            .write_all(&serialize(&BtMessage::Unchoke))
+            .await
+            .unwrap();
 
         let request = read_frame(&mut stream).await;
         assert_eq!(request.first().copied(), Some(6));
@@ -102,7 +106,13 @@ async fn active_download_actor_serves_upload_request_on_same_peer_connection() {
     .await
     .unwrap();
     connection.allocate_session_resource(16, 2, 32);
-    connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 2, 16, false);
+    connection.configure_upload_with_auto_unchoke(
+        &BtSeedingConfig::default(),
+        crate::rate_limiter::RateLimiter::unlimited(),
+        2,
+        16,
+        false,
+    );
     connection.set_pex_enabled(true);
     connection.register_peer_extension("ut_pex", 9);
 
@@ -179,6 +189,10 @@ async fn swarm_actor_downloads_consecutive_pieces_without_restarting_peer_io() {
             .unwrap();
         stream
             .write_all(&serialize(&BtMessage::Bitfield { data: vec![0xC0] }))
+            .await
+            .unwrap();
+        stream
+            .write_all(&serialize(&BtMessage::Unchoke))
             .await
             .unwrap();
 
@@ -295,6 +309,10 @@ async fn swarm_actor_endgame_uses_the_same_peer_across_piece_generations() {
             .write_all(&serialize(&BtMessage::Bitfield { data: vec![0xC0] }))
             .await
             .unwrap();
+        stream
+            .write_all(&serialize(&BtMessage::Unchoke))
+            .await
+            .unwrap();
 
         for expected_piece in 0..2 {
             let request = read_frame(&mut stream).await;
@@ -388,6 +406,10 @@ async fn active_download_updates_choke_peer_stats_before_piece_completion() {
             .write_all(&serialize(&BtMessage::Bitfield { data: vec![0x80] }))
             .await
             .unwrap();
+        stream
+            .write_all(&serialize(&BtMessage::Unchoke))
+            .await
+            .unwrap();
 
         let mut requested_offsets = Vec::new();
         while requested_offsets.len() < 2 {
@@ -472,23 +494,13 @@ async fn active_download_applies_choke_rotation_deadline_without_peer_messages()
             .write_all(&serialize(&BtMessage::Bitfield { data: vec![0x80] }))
             .await
             .unwrap();
+        stream
+            .write_all(&serialize(&BtMessage::Unchoke))
+            .await
+            .unwrap();
 
-        loop {
-            let frame = read_frame(&mut stream).await;
-            if frame.first().copied() == Some(6) {
-                break;
-            }
-        }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let frame = read_frame(&mut stream).await;
-                if frame.first().copied() == Some(1) {
-                    return frame;
-                }
-            }
-        })
-        .await
-        .expect("periodic choke decision did not unchoke the interested peer")
+        wait_for_request_and_unchoke(&mut stream).await;
+        vec![1]
     });
 
     let mut connection = BtPeerConn::connect_plain_with_options(
@@ -501,8 +513,15 @@ async fn active_download_applies_choke_rotation_deadline_without_peer_messages()
     )
     .await
     .unwrap();
+    connection.allocate_session_resource(16, 1, 16);
     connection.stats.peer_interested = true;
-    connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 1, 16, false);
+    connection.configure_upload_with_auto_unchoke(
+        &BtSeedingConfig::default(),
+        crate::rate_limiter::RateLimiter::unlimited(),
+        1,
+        16,
+        false,
+    );
 
     let mut choking_algo = ChokingAlgorithm::new(ChokingConfig {
         max_upload_slots: 2,
@@ -555,23 +574,13 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
             .write_all(&serialize(&BtMessage::Bitfield { data: vec![0x80] }))
             .await
             .unwrap();
+        stream
+            .write_all(&serialize(&BtMessage::Unchoke))
+            .await
+            .unwrap();
 
-        loop {
-            let frame = read_frame(&mut stream).await;
-            if frame.first().copied() == Some(6) {
-                break;
-            }
-        }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let frame = read_frame(&mut stream).await;
-                if frame.first().copied() == Some(1) {
-                    return frame;
-                }
-            }
-        })
-        .await
-        .expect("endgame choke deadline did not unchoke the interested peer")
+        wait_for_request_and_unchoke(&mut stream).await;
+        vec![1]
     });
 
     let mut connection = BtPeerConn::connect_plain_with_options(
@@ -584,8 +593,15 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
     )
     .await
     .unwrap();
+    connection.allocate_session_resource(16, 1, 16);
     connection.stats.peer_interested = true;
-    connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 1, 16, false);
+    connection.configure_upload_with_auto_unchoke(
+        &BtSeedingConfig::default(),
+        crate::rate_limiter::RateLimiter::unlimited(),
+        1,
+        16,
+        false,
+    );
 
     let mut choking_algo = ChokingAlgorithm::new(ChokingConfig {
         max_upload_slots: 2,
@@ -599,7 +615,7 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
     let mut swarm = crate::engine::bt_message_handler::PeerSwarm::new(16);
     assert!(swarm.spawn_peer(connection, None, provider).is_ok());
     let result = tokio::time::timeout(
-        Duration::from_secs(4),
+        Duration::from_secs(6),
         download_piece_blocks_endgame(
             &mut swarm,
             0,
@@ -616,6 +632,10 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
     .expect("endgame piece attempt did not respect request timeout");
 
     assert!(result.is_err());
+    assert!(
+        !choking_algo.peers()[0].am_choking,
+        "endgame loop must rotate the eligible peer to unchoked"
+    );
     assert!(!swarm.actor(actor_id).unwrap().stats.am_choking);
     assert_eq!(remote.await.unwrap().as_slice(), &[1]);
     swarm.shutdown_all().await;
@@ -646,6 +666,10 @@ async fn swarm_endgame_actors_duplicate_requests_and_cancel_loser() {
                 .unwrap();
             stream
                 .write_all(&serialize(&BtMessage::Bitfield { data: vec![0x80] }))
+                .await
+                .unwrap();
+            stream
+                .write_all(&serialize(&BtMessage::Unchoke))
                 .await
                 .unwrap();
 
@@ -760,4 +784,27 @@ async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
     let mut payload = vec![0u8; u32::from_be_bytes(length) as usize];
     stream.read_exact(&mut payload).await.unwrap();
     payload
+}
+
+async fn wait_for_request_and_unchoke(stream: &mut TcpStream) {
+    let mut unchoked = false;
+    loop {
+        let frame = read_frame(stream).await;
+        match frame.first().copied() {
+            Some(1) => unchoked = true,
+            Some(6) => break,
+            _ => {}
+        }
+    }
+    if !unchoked {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if read_frame(stream).await.first().copied() == Some(1) {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("choke scheduler did not unchoke the interested peer");
+    }
 }

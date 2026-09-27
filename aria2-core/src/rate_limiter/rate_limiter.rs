@@ -65,6 +65,12 @@ impl RateLimiter {
         self.inner.upload.acquire(bytes).await;
     }
 
+    /// Return upload tokens reserved for a request that was canceled before
+    /// its payload was sent.
+    pub fn refund_upload(&self, bytes: u64) {
+        self.inner.upload.refund(bytes);
+    }
+
     /// Non-blocking attempt to acquire download tokens.
     /// Returns `true` if tokens were available, `false` otherwise (no wait).
     #[allow(clippy::unused_async)]

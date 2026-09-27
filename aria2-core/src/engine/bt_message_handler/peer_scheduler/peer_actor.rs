@@ -3,6 +3,8 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -18,6 +20,8 @@ use super::peer_request::PeerRequestLedger;
 pub(super) use super::peer_request::RequestGeneration;
 use super::peer_snapshot::PeerSchedulingSnapshot;
 use super::pipelined::BlockRequest;
+
+const UPLOAD_RATE_LIMIT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 pub(crate) enum PeerCommand {
     BeginGeneration {
@@ -41,6 +45,7 @@ pub(crate) enum PeerCommand {
     HavePiece {
         piece_index: u32,
     },
+    SetWantedPieces(Arc<[u8]>),
     SendPex(Vec<u8>),
     AnnounceAvailability,
     ChokeUpload,
@@ -59,6 +64,10 @@ pub(crate) enum PeerEvent {
         actor_id: PeerActorId,
         snapshot: Box<crate::engine::peer_stats::PeerStats>,
     },
+    AmInterestChanged {
+        actor_id: PeerActorId,
+        snapshot: Box<crate::engine::peer_stats::PeerStats>,
+    },
     ChokeStateChanged {
         actor_id: PeerActorId,
         snapshot: Box<crate::engine::peer_stats::PeerStats>,
@@ -66,6 +75,10 @@ pub(crate) enum PeerEvent {
     PeerChokingChanged {
         actor_id: PeerActorId,
         peer_choking: bool,
+    },
+    AllowedFast {
+        actor_id: PeerActorId,
+        piece_index: u32,
     },
     AvailabilityChanged {
         actor_id: PeerActorId,
@@ -81,6 +94,10 @@ pub(crate) enum PeerEvent {
         actor_id: PeerActorId,
         bitfield: Vec<u8>,
         seeder: bool,
+    },
+    PexNegotiated {
+        actor_id: PeerActorId,
+        ut_pex_id: Option<u8>,
     },
     PexPeers {
         peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
@@ -166,20 +183,6 @@ impl PeerActorControl {
         })
     }
 
-    pub(crate) async fn cancel(
-        &self,
-        generation: RequestGeneration,
-        piece_index: u32,
-        request: BlockRequest,
-    ) -> std::result::Result<(), mpsc::error::SendError<PeerCommand>> {
-        self.send(PeerCommand::Cancel {
-            generation,
-            piece_index,
-            request,
-        })
-        .await
-    }
-
     pub(crate) fn try_cancel(
         &self,
         generation: RequestGeneration,
@@ -221,6 +224,7 @@ impl PeerActorTask {
         event_tx: mpsc::Sender<PeerEvent>,
         dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
         upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
+        pending_download_requests: Arc<AtomicUsize>,
         command_capacity: usize,
     ) -> Self {
         let (control, command_rx) = PeerActorControl::channel(command_capacity);
@@ -232,6 +236,7 @@ impl PeerActorTask {
                 event_tx,
                 dht_engine,
                 upload_provider,
+                pending_download_requests,
             )
             .await;
         });
@@ -267,6 +272,11 @@ pub(super) struct PeerGeneration {
     piece_index: u32,
     availability_changed_actor_ids: HashSet<PeerActorId>,
     pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+}
+
+pub(super) enum TryRequestError {
+    Full,
+    Closed,
 }
 
 impl PeerGeneration {
@@ -345,27 +355,15 @@ impl PeerGeneration {
         actor_id: PeerActorId,
         piece_index: u32,
         request: BlockRequest,
-    ) -> bool {
-        self.senders.get(&actor_id).is_some_and(|sender| {
-            sender
-                .try_request(self.generation, piece_index, request)
-                .is_ok()
-        })
-    }
-
-    pub(super) async fn cancel(
-        &mut self,
-        actor_id: PeerActorId,
-        piece_index: u32,
-        request: BlockRequest,
-    ) -> bool {
+    ) -> std::result::Result<(), TryRequestError> {
         let Some(sender) = self.senders.get(&actor_id) else {
-            return false;
+            return Err(TryRequestError::Closed);
         };
-        sender
-            .cancel(self.generation, piece_index, request)
-            .await
-            .is_ok()
+        match sender.try_request(self.generation, piece_index, request) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(TryRequestError::Full),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(TryRequestError::Closed),
+        }
     }
 
     /// Reuse the same peer I/O tasks for a retry while advancing the request
@@ -454,12 +452,53 @@ pub(crate) async fn run_peer_actor(
     event_tx: mpsc::Sender<PeerEvent>,
     dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
     upload_provider: Option<Arc<dyn crate::engine::bt_upload_session::PieceDataProvider>>,
+    pending_download_requests: Arc<AtomicUsize>,
 ) -> PeerActorId {
+    let mut availability_sent = false;
+    let mut wanted_pieces: Arc<[u8]> = Arc::from([]);
+    if let Some(startup) = connection.actor_startup.take() {
+        let startup_result = async {
+            connection
+                .send_extension_handshake_with_port(&startup.peer_agent, startup.listen_port)
+                .await?;
+            let provider = upload_provider.as_deref().ok_or_else(|| {
+                crate::error::Aria2Error::DownloadFailed(
+                    "peer actor started without an upload provider".into(),
+                )
+            })?;
+            connection.announce_upload_availability(provider).await?;
+            for piece_index in startup.allowed_fast {
+                connection
+                    .send_bt_message(
+                        &aria2_protocol::bittorrent::message::types::BtMessage::AllowedFast {
+                            index: piece_index,
+                        },
+                    )
+                    .await?;
+                connection.add_am_allowed_fast(piece_index);
+            }
+            if startup.dht_enabled
+                && connection.remote_supports_dht()
+                && let Some(port) = startup.listen_port
+            {
+                connection.send_port(port).await?;
+            }
+            Result::<()>::Ok(())
+        }
+        .await;
+        if let Err(error) = startup_result {
+            tracing::debug!(actor_id = actor_id.0, %error, "BT peer actor startup failed");
+            let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+            return actor_id;
+        }
+        availability_sent = true;
+    }
     let mut requests = PeerRequestLedger::default();
     let mut active_generation: Option<(RequestGeneration, u32)> = None;
     let mut upload_flush_deadline: Option<tokio::time::Instant> = None;
     let mut shutdown_requested = false;
     loop {
+        pending_download_requests.store(requests.len(), Ordering::Relaxed);
         if shutdown_requested && !connection.has_pending_upload_messages() {
             break;
         }
@@ -564,6 +603,23 @@ pub(crate) async fn run_peer_actor(
                         }
                         connection.record_outbound_activity();
                     }
+                    Some(PeerCommand::SetWantedPieces(wanted)) => {
+                        wanted_pieces = wanted;
+                        match reconcile_peer_interest(
+                            actor_id,
+                            connection,
+                            &wanted_pieces,
+                            &event_tx,
+                        ).await {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(error) => {
+                                tracing::debug!(actor_id = actor_id.0, %error, "Failed to update BT peer interest");
+                                let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
+                                break;
+                            }
+                        }
+                    }
                     Some(PeerCommand::SendPex(wire_bytes)) => {
                         connection.queue_message(wire_bytes);
                         if let Err(error) = connection.flush_send_buffer().await {
@@ -574,6 +630,9 @@ pub(crate) async fn run_peer_actor(
                         connection.record_outbound_activity();
                     }
                     Some(PeerCommand::AnnounceAvailability) => {
+                        if availability_sent {
+                            continue;
+                        }
                         let Some(provider) = upload_provider.as_deref() else {
                             tracing::debug!(actor_id = actor_id.0, "Peer actor has no upload provider for availability announcement");
                             let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
@@ -584,6 +643,7 @@ pub(crate) async fn run_peer_actor(
                             let _ = event_tx.send(PeerEvent::Disconnected { actor_id }).await;
                             break;
                         }
+                        availability_sent = true;
                     }
                     Some(PeerCommand::ChokeUpload) => {
                         let has_upload_state = connection.upload_state.is_some();
@@ -640,6 +700,7 @@ pub(crate) async fn run_peer_actor(
                                 connection.record_outbound_activity();
                             }
                         }
+                        connection.discard_pending_upload_messages();
                         if !connection.has_pending_upload_messages() {
                             break;
                         }
@@ -664,6 +725,19 @@ pub(crate) async fn run_peer_actor(
                                 | aria2_protocol::bittorrent::message::types::BtMessage::HaveAll
                                 | aria2_protocol::bittorrent::message::types::BtMessage::HaveNone
                         );
+                        let received_extension_handshake = matches!(
+                            &message,
+                            aria2_protocol::bittorrent::message::types::BtMessage::Extended {
+                                ext_id: 0,
+                                ..
+                            }
+                        );
+                        let allowed_fast_piece = match &message {
+                            aria2_protocol::bittorrent::message::types::BtMessage::AllowedFast {
+                                index,
+                            } => Some(*index),
+                            _ => None,
+                        };
                         let availability_change = active_generation.filter(|(_, target_piece)| {
                             use aria2_protocol::bittorrent::message::types::BtMessage;
                             match &message {
@@ -689,6 +763,28 @@ pub(crate) async fn run_peer_actor(
                                 break;
                             }
                         };
+                        if let Some(piece_index) = allowed_fast_piece
+                            && event_tx
+                                .send(PeerEvent::AllowedFast {
+                                    actor_id,
+                                    piece_index,
+                                })
+                                .await
+                                .is_err()
+                        {
+                            break;
+                        }
+                        if received_extension_handshake
+                            && event_tx
+                                .send(PeerEvent::PexNegotiated {
+                                    actor_id,
+                                    ut_pex_id: connection.peer_extension_id("ut_pex"),
+                                })
+                                .await
+                                .is_err()
+                        {
+                            break;
+                        }
                         let discovered_pex_peers = connection.drain_pex_peers();
                         if !discovered_pex_peers.is_empty()
                             && event_tx
@@ -715,6 +811,14 @@ pub(crate) async fn run_peer_actor(
                             }).await.is_err()
                         {
                             break;
+                        }
+                        if connection.stats.outstanding_upload_count != outstanding_upload_count
+                            && connection.has_pending_upload_messages()
+                        {
+                            upload_flush_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + std::time::Duration::from_millis(2),
+                            );
                         }
                         if connection.stats.peer_interested != was_interested
                             && event_tx.send(PeerEvent::InterestChanged {
@@ -773,6 +877,26 @@ pub(crate) async fn run_peer_actor(
                                 .is_err()
                         {
                             break;
+                        }
+                        if peer_availability_change.is_some() || full_availability_change {
+                            match reconcile_peer_interest(
+                                actor_id,
+                                connection,
+                                &wanted_pieces,
+                                &event_tx,
+                            )
+                            .await
+                            {
+                                Ok(true) => {}
+                                Ok(false) => break,
+                                Err(error) => {
+                                    tracing::debug!(actor_id = actor_id.0, %error, "Failed to update BT peer interest");
+                                    let _ = event_tx
+                                        .send(PeerEvent::Disconnected { actor_id })
+                                        .await;
+                                    break;
+                                }
+                            }
                         }
                         let Some(message) = message else {
                             if shutdown_requested && !connection.has_pending_upload_messages() {
@@ -876,7 +1000,9 @@ pub(crate) async fn run_peer_actor(
                         break;
                     }
                 }
-                upload_flush_deadline = None;
+                upload_flush_deadline = connection.has_pending_upload_messages().then(|| {
+                    tokio::time::Instant::now() + UPLOAD_RATE_LIMIT_RETRY_INTERVAL
+                });
                 if shutdown_requested {
                     break;
                 }
@@ -885,6 +1011,43 @@ pub(crate) async fn run_peer_actor(
     }
 
     actor_id
+}
+
+async fn reconcile_peer_interest(
+    actor_id: PeerActorId,
+    connection: &mut BtPeerConn,
+    wanted_pieces: &[u8],
+    event_tx: &mpsc::Sender<PeerEvent>,
+) -> Result<bool> {
+    let has_wanted_pieces = wanted_pieces.iter().any(|pieces| *pieces != 0);
+    let interested = has_wanted_pieces
+        && (connection.seeder
+            || connection
+                .session_resource
+                .as_ref()
+                .is_some_and(|resource| {
+                    wanted_pieces
+                        .iter()
+                        .zip(resource.bitfield())
+                        .any(|(wanted, available)| wanted & available != 0)
+                }));
+    if connection.stats.am_interested == interested {
+        return Ok(true);
+    }
+
+    if interested {
+        connection.send_interested().await?;
+    } else {
+        connection.send_not_interested().await?;
+    }
+    connection.record_outbound_activity();
+    Ok(event_tx
+        .send(PeerEvent::AmInterestChanged {
+            actor_id,
+            snapshot: Box::new(connection.stats.clone()),
+        })
+        .await
+        .is_ok())
 }
 
 pub(crate) async fn process_peer_message(
@@ -1012,6 +1175,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn peer_actor_sends_startup_allowed_fast_message() {
+        use tokio::time::{Duration, timeout};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (local_stream, endpoint) = listener.accept().await.unwrap();
+        let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
+        let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
+        connection.configure_upload_with_auto_unchoke(
+            &BtSeedingConfig::default(),
+            crate::rate_limiter::RateLimiter::unlimited(),
+            1,
+            16,
+            false,
+        );
+        connection.actor_startup = Some(crate::engine::bt_peer_connection::PeerActorStartup {
+            peer_agent: "test-peer".to_string(),
+            listen_port: None,
+            dht_enabled: false,
+            allowed_fast: vec![3],
+        });
+
+        let actor_id = connection.actor_id;
+        let (command_tx, command_rx) = mpsc::channel(8);
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        let provider = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let worker = tokio::spawn(async move {
+            run_peer_actor(
+                actor_id,
+                &mut connection,
+                command_rx,
+                event_tx,
+                None,
+                Some(provider),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .await;
+        });
+
+        let mut remote =
+            PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
+        let _extension_handshake = read_message_while_actor_runs(&mut remote).await;
+        let _availability = read_message_while_actor_runs(&mut remote).await;
+        let allowed_fast = timeout(Duration::from_secs(1), remote.read_message()).await;
+        assert!(
+            allowed_fast.is_ok(),
+            "peer actor stopped during startup: {}",
+            matches!(event_rx.try_recv(), Ok(PeerEvent::Disconnected { actor_id: id }) if id == actor_id)
+        );
+        assert_eq!(
+            allowed_fast.unwrap().unwrap().unwrap(),
+            BtMessage::AllowedFast { index: 3 }
+        );
+
+        command_tx.send(PeerCommand::Shutdown).await.unwrap();
+        worker.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn peer_actor_cancels_inflight_request_before_orderly_shutdown() {
         use tokio::time::{Duration, timeout};
 
@@ -1025,7 +1248,16 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, _event_rx) = mpsc::channel(8);
         let worker = tokio::spawn(async move {
-            run_peer_actor(actor_id, &mut connection, command_rx, event_tx, None, None).await;
+            run_peer_actor(
+                actor_id,
+                &mut connection,
+                command_rx,
+                event_tx,
+                None,
+                None,
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .await;
             connection
         });
 
@@ -1093,7 +1325,16 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let worker = tokio::spawn(async move {
-            run_peer_actor(actor_id, &mut connection, command_rx, event_tx, None, None).await;
+            run_peer_actor(
+                actor_id,
+                &mut connection,
+                command_rx,
+                event_tx,
+                None,
+                None,
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .await;
             connection
         });
         let mut remote =
@@ -1263,7 +1504,16 @@ mod tests {
         let (command_tx, command_rx) = mpsc::channel(8);
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let worker = tokio::spawn(async move {
-            run_peer_actor(actor_id, &mut connection, command_rx, event_tx, None, None).await;
+            run_peer_actor(
+                actor_id,
+                &mut connection,
+                command_rx,
+                event_tx,
+                None,
+                None,
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .await;
         });
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
@@ -1339,7 +1589,15 @@ mod tests {
         let connection = BtPeerConn::from_incoming_plain(local, endpoint);
         let actor_id = connection.actor_id;
         let (event_tx, _event_rx) = mpsc::channel(8);
-        let mut actor = PeerActorTask::spawn_owned(actor_id, connection, event_tx, None, None, 8);
+        let mut actor = PeerActorTask::spawn_owned(
+            actor_id,
+            connection,
+            event_tx,
+            None,
+            None,
+            Arc::new(AtomicUsize::new(0)),
+            8,
+        );
         let control = actor.control.clone();
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
@@ -1411,7 +1669,16 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let worker = tokio::spawn(async move {
             let mut connection = connection;
-            run_peer_actor(actor_id, &mut connection, command_rx, event_tx, None, None).await;
+            run_peer_actor(
+                actor_id,
+                &mut connection,
+                command_rx,
+                event_tx,
+                None,
+                None,
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            )
+            .await;
         });
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
@@ -1547,7 +1814,13 @@ mod tests {
         let (local_stream, endpoint) = listener.accept().await.unwrap();
         let local = PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true);
         let mut connection = BtPeerConn::from_incoming_plain(local, endpoint);
-        connection.configure_upload_with_auto_unchoke(&BtSeedingConfig::default(), 1, 32, true);
+        connection.configure_upload_with_auto_unchoke(
+            &BtSeedingConfig::default(),
+            crate::rate_limiter::RateLimiter::unlimited(),
+            1,
+            32,
+            true,
+        );
 
         let mut provider = InMemoryPieceProvider::new(32, 1);
         provider.set_piece_data(0, vec![0x71; 32]);
@@ -1563,6 +1836,7 @@ mod tests {
                 event_tx,
                 None,
                 Some(provider),
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             )
             .await;
             connection

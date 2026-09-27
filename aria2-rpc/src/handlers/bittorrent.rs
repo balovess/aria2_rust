@@ -21,6 +21,22 @@ pub(crate) fn parse_get_dht_status(
     Ok(BackendRequest::GetDhtStatus)
 }
 
+pub(crate) fn parse_get_peer_stats(
+    req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::GetPeerStats {
+        gid: req.take_param(0)?,
+    })
+}
+
+pub(crate) fn parse_get_peer_details(
+    req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::GetPeerDetails {
+        gid: req.take_param(0)?,
+    })
+}
+
 pub(crate) fn parse_save_dht_state(
     _req: &mut JsonRpcRequest,
 ) -> Result<BackendRequest, JsonRpcError> {
@@ -55,6 +71,14 @@ pub(crate) fn parse_remove_download_result(
     req: &mut JsonRpcRequest,
 ) -> Result<BackendRequest, JsonRpcError> {
     Ok(BackendRequest::RemoveDownloadResult {
+        gid: req.take_param(0)?,
+    })
+}
+
+pub(crate) fn parse_remove_download_files(
+    req: &mut JsonRpcRequest,
+) -> Result<BackendRequest, JsonRpcError> {
+    Ok(BackendRequest::RemoveDownloadFiles {
         gid: req.take_param(0)?,
     })
 }

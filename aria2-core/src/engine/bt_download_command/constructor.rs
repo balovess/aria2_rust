@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -9,6 +8,7 @@ use crate::engine::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::error::{Aria2Error, FatalError, Result};
 use crate::filesystem::file_lock::DownloadPathLock;
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 use crate::util::uri::percent_encode;
@@ -93,7 +93,8 @@ pub(crate) fn build_download_context_from_meta(
     } else {
         let base_dir = std::path::Path::new(&path)
             .parent()
-            .unwrap_or_else(|| std::path::Path::new("."));
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&meta.info.name);
         let v1_files = meta.info.files.as_deref();
         let v2_files = meta.info.v2_files.as_deref();
         let file_count = v1_files
@@ -184,74 +185,6 @@ pub(crate) fn build_download_context_from_meta(
     };
     ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
     Ok(ctx)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{file_web_seed_urls, normalized_announce_list, normalized_web_seed_list};
-
-    #[test]
-    fn fills_a_missing_tier_from_the_single_announce_field() {
-        assert_eq!(
-            normalized_announce_list(&[], "https://tracker.example/announce"),
-            vec![vec!["https://tracker.example/announce".to_string()]]
-        );
-    }
-
-    #[test]
-    fn keeps_existing_tiers_and_does_not_add_an_empty_announce() {
-        let tiers = vec![vec!["https://one.example/announce".to_string()]];
-        assert_eq!(normalized_announce_list(&tiers, ""), tiers);
-        assert!(normalized_announce_list(&[], "").is_empty());
-    }
-
-    #[test]
-    fn combines_and_deduplicates_torrent_and_external_web_seeds() {
-        assert_eq!(
-            normalized_web_seed_list(
-                &[
-                    "https://seed.test/root/".into(),
-                    "https://seed.test/other".into()
-                ],
-                &[
-                    "https://seed.test/root/".into(),
-                    "https://extra.test/".into()
-                ],
-            ),
-            vec![
-                "https://extra.test/",
-                "https://seed.test/other",
-                "https://seed.test/root/",
-            ]
-        );
-    }
-
-    #[test]
-    fn expands_web_seed_roots_to_single_and_multi_file_paths() {
-        let seeds = vec!["https://seed.test/root".to_string()];
-        assert_eq!(
-            file_web_seed_urls(&seeds, "file name.bin", &[], true),
-            vec!["https://seed.test/root".to_string()]
-        );
-        assert_eq!(
-            file_web_seed_urls(
-                &seeds,
-                "release pack",
-                &["sub dir".into(), "a#b.bin".into()],
-                false
-            ),
-            vec!["https://seed.test/root/release%20pack/sub%20dir/a%23b.bin"]
-        );
-        assert_eq!(
-            file_web_seed_urls(
-                &["https://seed.test/root/".into()],
-                "file name.bin",
-                &[],
-                true
-            ),
-            vec!["https://seed.test/root/file%20name.bin"]
-        );
-    }
 }
 
 /// Parse local torrent metadata into an existing request group before the
@@ -522,6 +455,7 @@ impl BtDownloadCommand {
             if let Some(info_hash) = info_hash {
                 external.set_bt_metadata(piece_count, piece_length, info_hash);
             }
+            external.set_rate_limiter(command.torrent_upload_limiter.clone());
         }
         command.group = group;
         command.progress = command.group.recover().progress.clone();
@@ -613,6 +547,9 @@ impl BtDownloadCommand {
             vec![format!("bt://{}", meta.info_hash.as_hex())],
             options.clone(),
         );
+        let torrent_upload_limiter =
+            RateLimiter::new(&RateLimiterConfig::new(None, options.max_upload_limit));
+        group.set_rate_limiter(torrent_upload_limiter.clone());
 
         // Set BT metadata for session persistence (Task 3)
         group.set_bt_metadata(
@@ -664,8 +601,9 @@ impl BtDownloadCommand {
             None
         };
 
+        let multi_file_root = std::path::PathBuf::from(&dir).join(&filename);
         let multi_file_layout = if !meta.is_single_file() {
-            let layout_base_dir = std::path::PathBuf::from(&dir);
+            let layout_base_dir = multi_file_root.clone();
             match MultiFileLayout::from_info_dict(&meta.info, &layout_base_dir) {
                 Ok(layout) => Some(layout),
                 Err(e) => {
@@ -680,7 +618,7 @@ impl BtDownloadCommand {
         };
 
         let effective_output_path = if multi_file_layout.is_some() {
-            std::path::PathBuf::from(&dir)
+            multi_file_root
         } else {
             path.clone()
         };
@@ -814,10 +752,6 @@ impl BtDownloadCommand {
             pex_last_send_time: None,
             pex_send_interval: Duration::from_secs(60),
 
-            // BEP 6 Fast Extension tracking
-            allowed_fast_sent_peers: HashMap::new(),
-            suggest_sent_counts: HashMap::new(),
-
             // Endgame mode default values
 
             // Web seed manager (initialized lazily when needed)
@@ -840,6 +774,7 @@ impl BtDownloadCommand {
 
             // Process-wide rate limiter (set via set_global_limiter after construction)
             global_limiter: None,
+            torrent_upload_limiter,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
 
             peer_rejection: crate::engine::bt_peer_storage::PeerRejectionState::shared(),
@@ -860,5 +795,73 @@ impl BtDownloadCommand {
         };
         command.apply_context_paths()?;
         Ok(command)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_web_seed_urls, normalized_announce_list, normalized_web_seed_list};
+
+    #[test]
+    fn fills_a_missing_tier_from_the_single_announce_field() {
+        assert_eq!(
+            normalized_announce_list(&[], "https://tracker.example/announce"),
+            vec![vec!["https://tracker.example/announce".to_string()]]
+        );
+    }
+
+    #[test]
+    fn keeps_existing_tiers_and_does_not_add_an_empty_announce() {
+        let tiers = vec![vec!["https://one.example/announce".to_string()]];
+        assert_eq!(normalized_announce_list(&tiers, ""), tiers);
+        assert!(normalized_announce_list(&[], "").is_empty());
+    }
+
+    #[test]
+    fn combines_and_deduplicates_torrent_and_external_web_seeds() {
+        assert_eq!(
+            normalized_web_seed_list(
+                &[
+                    "https://seed.test/root/".into(),
+                    "https://seed.test/other".into()
+                ],
+                &[
+                    "https://seed.test/root/".into(),
+                    "https://extra.test/".into()
+                ],
+            ),
+            vec![
+                "https://extra.test/",
+                "https://seed.test/other",
+                "https://seed.test/root/",
+            ]
+        );
+    }
+
+    #[test]
+    fn expands_web_seed_roots_to_single_and_multi_file_paths() {
+        let seeds = vec!["https://seed.test/root".to_string()];
+        assert_eq!(
+            file_web_seed_urls(&seeds, "file name.bin", &[], true),
+            vec!["https://seed.test/root".to_string()]
+        );
+        assert_eq!(
+            file_web_seed_urls(
+                &seeds,
+                "release pack",
+                &["sub dir".into(), "a#b.bin".into()],
+                false
+            ),
+            vec!["https://seed.test/root/release%20pack/sub%20dir/a%23b.bin"]
+        );
+        assert_eq!(
+            file_web_seed_urls(
+                &["https://seed.test/root/".into()],
+                "file name.bin",
+                &[],
+                true
+            ),
+            vec!["https://seed.test/root/file%20name.bin"]
+        );
     }
 }

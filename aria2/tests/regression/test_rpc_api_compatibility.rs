@@ -1,6 +1,6 @@
 //! RPC API regression tests for aria2-rust.
 //!
-//! These tests verify that all 35 original RPC methods return values in the expected format
+//! These tests verify the RPC methods return values in the expected format
 //! and maintain compatibility with the original aria2 RPC specification.
 
 #[path = "../support/mod.rs"]
@@ -948,10 +948,15 @@ async fn regression_get_uris_uses_first_file_entry_for_multi_file_tasks() {
     assert_success(&resp);
 
     let uris: Vec<serde_json::Value> = serde_json::from_value(resp.result.unwrap()).unwrap();
-    assert_eq!(uris.len(), 3);
-    assert_eq!(uris[0]["uri"], format!("bt://{gid}"));
-    assert_eq!(uris[1]["uri"], "http://example.com/first.bin");
-    assert_eq!(uris[2]["uri"], "http://mirror.example.com/first.bin");
+    assert_eq!(uris.len(), 2);
+    assert_eq!(
+        uris[0]["uri"],
+        "http://example.com/first.bin/multi/one/first.bin"
+    );
+    assert_eq!(
+        uris[1]["uri"],
+        "http://mirror.example.com/first.bin/multi/one/first.bin"
+    );
 }
 
 /// Test: changeUri follows aria2's fileIndex contract even for an unselected
@@ -1555,6 +1560,102 @@ async fn regression_remove_download_result_returns_ok() {
     assert_eq!(result, "OK");
 }
 
+#[tokio::test]
+async fn regression_remove_download_files_cleans_stopped_child_tree() {
+    use aria2_core::request::request_group::{DownloadOptions, GroupId};
+
+    let fixture = RpcFixture::new(None);
+    let directory = tempfile::tempdir().expect("temporary output directory");
+    let directory_name = directory.path().to_string_lossy().into_owned();
+    let parent_gid = GroupId::new(0x7201);
+    let child_gid = GroupId::new(0x7202);
+    let grandchild_gid = GroupId::new(0x7203);
+    let insert_group = |gid, name: &str| {
+        fixture
+            .group_man
+            .add_group_with_gid(
+                gid,
+                vec![format!("https://example.test/{name}")],
+                DownloadOptions {
+                    dir: Some(directory_name.clone()),
+                    out: Some(name.to_string()),
+                    ..DownloadOptions::default()
+                },
+            )
+            .expect("add stopped-tree fixture group");
+    };
+    insert_group(parent_gid, "parent.bin");
+    insert_group(child_gid, "child.bin");
+    insert_group(grandchild_gid, "grandchild.bin");
+
+    fixture
+        .group_man
+        .find_group(parent_gid)
+        .expect("parent group")
+        .read()
+        .expect("parent lock")
+        .add_followed_by_gid(child_gid);
+    fixture
+        .group_man
+        .find_group(child_gid)
+        .expect("child group")
+        .read()
+        .expect("child lock")
+        .add_followed_by_gid(grandchild_gid);
+
+    let file_names = ["parent.bin", "child.bin", "grandchild.bin"];
+    for name in file_names {
+        std::fs::write(directory.path().join(name), b"downloaded").expect("create output");
+    }
+    std::fs::write(directory.path().join("unrelated.bin"), b"keep")
+        .expect("create unrelated output");
+    for gid in [parent_gid, child_gid, grandchild_gid] {
+        fixture
+            .group_man
+            .remove_group(gid)
+            .expect("stop fixture group");
+    }
+
+    let response = fixture
+        .engine
+        .handle_request(&make_request(
+            "aria2.removeDownloadFiles",
+            serde_json::json!([parent_gid.to_hex_string()]),
+        ))
+        .await;
+    assert_success(&response);
+    assert_eq!(response.result.unwrap(), "OK");
+    for name in file_names {
+        assert!(
+            !directory.path().join(name).exists(),
+            "{name} should be removed"
+        );
+    }
+    assert!(directory.path().join("unrelated.bin").exists());
+    assert!(
+        fixture
+            .group_man
+            .find_stopped_result(&parent_gid.to_hex_string())
+            .is_some(),
+        "cleanup should retain the stopped result"
+    );
+
+    let active_gid = GroupId::new(0x7204);
+    insert_group(active_gid, "active.bin");
+    fixture.group_man.fill_from_reserver();
+    let active_path = directory.path().join("active.bin");
+    std::fs::write(&active_path, b"in progress").expect("create active output");
+    let active_response = fixture
+        .engine
+        .handle_request(&make_request(
+            "aria2.removeDownloadFiles",
+            serde_json::json!([active_gid.to_hex_string()]),
+        ))
+        .await;
+    assert_error_code(&active_response, 1);
+    assert!(active_path.exists(), "active output must not be removed");
+}
+
 // =========================================================================
 // System Discovery Methods (2 methods)
 // =========================================================================
@@ -1574,6 +1675,8 @@ async fn regression_list_methods_returns_feature_specific_methods() {
     expected.extend([
         "aria2.addTorrent",
         "aria2.getPeers",
+        "aria2.getPeerStats",
+        "aria2.getPeerDetails",
         "aria2.getTrackers",
         "aria2.getDhtStatus",
         "aria2.saveDhtState",
@@ -1605,6 +1708,7 @@ async fn regression_list_methods_returns_feature_specific_methods() {
         "aria2.changeGlobalOption",
         "aria2.purgeDownloadResult",
         "aria2.removeDownloadResult",
+        "aria2.removeDownloadFiles",
         "aria2.getVersion",
         "aria2.getSessionInfo",
         "aria2.shutdown",

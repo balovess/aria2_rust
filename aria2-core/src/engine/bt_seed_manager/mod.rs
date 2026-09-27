@@ -34,6 +34,7 @@
 //! | `BtSeederStateChoke` | `BtSeederStateChoke` |
 
 mod constructors;
+mod seeding_connections;
 mod seeding_loop;
 #[cfg(test)]
 mod tests;
@@ -49,11 +50,36 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
+use crate::engine::bt_download_execute::execute::DhtPeriodicLookup;
 use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
+use crate::engine::bt_peer_interaction::BtPeerConnectionOptions;
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::bt_upload_session::{BtSeedingConfig, PieceDataProvider};
+use crate::rate_limiter::RateLimiter;
 use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionState};
+
+/// Discovery and connection state transferred from download execution to the
+/// long-lived seeding coordinator. This keeps torrent-scoped peer discovery
+/// alive across the leech-to-seed transition.
+pub(crate) struct SeedPeerDiscovery {
+    pub(crate) group: Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>,
+    pub(crate) dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    pub(crate) dht_lookup: DhtPeriodicLookup,
+    pub(crate) connection_options: BtPeerConnectionOptions,
+    pub(crate) total_size: u64,
+    pub(crate) utp_socket:
+        Option<Arc<tokio::sync::Mutex<aria2_protocol::bittorrent::utp::UtpSocket>>>,
+    pub(crate) outbound_network_policy: Arc<crate::network::OutboundNetworkPolicy>,
+    pub(crate) enable_peer_exchange: bool,
+}
+
+pub(super) struct SeedPeerConnectionAttempt {
+    pub(super) task: tokio::task::JoinHandle<
+        crate::error::Result<crate::engine::bt_peer_interaction::PeerConnectionResult>,
+    >,
+    pub(super) checked_out: Vec<crate::engine::bt_peer_storage::PeerEntry>,
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -61,6 +87,7 @@ use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionSt
 
 /// Interval between choke rounds (seconds). Matches C++ rotation interval.
 const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
+const PEER_UPLOAD_SPEED_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 
 // ===========================================================================
 // BtSeedManager — top-level seeding phase manager
@@ -79,12 +106,12 @@ const CHOKE_ROUND_INTERVAL_SECS: u64 = 10;
 pub struct BtSeedManager {
     /// Info hash of the torrent being seeded
     info_hash: [u8; 20],
-    /// Connections admitted before the long-lived peer workers start.
-    upload_sessions: Vec<BtPeerConn>,
-    /// Long-lived I/O owners after the seeding loop starts.
+    /// Synchronous constructors stage established transports until the async
+    /// loop starts; after startup, every live connection belongs to the swarm.
+    pending_connections: Vec<BtPeerConn>,
     swarm: PeerSwarm,
     /// Piece data provider for reading completed pieces from disk
-    piece_provider: Option<Arc<dyn PieceDataProvider>>,
+    piece_provider: Arc<dyn PieceDataProvider>,
     /// Seeding configuration (rate limits, unchoke settings)
     #[allow(dead_code)]
     config: BtSeedingConfig,
@@ -96,6 +123,8 @@ pub struct BtSeedManager {
     pub total_uploaded: u64,
     /// Authoritative upload counter shared with the connection-owned workers.
     upload_counter: Arc<AtomicU64>,
+    /// Torrent-wide upload limiter shared with the download-phase actors.
+    torrent_upload_limiter: RateLimiter,
     /// When seeding started
     pub seeding_start_time: Instant,
     /// Whether seeding is currently active
@@ -108,18 +137,25 @@ pub struct BtSeedManager {
     peer_storage: Option<
         std::sync::Arc<std::sync::Mutex<crate::engine::bt_peer_storage::DefaultPeerStorage>>,
     >,
+    /// DHT/tracker/PEX discovered peers are connected through the same swarm
+    /// after the piece scheduler has ended.
+    peer_discovery: Option<SeedPeerDiscovery>,
+    /// At most one bounded outgoing batch is active. Checked-out peer entries
+    /// remain here until its result is reconciled into the swarm.
+    pending_peer_connection: Option<SeedPeerConnectionAttempt>,
     /// Set when seed criteria ends the runtime, matching BtRuntime::halt.
     halt_requested: bool,
     /// Timestamp of the last choke round
     last_choke_time: Instant,
     /// Tracker announcer for periodic re-announce while seeding
     /// (mirrors C++ SeedCheckCommand keeping the swarm informed).
-    announcer: Option<TrackerAnnouncer>,
+    announcer: Option<Arc<tokio::sync::Mutex<TrackerAnnouncer>>>,
+    pending_tracker_announce:
+        Option<tokio::task::JoinHandle<Option<crate::engine::bt_tracker_comm::AnnounceResult>>>,
     /// Our peer id, sent with tracker announces.
     peer_id: [u8; 20],
     /// Incoming peers routed to this torrent while it remains in seeding mode.
-    incoming_peers:
-        Option<tokio::sync::mpsc::Receiver<crate::engine::bt_peer_listener::IncomingPeer>>,
+    incoming_peers: Option<crate::engine::bt_peer_listener::IncomingPeerReceiver>,
     /// Lock-free progress sink for live RPC/UI upload statistics.
     upload_progress: Option<Arc<AtomicProgress>>,
     /// Shared protocol counters and peer snapshots consumed by RPC/TUI.
@@ -168,7 +204,14 @@ impl BtSeedManager {
     }
 
     pub fn take_announcer(&mut self) -> Option<TrackerAnnouncer> {
-        self.announcer.take()
+        let announcer = self.announcer.take()?;
+        match Arc::try_unwrap(announcer) {
+            Ok(announcer) => Some(announcer.into_inner()),
+            Err(announcer) => {
+                self.announcer = Some(announcer);
+                None
+            }
+        }
     }
 
     /// Return total bytes downloaded (used for seed ratio calculation).
@@ -178,13 +221,20 @@ impl BtSeedManager {
 
     /// Return upload statistics: (total_uploaded, upload_speed).
     pub fn get_upload_stats(&self) -> (u64, u64) {
-        let elapsed_secs = self.seeding_start_time.elapsed().as_secs_f64();
-        let upload_speed = if elapsed_secs > 0.0 {
-            (self.total_uploaded as f64 / elapsed_secs) as u64
-        } else {
-            0
-        };
-        (self.total_uploaded, upload_speed)
+        (self.total_uploaded, self.current_upload_speed())
+    }
+
+    pub(super) fn current_upload_speed(&self) -> u64 {
+        let now = Instant::now();
+        self.swarm
+            .iter()
+            .filter(|actor| {
+                actor.stats.last_upload_time.is_some_and(|last_upload| {
+                    now.saturating_duration_since(last_upload) < PEER_UPLOAD_SPEED_IDLE_TIMEOUT
+                })
+            })
+            .map(|actor| actor.stats.upload_speed.max(0.0) as u64)
+            .sum()
     }
 
     /// Return the duration of the seeding phase.
@@ -204,7 +254,7 @@ impl BtSeedManager {
 
     /// Return the number of connected peers owned by this manager.
     pub fn num_sessions(&self) -> usize {
-        self.upload_sessions.len() + self.swarm.len()
+        self.pending_connections.len() + self.swarm.len()
     }
 
     /// Record bytes uploaded to a peer.
@@ -270,12 +320,17 @@ impl BtSeedManager {
 
     fn peer_snapshots(&self) -> Vec<BtPeerSnapshot> {
         let mut snapshots = self
-            .upload_sessions
+            .pending_connections
             .iter()
             .filter_map(|session| {
                 let addr = session.remote_endpoint()?;
                 Some(BtPeerSnapshot {
                     peer_id: session.remote_peer_id().unwrap_or([0; 20]),
+                    client: session
+                        .remote_client
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
                     addr,
                     is_incoming: session.incoming,
                     source: session.source,
@@ -288,6 +343,10 @@ impl BtSeedManager {
                     avg_download_speed: 0,
                     am_choking: session.stats.am_choking,
                     peer_choking: false,
+                    am_interested: session.stats.am_interested,
+                    peer_interested: session.stats.peer_interested,
+                    outstanding_upload_requests: session.stats.outstanding_upload_count,
+                    outstanding_download_requests: 0,
                     seeder: Some(false),
                     connection_duration_secs: session.stats.connection_duration_secs(),
                     last_data_age_secs: session
@@ -305,6 +364,11 @@ impl BtSeedManager {
             let stats = &actor.stats;
             BtPeerSnapshot {
                 peer_id: stats.peer_id,
+                client: actor
+                    .client
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone(),
                 addr,
                 is_incoming: actor.incoming,
                 source: actor.source,
@@ -317,6 +381,12 @@ impl BtSeedManager {
                 avg_download_speed: stats.avg_download_speed,
                 am_choking: stats.am_choking,
                 peer_choking: stats.peer_choking,
+                am_interested: stats.am_interested,
+                peer_interested: stats.peer_interested,
+                outstanding_upload_requests: stats.outstanding_upload_count,
+                outstanding_download_requests: actor
+                    .pending_download_requests
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 seeder: Some(actor.seeder),
                 connection_duration_secs: stats.connection_duration_secs(),
                 last_data_age_secs: stats

@@ -455,6 +455,13 @@ fn test_endgame_candidates_populated_near_completion() {
 }
 
 #[test]
+fn new_picker_populates_endgame_candidates_when_entire_torrent_is_within_threshold() {
+    let picker = PiecePicker::new(20);
+
+    assert_eq!(picker.endgame_candidates(), &(0..20).collect::<Vec<_>>());
+}
+
+#[test]
 fn test_mark_completed_is_idempotent() {
     let mut picker = PiecePicker::new(3u32);
     picker.mark_completed(1);

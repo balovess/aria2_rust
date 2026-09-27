@@ -17,6 +17,10 @@ pub const BLOCK_REQUEST_TIMEOUT_SECS: u64 = constants::BT_BLOCK_REQUEST_TIMEOUT_
 /// Matches C++ `DEFAULT_MAX_OUTSTANDING_REQUEST = 6` (BtConstants.h).
 pub const DEFAULT_MAX_OUTSTANDING_REQUEST: usize = constants::BT_DEFAULT_MAX_OUTSTANDING_REQUEST;
 
+/// Maximum adaptive outstanding requests per peer.
+/// Matches C++ `UB_MAX_OUTSTANDING_REQUEST = 256` (BtConstants.h).
+pub const MAX_OUTSTANDING_REQUEST: usize = 256;
+
 /// Bytes supplied by a peer during a piece download.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeerDownloadBytes {

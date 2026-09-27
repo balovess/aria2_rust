@@ -205,13 +205,7 @@ impl Command for BtDownloadCommand {
 
         const PEX_SEND_INTERVAL_SECS: u64 = 60;
         let mut session = self
-            .prepare_torrent_session(
-                &meta,
-                piece_length,
-                total_size,
-                num_pieces,
-                network_info_hash,
-            )
+            .prepare_torrent_session(&meta, piece_length, total_size, network_info_hash)
             .await?;
 
         let piece_result = self
@@ -253,16 +247,32 @@ impl Command for BtDownloadCommand {
         }
 
         if self.seed_enabled {
+            let seeding_connections = if session.initial_peer_addrs.is_empty() {
+                Vec::new()
+            } else {
+                self.connect_to_peers(
+                    &session.initial_peer_addrs,
+                    &network_info_hash,
+                    meta.info_hash_v2,
+                    num_pieces,
+                    piece_length,
+                    total_size,
+                )
+                .await?
+            };
             info!(
                 "Starting seeding phase with {} peers...",
                 session.swarm.len()
             );
             self.run_seeding_phase_with_swarm(
-                std::mem::take(&mut session.pending_connections),
+                seeding_connections,
                 session.swarm,
+                session.upload_counter,
                 piece_length,
                 num_pieces,
                 network_info_hash,
+                meta.info_hash_v2,
+                total_size,
             )
             .await?;
         } else {

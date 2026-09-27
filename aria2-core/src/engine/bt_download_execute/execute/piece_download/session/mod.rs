@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -28,7 +28,6 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) total_size: u64,
     pub(super) num_pieces: u32,
     pub(super) web_seed_manager: Option<Arc<WebSeedManager>>,
-    pub(super) pex_enabled_peers: &'a mut HashSet<PeerKey>,
     pub(super) pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     pub(super) last_pex_send: &'a mut Instant,
     pub(super) pex_send_interval_secs: u64,
@@ -79,14 +78,15 @@ impl BtDownloadCommand {
         }
         let session = PieceDownloadSession::new(
             self,
-            &mut torrent_session.pending_connections,
+            std::mem::take(&mut torrent_session.initial_peer_addrs),
+            torrent_session.network_info_hash,
             &mut torrent_session.swarm,
+            Arc::clone(&torrent_session.upload_counter),
             meta,
             piece_length,
             total_size,
             num_pieces,
             torrent_session.web_seed_manager.clone(),
-            &mut torrent_session.pex_enabled_peers,
             &mut torrent_session.last_pex_send,
             pex_send_interval_secs,
             verified_piece_indices,

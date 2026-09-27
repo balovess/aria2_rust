@@ -1,13 +1,10 @@
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_download_execute::types::PeerKey;
 use crate::engine::bt_message_handler::PeerSwarm;
-use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::error::{Aria2Error, FatalError};
 use crate::http::client_identity::ClientTlsConfig;
 use crate::util::rwlock_ext::RwLockRecover;
@@ -16,13 +13,15 @@ use super::environment::parse_listen_ports;
 
 /// Torrent-scoped swarm state retained from peer discovery through seeding.
 pub(super) struct TorrentSession {
-    /// Handshaken peers waiting for the download-side actor context to be ready.
-    /// They are drained into `swarm` before piece scheduling begins.
-    pub(super) pending_connections: Vec<BtPeerConn>,
+    /// Discovered endpoints not yet connected; socket ownership starts in the
+    /// actor-ready piece-session setup after its upload provider is available.
+    pub(super) initial_peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    pub(super) network_info_hash: [u8; 20],
     /// Registry handed directly from download-session lifetime into seeding.
     pub(super) swarm: PeerSwarm,
+    /// One task-lifetime upload counter shared by download and seed actors.
+    pub(super) upload_counter: Arc<std::sync::atomic::AtomicU64>,
     pub(super) web_seed_manager: Option<Arc<crate::engine::bt_web_seed::WebSeedManager>>,
-    pub(super) pex_enabled_peers: HashSet<PeerKey>,
     pub(super) last_pex_send: Instant,
 }
 
@@ -32,7 +31,6 @@ impl BtDownloadCommand {
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         piece_length: u32,
         total_size: u64,
-        num_pieces: u32,
         network_info_hash: [u8; 20],
     ) -> crate::error::Result<TorrentSession> {
         // Register this torrent on the engine-owned listener before discovery
@@ -111,7 +109,8 @@ impl BtDownloadCommand {
             {
                 registry.set_tcp_port(self.listen_port);
             }
-            self.incoming_peers = Some(incoming_peers);
+            self.incoming_peers =
+                Some(std::sync::Arc::new(tokio::sync::Mutex::new(incoming_peers)));
             self.bt_peer_route = Some(route_handle);
             info!(
                 "[BT] Incoming peer route registered on TCP port {}",
@@ -122,20 +121,6 @@ impl BtDownloadCommand {
         let peer_addrs = self
             .discover_peers(meta, total_size, &network_info_hash)
             .await?;
-
-        let mut active_connections = if peer_addrs.is_empty() {
-            Vec::new()
-        } else {
-            self.connect_to_peers(
-                &peer_addrs,
-                &network_info_hash,
-                meta.info_hash_v2,
-                num_pieces,
-                piece_length,
-                total_size,
-            )
-            .await?
-        };
 
         // The initial DHT lookup is complete once discovery and the first
         // PeerStorage admission have finished. Record the same count the
@@ -154,13 +139,7 @@ impl BtDownloadCommand {
         if self.is_private {
             info!("[BT] Private torrent: PEX disabled (BEP 0027)");
         } else {
-            let pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> = peer_addrs
-                .iter()
-                .map(|pa| {
-                    aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&pa.ip, pa.port)
-                })
-                .collect();
-            self.set_pex_known_peers(pex_peers);
+            self.set_pex_known_peers(peer_addrs.clone());
             info!(
                 "[PEX] Initialized with {} known peers from tracker/DHT",
                 self.pex_known_peers.len()
@@ -191,74 +170,15 @@ impl BtDownloadCommand {
         };
         // Initialize PEX state only for peers whose BEP 10 handshake advertised
         // ut_pex. Private torrents keep this set empty per BEP 0027.
-        let mut pex_enabled_peers: HashSet<PeerKey> = HashSet::new();
         let last_pex_send = Instant::now();
-
-        if self.peer_exchange_enabled() {
-            // PEX is enabled only after the remote BEP 10 handshake advertises
-            // ut_pex. Each peer has an independent extension-ID namespace.
-            for conn in active_connections.iter() {
-                if conn.peer_extension_id("ut_pex").is_some()
-                    && let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port)
-                {
-                    pex_enabled_peers.insert(peer_key);
-                }
-            }
-            info!(
-                "[PEX] Initialized PEX tracking for {} negotiated peers",
-                pex_enabled_peers.len()
-            );
-        }
-
-        // BEP 6 (Fast Extension): Send initial AllowedFast messages to
-        // peers that support fast extension. The fast-set is computed from
-        // the peer's IP address (see compute_fast_set in fast_set.rs).
-        // Also, for peers that support fast extension, we can send HaveAll
-        // or HaveNone instead of a full Bitfield when appropriate.
-        for (idx, conn) in active_connections.iter_mut().enumerate() {
-            if conn.is_fast_extension_enabled() {
-                let mut sent = HashSet::new();
-                match Self::send_allowed_fast_for_torrent(
-                    conn,
-                    num_pieces,
-                    &network_info_hash,
-                    &mut sent,
-                )
-                .await
-                {
-                    Ok(count) if count > 0 => {
-                        if let Some(peer_key) = PeerKey::from_peer(&conn.ip_addr, conn.port) {
-                            self.allowed_fast_sent_peers.insert(peer_key, sent);
-                        }
-                        debug!(
-                            "[BEP6] Sent {} AllowedFast pieces to peer {} ({})",
-                            count, idx, conn.ip_addr
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!("[BEP6] Failed to flush AllowedFast to peer {}: {}", idx, e);
-                    }
-                }
-            }
-        }
-
-        // Admit handshaken incoming peers before the first piece cycle. Later
-        // cycles drain the receiver below, preserving PeerListenCommand's
-        // long-lived listener semantics.
-        self.stage_incoming_peers(
-            &mut active_connections,
-            piece_length,
-            num_pieces,
-            total_size,
-        );
 
         // Download pieces from the connected peers, using web seeds and PEX as configured.
         Ok(TorrentSession {
-            pending_connections: active_connections,
+            initial_peer_addrs: peer_addrs,
+            network_info_hash,
             swarm: PeerSwarm::new(64),
+            upload_counter: Arc::new(std::sync::atomic::AtomicU64::new(self.total_uploaded)),
             web_seed_manager,
-            pex_enabled_peers,
             last_pex_send,
         })
     }

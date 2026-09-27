@@ -149,7 +149,7 @@ async fn run_pipelined_attempts(
         workers.advance_generation(piece_index).await;
     }
 
-    Err(Aria2Error::Fatal(FatalError::Config(format!(
+    Err(Aria2Error::Network(format!(
         "Failed to download piece {} after {} pipelined attempts",
         piece_index,
         if max_attempts == 0 {
@@ -157,5 +157,5 @@ async fn run_pipelined_attempts(
         } else {
             max_attempts
         }
-    ))))
+    )))
 }

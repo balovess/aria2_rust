@@ -105,6 +105,42 @@ impl EndgameState {
         }
     }
 
+    /// Check whether a specific peer currently has a request for this block.
+    pub fn has_peer_request<K: Into<PeerKey>>(
+        &self,
+        piece: u32,
+        offset: u32,
+        len: u32,
+        peer_key: K,
+    ) -> bool {
+        let peer_key = peer_key.into();
+        self.active_duplicate_requests
+            .get(&(piece, offset, len))
+            .is_some_and(|peers| peers.contains(&peer_key))
+    }
+
+    /// Forget one peer's request when it is rejected, cancelled, or retired.
+    pub fn remove_peer_request<K: Into<PeerKey>>(
+        &mut self,
+        piece: u32,
+        offset: u32,
+        len: u32,
+        peer_key: K,
+    ) {
+        let key = (piece, offset, len);
+        let peer_key = peer_key.into();
+        let empty = self
+            .active_duplicate_requests
+            .get_mut(&key)
+            .is_some_and(|peers| {
+                peers.retain(|peer| *peer != peer_key);
+                peers.is_empty()
+            });
+        if empty {
+            self.active_duplicate_requests.remove(&key);
+        }
+    }
+
     /// When a block arrives, find other peers that have pending requests for the same block
     ///
     /// Returns the list of peer indices that should receive Cancel messages.

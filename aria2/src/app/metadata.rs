@@ -230,7 +230,7 @@ fn format_comma(value: u64) -> String {
     let first_group = if first_group == 0 { 3 } else { first_group };
     let mut output = String::with_capacity(digits.len() + digits.len() / 3);
     output.push_str(&digits[..first_group]);
-    for chunk in digits[first_group..].as_bytes().chunks(3) {
+    for chunk in digits.as_bytes()[first_group..].chunks(3) {
         output.push(',');
         output.push_str(std::str::from_utf8(chunk).expect("digits are valid UTF-8"));
     }

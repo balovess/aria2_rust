@@ -102,6 +102,7 @@ impl BtPeerConn {
                     ip_addr: addr.ip.clone(),
                     port: addr.port,
                     peer_id: None,
+                    remote_client: Arc::new(std::sync::RwLock::new(None)),
                     incoming: false,
                     source: crate::request::request_group::BtPeerSource::Unknown,
                     local_peer: false,
@@ -133,6 +134,7 @@ impl BtPeerConn {
                     pex_enabled: true,
                     upload_state: None,
                     upload_progress: None,
+                    actor_startup: None,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -218,6 +220,7 @@ impl BtPeerConn {
                     ip_addr: addr.ip.clone(),
                     port: addr.port,
                     peer_id: None,
+                    remote_client: Arc::new(std::sync::RwLock::new(None)),
                     incoming: false,
                     source: crate::request::request_group::BtPeerSource::Unknown,
                     local_peer: false,
@@ -249,6 +252,7 @@ impl BtPeerConn {
                     pex_enabled: true,
                     upload_state: None,
                     upload_progress: None,
+                    actor_startup: None,
                 })
             }
             Err(e) => Err(Aria2Error::Fatal(FatalError::Config(e))),
@@ -268,6 +272,7 @@ impl BtPeerConn {
             ip_addr: endpoint.ip().to_string(),
             port: endpoint.port(),
             peer_id,
+            remote_client: Arc::new(std::sync::RwLock::new(None)),
             incoming: true,
             source: crate::request::request_group::BtPeerSource::Incoming,
             local_peer: endpoint.ip().is_loopback()
@@ -289,6 +294,7 @@ impl BtPeerConn {
             pex_enabled: true,
             upload_state: None,
             upload_progress: None,
+            actor_startup: None,
         }
     }
 
@@ -305,6 +311,7 @@ impl BtPeerConn {
             ip_addr: endpoint.ip().to_string(),
             port: endpoint.port(),
             peer_id,
+            remote_client: Arc::new(std::sync::RwLock::new(None)),
             incoming: true,
             source: crate::request::request_group::BtPeerSource::Incoming,
             local_peer: endpoint.ip().is_loopback()
@@ -326,6 +333,7 @@ impl BtPeerConn {
             pex_enabled: true,
             upload_state: None,
             upload_progress: None,
+            actor_startup: None,
         }
     }
 
@@ -364,6 +372,7 @@ impl BtPeerConn {
             ip_addr: "127.0.0.1".to_string(),
             port: 0,
             peer_id: Some(*info_hash),
+            remote_client: Arc::new(std::sync::RwLock::new(None)),
             incoming: false,
             source: crate::request::request_group::BtPeerSource::Unknown,
             local_peer: true,
@@ -384,6 +393,7 @@ impl BtPeerConn {
             pex_enabled: true,
             upload_state: None,
             upload_progress: None,
+            actor_startup: None,
         }
     }
 
@@ -457,6 +467,7 @@ impl BtPeerConn {
             ip_addr: addr.ip().to_string(),
             port: addr.port(),
             peer_id: None,
+            remote_client: Arc::new(std::sync::RwLock::new(None)),
             incoming: false,
             source: crate::request::request_group::BtPeerSource::Unknown,
             local_peer: false,
@@ -477,6 +488,7 @@ impl BtPeerConn {
             pex_enabled: true,
             upload_state: None,
             upload_progress: None,
+            actor_startup: None,
         })
     }
 }

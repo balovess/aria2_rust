@@ -19,6 +19,7 @@ fn test_bt_peer_snapshots_roundtrip() {
     let group = RequestGroup::new(GroupId::new(99), Vec::new(), DownloadOptions::default());
     let snapshot = super::BtPeerSnapshot {
         peer_id: [1; 20],
+        client: Some("peer-test/1.0".into()),
         addr: "127.0.0.1:6881".parse().expect("valid test address"),
         is_incoming: false,
         source: BtPeerSource::Tracker,
@@ -31,6 +32,10 @@ fn test_bt_peer_snapshots_roundtrip() {
         avg_download_speed: 6,
         am_choking: true,
         peer_choking: false,
+        am_interested: true,
+        peer_interested: false,
+        outstanding_upload_requests: 0,
+        outstanding_download_requests: 1,
         seeder: Some(true),
         connection_duration_secs: 7,
         last_data_age_secs: 8,
@@ -62,6 +67,7 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
     for (port, seeder) in [(6881, true), (6882, false)] {
         peers.push(super::BtPeerSnapshot {
             peer_id: [port as u8; 20],
+            client: None,
             addr: format!("127.0.0.1:{port}")
                 .parse()
                 .expect("valid peer address"),
@@ -76,6 +82,10 @@ fn status_snapshot_uses_one_bt_peer_source_for_all_consumers() {
             avg_download_speed: 1,
             am_choking: false,
             peer_choking: false,
+            am_interested: false,
+            peer_interested: false,
+            outstanding_upload_requests: 0,
+            outstanding_download_requests: 0,
             seeder: Some(seeder),
             connection_duration_secs: 1,
             last_data_age_secs: 0,

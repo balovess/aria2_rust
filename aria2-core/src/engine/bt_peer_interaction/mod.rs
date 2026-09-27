@@ -2,16 +2,15 @@
 //!
 //! This module manages the interaction with BitTorrent peers, including:
 //! - Connection establishment (plain and encrypted)
-//! - Initial handshake and bitfield exchange
-//! - Waiting for unchoke messages
-//! - Peer connection lifecycle and readiness
+//! - BitTorrent handshake and peer identity checks
+//! - Handing the established stream to its long-lived Swarm actor
 //!
-//! # Architecture Reference
+//! # Compatibility Reference
 //!
-//! Based on original aria2 C++ structure:
+//! Protocol behavior is checked against original aria2's:
 //! - `src/PeerInteractionCommand.h/.cc` — Peer connection lifecycle command
 //! - `src/PeerConnection.cc/h` — Peer connection management
-//! - `src/BtSetup.cc/h` — BT setup and initialization
+//!   This module does not own post-handshake protocol I/O; the peer actor does.
 
 mod types;
 
@@ -21,26 +20,20 @@ pub use types::{BtPeerConnectionOptions, BtPeerCryptoPolicy, PeerConnectionResul
 // BtPeerInteraction — peer connection lifecycle manager
 // ======================================================================
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use aria2_protocol::bittorrent::message::types::BtMessage;
 use futures::stream::{self, StreamExt};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use crate::engine::bt_peer_connection::BtPeerConn;
-use crate::error::{Aria2Error, RecoverableError, Result};
+use crate::engine::bt_peer_connection::{BtPeerConn, PeerActorStartup};
+use crate::error::Result;
 use crate::network::OutboundNetworkPolicy;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 /// BT Peer Interaction Manager
 ///
 /// Handles the lifecycle of peer connections from initial connection
 /// through the handshake phase until they're ready for data transfer.
 pub struct BtPeerInteraction;
-
-const PEER_CONNECTION_DELAY_MS: u64 = crate::constants::BT_PEER_CONNECTION_DELAY_MS;
-const PEER_MESSAGE_TIMEOUT_SECS: u64 = crate::constants::BT_PEER_MESSAGE_TIMEOUT_SECS;
 
 impl BtPeerInteraction {
     /// Connect to multiple peers with automatic fallback strategies
@@ -49,10 +42,7 @@ impl BtPeerInteraction {
     /// 1. MSE encryption if required or forced
     /// 2. Plain connection as fallback
     ///
-    /// For each successful connection:
-    /// - Sends initial unchoke and interested messages
-    /// - Exchanges bitfields
-    /// - Waits for unchoke from the peer
+    /// Socket ownership passes to the peer actor immediately after handshake.
     ///
     /// # Arguments
     /// * `peer_addrs` - List of peer addresses to connect to
@@ -116,14 +106,6 @@ impl BtPeerInteraction {
 
         info!("[BT] Active connections: {}", active_connections.len());
 
-        if active_connections.is_empty() {
-            return Err(Aria2Error::Recoverable(
-                RecoverableError::TemporaryNetworkFailure {
-                    message: "All peer connections failed".into(),
-                },
-            ));
-        }
-
         Ok(PeerConnectionResult {
             connections: active_connections,
             failed_count,
@@ -160,10 +142,21 @@ impl BtPeerInteraction {
             piece_length,
             total_length
         );
-        Self::initialize_connection(&mut conn, num_pieces, connection_options).await?;
-        if let Err(error) = Self::wait_for_unchoke(&mut conn, addr).await {
-            warn!("[BT] No unchoke from peer {}: {}", addr.ip, error);
-        }
+        conn.actor_startup = Some(PeerActorStartup {
+            peer_agent: connection_options.peer_agent.clone(),
+            listen_port: connection_options.listen_port,
+            dht_enabled: connection_options.dht_enabled,
+            allowed_fast: if conn.is_fast_extension_enabled() {
+                aria2_protocol::bittorrent::fast_set::compute_fast_set(
+                    &addr.ip,
+                    num_pieces,
+                    info_hash_raw,
+                    10,
+                )
+            } else {
+                Vec::new()
+            },
+        });
         Ok(conn)
     }
 
@@ -176,36 +169,38 @@ impl BtPeerInteraction {
         policy: &OutboundNetworkPolicy,
     ) -> Result<BtPeerConn> {
         if connection_options.enable_utp && !connection_options.crypto.require_mse {
-            let endpoint = format!("{}:{}", addr.ip, addr.port)
-                .parse::<std::net::SocketAddr>()
-                .map_err(|error| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "Invalid peer address '{}:{}': {error}",
-                        addr.ip, addr.port
-                    )))
-                })?;
-            let utp_result = BtPeerConn::connect_utp_with_policy(
-                endpoint,
-                info_hash_raw,
-                connection_options.hybrid_info_hash_v2.as_ref(),
-                crate::engine::bt_peer_connection::UtpConnectionOptions {
-                    local_peer_id: connection_options.local_peer_id,
-                    timeout: connection_options.connection_timeout,
-                    listen_port: connection_options.utp_listen_port,
-                    shared_socket: utp_socket,
-                    dht_enabled: connection_options.dht_enabled,
-                },
-                policy,
-            )
-            .await;
-            match utp_result {
-                Ok(conn) => {
-                    debug!("[BT] Connected to peer {}:{} over uTP", addr.ip, addr.port);
-                    return Ok(conn);
+            match addr.to_socket_addr() {
+                Ok(endpoint) => {
+                    let utp_result = BtPeerConn::connect_utp_with_policy(
+                        endpoint,
+                        info_hash_raw,
+                        connection_options.hybrid_info_hash_v2.as_ref(),
+                        crate::engine::bt_peer_connection::UtpConnectionOptions {
+                            local_peer_id: connection_options.local_peer_id,
+                            timeout: connection_options.connection_timeout,
+                            listen_port: connection_options.utp_listen_port,
+                            shared_socket: utp_socket,
+                            dht_enabled: connection_options.dht_enabled,
+                        },
+                        policy,
+                    )
+                    .await;
+                    match utp_result {
+                        Ok(conn) => {
+                            debug!("[BT] Connected to peer {}:{} over uTP", addr.ip, addr.port);
+                            return Ok(conn);
+                        }
+                        Err(error) => {
+                            debug!(
+                                "[BT] uTP connection to {}:{} failed, trying TCP: {}",
+                                addr.ip, addr.port, error
+                            );
+                        }
+                    }
                 }
                 Err(error) => {
                     debug!(
-                        "[BT] uTP connection to {}:{} failed, trying TCP: {}",
+                        "[BT] Skipping uTP for peer {}:{} because it is not a numeric IP address: {}",
                         addr.ip, addr.port, error
                     );
                 }
@@ -262,194 +257,59 @@ impl BtPeerInteraction {
             }
         }
     }
+}
 
-    /// Initialize a newly established connection
-    ///
-    /// Sends initial protocol messages:
-    /// - Unchoke (we allow them to request from us)
-    /// - Interested (we want to download from them)
-    /// - Bitfield (our current piece possession status)
-    async fn initialize_connection(
-        conn: &mut BtPeerConn,
-        num_pieces: u32,
-        connection_options: &BtPeerConnectionOptions,
-    ) -> Result<()> {
-        // Send initial messages
-        conn.send_unchoke().await?;
-        conn.send_interested().await?;
+#[cfg(test)]
+mod tests {
+    use super::{BtPeerConnectionOptions, BtPeerCryptoPolicy, BtPeerInteraction};
+    use crate::network::OutboundNetworkPolicy;
+    use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
+    use std::time::Duration;
 
-        // BEP 10 is part of the real connection setup. The peer-agent option
-        // therefore travels on the wire before the piece loop starts.
-        conn.send_extension_handshake_with_port(
-            &connection_options.peer_agent,
-            connection_options.listen_port,
-        )
-        .await?;
-
-        // Send empty bitfield (we have nothing yet)
-        let bf_len = (num_pieces as usize).div_ceil(8);
-        let empty_bf = vec![0u8; bf_len];
-        conn.send_bitfield(empty_bf).await?;
-
-        // BEP 5 requires the Port message only when both sides advertised
-        // DHT support. Private torrents clear `dht_enabled` before reaching
-        // this path, so their info-hash is never announced through peers.
-        if connection_options.dht_enabled
-            && conn.remote_supports_dht()
-            && let Some(port) = connection_options.listen_port
-        {
-            conn.send_port(port).await?;
-        }
-
-        // Small delay to allow processing
-        tokio::time::sleep(Duration::from_millis(PEER_CONNECTION_DELAY_MS)).await;
-
-        Ok(())
-    }
-
-    /// Apply peer state messages consumed while waiting for the initial
-    /// unchoke. Peers commonly send their bitfield or HaveAll before Unchoke;
-    /// dropping those messages leaves the piece selector with no availability.
-    fn apply_setup_message(conn: &mut BtPeerConn, msg: BtMessage) -> bool {
-        match msg {
-            BtMessage::Have { piece_index } => {
-                conn.update_peer_bitfield(piece_index as usize, 1);
-                if conn
-                    .session_resource
-                    .as_ref()
-                    .is_some_and(|resource| resource.is_seeder())
+    #[tokio::test]
+    async fn ipv6_peer_with_utp_enabled_falls_back_to_tcp() {
+        let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let info_hash = [7; 20];
+        let remote_peer_id = [8; 20];
+        let server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                if let Ok(connection) =
+                    PeerConnection::from_incoming_stream(stream, &info_hash, &remote_peer_id).await
                 {
-                    conn.seeder = true;
+                    return connection;
                 }
             }
-            BtMessage::Bitfield { data } => {
-                conn.set_peer_bitfield(&data);
-                conn.seeder = conn
-                    .session_resource
-                    .as_ref()
-                    .is_some_and(|resource| resource.is_seeder());
-            }
-            BtMessage::HaveAll => conn.mark_seeder(),
-            BtMessage::HaveNone => {
-                conn.set_peer_bitfield(&[]);
-                conn.seeder = false;
-            }
-            BtMessage::Choke => conn.stats.peer_choking = true,
-            BtMessage::Unchoke => {
-                conn.stats.peer_choking = false;
-                return true;
-            }
-            BtMessage::AllowedFast { index } => conn.add_peer_allowed_fast(index),
-            _ => {}
-        }
-        false
-    }
+        });
 
-    /// Wait for an unchoke message from a peer
-    ///
-    /// Polls the connection for messages until we receive an Unchoke
-    /// or hit the timeout/attempts limit.
-    async fn wait_for_unchoke(
-        conn: &mut BtPeerConn,
-        addr: &aria2_protocol::bittorrent::peer::connection::PeerAddr,
-    ) -> Result<()> {
-        debug!("[BT] Waiting for unchoke from {}:{}", addr.ip, addr.port);
+        let options = BtPeerConnectionOptions {
+            crypto: BtPeerCryptoPolicy::default(),
+            connection_timeout: Duration::from_millis(150),
+            keep_alive_interval: Duration::from_secs(120),
+            peer_timeout: Duration::from_secs(60),
+            local_peer_id: [9; 20],
+            peer_agent: "aria2-rust-test".to_string(),
+            enable_utp: true,
+            utp_listen_port: None,
+            dht_enabled: false,
+            listen_port: None,
+            hybrid_info_hash_v2: None,
+        };
 
-        // Read only the initial setup burst here. A peer that delays Unchoke
-        // must not hold the whole initial peer batch hostage; the piece loop
-        // owns the connection after this point and can consume late setup
-        // messages normally.
-        let first_message = tokio::time::timeout(
-            Duration::from_secs(PEER_MESSAGE_TIMEOUT_SECS),
-            conn.read_message(),
+        let result = BtPeerInteraction::connect_single_peer(
+            &PeerAddr::new(&endpoint.ip().to_string(), endpoint.port()),
+            &info_hash,
+            &options,
+            None,
+            &OutboundNetworkPolicy::direct(),
         )
         .await;
-        let mut got_unchoke = false;
-        match first_message {
-            Ok(Ok(Some(msg))) => {
-                if Self::apply_setup_message(conn, msg) {
-                    got_unchoke = true;
-                    info!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
-                }
-                debug!("[BT] Applied message while waiting for unchoke");
-
-                // Consume the rest of the setup burst without waiting for a
-                // second full peer timeout. This preserves HaveAll/bitfield
-                // state while still bounding slow peers to one initial wait.
-                while let Ok(Ok(Some(msg))) =
-                    tokio::time::timeout(Duration::from_millis(100), conn.read_message()).await
-                {
-                    if Self::apply_setup_message(conn, msg) {
-                        got_unchoke = true;
-                        info!("[BT] Got unchoke from {}:{}", addr.ip, addr.port);
-                    }
-                    debug!("[BT] Applied setup message while waiting for unchoke");
-                }
-            }
-            Ok(Ok(None)) => {
-                warn!("[BT] EOF from peer while waiting for unchoke");
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: "Peer closed connection".into(),
-                    },
-                ));
-            }
-            Ok(Err(e)) => {
-                error!("[BT] Error reading from peer: {}", e);
-                return Err(Aria2Error::Recoverable(
-                    RecoverableError::TemporaryNetworkFailure {
-                        message: format!("Read error: {}", e),
-                    },
-                ));
-            }
-            Err(_) => {
-                debug!("[BT] Setup message wait elapsed; continuing with peer");
-            }
+        if let Err(error) = result {
+            server.abort();
+            panic!("IPv6 peer connection should fall back from uTP to TCP: {error}");
         }
 
-        if got_unchoke {
-            return Ok(());
-        }
-
-        warn!(
-            "[BT] Did not receive unchoke from {}:{} after {} attempts",
-            addr.ip, addr.port, 1
-        );
-        Ok(()) // Continue anyway; the piece loop can receive it later.
-    }
-
-    /// Return the stable key used by the peer bitfield tracker.
-    pub(crate) fn peer_tracker_key(conn: &BtPeerConn) -> String {
-        conn.remote_peer_id()
-            .map(|id| String::from_utf8_lossy(&id).into_owned())
-            .unwrap_or_else(|| format!("{}:{}", conn.ip_addr, conn.port))
-    }
-
-    /// Initialize peer bitfield tracker for all connections
-    ///
-    /// Sets up tracking of which pieces each peer claims to have.
-    ///
-    /// # Arguments
-    /// * `connections` - Slice of active peer connections
-    /// * `num_pieces` - Total number of pieces in the torrent
-    /// * `peer_tracker` - Mutable reference to the peer bitfield tracker
-    pub(crate) fn initialize_peer_tracking(
-        connections: &[BtPeerConn],
-        _num_pieces: u32,
-        peer_tracker: &mut crate::engine::bt_piece::PeerBitfieldTracker,
-    ) {
-        for conn in connections {
-            let peer_key = Self::peer_tracker_key(conn);
-            let bitfield = conn
-                .session_resource
-                .as_ref()
-                .map_or(&[][..], |resource| resource.bitfield());
-            peer_tracker.update_peer_bitfield(&peer_key, bitfield);
-        }
-
-        debug!(
-            "[BT] Initialized peer tracking for {} peers",
-            connections.len()
-        );
+        server.abort();
     }
 }

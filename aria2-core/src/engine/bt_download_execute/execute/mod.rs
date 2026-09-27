@@ -1,4 +1,3 @@
-mod bep6;
 mod checkpoint;
 mod command;
 mod dht_periodic_lookup;

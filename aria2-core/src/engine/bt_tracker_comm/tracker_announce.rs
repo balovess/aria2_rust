@@ -16,6 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -88,8 +89,12 @@ pub struct TrackerRuntimeInfo {
     pub min_interval_secs: u64,
     pub seeders: Option<i64>,
     pub leechers: Option<i64>,
+    pub downloaded: Option<u64>,
     pub tracker_id: String,
     pub seconds_since_last_success: Option<u64>,
+    pub last_success_at_unix_millis: Option<u64>,
+    pub snapshot_at_unix_millis: u64,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,13 +104,22 @@ struct TrackerState {
     min_interval_secs: u64,
     seeders: Option<i64>,
     leechers: Option<i64>,
+    downloaded: Option<u64>,
     tracker_id: String,
     last_success_at: Option<Instant>,
+    last_success_wall_time: Option<SystemTime>,
     last_failure_kind: Option<TrackerFailureKind>,
 }
 
 /// Registry-safe handle for the live tracker snapshot.
 pub type SharedTrackerRuntime = Arc<std::sync::RwLock<TrackerRuntimeSnapshot>>;
+
+fn unix_millis(time: SystemTime) -> u64 {
+    time.duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
 
 impl TrackerRuntimeSnapshot {
     /// Build an initial snapshot from the compatibility announce state.
@@ -282,6 +296,7 @@ impl TrackerAnnouncer {
         let last_attempt = self.last_attempt_tracker_url.as_deref();
         let ready = self.announce.is_announce_ready();
         let mut trackers = Vec::new();
+        let snapshot_at_unix_millis = unix_millis(SystemTime::now());
 
         for tier in 0..self.announce.announce_list().tier_count() {
             let mut entry = 0;
@@ -299,10 +314,38 @@ impl TrackerAnnouncer {
                     min_interval_secs: state.map_or(0, |state| state.min_interval_secs),
                     seeders: state.and_then(|state| state.seeders),
                     leechers: state.and_then(|state| state.leechers),
+                    downloaded: state.and_then(|state| state.downloaded),
                     tracker_id: state.map_or_else(String::new, |state| state.tracker_id.clone()),
                     seconds_since_last_success: state.and_then(|state| {
                         state.last_success_at.map(|time| time.elapsed().as_secs())
                     }),
+                    last_success_at_unix_millis: state
+                        .and_then(|state| state.last_success_wall_time.map(unix_millis)),
+                    snapshot_at_unix_millis,
+                    status: state.map_or_else(
+                        || {
+                            if ready && current == Some(uri.as_str()) {
+                                "ready"
+                            } else {
+                                "unknown"
+                            }
+                            .to_string()
+                        },
+                        |state| {
+                            if state.in_flight {
+                                "announcing"
+                            } else if state.last_failure_kind.is_some() {
+                                "failed"
+                            } else if state.last_success_at.is_some() {
+                                "succeeded"
+                            } else if ready && current == Some(uri.as_str()) {
+                                "ready"
+                            } else {
+                                "idle"
+                            }
+                            .to_string()
+                        },
+                    ),
                 });
                 entry += 1;
             }
@@ -326,9 +369,17 @@ impl TrackerAnnouncer {
         if succeeded {
             state.last_failure_kind = None;
             state.last_success_at = Some(Instant::now());
+            state.last_success_wall_time = Some(SystemTime::now());
         } else {
             state.last_failure_kind = self.last_failure_kind;
         }
+    }
+
+    fn update_tracker_downloaded(&mut self, tracker_url: &str, downloaded: Option<u64>) {
+        self.tracker_states
+            .entry(tracker_url.to_string())
+            .or_default()
+            .downloaded = downloaded;
     }
 
     fn update_tracker_stats(
@@ -928,6 +979,10 @@ impl TrackerAnnouncer {
                                             tracker_resp.seeders.map(i64::from),
                                             tracker_resp.leechers.map(i64::from),
                                             tracker_resp.tracker_id.as_deref(),
+                                        );
+                                        self.update_tracker_downloaded(
+                                            tracker_url,
+                                            tracker_resp.downloaded,
                                         );
                                         self.announce.announce_success();
                                         let interval = self.announce.interval();

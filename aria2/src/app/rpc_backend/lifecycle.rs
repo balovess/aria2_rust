@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::request::request_group_man::PositionMode as CorePositionMode;
@@ -9,6 +10,61 @@ use super::CoreRpcBackend;
 use super::values::normalize_options;
 
 impl CoreRpcBackend {
+    pub(super) async fn remove_download_files(
+        &self,
+        gid: String,
+    ) -> Result<BackendResult, BackendError> {
+        let root_gid = self.parse_gid(&gid)?;
+        let mut pending = VecDeque::from([root_gid]);
+        let mut visited = HashSet::new();
+        let mut seen_paths = HashSet::<PathBuf>::new();
+        let mut paths = Vec::new();
+
+        while let Some(current_gid) = pending.pop_front() {
+            if !visited.insert(current_gid) {
+                continue;
+            }
+            if self.group_man.find_group(current_gid).is_some() {
+                return Err(Self::execution(format!(
+                    "Cannot remove files for non-stopped GID#{}",
+                    current_gid.to_hex_string()
+                )));
+            }
+            let current_hex = current_gid.to_hex_string();
+            let result = self
+                .group_man
+                .find_stopped_result(&current_hex)
+                .ok_or_else(|| {
+                    Self::execution(format!("No retained download result for GID#{current_hex}"))
+                })?;
+
+            if !result.in_memory_download {
+                for file in result.files.iter().filter(|file| file.selected) {
+                    let path = PathBuf::from(&file.path);
+                    if !path.as_os_str().is_empty() && seen_paths.insert(path.clone()) {
+                        paths.push(path);
+                    }
+                }
+            }
+            pending.extend(result.followed_by);
+        }
+
+        for path in paths {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(Self::execution(format!(
+                        "Could not remove downloaded file '{}': {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+
+        Ok(BackendResult::response(BackendResponse::Text("OK".into())))
+    }
+
     pub(super) fn change_position(
         &self,
         gid: &str,
