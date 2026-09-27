@@ -190,15 +190,6 @@ impl DhtPeriodicLookup {
         }
     }
 
-    /// Record a lookup performed by the initial peer-discovery phase.
-    ///
-    /// The initial discovery is intentionally awaited during setup. Recording
-    /// it here prevents the periodic scheduler from immediately issuing the
-    /// same lookup again once piece downloading starts.
-    pub fn record_lookup_completed(&mut self, current_peer_count: usize) {
-        self.on_lookup_completed(current_peer_count);
-    }
-
     /// Get the current retry count.
     pub fn retry_count(&self) -> u32 {
         self.num_retry

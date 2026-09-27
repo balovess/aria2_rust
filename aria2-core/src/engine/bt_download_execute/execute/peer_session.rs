@@ -122,16 +122,6 @@ impl BtDownloadCommand {
             .discover_peers(meta, total_size, &network_info_hash)
             .await?;
 
-        // The initial DHT lookup is complete once discovery and the first
-        // PeerStorage admission have finished. Record the same count the
-        // original DHTGetPeersCommand uses for retry decisions.
-        if self.dht_engine.is_some() {
-            self.dht_periodic_lookup
-                .set_peer_limits(self.bt_runtime.min_peers(), self.bt_runtime.max_peers());
-            self.dht_periodic_lookup
-                .record_lookup_completed(self.tracked_peer_count());
-        }
-
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
         // BEP 0027 (Private Torrent): PEX must be disabled for private torrents
         // because it exchanges peer lists with connected peers, which would leak
@@ -141,7 +131,7 @@ impl BtDownloadCommand {
         } else {
             self.set_pex_known_peers(peer_addrs.clone());
             info!(
-                "[PEX] Initialized with {} known peers from tracker/DHT",
+                "[PEX] Initialized with {} known tracker and LPD peers",
                 self.pex_known_peers.len()
             );
         }

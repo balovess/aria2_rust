@@ -642,7 +642,8 @@ impl DownloadCommand {
                     self.mmap_threshold,
                     self.file_allocation.clone(),
                     self.global_limiter.clone(),
-                );
+                )
+                .with_range_clients(Arc::clone(&self.range_clients));
                 match concurrent_downloader.execute_with_retry(
                     uri,
                     total_length,

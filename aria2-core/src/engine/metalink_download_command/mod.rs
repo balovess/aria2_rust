@@ -137,7 +137,8 @@ pub(crate) fn build_http_client_with_source(
         Some(address) => builder.local_address(address),
         None => builder,
     };
-    crate::http::client_identity::apply(builder, &client_tls)?
+    let builder = crate::http::client_identity::apply(builder, &client_tls)?;
+    crate::http::client_pool::configure_http2_download_client(builder)
         .build()
         .map_err(|e| {
             Aria2Error::Fatal(FatalError::Config(format!(

@@ -113,6 +113,7 @@ pub(crate) async fn acquire_download_tokens(
 /// hot path.
 pub struct ConcurrentDownloader {
     pub(crate) client: Arc<reqwest::Client>,
+    pub(crate) range_clients: Arc<Vec<reqwest::Client>>,
     pub(crate) output_path: std::path::PathBuf,
     pub(crate) request_policy: HttpRequestPolicy,
     pub(crate) auth_options: AuthResolveOptions,
@@ -174,6 +175,7 @@ impl ConcurrentDownloader {
         global_limiter: Option<RateLimiter>,
     ) -> Self {
         Self {
+            range_clients: Arc::new(vec![client.as_ref().clone()]),
             client,
             output_path,
             request_policy,
@@ -187,6 +189,13 @@ impl ConcurrentDownloader {
             file_allocation,
             global_limiter,
         }
+    }
+
+    pub(crate) fn with_range_clients(mut self, clients: Arc<Vec<reqwest::Client>>) -> Self {
+        if !clients.is_empty() {
+            self.range_clients = clients;
+        }
+        self
     }
 
     /// Non-blocking cancellation check.

@@ -346,8 +346,9 @@ pub(crate) fn build_client(
     if let Some(address) = local_address {
         builder = builder.local_address(address);
     }
-    crate::http::client_identity::apply(builder, tls)
-        .map_err(|error| error.to_string())?
+    let builder =
+        crate::http::client_identity::apply(builder, tls).map_err(|error| error.to_string())?;
+    crate::http::client_pool::configure_http2_download_client(builder)
         .build()
         .map_err(|error| format!("web-seed HTTP client build failed: {error}"))
 }

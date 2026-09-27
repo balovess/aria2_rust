@@ -73,7 +73,7 @@ fn test_status_info_deserialization_roundtrip() {
 }
 
 #[test]
-fn test_internal_piece_counts_are_not_serialized_on_aria2_status_wire() {
+fn test_rust_piece_count_extensions_are_serialized_as_aria2_numeric_strings() {
     let info = StatusInfo::new("bt-test")
         .with_num_pieces(10)
         .with_completed_pieces(9)
@@ -81,12 +81,12 @@ fn test_internal_piece_counts_are_not_serialized_on_aria2_status_wire() {
 
     let json = serde_json::to_value(&info).unwrap();
     assert_eq!(json["numPieces"].as_str(), Some("10"));
-    assert!(json.get("completedPieces").is_none());
-    assert!(json.get("missingPieces").is_none());
+    assert_eq!(json["completedPieces"].as_str(), Some("9"));
+    assert_eq!(json["missingPieces"].as_str(), Some("1"));
 
     let roundtrip: StatusInfo = serde_json::from_value(json).unwrap();
-    assert_eq!(roundtrip.completed_pieces, None);
-    assert_eq!(roundtrip.missing_pieces, None);
+    assert_eq!(roundtrip.completed_pieces, Some(9));
+    assert_eq!(roundtrip.missing_pieces, Some(1));
 }
 
 #[test]

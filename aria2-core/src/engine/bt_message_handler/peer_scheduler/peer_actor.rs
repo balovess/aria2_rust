@@ -712,6 +712,7 @@ pub(crate) async fn run_peer_actor(
                     Ok(Some(message)) => {
                         let was_interested = connection.stats.peer_interested;
                         let was_peer_choking = connection.stats.peer_choking;
+                        let was_seeder = connection.seeder;
                         let outstanding_upload_count = connection.stats.outstanding_upload_count;
                         let peer_availability_change = match &message {
                             aria2_protocol::bittorrent::message::types::BtMessage::Have {
@@ -852,7 +853,7 @@ pub(crate) async fn run_peer_actor(
                         {
                             break;
                         }
-                        if full_availability_change
+                        if (full_availability_change || connection.seeder != was_seeder)
                             && let Some(resource) = connection.session_resource.as_ref()
                             && event_tx
                                 .send(PeerEvent::PeerAvailabilitySnapshot {

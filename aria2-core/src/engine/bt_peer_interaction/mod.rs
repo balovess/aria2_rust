@@ -27,7 +27,9 @@ use tokio::sync::Mutex;
 use crate::engine::bt_peer_connection::{BtPeerConn, PeerActorStartup};
 use crate::error::Result;
 use crate::network::OutboundNetworkPolicy;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
+
+pub(crate) const PEER_CONNECT_SETTLE_TIME: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// BT Peer Interaction Manager
 ///
@@ -69,7 +71,7 @@ impl BtPeerInteraction {
         // A peer can legitimately delay Unchoke while the tracker has already
         // supplied other usable peers. Establish each candidate independently
         // so one slow peer cannot prevent the piece scheduler from starting.
-        let results = stream::iter(peer_addrs.iter().cloned())
+        let mut results = stream::iter(peer_addrs.iter().cloned())
             .map(|addr| {
                 let utp_socket = utp_socket.clone();
                 async move {
@@ -88,17 +90,34 @@ impl BtPeerInteraction {
                     (addr, result)
                 }
             })
-            .buffer_unordered(peer_addrs.len().max(1))
-            .collect::<Vec<_>>()
-            .await;
+            .buffer_unordered(peer_addrs.len().max(1));
 
-        let mut active_connections = Vec::with_capacity(results.len());
+        let mut active_connections = Vec::with_capacity(peer_addrs.len());
         let mut failed_count = 0usize;
-        for (addr, result) in results {
+        let mut settle_deadline = None;
+        loop {
+            let next = if let Some(deadline) = settle_deadline {
+                tokio::select! {
+                    biased;
+                    result = results.next() => result,
+                    _ = tokio::time::sleep_until(deadline) => break,
+                }
+            } else {
+                results.next().await
+            };
+            let Some((addr, result)) = next else {
+                break;
+            };
             match result {
-                Ok(conn) => active_connections.push(conn),
+                Ok(conn) => {
+                    active_connections.push(conn);
+                    settle_deadline = Some(tokio::time::Instant::now() + PEER_CONNECT_SETTLE_TIME);
+                }
                 Err(e) => {
-                    error!("[BT] Failed to connect peer {}: {}", addr.ip, e);
+                    debug!(
+                        "[BT] Failed to connect peer {}:{}: {}",
+                        addr.ip, addr.port, e
+                    );
                     failed_count += 1;
                 }
             }
@@ -265,6 +284,75 @@ mod tests {
     use crate::network::OutboundNetworkPolicy;
     use aria2_protocol::bittorrent::peer::connection::{PeerAddr, PeerConnection};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_slow_peer_does_not_hold_a_ready_peer_batch_open() {
+        let info_hash = [7; 20];
+        let remote_peer_id = [8; 20];
+        let good_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_addr = good_listener.local_addr().unwrap();
+        let good_server = tokio::spawn(async move {
+            loop {
+                let (stream, _) = good_listener.accept().await.unwrap();
+                if let Ok(connection) =
+                    PeerConnection::from_incoming_stream(stream, &info_hash, &remote_peer_id).await
+                {
+                    return connection;
+                }
+            }
+        });
+
+        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let slow_addr = slow_listener.local_addr().unwrap();
+        let slow_server = tokio::spawn(async move {
+            while let Ok((stream, _)) = slow_listener.accept().await {
+                tokio::spawn(async move {
+                    let _stream = stream;
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                });
+            }
+        });
+
+        let options = BtPeerConnectionOptions {
+            crypto: BtPeerCryptoPolicy::default(),
+            connection_timeout: Duration::from_secs(2),
+            keep_alive_interval: Duration::from_secs(120),
+            peer_timeout: Duration::from_secs(60),
+            local_peer_id: [9; 20],
+            peer_agent: "aria2-rust-test".to_string(),
+            enable_utp: false,
+            utp_listen_port: None,
+            dht_enabled: false,
+            listen_port: None,
+            hybrid_info_hash_v2: None,
+        };
+        let peers = [
+            PeerAddr::new(&good_addr.ip().to_string(), good_addr.port()),
+            PeerAddr::new(&slow_addr.ip().to_string(), slow_addr.port()),
+        ];
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(1500),
+            BtPeerInteraction::connect_to_peers(
+                &peers,
+                &info_hash,
+                1,
+                16 * 1024,
+                3,
+                &options,
+                None,
+                &OutboundNetworkPolicy::direct(),
+            ),
+        )
+        .await
+        .expect("the ready peer should be returned before the slow peer times out")
+        .unwrap();
+
+        assert_eq!(result.connections.len(), 1);
+        drop(result);
+        good_server.abort();
+        slow_server.abort();
+    }
 
     #[tokio::test]
     async fn ipv6_peer_with_utp_enabled_falls_back_to_tcp() {

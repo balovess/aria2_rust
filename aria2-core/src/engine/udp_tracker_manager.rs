@@ -204,7 +204,8 @@ impl UdpTrackerManager {
             .current_tier
             .min(self.endpoints.len().saturating_sub(1));
 
-        for tier_offset in 0..MAX_TRACKER_ANNOUNCE_TIER {
+        let endpoint_attempts = self.endpoints.len().min(MAX_TRACKER_ANNOUNCE_TIER);
+        for tier_offset in 0..endpoint_attempts {
             let tier_idx = (start_tier + tier_offset) % self.endpoints.len();
             let ep = &self.endpoints[tier_idx];
 
@@ -216,11 +217,30 @@ impl UdpTrackerManager {
                 .await;
             }
 
-            let mut c = self.client.lock().await;
-            while c.process_one().await {
-                if c.has_inflight() && !c.receive_next_with_timeout(request_timeout).await {
+            loop {
+                let mut c = self.client.lock().await;
+                let request_finished = c.pending.iter().any(|request| {
+                    !request.is_connect
+                        && request.remote_addr == ep.addr
+                        && request.info_hash == *info_hash
+                        && (request.reply.is_some() || request.error.is_some())
+                });
+                if request_finished {
                     break;
                 }
+
+                let processed = c.process_one().await;
+                if c.has_inflight() {
+                    if !c.receive_next_with_timeout(request_timeout).await {
+                        c.handle_timeouts_with_timeout(request_timeout).await;
+                    }
+                    continue;
+                }
+                if !processed {
+                    break;
+                }
+
+                drop(c);
                 tokio::task::yield_now().await;
             }
         }
@@ -392,6 +412,65 @@ mod tests {
     use super::*;
     use crate::engine::udp_tracker_client::UdpTrackerClient;
     use crate::network::OutboundNetworkPolicy;
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::Instant;
+
+    const UDP_TIMEOUT_CHILD_ENV: &str = "ARIA2_RUST_UDP_TIMEOUT_CHILD";
+
+    #[tokio::test]
+    async fn udp_tracker_announce_returns_after_connect_timeouts() {
+        if std::env::var_os(UDP_TIMEOUT_CHILD_ENV).is_some() {
+            let sink = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind local UDP tracker sink");
+            let addr = sink.local_addr().expect("read sink address");
+            let shared = UdpTrackerClient::create_shared(0).await.unwrap();
+            let mut manager = UdpTrackerManager::new(shared).await;
+            manager.request_timeout = Duration::from_millis(10);
+            manager.endpoints.push(UdpTrackerEndpoint {
+                url: format!("udp://{addr}/announce"),
+                addr,
+                tier: 0,
+            });
+
+            let responses = manager
+                .announce(&[0x11; 20], &[0x22; 20], 0, 1, 0, UdpEvent::Started, 50)
+                .await;
+            assert!(responses.is_empty());
+            assert_eq!(manager.last_announce_error().await, Some(UdpError::Timeout));
+            return;
+        }
+
+        let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "engine::udp_tracker_manager::tests::udp_tracker_announce_returns_after_connect_timeouts",
+                "--nocapture",
+            ])
+            .env(UDP_TIMEOUT_CHILD_ENV, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start timeout regression child");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(status) = child.try_wait().expect("poll timeout child") {
+                assert!(
+                    status.success(),
+                    "timeout regression child failed: {status}"
+                );
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill stuck timeout regression child");
+                let _ = child.wait();
+                panic!("UDP tracker announce did not return after tracker timeouts");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     #[tokio::test]
     async fn test_manager_creation() {

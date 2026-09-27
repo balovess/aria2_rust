@@ -301,41 +301,6 @@ impl BtDownloadCommand {
             }
         }
 
-        if let Some(ref engine) = self.dht_engine {
-            match engine.find_peers(info_hash_raw).await {
-                Ok(result) => {
-                    if !result.peers.is_empty() {
-                        let before = peer_addrs.len();
-                        for addr in &result.peers {
-                            let ip_str = addr.ip().to_string();
-                            let paddr = aria2_protocol::bittorrent::peer::connection::PeerAddr::new(
-                                &ip_str,
-                                addr.port(),
-                            );
-                            if !self.is_peer_temporarily_rejected(&paddr.ip)
-                                && !peer_addrs
-                                    .iter()
-                                    .any(|p| p.ip == paddr.ip && p.port == paddr.port)
-                            {
-                                peer_addrs.push(paddr);
-                            }
-                        }
-                        tracing::info!(
-                            "[BT] DHT discovered {} extra peers (total: {}, contacted {} DHT nodes)",
-                            peer_addrs.len() - before,
-                            peer_addrs.len(),
-                            result.nodes_contacted
-                        );
-                    } else {
-                        debug!("[BT] DHT find_peers returned no peers");
-                    }
-                }
-                Err(error) => {
-                    debug!(error = %error, "[BT] Initial DHT peer lookup failed");
-                }
-            }
-        }
-
         // BEP 0027 (Private Torrent): public tracker announcement is forbidden
         // for private torrents because it would leak the info_hash to trackers
         // not explicitly listed in the torrent's announce list.

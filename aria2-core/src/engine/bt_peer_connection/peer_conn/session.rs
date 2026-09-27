@@ -147,6 +147,7 @@ impl BtPeerConn {
     pub fn set_peer_bitfield(&mut self, bitfield: &[u8]) {
         if let Some(ref mut res) = self.session_resource {
             res.set_bitfield(bitfield);
+            self.seeder = res.is_seeder();
         }
     }
 
@@ -158,6 +159,7 @@ impl BtPeerConn {
     pub fn update_peer_bitfield(&mut self, index: usize, operation: i32) {
         if let Some(ref mut res) = self.session_resource {
             res.update_bitfield(index, operation);
+            self.seeder = res.is_seeder();
         }
     }
 

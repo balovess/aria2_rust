@@ -168,8 +168,9 @@ pub async fn execute(
     // Write channel: segment futures send chunks as they arrive,
     // the main loop drains them to disk via tokio::select!
     let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
-    let mut executor = HttpSegmentRequestExecutor::new(
+    let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
+        dl.range_clients.as_slice(),
         dl.request_policy.clone(),
         dl.cookie_helper.clone(),
         dl.auth_options.clone(),

@@ -625,6 +625,23 @@ async fn cli_download_keeps_live_peer_visible_during_actor_transfer() {
         peers.as_array().is_some_and(|peers| !peers.is_empty()),
         "the connected peer must be visible in the public RPC snapshot while its block response is in flight"
     );
+    let peer_details = rpc(&client, 6, "aria2.getPeerDetails", json!([gid]));
+    assert!(
+        peer_details.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["seeder"].as_bool() == Some(true))
+        }),
+        "a full peer bitfield must be reflected as seeder=true in RPC: {peer_details}"
+    );
+    assert!(
+        peer_details.as_array().is_some_and(|peers| {
+            peers
+                .iter()
+                .any(|peer| peer["flags"]["amInterested"].as_bool() == Some(true))
+        }),
+        "a peer with an outstanding block request must be reported as interesting in RPC: {peer_details}"
+    );
 
     let deadline = Instant::now() + Duration::from_secs(12);
     loop {
@@ -1068,6 +1085,18 @@ async fn cli_uploads_a_verified_piece_before_torrent_completion() {
     tokio::time::timeout(Duration::from_secs(5), peer.peer_not_interested.notified())
         .await
         .expect("client did not withdraw interest after exhausting this peer's wanted pieces");
+    let uninterested_deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let peer_details = rpc(&client, 4, "aria2.getPeerDetails", json!([gid]));
+        if peer_details[0]["flags"]["amInterested"] == false {
+            break;
+        }
+        assert!(
+            Instant::now() < uninterested_deadline,
+            "RPC did not publish the NotInterested transition before upload: {peer_details}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     peer.request_upload();
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -1107,10 +1136,21 @@ async fn cli_uploads_a_verified_piece_before_torrent_completion() {
             .is_some_and(|speed| speed > 0),
         "RPC should expose a non-zero instantaneous uploadSpeed while the verified piece is being uploaded: {active_status}"
     );
-    let peer_details = rpc(&client, 4, "aria2.getPeerDetails", json!([gid]));
+    let peer_snapshot_deadline = Instant::now() + Duration::from_secs(1);
+    let peer_details = loop {
+        let peer_details = rpc(&client, 4, "aria2.getPeerDetails", json!([gid]));
+        if peer_details[0]["uploadedBytes"] == "16" {
+            break peer_details;
+        }
+        assert!(
+            Instant::now() < peer_snapshot_deadline,
+            "per-peer RPC upload bytes did not reflect the 16 bytes sent during the active download: {peer_details}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(
         peer_details[0]["flags"]["amInterested"], false,
-        "the live peer snapshot must reflect that this peer has no remaining wanted piece"
+        "the upload event must not revert the peer's NotInterested state: {peer_details}"
     );
 
     peer.release_tail_piece();
@@ -1141,10 +1181,21 @@ async fn cli_uploads_a_verified_piece_before_torrent_completion() {
     tokio::time::timeout(Duration::from_secs(5), peer.peer_not_interested.notified())
         .await
         .expect("completed torrent did not withdraw Interested from its peer");
-    let seeding_peer_details = rpc(&client, 5, "aria2.getPeerDetails", json!([gid]));
+    let seeding_snapshot_deadline = Instant::now() + Duration::from_secs(1);
+    let seeding_peer_details = loop {
+        let peer_details = rpc(&client, 5, "aria2.getPeerDetails", json!([gid]));
+        if peer_details[0]["flags"]["amInterested"] == false {
+            break peer_details;
+        }
+        assert!(
+            Instant::now() < seeding_snapshot_deadline,
+            "RPC did not publish the post-download NotInterested state within one second: {peer_details}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
     assert_eq!(
         seeding_peer_details[0]["flags"]["amInterested"], false,
-        "RPC snapshot reflects the post-download NotInterested state"
+        "RPC snapshot reflects the post-download NotInterested state: {seeding_peer_details}"
     );
     assert_eq!(
         std::fs::read(output_dir.path().join("active-upload.bin")).unwrap(),

@@ -1076,8 +1076,8 @@ async fn regression_tell_status_includes_original_bt_metadata() {
     assert_eq!(status["bittorrent"]["mode"], "single");
     assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
     assert_eq!(status["seeder"], "false");
-    assert!(status.get("completedPieces").is_none());
-    assert!(status.get("missingPieces").is_none());
+    assert_eq!(status["completedPieces"], "0");
+    assert_eq!(status["missingPieces"], "1");
 }
 
 /// Test: stopped BitTorrent status keeps the original torrent metadata.
@@ -1115,8 +1115,8 @@ async fn regression_tell_stopped_includes_original_bt_metadata() {
     );
     assert_eq!(status["bittorrent"]["mode"], "single");
     assert_eq!(status["bittorrent"]["info"]["name"], "file.bin");
-    assert!(status.get("completedPieces").is_none());
-    assert!(status.get("missingPieces").is_none());
+    assert_eq!(status["completedPieces"], "0");
+    assert_eq!(status["missingPieces"], "1");
 }
 
 /// Test: aria2.getServers returns array with server info.

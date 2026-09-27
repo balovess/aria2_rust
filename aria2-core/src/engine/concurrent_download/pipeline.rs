@@ -252,8 +252,9 @@ pub async fn execute_with_coordinator(
             HttpAdaptiveConcurrency::new(max_conn, retry_wait),
         );
     }
-    let mut executor = HttpSegmentRequestExecutor::new(
+    let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
+        dl.range_clients.as_slice(),
         dl.request_policy.clone(),
         dl.cookie_helper.clone(),
         dl.auth_options.clone(),

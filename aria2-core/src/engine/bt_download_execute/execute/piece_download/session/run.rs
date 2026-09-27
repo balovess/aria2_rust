@@ -301,6 +301,9 @@ impl PieceDownloadSession<'_> {
                         "[BT] Periodic tracker announce found {} new peers",
                         new_peers.len()
                     );
+                    for peer in &new_peers {
+                        self.command.add_pex_peer(peer.clone());
+                    }
                     // Connect to newly discovered peers
                     let connected = self
                         .connect_to_discovered_swarm_peers(&new_peers, BtPeerSource::Tracker)
@@ -332,6 +335,9 @@ impl PieceDownloadSession<'_> {
             .await;
             dht_peers.retain(|peer| !self.command.is_peer_temporarily_rejected(&peer.ip));
             if !dht_peers.is_empty() {
+                for peer in &dht_peers {
+                    self.command.add_pex_peer(peer.clone());
+                }
                 info!(
                     discovered = dht_peers.len(),
                     "[BT] Periodic DHT lookup found new peers"

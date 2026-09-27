@@ -36,6 +36,8 @@ pub struct DownloadCommand {
     /// Direct access to progress counters -- avoids RwLock on the hot path.
     pub(super) progress: Arc<AtomicProgress>,
     pub(super) client: Arc<reqwest::Client>,
+    /// Independent transport pools used only for concurrent HTTP ranges.
+    pub(super) range_clients: Arc<Vec<reqwest::Client>>,
     pub(super) outbound_network_policy: Arc<OutboundNetworkPolicy>,
     pub(super) output_path: std::path::PathBuf,
     /// Whether the filename came from an explicit `--out`/metadata name.
@@ -189,6 +191,165 @@ fn apply_local_address(
         Some(address) => builder.local_address(address),
         None => builder,
     }
+}
+
+fn build_download_client(
+    uri: &str,
+    options: &DownloadOptions,
+    client_tls: &crate::http::client_identity::ClientTlsConfig,
+    proxy_disabled: bool,
+    local_address: Option<IpAddr>,
+    resolved_addresses: &ResolvedNetworkAddresses,
+) -> Result<Arc<reqwest::Client>> {
+    let has_custom_tls = client_tls.requires_custom_client();
+    if proxy_disabled {
+        if let Some(addresses) = resolved_addresses
+            .target
+            .as_deref()
+            .filter(|addresses| !addresses.is_empty())
+        {
+            let host = uri_host(uri).ok_or_else(|| {
+                Aria2Error::Fatal(crate::error::FatalError::Config(
+                    "Unable to extract HTTP hostname for DNS cache override".to_string(),
+                ))
+            })?;
+            let builder = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                ))
+                .gzip(options.http_accept_gzip)
+                .user_agent(constants::USER_AGENT)
+                .redirect(reqwest::redirect::Policy::none())
+                .resolve_to_addrs(&host, addresses);
+            let builder = apply_local_address(builder, local_address);
+            let builder = crate::http::client_identity::apply(builder, client_tls)?;
+            return crate::http::client_pool::configure_http2_download_client(builder)
+                .build()
+                .map(Arc::new)
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Failed to build HTTP client with DNS cache: {error}"
+                    )))
+                });
+        }
+
+        if has_custom_tls {
+            let builder = reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(
+                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+                ))
+                .gzip(options.http_accept_gzip)
+                .user_agent(constants::USER_AGENT)
+                .redirect(reqwest::redirect::Policy::none())
+                .pool_max_idle_per_host(constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
+                .pool_idle_timeout(Some(Duration::from_secs(
+                    constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
+                )))
+                .tcp_keepalive(Some(Duration::from_secs(
+                    constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+                )));
+            let builder = apply_local_address(builder, local_address);
+            let builder = crate::http::client_identity::apply(builder, client_tls)?;
+            return crate::http::client_pool::configure_http2_download_client(builder)
+                .build()
+                .map(Arc::new)
+                .map_err(|error| {
+                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                        "Failed to build HTTP client: {error}"
+                    )))
+                });
+        }
+
+        return Ok(crate::http::client_pool::get_bound_client(
+            local_address,
+            options.http_accept_gzip,
+        ));
+    }
+
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(
+            constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
+        ))
+        .gzip(options.http_accept_gzip)
+        .user_agent(constants::USER_AGENT)
+        // Redirects are handled by SequentialDownloader so direct, DNS-pinned,
+        // and proxied clients share one URI/retry seam.
+        .redirect(reqwest::redirect::Policy::none())
+        .pool_max_idle_per_host(constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(Some(Duration::from_secs(
+            constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS,
+        )))
+        .tcp_keepalive(Some(Duration::from_secs(
+            constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
+        )));
+
+    let no_proxy = options.no_proxy.as_deref();
+    if let Some(proxy) = options
+        .http_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = add_reqwest_proxy(
+            builder,
+            ProxyTarget::Http,
+            proxy,
+            options.proxy_credentials_for_scheme("http"),
+            no_proxy,
+        );
+    }
+    if let Some(proxy) = options
+        .https_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        builder = add_reqwest_proxy(
+            builder,
+            ProxyTarget::Https,
+            proxy,
+            options.proxy_credentials_for_scheme("https"),
+            no_proxy,
+        );
+    }
+    if let Some(all_proxy) = options
+        .all_proxy
+        .as_deref()
+        .filter(|proxy| !proxy.is_empty())
+    {
+        match ProxyUrl::parse(all_proxy) {
+            Ok(parsed) => match parsed.protocol {
+                crate::http::socks_connector::ProxyProtocol::Http
+                | crate::http::socks_connector::ProxyProtocol::Https => {
+                    builder = add_reqwest_proxy(
+                        builder,
+                        ProxyTarget::All,
+                        all_proxy,
+                        options.proxy_credentials_for_scheme("all"),
+                        no_proxy,
+                    );
+                }
+                _ => {
+                    tracing::info!(
+                        "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
+                        all_proxy
+                    );
+                }
+            },
+            Err(error) => {
+                warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, error);
+            }
+        }
+    }
+
+    let builder = apply_local_address(builder, local_address);
+    let builder = crate::http::client_identity::apply(builder, client_tls)?;
+    crate::http::client_pool::configure_http2_download_client(builder)
+        .build()
+        .map(Arc::new)
+        .map_err(|error| {
+            Aria2Error::Fatal(crate::error::FatalError::Config(format!(
+                "Failed to build HTTP client: {error}"
+            )))
+        })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -495,143 +656,43 @@ impl DownloadCommand {
                 .flatten()
                 .or_else(|| outbound_network_policy.addresses().into_iter().next())
         };
-        let client = if no_proxy {
-            if let Some(addresses) = resolved_addresses.target.as_deref()
-                && !addresses.is_empty()
-            {
-                let host = uri_host(uri).ok_or_else(|| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(
-                        "Unable to extract HTTP hostname for DNS cache override".to_string(),
-                    ))
-                })?;
-                let builder = reqwest::Client::builder()
-                    .connect_timeout(Duration::from_secs(
-                        constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                    ))
-                    .gzip(options.http_accept_gzip)
-                    .user_agent(constants::USER_AGENT)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .resolve_to_addrs(&host, addresses);
-                let builder = apply_local_address(builder, local_address);
-                let builder = crate::http::client_identity::apply(builder, &client_tls)?;
-                Arc::new(builder.build().map_err(|e| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "Failed to build HTTP client with DNS cache: {e}"
-                    )))
-                })?)
-            } else if has_custom_tls {
-                let builder = reqwest::Client::builder()
-                    .connect_timeout(Duration::from_secs(
-                        constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                    ))
-                    .gzip(options.http_accept_gzip)
-                    .user_agent(constants::USER_AGENT)
-                    .redirect(reqwest::redirect::Policy::none())
-                    .pool_max_idle_per_host(constants::HTTP_CLIENT_POOL_MAX_IDLE_PER_HOST)
-                    .pool_idle_timeout(Some(Duration::from_secs(
-                        constants::HTTP_CLIENT_POOL_IDLE_TIMEOUT_SECS,
-                    )))
-                    .tcp_keepalive(Some(Duration::from_secs(
-                        constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
-                    )));
-                let builder = apply_local_address(builder, local_address);
-                let builder = crate::http::client_identity::apply(builder, &client_tls)?;
-                Arc::new(builder.build().map_err(|error| {
-                    Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                        "Failed to build HTTP client: {error}"
-                    )))
-                })?)
-            } else {
-                crate::http::client_pool::get_bound_client(local_address, options.http_accept_gzip)
-            }
+        let client = build_download_client(
+            uri,
+            options,
+            &client_tls,
+            no_proxy,
+            local_address,
+            &resolved_addresses,
+        )?;
+
+        let has_resolved_target = resolved_addresses
+            .target
+            .as_deref()
+            .is_some_and(|addresses| !addresses.is_empty());
+        let range_clients = if no_proxy && !has_resolved_target && !has_custom_tls {
+            crate::http::client_pool::get_bound_download_clients(
+                local_address,
+                options.http_accept_gzip,
+            )
         } else {
-            let mut builder = reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(
-                    constants::HTTP_DEFAULT_CONNECT_TIMEOUT_SECS,
-                ))
-                .gzip(options.http_accept_gzip)
-                .user_agent(constants::USER_AGENT)
-                // Redirects are handled by SequentialDownloader so direct,
-                // DNS-pinned, and proxied clients share one URI/retry seam.
-                .redirect(reqwest::redirect::Policy::none())
-                .pool_max_idle_per_host(constants::HTTP_DEFAULT_POOL_MAX_IDLE_PER_HOST)
-                .pool_idle_timeout(Some(std::time::Duration::from_secs(
-                    constants::HTTP_DEFAULT_POOL_IDLE_TIMEOUT_SECS,
-                )))
-                .tcp_keepalive(Some(std::time::Duration::from_secs(
-                    constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
-                )));
-
-            let no_proxy = options.no_proxy.as_deref();
-
-            if let Some(proxy) = options
-                .http_proxy
-                .as_deref()
-                .filter(|proxy| !proxy.is_empty())
-            {
-                builder = add_reqwest_proxy(
-                    builder,
-                    ProxyTarget::Http,
-                    proxy,
-                    options.proxy_credentials_for_scheme("http"),
-                    no_proxy,
+            let mut clients =
+                Vec::with_capacity(crate::http::client_pool::HTTP2_DOWNLOAD_SESSION_COUNT);
+            clients.push(client.as_ref().clone());
+            for _ in 1..crate::http::client_pool::HTTP2_DOWNLOAD_SESSION_COUNT {
+                clients.push(
+                    build_download_client(
+                        uri,
+                        options,
+                        &client_tls,
+                        no_proxy,
+                        local_address,
+                        &resolved_addresses,
+                    )?
+                    .as_ref()
+                    .clone(),
                 );
             }
-
-            if let Some(proxy) = options
-                .https_proxy
-                .as_deref()
-                .filter(|proxy| !proxy.is_empty())
-            {
-                builder = add_reqwest_proxy(
-                    builder,
-                    ProxyTarget::Https,
-                    proxy,
-                    options.proxy_credentials_for_scheme("https"),
-                    no_proxy,
-                );
-            }
-
-            if let Some(all_proxy) = options
-                .all_proxy
-                .as_deref()
-                .filter(|proxy| !proxy.is_empty())
-            {
-                match ProxyUrl::parse(all_proxy) {
-                    Ok(parsed) => match parsed.protocol {
-                        crate::http::socks_connector::ProxyProtocol::Http
-                        | crate::http::socks_connector::ProxyProtocol::Https => {
-                            builder = add_reqwest_proxy(
-                                builder,
-                                ProxyTarget::All,
-                                all_proxy,
-                                options.proxy_credentials_for_scheme("all"),
-                                no_proxy,
-                            );
-                        }
-                        _ => {
-                            tracing::info!(
-                                "SOCKS proxy configured ({}) - use SocksConnector for direct TCP connections",
-                                all_proxy
-                            );
-                        }
-                    },
-                    Err(e) => {
-                        warn!("Failed to parse all-proxy URL '{}': {}", all_proxy, e);
-                    }
-                }
-            }
-
-            let builder = apply_local_address(builder, local_address);
-            let builder = crate::http::client_identity::apply(builder, &client_tls)?;
-            let client = builder.build().map_err(|e| {
-                Aria2Error::Fatal(crate::error::FatalError::Config(format!(
-                    "Failed to build HTTP client: {}",
-                    e
-                )))
-            })?;
-
-            Arc::new(client)
+            Arc::new(clients)
         };
 
         info!("DownloadCommand created: {} -> {}", uri, path.display());
@@ -647,6 +708,7 @@ impl DownloadCommand {
             group,
             progress,
             client,
+            range_clients,
             outbound_network_policy,
             output_path: path,
             output_name_explicit: output_name.is_some(),
@@ -779,6 +841,7 @@ impl DownloadCommand {
         Ok(Self {
             group,
             progress,
+            range_clients: Arc::new(vec![client.as_ref().clone()]),
             client,
             outbound_network_policy: Arc::new(OutboundNetworkPolicy::direct()),
             output_path: path,

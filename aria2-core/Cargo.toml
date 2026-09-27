@@ -111,7 +111,7 @@ windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem", "Win32
 # hyper/* are used by the mock HTTP server (tests/e2e_helpers/mock_http_server.rs)
 # for serving test HTTP responses. reqwest 0.13 already depends on hyper 1.x
 # as a transitive dep, so no additional version conflicts are introduced.
-hyper = { version = "1", features = ["http1", "http2"] }
+hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["server", "http1", "http2", "tokio"] }
 http-body-util = "0.1"
 http = "1"

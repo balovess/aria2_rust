@@ -52,7 +52,7 @@ impl DhtNode {
     }
 
     pub fn record_failure(&mut self) {
-        self.failed_count += 1;
+        self.failed_count = self.failed_count.saturating_add(1);
     }
 
     pub fn distance_to(&self, target: &[u8; 20]) -> usize {
@@ -113,6 +113,19 @@ mod tests {
         }
         good_node.touch();
         assert!(good_node.is_good());
+    }
+
+    #[test]
+    fn repeated_failures_saturate_without_reviving_a_bad_node() {
+        let mut node = DhtNode::new([4u8; 20], "0.0.0.0:0".parse().unwrap());
+
+        for _ in 0..=u8::MAX {
+            node.record_failure();
+        }
+
+        assert_eq!(node.failed_count(), u8::MAX);
+        assert!(node.is_bad());
+        assert!(!node.is_good());
     }
 
     #[test]

@@ -23,6 +23,11 @@ impl UdpTrackerClient {
                     self.pending.push_front(req);
                     return false;
                 }
+
+                if req.is_connect {
+                    return self.send_connect_request(req).await;
+                }
+
                 let host_key = req.remote_addr;
 
                 if let Some(conn) = self.conn_cache.get(&host_key) {
@@ -47,7 +52,12 @@ impl UdpTrackerClient {
 
                 self.waiting_for_conn.push_back(req);
                 debug!("Waiting for connection to {}", host_key);
+                return false;
             } else if let Some(req) = self.waiting_for_conn.pop_front() {
+                if self.is_connecting_to(&req.remote_addr) {
+                    self.waiting_for_conn.push_front(req);
+                    return false;
+                }
                 self.pending.push_front(req);
             } else {
                 return false;
@@ -129,33 +139,36 @@ impl UdpTrackerClient {
     }
 
     pub(crate) async fn send_connect(&mut self, addr: SocketAddr) -> bool {
+        let mut req =
+            UdpTrackerRequest::new(addr, [0u8; 20], [0u8; 20], 0, 0, 0, UdpEvent::None, 0, 0);
+        req.is_connect = true;
+        self.send_connect_request(req).await
+    }
+
+    async fn send_connect_request(&mut self, mut req: UdpTrackerRequest) -> bool {
         let txn_id = self.next_txn();
-
         let payload = build_connect_request(txn_id);
+        req.txn_id = txn_id;
+        req.dispatched_at = Some(std::time::Instant::now());
+        req.state = UdpState::Pending;
 
-        match self.socket.send_to(&payload, addr).await {
+        match self.socket.send_to(&payload, req.remote_addr).await {
             Ok(len) => {
-                let mut dummy_req = UdpTrackerRequest::new(
-                    addr,
-                    [0u8; 20],
-                    [0u8; 20],
-                    0,
-                    0,
-                    0,
-                    UdpEvent::None,
-                    0,
-                    0,
-                );
-                dummy_req.txn_id = txn_id;
-                dummy_req.dispatched_at = Some(std::time::Instant::now());
-                dummy_req.state = UdpState::Pending;
+                let addr = req.remote_addr;
                 self.txn_map.insert(txn_id, self.inflight.len());
-                self.inflight.push_back(dummy_req);
+                self.inflight.push_back(req);
                 debug!("Sent CONNECT {} bytes to {} (txn={})", len, addr, txn_id);
                 true
             }
             Err(e) => {
-                warn!("Send CONNECT to {} failed: {}", addr, e);
+                warn!("Send CONNECT to {} failed: {}", req.remote_addr, e);
+                req.fail_count += 1;
+                if req.fail_count < MAX_RETRIES {
+                    req.dispatched_at = None;
+                    self.pending.push_front(req);
+                } else {
+                    self.fail_connection_requests(req.remote_addr, UdpError::Network);
+                }
                 true
             }
         }
@@ -234,15 +247,17 @@ impl UdpTrackerClient {
                         },
                     );
 
-                    while let Some(waiting) = self.waiting_for_conn.pop_front() {
-                        self.pending.push_front(waiting);
-                    }
+                    self.move_connection_waiters_to_pending(from);
                 }
                 Err(e) => {
                     warn!("Parse CONNECT response from {} failed: {}", from, e);
-                    req.error = Some(UdpError::MalformedResponse);
+                    self.fail_connection_requests(*from, UdpError::MalformedResponse);
                 }
             },
+            Some(UdpAction::Announce) if req.is_connect => {
+                warn!("Unexpected ANNOUNCE response for CONNECT from {}", from);
+                self.fail_connection_requests(*from, UdpError::MalformedResponse);
+            }
             Some(UdpAction::Announce) => {
                 match parse_announce_response(data) {
                     Ok(resp) => {
@@ -267,8 +282,16 @@ impl UdpTrackerClient {
                 let msg_len = (data.len() - 8).min(256);
                 let msg = String::from_utf8_lossy(&data[8..8 + msg_len]);
                 warn!("Tracker error from {}: {}", from, msg);
-                req.error = Some(UdpError::TrackerError);
-                self.pending.push_back(req);
+                if req.is_connect {
+                    self.fail_connection_requests(*from, UdpError::TrackerError);
+                } else {
+                    req.error = Some(UdpError::TrackerError);
+                    self.pending.push_back(req);
+                }
+            }
+            Some(UdpAction::Scrape) if req.is_connect => {
+                warn!("Unexpected SCRAPE response for CONNECT from {}", from);
+                self.fail_connection_requests(*from, UdpError::MalformedResponse);
             }
             Some(UdpAction::Scrape) => match parse_scrape_response(data) {
                 Ok(results) => {
@@ -296,8 +319,12 @@ impl UdpTrackerClient {
             },
             _ => {
                 warn!("Unknown action {} from {}", action_val, from);
-                req.error = Some(UdpError::MalformedResponse);
-                self.pending.push_back(req);
+                if req.is_connect {
+                    self.fail_connection_requests(*from, UdpError::MalformedResponse);
+                } else {
+                    req.error = Some(UdpError::MalformedResponse);
+                    self.pending.push_back(req);
+                }
             }
         }
     }
@@ -349,9 +376,13 @@ impl UdpTrackerClient {
                     );
                     req.dispatched_at = None;
                     self.pending.push_back(req);
+                } else if req.is_connect {
+                    warn!("CONNECT retries exhausted for {}", req.remote_addr);
+                    self.fail_connection_requests(req.remote_addr, UdpError::Timeout);
                 } else {
                     warn!("Max retries exceeded for txn_id={}", req.txn_id);
                     req.error = Some(UdpError::Timeout);
+                    req.state = UdpState::Complete;
                     self.pending.push_back(req);
                 }
             }
@@ -376,7 +407,40 @@ impl UdpTrackerClient {
     pub(crate) fn is_connecting_to(&self, addr: &SocketAddr) -> bool {
         self.inflight
             .iter()
-            .any(|r| &r.remote_addr == addr && r.reply.is_none())
+            .any(|r| r.is_connect && &r.remote_addr == addr)
+    }
+
+    fn move_connection_waiters_to_pending(&mut self, addr: &SocketAddr) {
+        let mut waiting = std::mem::take(&mut self.waiting_for_conn);
+        while let Some(request) = waiting.pop_front() {
+            if &request.remote_addr == addr {
+                self.pending.push_back(request);
+            } else {
+                self.waiting_for_conn.push_back(request);
+            }
+        }
+    }
+
+    fn fail_connection_requests(&mut self, addr: SocketAddr, error: UdpError) {
+        let mut waiting = std::mem::take(&mut self.waiting_for_conn);
+        while let Some(mut request) = waiting.pop_front() {
+            if request.remote_addr == addr {
+                request.error = Some(error);
+                request.state = UdpState::Complete;
+                self.pending.push_back(request);
+            } else {
+                self.waiting_for_conn.push_back(request);
+            }
+        }
+
+        let mut pending = std::mem::take(&mut self.pending);
+        while let Some(mut request) = pending.pop_front() {
+            if request.remote_addr == addr && !request.is_connect && request.error.is_none() {
+                request.error = Some(error);
+                request.state = UdpState::Complete;
+            }
+            self.pending.push_back(request);
+        }
     }
 
     pub fn socket(&self) -> Arc<tokio::net::UdpSocket> {

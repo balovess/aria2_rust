@@ -1,15 +1,14 @@
 //! Admission and execution for HTTP Range requests.
 //!
-//! This module deliberately does not model download tasks or transport
-//! connections. The shared `reqwest::Client` owns transport connection reuse;
-//! this module owns the per-download request budget and per-authority adaptive
-//! budget.
+//! This module owns per-download request admission and assigns admitted ranges
+//! across independent reqwest pools. Each pool is warmed once per authority so
+//! HTTP/2 can multiplex later range streams over a bounded set of TCP sessions.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{OnceCell, mpsc};
 
 use crate::engine::download_cookie::CookieHelper;
 use crate::engine::http_segment_downloader::{HttpSegmentDownloader, SegmentProgress, WriteChunk};
@@ -51,6 +50,7 @@ struct AuthorityState {
     hard_limit: usize,
     target: AtomicUsize,
     in_flight: AtomicUsize,
+    client_warmups: DashMap<usize, Arc<OnceCell<bool>>>,
 }
 
 struct ExecutorState {
@@ -85,7 +85,8 @@ struct RunningTask {
 pub struct HttpSegmentRequestExecutor {
     result_rx: mpsc::Receiver<HttpSegmentRequestResult>,
     result_tx: mpsc::Sender<HttpSegmentRequestResult>,
-    client: reqwest::Client,
+    clients: Vec<reqwest::Client>,
+    next_client_index: usize,
     request_policy: HttpRequestPolicy,
     cookie_helper: CookieHelper,
     auth_options: AuthResolveOptions,
@@ -98,8 +99,34 @@ pub struct HttpSegmentRequestExecutor {
 
 impl HttpSegmentRequestExecutor {
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Preserve the single-client constructor for existing callers.
     pub fn new(
         client: &reqwest::Client,
+        request_policy: HttpRequestPolicy,
+        cookie_helper: CookieHelper,
+        auth_options: AuthResolveOptions,
+        netrc_path: Option<String>,
+        total_limit: usize,
+        authority_keys: &[String],
+        server_hard_limit: usize,
+    ) -> Self {
+        Self::new_with_clients(
+            client,
+            std::slice::from_ref(client),
+            request_policy,
+            cookie_helper,
+            auth_options,
+            netrc_path,
+            total_limit,
+            authority_keys,
+            server_hard_limit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_clients(
+        client: &reqwest::Client,
+        range_clients: &[reqwest::Client],
         request_policy: HttpRequestPolicy,
         cookie_helper: CookieHelper,
         auth_options: AuthResolveOptions,
@@ -111,11 +138,20 @@ impl HttpSegmentRequestExecutor {
         let total_limit = total_limit.max(1);
         let (result_tx, result_rx) = mpsc::channel(total_limit);
         let state = Arc::new(ExecutorState::new(authority_keys, server_hard_limit));
+        let session_limit = server_hard_limit
+            .clamp(1, MAX_SERVER_CONCURRENCY)
+            .min(range_clients.len().max(1));
+        let clients = if range_clients.is_empty() {
+            vec![client.clone()]
+        } else {
+            range_clients.iter().take(session_limit).cloned().collect()
+        };
 
         Self {
             result_rx,
             result_tx,
-            client: client.clone(),
+            clients,
+            next_client_index: 0,
             request_policy,
             cookie_helper,
             auth_options,
@@ -132,7 +168,11 @@ impl HttpSegmentRequestExecutor {
         let authority = self.state.authority(&request.authority_key)?;
         let lease = self.state.try_acquire(&authority, self.total_limit)?;
 
-        let client = self.client.clone();
+        let client_index = self.next_client_index;
+        self.next_client_index = (self.next_client_index + 1) % self.clients.len();
+        let client = self.clients[client_index].clone();
+        let fallback_client = self.clients[0].clone();
+        let warmup = authority.client_warmup(client_index);
         let request_policy = self.request_policy.clone();
         let cookie_helper = self.cookie_helper.clone();
         let auth_options = self.auth_options.clone();
@@ -143,9 +183,47 @@ impl HttpSegmentRequestExecutor {
         self.next_task_id = self.next_task_id.wrapping_add(1).max(1);
 
         let handle = tokio::spawn(async move {
-            let downloader = HttpSegmentDownloader::new_with_policy(&client, request_policy)
-                .with_cookie_helper(cookie_helper)
-                .with_auth_options(auth_options, netrc_path);
+            let make_downloader = |client: &reqwest::Client| {
+                HttpSegmentDownloader::new_with_policy(client, request_policy.clone())
+                    .with_cookie_helper(cookie_helper.clone())
+                    .with_auth_options(auth_options.clone(), netrc_path.clone())
+            };
+            let downloader = make_downloader(&client);
+            // One successful one-byte Range response establishes this
+            // client's connection before its other requests are dispatched.
+            // Without this gate, cold concurrent requests can each open a new
+            // HTTP/2 TCP session before the pool learns that one is reusable.
+            let session_ready = warmup
+                .get_or_init(|| async {
+                    match downloader
+                        .download_range(
+                            &request.url,
+                            0,
+                            1,
+                            request.cookie_header.as_deref(),
+                            &[],
+                            None,
+                            request.expected_entity_length,
+                        )
+                        .await
+                    {
+                        Ok(_) => true,
+                        Err(error) => {
+                            tracing::debug!(%error, "HTTP range session warmup failed");
+                            false
+                        }
+                    }
+                })
+                .await;
+            let downloader = if *session_ready || client_index == 0 {
+                downloader
+            } else {
+                tracing::debug!(
+                    client_index,
+                    "HTTP range session unavailable; routing request through the primary client pool"
+                );
+                make_downloader(&fallback_client)
+            };
             downloader.clear_last_peer_addr();
             let result = downloader
                 .download_range_streaming_with_progress(
@@ -271,6 +349,7 @@ impl ExecutorState {
                     hard_limit,
                     target: AtomicUsize::new(hard_limit),
                     in_flight: AtomicUsize::new(0),
+                    client_warmups: DashMap::new(),
                 }),
             );
         }
@@ -302,6 +381,15 @@ impl ExecutorState {
             state: Arc::clone(self),
             authority: Arc::clone(authority),
         })
+    }
+}
+
+impl AuthorityState {
+    fn client_warmup(&self, client_index: usize) -> Arc<OnceCell<bool>> {
+        self.client_warmups
+            .entry(client_index)
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
     }
 }
 
@@ -409,7 +497,8 @@ mod tests {
         let mut executor = HttpSegmentRequestExecutor {
             result_rx,
             result_tx,
-            client: reqwest::Client::new(),
+            clients: vec![reqwest::Client::new()],
+            next_client_index: 0,
             request_policy: HttpRequestPolicy::default(),
             cookie_helper: CookieHelper::new(
                 Arc::new(crate::http::cookie::CookieStorage::new()),
@@ -441,3 +530,7 @@ mod tests {
         executor.cancel().await;
     }
 }
+
+#[cfg(test)]
+#[path = "http_segment_request_executor_h2_tests.rs"]
+mod h2_tests;

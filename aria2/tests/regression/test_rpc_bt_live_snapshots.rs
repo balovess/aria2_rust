@@ -59,7 +59,11 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(announce.peers, vec![("127.0.0.1".to_string(), 65535)]);
     tracker.wait_for_event("started").await;
 
-    let dht = DhtEngine::start(DhtEngineConfig::local())
+    let dht_directory = tempfile::tempdir().unwrap();
+    let dht_file_path = dht_directory.path().join("dht.dat");
+    let mut dht_config = DhtEngineConfig::local();
+    dht_config.dht_file_path = Some(dht_file_path.clone());
+    let dht = DhtEngine::start(dht_config)
         .await
         .expect("the local DHT engine should start");
     assert_eq!(dht.stats().await.state, DhtEngineState::Running);
@@ -294,6 +298,22 @@ async fn rpc_snapshots_expose_real_bt_peer_tracker_and_dht_state() {
     assert_eq!(dht_status["totalNodes"], "0");
     assert_eq!(dht_status["goodNodes"], "0");
     assert_eq!(dht_status["pendingTransactions"], "0");
+
+    let save_resp = engine
+        .handle_request(&make_request("aria2.saveDhtState", serde_json::json!([])))
+        .await;
+    assert_success(&save_resp);
+    assert_eq!(save_resp.result.unwrap(), "OK");
+    assert!(
+        dht_file_path.is_file(),
+        "manual RPC save writes the DHT table"
+    );
+
+    let evict_resp = engine
+        .handle_request(&make_request("aria2.evictDhtNodes", serde_json::json!([])))
+        .await;
+    assert_success(&evict_resp);
+    assert_eq!(evict_resp.result.unwrap(), serde_json::json!(["0", "0"]));
 
     dht.shutdown_async().await;
 }

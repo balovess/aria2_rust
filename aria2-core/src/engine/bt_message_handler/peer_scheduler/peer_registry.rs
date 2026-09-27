@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -13,6 +14,8 @@ use crate::engine::peer_stats::PeerStats;
 
 use super::super::types::{DEFAULT_MAX_OUTSTANDING_REQUEST, MAX_OUTSTANDING_REQUEST};
 use super::{PeerActorControl, PeerActorTask, PeerCommand, PeerEvent};
+
+const PEER_STATS_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// One long-lived I/O owner for a handshaken BitTorrent connection.
 pub(crate) struct PeerActorEntry {
@@ -125,6 +128,8 @@ pub(crate) struct PeerSwarm {
     wanted_pieces: Arc<[u8]>,
     peer_snapshot_store:
         Option<Arc<std::sync::RwLock<Vec<crate::request::request_group::BtPeerSnapshot>>>>,
+    last_stats_snapshot_publish: Option<Instant>,
+    stats_snapshot_dirty: bool,
     pub(crate) event_tx: Option<mpsc::Sender<PeerEvent>>,
     pub(crate) event_rx: Option<mpsc::Receiver<PeerEvent>>,
 }
@@ -147,7 +152,21 @@ impl PeerSwarmEventLease<'_> {
     /// apply additional event-side effects can use this to apply registry
     /// state exactly once in their common event handler.
     pub(crate) async fn recv_unapplied(&mut self) -> Option<PeerEvent> {
-        self.receiver.as_mut()?.recv().await
+        loop {
+            let receiver = self.receiver.as_mut()?;
+            let event = if let Some(deadline) = self.swarm.pending_stats_snapshot_deadline() {
+                tokio::select! {
+                    event = receiver.recv() => event,
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        self.swarm.publish_pending_stats_snapshot();
+                        continue;
+                    }
+                }
+            } else {
+                receiver.recv().await
+            };
+            return event;
+        }
     }
 
     pub(crate) fn try_recv(&mut self) -> Result<PeerEvent, mpsc::error::TryRecvError> {
@@ -207,6 +226,8 @@ impl PeerSwarm {
             endpoint_counts: HashMap::new(),
             wanted_pieces: Arc::from([]),
             peer_snapshot_store: None,
+            last_stats_snapshot_publish: None,
+            stats_snapshot_dirty: false,
             event_tx: Some(event_tx),
             event_rx: Some(event_rx),
         }
@@ -519,8 +540,59 @@ impl PeerSwarm {
             | PeerEvent::Message { stats: None, .. }
             | PeerEvent::PexPeers { .. } => {}
         }
-        if matches!(event, PeerEvent::AmInterestChanged { .. }) {
+        let publishes_peer_state = matches!(
+            event,
+            PeerEvent::InterestChanged { .. }
+                | PeerEvent::AmInterestChanged { .. }
+                | PeerEvent::ChokeStateChanged { .. }
+                | PeerEvent::PeerChokingChanged { .. }
+                | PeerEvent::PeerAvailabilityChanged { .. }
+                | PeerEvent::PeerAvailabilitySnapshot { .. }
+        );
+        let publishes_peer_stats = matches!(
+            event,
+            PeerEvent::UploadBytes { .. }
+                | PeerEvent::UploadQueueChanged { .. }
+                | PeerEvent::Message { stats: Some(_), .. }
+        );
+        let now = Instant::now();
+        let stats_snapshot_due = publishes_peer_stats
+            && self.last_stats_snapshot_publish.is_none_or(|last| {
+                now.saturating_duration_since(last) >= PEER_STATS_SNAPSHOT_MIN_INTERVAL
+            });
+        if publishes_peer_state {
             self.publish_peer_snapshots();
+            self.last_stats_snapshot_publish = Some(now);
+            self.stats_snapshot_dirty = false;
+        }
+        if stats_snapshot_due {
+            if !publishes_peer_state {
+                self.publish_peer_snapshots();
+            }
+            self.last_stats_snapshot_publish = Some(now);
+            self.stats_snapshot_dirty = false;
+        } else if publishes_peer_stats {
+            self.stats_snapshot_dirty = true;
+        }
+    }
+
+    fn pending_stats_snapshot_deadline(&self) -> Option<Instant> {
+        self.stats_snapshot_dirty.then(|| {
+            self.last_stats_snapshot_publish
+                .map_or_else(Instant::now, |last| last + PEER_STATS_SNAPSHOT_MIN_INTERVAL)
+        })
+    }
+
+    fn publish_pending_stats_snapshot(&mut self) {
+        let now = Instant::now();
+        if self.stats_snapshot_dirty
+            && self.last_stats_snapshot_publish.is_none_or(|last| {
+                now.saturating_duration_since(last) >= PEER_STATS_SNAPSHOT_MIN_INTERVAL
+            })
+        {
+            self.publish_peer_snapshots();
+            self.last_stats_snapshot_publish = Some(now);
+            self.stats_snapshot_dirty = false;
         }
     }
 
@@ -1196,8 +1268,11 @@ mod tests {
         let mut remote =
             PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
 
-        for (message, expected_seeder) in [(BtMessage::HaveAll, true), (BtMessage::HaveNone, false)]
-        {
+        for (message, expected_seeder) in [
+            (BtMessage::Bitfield { data: vec![0xff] }, true),
+            (BtMessage::HaveAll, true),
+            (BtMessage::HaveNone, false),
+        ] {
             remote.send_message(&message).await.unwrap();
             let events = {
                 let mut receiver = swarm.lease_event_receiver().unwrap();
@@ -1252,6 +1327,66 @@ mod tests {
                 expected_choking
             );
         }
+
+        swarm.shutdown_all().await;
+    }
+
+    #[tokio::test]
+    async fn actor_publishes_seeder_state_when_have_completes_the_bitfield() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (local_stream, endpoint) = listener.accept().await.unwrap();
+        let mut connection = BtPeerConn::from_incoming_plain(
+            PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
+            endpoint,
+        );
+        connection.allocate_session_resource(16, 1, 16);
+        let actor_id = connection.actor_id;
+        let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let peer_snapshots = Arc::new(std::sync::RwLock::new(Vec::new()));
+        let mut swarm = PeerSwarm::new(8);
+        swarm.attach_peer_snapshot_store(Arc::clone(&peer_snapshots));
+        assert!(swarm.spawn_peer(connection, None, provider).is_ok());
+        let mut remote =
+            PeerConnection::from_stream_with_peer(remote_stream, [1; 20], false, false);
+        remote
+            .send_message(&BtMessage::Have { piece_index: 0 })
+            .await
+            .unwrap();
+
+        let events = {
+            let mut receiver = swarm.lease_event_receiver().unwrap();
+            let mut events = Vec::new();
+            loop {
+                let event = timeout(Duration::from_secs(1), receiver.recv())
+                    .await
+                    .expect("peer must report the seeder-state transition")
+                    .expect("peer actor event channel must stay open");
+                let reached_snapshot = matches!(
+                    event,
+                    PeerEvent::PeerAvailabilitySnapshot { actor_id: event_actor, .. }
+                        if event_actor == actor_id
+                );
+                events.push(event);
+                if reached_snapshot {
+                    break;
+                }
+            }
+            events
+        };
+        for event in &events {
+            swarm.apply_event(event);
+        }
+
+        let actor = swarm.actor(actor_id).unwrap();
+        assert!(actor.seeder);
+        assert_eq!(actor.bitfield, [0x80]);
+        let snapshots = peer_snapshots
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].seeder, Some(true));
 
         swarm.shutdown_all().await;
     }
