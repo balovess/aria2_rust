@@ -29,6 +29,7 @@ pub(super) struct PieceDownloadSession<'a> {
     pub(super) num_pieces: u32,
     pub(super) web_seed_manager: Option<Arc<WebSeedManager>>,
     pub(super) pending_pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    pub(super) pending_tracker_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     pub(super) last_pex_send: &'a mut Instant,
     pub(super) pex_send_interval_secs: u64,
     pub(super) writer: Box<dyn SeekableDiskWriter>,

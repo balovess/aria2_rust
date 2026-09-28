@@ -4,13 +4,15 @@ use super::{ChokingAlgorithm, IdentityChokeAction, PeerIdentity};
 use crate::constants;
 use rand::Rng;
 use rand::seq::SliceRandom;
+use std::cmp::Reverse;
+use std::time::{Duration, Instant};
 
 /// Core algorithm: performs tit-for-tat choke rotation.
 ///
 /// Steps:
 /// 1. Check and mark snubbed peers (timeout-based)
 /// 2. Put peers with download activity in the last 30 seconds first
-/// 3. Rank by download speed descending
+/// 3. Rank recent contributors by the rolling 10-second download rate
 /// 4. Recently contributing interested peers are ranked first; the remaining
 ///    peer tail is shuffled and occupies regular positions even when a peer is
 ///    uninterested, matching aria2's leecher selector.
@@ -31,23 +33,28 @@ pub(super) fn rotate_choke_by_identity_with_rng<R: Rng + ?Sized>(
     let regular_slots = algo.config.max_upload_slots.saturating_sub(1);
     let mut regular_candidates = Vec::new();
     let mut stale_candidates = Vec::new();
-    for peer in &algo.peers {
-        let identity = PeerIdentity::from(peer);
+    let now = Instant::now();
+    for peer in &mut algo.peers {
+        let identity = PeerIdentity::from(&*peer);
         if peer.is_snubbed || algo.snubbed_peers.contains(&identity) {
             continue;
         }
         let recent_interested = peer.peer_interested
-            && peer
-                .last_data_time
-                .is_some_and(|received_at| received_at.elapsed().as_secs() < 30);
-        let candidate = (identity, peer.peer_interested, peer.download_speed);
+            && peer.last_data_time.is_some_and(|received_at| {
+                now.saturating_duration_since(received_at) < Duration::from_secs(30)
+            });
+        let candidate = (
+            identity,
+            peer.peer_interested,
+            peer.recent_download_speed_at(now),
+        );
         if recent_interested {
             regular_candidates.push(candidate);
         } else {
             stale_candidates.push(candidate);
         }
     }
-    regular_candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    regular_candidates.sort_by_key(|candidate| Reverse(candidate.2));
     stale_candidates.shuffle(rng);
     regular_candidates.extend(stale_candidates);
     let selected: std::collections::HashSet<_> = regular_candidates

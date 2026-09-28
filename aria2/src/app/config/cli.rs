@@ -259,6 +259,15 @@ impl App {
         set_u64!("split", h.split);
         set_str!("min-split-size", h.min_split_size);
         set_u64!("max-connection-per-server", h.max_connection_per_server);
+        set_u64!(
+            "max-http2-sessions-per-server",
+            h.max_http2_sessions_per_server
+        );
+        set_u64!(
+            "max-http2-streams-per-session",
+            h.max_http2_streams_per_session
+        );
+        set_str!("http-version", h.http_version);
         set_u64!("max-http-pipelining", h.max_http_pipelining);
         // Negation: --no-check-certificate takes precedence over --check-certificate
         if h.no_check_certificate.unwrap_or(false) {

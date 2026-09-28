@@ -45,8 +45,8 @@ fn test_private_torrent_dht_engine_not_started() {
     // starts as None by default, asserting here documents the BEP 0027
     // invariant: the download loop will never start DHT for this command.
     assert!(
-        cmd.dht_engine.is_none(),
-        "DHT engine must not be started for private torrents (BEP 0027)"
+        cmd.dht_engines.is_empty(),
+        "DHT engines must not be started for private torrents (BEP 0027)"
     );
 }
 

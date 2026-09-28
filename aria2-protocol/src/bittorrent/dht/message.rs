@@ -307,10 +307,24 @@ impl DhtMessageBuilder {
     /// `compact_nodes` is a concatenation of 26-byte compact node entries
     /// (20 bytes node ID + 6 bytes IPv4 compact addr) per BEP 0005.
     pub fn find_node_response(tx: &[u8], self_id: &[u8; 20], compact_nodes: &[u8]) -> DhtMessage {
+        Self::find_node_response_with_nodes_field(tx, self_id, b"nodes", compact_nodes)
+    }
+
+    /// Build a find_node response carrying IPv6 compact nodes under `nodes6`.
+    pub fn find_node_response6(tx: &[u8], self_id: &[u8; 20], compact_nodes: &[u8]) -> DhtMessage {
+        Self::find_node_response_with_nodes_field(tx, self_id, b"nodes6", compact_nodes)
+    }
+
+    fn find_node_response_with_nodes_field(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        nodes_field: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
         let mut r_dict = std::collections::BTreeMap::new();
         r_dict.insert(b"id".to_vec(), BencodeValue::Bytes(self_id.to_vec()));
         r_dict.insert(
-            b"nodes".to_vec(),
+            nodes_field.to_vec(),
             BencodeValue::Bytes(compact_nodes.to_vec()),
         );
         DhtMessage::new_response(tx.to_vec(), BencodeValue::Dict(r_dict))
@@ -346,11 +360,31 @@ impl DhtMessageBuilder {
         token: &[u8],
         compact_nodes: &[u8],
     ) -> DhtMessage {
+        Self::get_peers_response_with_nodes_field(tx, self_id, token, b"nodes", compact_nodes)
+    }
+
+    /// Build a get_peers response carrying closest IPv6 nodes under `nodes6`.
+    pub fn get_peers_response_with_nodes6(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
+        Self::get_peers_response_with_nodes_field(tx, self_id, token, b"nodes6", compact_nodes)
+    }
+
+    fn get_peers_response_with_nodes_field(
+        tx: &[u8],
+        self_id: &[u8; 20],
+        token: &[u8],
+        nodes_field: &[u8],
+        compact_nodes: &[u8],
+    ) -> DhtMessage {
         let mut r_dict = std::collections::BTreeMap::new();
         r_dict.insert(b"id".to_vec(), BencodeValue::Bytes(self_id.to_vec()));
         r_dict.insert(b"token".to_vec(), BencodeValue::Bytes(token.to_vec()));
         r_dict.insert(
-            b"nodes".to_vec(),
+            nodes_field.to_vec(),
             BencodeValue::Bytes(compact_nodes.to_vec()),
         );
         DhtMessage::new_response(tx.to_vec(), BencodeValue::Dict(r_dict))

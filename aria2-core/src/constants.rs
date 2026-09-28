@@ -101,7 +101,16 @@ pub const DEFAULT_FILE_ALLOCATION: &str = "prealloc";
 pub const DEFAULT_SECURE_FALLOC: bool = false;
 pub const CONCURRENT_MIN_FILE_SIZE: usize = 1024 * 1024;
 pub const PROGRESS_UPDATE_BYTES: usize = 256 * 1024;
+/// Hard per-download, per-authority ceiling for physical HTTP TCP connections.
+/// The adaptive scheduler changes active Range request/stream concurrency,
+/// while HTTP/2 may multiplex several Range requests over one TCP session.
 pub const DEFAULT_MAX_CONNECTION_PER_SERVER: usize = 16;
+/// Default count of independent HTTP/2 client pools for concurrent Range traffic.
+pub const DEFAULT_HTTP2_SESSIONS_PER_SERVER: usize = 4;
+/// Default simultaneous HTTP/2 Range streams allowed on each physical session.
+pub const DEFAULT_HTTP2_STREAMS_PER_SESSION: usize = 4;
+/// Maximum simultaneous HTTP Range request budget for one download and the
+/// number of durable parent ranges before adaptive dynamic slicing.
 pub const DEFAULT_SPLIT: u16 = 16;
 pub const DEFAULT_MIN_SPLIT_SIZE: u64 = 1024 * 1024;
 pub const MIN_SEGMENT_SIZE: usize = 1024 * 256;

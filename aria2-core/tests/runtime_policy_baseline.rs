@@ -12,8 +12,15 @@ use aria2_core::config::{
 
 const COMPATIBILITY_POLICIES: &str = include_str!("fixtures/compatibility_option_policies.txt");
 
-// Rust keeps the original RPC policy as the baseline and explicitly adds the
-// DHT controls that are implemented by the Rust engine.
+// Rust keeps the original RPC policy as the baseline and explicitly registers
+// implemented Rust-only extensions here rather than changing the upstream
+// compatibility fixture.
+const RUST_HTTP2_POLICY_EXTENSIONS: &[&str] = &[
+    "http-version",
+    "max-http2-sessions-per-server",
+    "max-http2-streams-per-session",
+];
+
 const RUST_DHT_POLICY_EXTENSIONS: &[&str] = &[
     "enable-dht",
     "enable-dht6",
@@ -99,6 +106,7 @@ fn assert_policy_matches_baseline(
 fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions() {
     let mut initial_extensions = vec!["bt-tracker-stopped-timeout"];
     initial_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
+    initial_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setInitialOption",
         compatibility_policy_names("setInitialOption"),
@@ -112,6 +120,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
         "enable-public-trackers",
     ];
     global_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
+    global_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeGlobalOption",
         compatibility_policy_names("setChangeGlobalOption"),
@@ -120,6 +129,7 @@ fn runtime_policies_match_compatibility_baseline_with_explicit_rust_extensions()
     );
     let mut reserved_extensions = vec!["enable-public-trackers"];
     reserved_extensions.extend_from_slice(RUST_DHT_POLICY_EXTENSIONS);
+    reserved_extensions.extend_from_slice(RUST_HTTP2_POLICY_EXTENSIONS);
     assert_policy_matches_baseline(
         "setChangeOptionForReserved",
         compatibility_policy_names("setChangeOptionForReserved"),

@@ -201,6 +201,43 @@ fn test_recent_download_data_precedes_higher_speed_regular_candidate() {
 }
 
 #[test]
+fn leecher_rotation_ranks_recent_download_rate_after_old_burst_expires() {
+    let now = Instant::now();
+    let mut algo = ChokingAlgorithm::new(ChokingConfig {
+        max_upload_slots: 4,
+        ..Default::default()
+    });
+
+    let mut expired_burst = create_test_peer(100_000.0, 0.0, true, true);
+    let expired_identity = PeerIdentity::from(&expired_burst);
+    expired_burst.last_data_time = Some(now - Duration::from_secs(11));
+    expired_burst.record_download_rate_at(1_100_000, now - Duration::from_secs(11));
+
+    assert!(expired_burst.download_speed > 300.0);
+    algo.add_peer(expired_burst);
+
+    let mut recent_identities = Vec::new();
+    for speed in [300.0, 200.0, 100.0] {
+        let mut peer = create_test_peer(speed, 0.0, true, true);
+        peer.last_data_time = Some(now - Duration::from_secs(1));
+        peer.record_download_rate_at(speed as u64, now - Duration::from_secs(1));
+        recent_identities.push(PeerIdentity::from(&peer));
+        algo.add_peer(peer);
+    }
+
+    let actions = algo.rotate_choke_by_identity();
+
+    assert!(!actions.iter().any(|action| {
+        matches!(action, IdentityChokeAction::Unchoke(identity) if *identity == expired_identity)
+    }));
+    for identity in recent_identities {
+        assert!(actions.iter().any(|action| {
+            matches!(action, IdentityChokeAction::Unchoke(candidate) if *candidate == identity)
+        }));
+    }
+}
+
+#[test]
 fn leecher_uninterested_stale_peer_consumes_regular_slot() {
     use rand::SeedableRng;
 

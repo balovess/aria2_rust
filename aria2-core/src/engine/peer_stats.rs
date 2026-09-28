@@ -1,10 +1,12 @@
 //! Peer statistics tracking with sliding window speed calculation.
 //!
 //! This module provides [`PeerStats`] for tracking per-peer metrics including
-//! upload/download byte counts, speed calculations using Exponential Moving Average (EMA),
+//! upload/download byte counts, EMA speed estimates and bounded rolling speed
+//! windows for choke ranking,
 //! choke/interested state management for BT choking algorithm implementation,
 //! and bad peer detection/banning system for handling peers that send invalid data.
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -15,12 +17,60 @@ use crate::constants;
 /// Controls responsiveness vs. smoothness of speed estimates.
 /// 0.5 provides balanced behavior: responsive to changes while filtering noise.
 const EMA_ALPHA: f64 = constants::PEER_STATS_EMA_ALPHA;
+const PEER_RATE_WINDOW: Duration = Duration::from_secs(10);
+const PEER_RATE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Threshold for banning peers that send too many invalid pieces.
 ///
 /// When a peer's `bad_data_count` reaches this value, they are permanently
 /// banned for the remainder of the session.
 pub const BAD_DATA_THRESHOLD: u32 = constants::PEER_STATS_BAD_DATA_THRESHOLD as u32;
+
+/// Bounded byte-rate samples used to match aria2's `SpeedCalc` choke ranking.
+#[derive(Clone, Default)]
+struct PeerSpeedWindow {
+    samples: VecDeque<(Instant, u64)>,
+    window_bytes: u64,
+}
+
+impl PeerSpeedWindow {
+    fn speed_at(&mut self, now: Instant) -> u64 {
+        self.remove_expired(now);
+        let Some((oldest_sample, _)) = self.samples.front() else {
+            return 0;
+        };
+        let elapsed_millis = now
+            .saturating_duration_since(*oldest_sample)
+            .as_millis()
+            .max(1);
+        ((self.window_bytes as u128 * 1000) / elapsed_millis).min(u64::MAX as u128) as u64
+    }
+
+    fn record(&mut self, bytes: u64, at: Instant) {
+        if bytes == 0 {
+            return;
+        }
+        self.remove_expired(at);
+        if let Some((last_sample, last_bytes)) = self.samples.back_mut()
+            && at.saturating_duration_since(*last_sample) < PEER_RATE_SAMPLE_INTERVAL
+        {
+            *last_bytes = last_bytes.saturating_add(bytes);
+        } else {
+            self.samples.push_back((at, bytes));
+        }
+        self.window_bytes = self.window_bytes.saturating_add(bytes);
+    }
+
+    fn remove_expired(&mut self, now: Instant) {
+        while let Some((sample_time, bytes)) = self.samples.front().copied() {
+            if now.saturating_duration_since(sample_time) <= PEER_RATE_WINDOW {
+                break;
+            }
+            self.samples.pop_front();
+            self.window_bytes = self.window_bytes.saturating_sub(bytes);
+        }
+    }
+}
 
 /// Per-peer statistics for BitTorrent choking algorithm decisions.
 ///
@@ -45,7 +95,7 @@ pub struct PeerStats {
     pub downloaded_bytes: u64,
 
     // ------------------------------------------------------------------
-    // Speed estimates (bytes/sec), updated via EMA
+    // Speed estimates (bytes/sec); these public estimates remain EMA-based.
     // ------------------------------------------------------------------
     /// Current upload speed estimate in bytes/second.
     pub upload_speed: f64,
@@ -142,6 +192,11 @@ pub struct PeerStats {
 
     /// Last time `on_data_received` was called (for download speed EMA).
     last_download_tick: Instant,
+
+    /// Recent sent bytes used by seeder-state choke ranking.
+    upload_rate_window: PeerSpeedWindow,
+    /// Recent received bytes used by leecher-state choke ranking.
+    download_rate_window: PeerSpeedWindow,
 }
 
 impl PeerStats {
@@ -196,6 +251,8 @@ impl PeerStats {
             created_at: now,
             last_upload_tick: now,
             last_download_tick: now,
+            upload_rate_window: PeerSpeedWindow::default(),
+            download_rate_window: PeerSpeedWindow::default(),
         }
     }
 
@@ -218,6 +275,7 @@ impl PeerStats {
         self.uploaded_bytes += bytes;
         let now = Instant::now();
         self.last_upload_time = Some(now);
+        self.upload_rate_window.record(bytes, now);
 
         let elapsed = now - self.last_upload_tick;
         self.last_upload_tick = now;
@@ -243,6 +301,28 @@ impl PeerStats {
         }
     }
 
+    /// Return upload throughput over the same rolling window used by aria2's
+    /// `SpeedCalc::calculateSpeed`, for seeder-state choke ranking.
+    pub(crate) fn recent_upload_speed_at(&mut self, now: Instant) -> u64 {
+        self.upload_rate_window.speed_at(now)
+    }
+
+    /// Return download throughput over the same rolling window used by aria2's
+    /// `SpeedCalc::calculateSpeed`, for leecher-state choke ranking.
+    pub(crate) fn recent_download_speed_at(&mut self, now: Instant) -> u64 {
+        self.download_rate_window.speed_at(now)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_download_rate_at(&mut self, bytes: u64, at: Instant) {
+        self.download_rate_window.record(bytes, at);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_upload_rate_at(&mut self, bytes: u64, at: Instant) {
+        self.upload_rate_window.record(bytes, at);
+    }
+
     /// Record that we received `bytes` from this peer.
     ///
     /// Increments [`downloaded_bytes`](Self::downloaded_bytes),
@@ -253,6 +333,7 @@ impl PeerStats {
     pub fn on_data_received(&mut self, bytes: u64) {
         self.downloaded_bytes += bytes;
         let now = Instant::now();
+        self.download_rate_window.record(bytes, now);
         self.last_message_received_at = now;
         self.last_data_time = Some(now);
         self.is_snubbed = false;

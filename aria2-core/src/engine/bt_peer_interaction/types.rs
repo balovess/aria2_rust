@@ -28,7 +28,7 @@ pub struct BtPeerConnectionOptions {
     pub utp_listen_port: Option<u16>,
     /// Advertise BEP 5 support on outbound peer handshakes.
     pub dht_enabled: bool,
-    /// TCP port advertised in the BEP 5 Port message and BEP 10 `p` key.
+    /// TCP port advertised in the BEP 10 `p` key.
     pub listen_port: Option<u16>,
     /// v2 info-hash for a hybrid BEP 52 torrent.
     pub hybrid_info_hash_v2: Option<[u8; 32]>,
@@ -50,7 +50,7 @@ impl BtPeerConnectionOptions {
             peer_agent: options.peer_agent.clone(),
             enable_utp: options.enable_utp,
             utp_listen_port: options.utp_listen_port,
-            dht_enabled: options.enable_dht,
+            dht_enabled: options.enable_dht || options.enable_dht6,
             listen_port: None,
             hybrid_info_hash_v2: None,
         }

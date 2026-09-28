@@ -25,23 +25,11 @@ impl BtPeerCoordinator {
         self.max_peers = max_peers;
     }
 
-    pub(crate) fn should_replenish(&self, active: usize) -> bool {
-        self.max_peers == 0 || active < self.minimum_peers()
-    }
-
     pub(crate) fn available_slots(&self, active: usize) -> usize {
         if self.max_peers == 0 {
             self.batch_size
         } else {
             self.max_peers.saturating_sub(active).min(self.batch_size)
-        }
-    }
-
-    pub(crate) fn minimum_peers(&self) -> usize {
-        if self.max_peers == 0 {
-            0
-        } else {
-            (self.max_peers * 4 / 5).max(1)
         }
     }
 
@@ -70,14 +58,6 @@ mod tests {
 
     fn peer(ip: &str, port: u16) -> PeerAddr {
         PeerAddr::new(ip, port)
-    }
-
-    #[test]
-    fn computes_original_minimum_peer_threshold() {
-        let coordinator = BtPeerCoordinator::new(10, 10);
-        assert_eq!(coordinator.minimum_peers(), 8);
-        assert!(coordinator.should_replenish(7));
-        assert!(!coordinator.should_replenish(8));
     }
 
     #[test]

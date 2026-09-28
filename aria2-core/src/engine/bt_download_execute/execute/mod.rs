@@ -16,7 +16,7 @@ mod web_seed;
 #[cfg(test)]
 mod tests;
 
-pub use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
+pub(crate) use dht_periodic_lookup::{DhtPeriodicLookup, check_periodic_dht_lookup};
 
 use std::collections::HashSet;
 

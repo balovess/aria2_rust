@@ -105,6 +105,20 @@ fn uri_host(uri: &str) -> Option<String> {
     reqwest::Url::parse(uri).ok()?.host_str().map(str::to_owned)
 }
 
+fn range_client_pool_count(options: &DownloadOptions) -> usize {
+    let max_connections = options
+        .max_connection_per_server
+        .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        .clamp(1, constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        as usize;
+    let requested_sessions = options
+        .max_http2_sessions_per_server
+        .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
+        .clamp(1, constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
+        as usize;
+    requested_sessions.min(max_connections)
+}
+
 /// Return the actual HTTP proxy endpoint used for an HTTP(S) URI.
 ///
 /// The endpoint, rather than the origin, determines the address family of the
@@ -223,7 +237,11 @@ fn build_download_client(
                 .resolve_to_addrs(&host, addresses);
             let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, client_tls)?;
-            return crate::http::client_pool::configure_http2_download_client(builder)
+            return options
+                .http_version
+                .configure(crate::http::client_pool::configure_http2_download_client(
+                    builder,
+                ))
                 .build()
                 .map(Arc::new)
                 .map_err(|error| {
@@ -250,7 +268,11 @@ fn build_download_client(
                 )));
             let builder = apply_local_address(builder, local_address);
             let builder = crate::http::client_identity::apply(builder, client_tls)?;
-            return crate::http::client_pool::configure_http2_download_client(builder)
+            return options
+                .http_version
+                .configure(crate::http::client_pool::configure_http2_download_client(
+                    builder,
+                ))
                 .build()
                 .map(Arc::new)
                 .map_err(|error| {
@@ -260,9 +282,10 @@ fn build_download_client(
                 });
         }
 
-        return Ok(crate::http::client_pool::get_bound_client(
+        return Ok(crate::http::client_pool::get_bound_client_with_version(
             local_address,
             options.http_accept_gzip,
+            options.http_version,
         ));
     }
 
@@ -342,7 +365,11 @@ fn build_download_client(
 
     let builder = apply_local_address(builder, local_address);
     let builder = crate::http::client_identity::apply(builder, client_tls)?;
-    crate::http::client_pool::configure_http2_download_client(builder)
+    options
+        .http_version
+        .configure(crate::http::client_pool::configure_http2_download_client(
+            builder,
+        ))
         .build()
         .map(Arc::new)
         .map_err(|error| {
@@ -669,16 +696,18 @@ impl DownloadCommand {
             .target
             .as_deref()
             .is_some_and(|addresses| !addresses.is_empty());
+        let session_count = range_client_pool_count(options);
         let range_clients = if no_proxy && !has_resolved_target && !has_custom_tls {
-            crate::http::client_pool::get_bound_download_clients(
+            crate::http::client_pool::get_bound_download_clients_with_version(
                 local_address,
                 options.http_accept_gzip,
+                session_count,
+                options.http_version,
             )
         } else {
-            let mut clients =
-                Vec::with_capacity(crate::http::client_pool::HTTP2_DOWNLOAD_SESSION_COUNT);
+            let mut clients = Vec::with_capacity(session_count);
             clients.push(client.as_ref().clone());
-            for _ in 1..crate::http::client_pool::HTTP2_DOWNLOAD_SESSION_COUNT {
+            for _ in 1..session_count {
                 clients.push(
                     build_download_client(
                         uri,

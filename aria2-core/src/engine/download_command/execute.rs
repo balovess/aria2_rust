@@ -122,7 +122,7 @@ impl DownloadCommand {
         }
     }
 
-    async fn send_head_with_redirects(&self, uri: &str) -> Option<reqwest::Response> {
+    async fn send_head_with_redirects(&self, uri: &str) -> Option<PreparedHttpResponse> {
         let mut current_url = reqwest::Url::parse(uri).ok()?;
         let cookie_helper = self.create_cookie_helper();
         let initial_scheme = current_url.scheme().to_owned();
@@ -145,7 +145,10 @@ impl DownloadCommand {
 
             let status_code = response.status().as_u16();
             if !matches!(status_code, 300..=303 | 307 | 308) {
-                return Some(response);
+                return Some(PreparedHttpResponse {
+                    response,
+                    effective_uri: current_url.to_string(),
+                });
             }
 
             let location = response
@@ -242,7 +245,6 @@ impl DownloadCommand {
             }
         };
 
-        let url_for_head = reqwest::Url::parse(uri).ok();
         let options = self.group.recover().options_arc();
         self.publish_output_path();
         let known_total_length = self.group.recover().total_length();
@@ -267,8 +269,13 @@ impl DownloadCommand {
         };
         let response_for_metadata = prepared_get
             .as_ref()
-            .map(|prepared| &prepared.response)
-            .or(head_resp.as_ref());
+            .or(head_resp.as_ref())
+            .map(|prepared| &prepared.response);
+        let mut effective_uri = prepared_get
+            .as_ref()
+            .or(head_resp.as_ref())
+            .map(|prepared| prepared.effective_uri.clone())
+            .unwrap_or_else(|| uri.to_owned());
 
         // An explicit output name is authoritative. For an inferred HTTP
         // name, the first successful response is the metadata seam at which
@@ -303,22 +310,18 @@ impl DownloadCommand {
             }
         }
 
-        let (total_length, head_supports_range) = if let Some(resp) = response_for_metadata {
-            let tl = resp
-                .headers()
+        let mut total_length = if let Some(resp) = response_for_metadata {
+            resp.headers()
                 .get(reqwest::header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(0);
-            let sr = resp
-                .headers()
-                .get("Accept-Ranges")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.to_lowercase().contains("bytes"));
-            (tl, sr)
+                .unwrap_or(0)
         } else {
-            (known_total_length, false)
+            0
         };
+        if total_length == 0 {
+            total_length = known_total_length;
+        }
 
         // `dry_run` is a metadata-only HTTP operation. The HEAD above checks
         // availability and discovers the size, but no range probe, output
@@ -348,23 +351,82 @@ impl DownloadCommand {
             })?;
         }
 
-        let supports_range = if head_supports_range {
-            true
-        } else if total_length > constants::CONCURRENT_MIN_FILE_SIZE as u64 {
+        let mut supports_range = false;
+        let mut probed_http_version = None;
+        let metadata_allows_probe = response_for_metadata
+            .map(|response| response.status().is_success())
+            .unwrap_or(known_total_length > 0);
+        let should_probe_range = metadata_allows_probe
+            && (total_length == 0 || total_length > constants::CONCURRENT_MIN_FILE_SIZE as u64)
+            && (total_length > 0 || should_head || known_total_length > 0);
+        if should_probe_range {
+            let cookie_helper = self.create_cookie_helper();
+            let cookie_header = reqwest::Url::parse(&effective_uri)
+                .map(|url| cookie_helper.build_cookie_header_from_url(&url))
+                .ok()
+                .filter(|header| !header.is_empty());
+            let target_scheme = reqwest::Url::parse(&effective_uri)
+                .ok()
+                .map(|url| url.scheme().to_owned())
+                .unwrap_or_else(|| "http".to_owned());
+            let (proxy_user, proxy_passwd) = options.proxy_credentials_for_scheme(&target_scheme);
+            let auth_options = crate::http::AuthResolveOptions {
+                http_auth_challenge: options.http_auth_challenge,
+                no_netrc: options.no_netrc,
+                http_user: options.http_user.clone(),
+                http_passwd: options.http_passwd.clone(),
+                ftp_user: options.ftp_user.clone(),
+                ftp_passwd: options.ftp_passwd.clone(),
+                proxy_user,
+                proxy_passwd,
+            };
             let prober = RangeProber::new(Arc::clone(&self.client), self.request_policy.clone())
-                .with_cookie_header(
-                    url_for_head
-                        .as_ref()
-                        .map(|url| {
-                            self.create_cookie_helper()
-                                .build_cookie_header_from_url(url)
-                        })
-                        .filter(|header| !header.is_empty()),
-                );
-            prober.probe_range_support(uri, total_length).await
-        } else {
-            false
-        };
+                .with_cookie_header(cookie_header)
+                .with_cookie_helper(cookie_helper)
+                .with_auth_options(auth_options, options.netrc_path.clone());
+            let probe_retry_policy =
+                RetryPolicy::new(options.max_retries, options.retry_wait.saturating_mul(1000));
+            let mut probe_attempt = 0u32;
+            let probe = loop {
+                match prober.probe(&effective_uri).await {
+                    Ok(probe) => break probe,
+                    Err(error) if probe_retry_policy.should_retry(probe_attempt, &error) => {
+                        let retry_wait = probe_retry_policy
+                            .compute_wait(probe_attempt.saturating_add(1))
+                            .unwrap_or_default();
+                        probe_attempt = probe_attempt.saturating_add(1);
+                        if !retry_wait.is_zero() {
+                            self.wait_for_retry(retry_wait).await?;
+                        }
+                        debug!(
+                            attempt = probe_attempt,
+                            wait_ms = retry_wait.as_millis() as u64,
+                            error = %error,
+                            "Retrying transient HTTP Range capability probe"
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            supports_range = probe.supports_range;
+            if probe.total_length > 0 {
+                total_length = probe.total_length;
+            }
+            effective_uri = probe.effective_url;
+            if effective_uri != uri {
+                self.group
+                    .recover_mut()
+                    .add_redirect_uri(effective_uri.as_str());
+            }
+            info!(
+                supports_range,
+                total_length,
+                final_url = %effective_uri,
+                http_version = ?probe.version,
+                "HTTP range capability probe completed"
+            );
+            probed_http_version = probe.version;
+        }
 
         let original_path = self.output_path.clone();
         if options.remove_control_file {
@@ -611,7 +673,7 @@ impl DownloadCommand {
                     );
                 }
                 let max_retries = options.max_retries;
-                let target_scheme = reqwest::Url::parse(uri)
+                let target_scheme = reqwest::Url::parse(&effective_uri)
                     .ok()
                     .map(|url| url.scheme().to_owned())
                     .unwrap_or_else(|| "http".to_string());
@@ -643,9 +705,11 @@ impl DownloadCommand {
                     self.file_allocation.clone(),
                     self.global_limiter.clone(),
                 )
-                .with_range_clients(Arc::clone(&self.range_clients));
+                .with_range_clients(Arc::clone(&self.range_clients))
+                .with_initial_http_version(&effective_uri, probed_http_version);
                 match concurrent_downloader.execute_with_retry(
                     uri,
+                    &effective_uri,
                     total_length,
                     &resume_state,
                     max_retries,

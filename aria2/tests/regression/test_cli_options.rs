@@ -1006,6 +1006,9 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
         "log-max-files",
         "log-max-size",
         "lpd-listen-port",
+        "max-http2-sessions-per-server",
+        "max-http2-streams-per-session",
+        "http-version",
         "mmap-threshold",
         "on-bt-download-error",
         "pid-file",
@@ -1039,7 +1042,7 @@ fn regression_registry_inventory_matches_compatibility_baseline_and_extensions()
     assert_eq!(baseline.len(), 213, "compatibility inventory changed");
     assert_eq!(
         registered.len(),
-        241,
+        242,
         "all-features registry inventory changed"
     );
     assert_eq!(
@@ -1458,6 +1461,36 @@ fn regression_max_connection_range_validation() {
     let mut parser = ConfigParser::new();
     parser.parse_cli_args(&["--max-connection-per-server=8"]);
     assert_eq!(parser.get_i64("max-connection-per-server").unwrap(), 8);
+}
+
+#[test]
+fn regression_max_http2_sessions_per_server_range_validation() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-sessions-per-server=12"]);
+    assert_eq!(parser.get_i64("max-http2-sessions-per-server").unwrap(), 12);
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-sessions-per-server=17"]);
+    assert!(parser.has_errors());
+}
+
+#[test]
+fn regression_http_protocol_and_h2_stream_options_validate() {
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--http-version=2"]);
+    assert_eq!(parser.get_str("http-version"), Some("2"));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--http-version=1.0"]);
+    assert!(parser.has_errors());
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-streams-per-session=8"]);
+    assert_eq!(parser.get_i64("max-http2-streams-per-session"), Some(8));
+
+    let mut parser = ConfigParser::new();
+    parser.parse_cli_args(&["--max-http2-streams-per-session=257"]);
+    assert!(parser.has_errors());
 }
 
 /// Test: timeout minimum value validation.

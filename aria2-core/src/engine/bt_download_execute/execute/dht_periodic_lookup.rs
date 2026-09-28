@@ -51,7 +51,7 @@ const MAX_RETRIES: u32 = 10;
 /// occurred, and whether a lookup is currently in progress.
 ///
 /// C++: `DHTGetPeersCommand`
-pub struct DhtPeriodicLookup {
+pub(crate) struct DhtPeriodicLookup {
     /// When the last DHT get_peers lookup was initiated.
     last_lookup_time: Option<Instant>,
     /// Number of consecutive retries (reset to 0 when we have enough peers).
@@ -77,12 +77,12 @@ pub struct DhtPeriodicLookup {
 
 impl DhtPeriodicLookup {
     /// Create a new periodic lookup tracker with default settings.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_peer_limits(30, 55)
     }
 
     /// Create a new periodic lookup tracker with custom peer limits.
-    pub fn with_peer_limits(min_peers: usize, max_peers: usize) -> Self {
+    pub(crate) fn with_peer_limits(min_peers: usize, max_peers: usize) -> Self {
         Self {
             last_lookup_time: None,
             num_retry: 0,
@@ -100,7 +100,7 @@ impl DhtPeriodicLookup {
     ///
     /// `BtRuntimeState` is the source of truth for runtime option changes;
     /// this tracker keeps only the small snapshot needed for scheduling.
-    pub fn set_peer_limits(&mut self, min_peers: usize, max_peers: usize) {
+    pub(crate) fn set_peer_limits(&mut self, min_peers: usize, max_peers: usize) {
         self.min_peers = min_peers;
         self.max_peers = max_peers;
     }
@@ -112,7 +112,7 @@ impl DhtPeriodicLookup {
     /// - The appropriate interval has elapsed based on current peer count
     ///
     /// C++: `DHTGetPeersCommand::execute()` — the interval logic
-    pub fn should_lookup(&self, current_peer_count: usize) -> bool {
+    pub(crate) fn should_lookup(&self, current_peer_count: usize) -> bool {
         if self.lookup_in_progress || self.lookup_completion_pending {
             return false;
         }
@@ -154,7 +154,7 @@ impl DhtPeriodicLookup {
     ///
     /// Call this after `should_lookup()` returns `true` and the lookup
     /// is actually started.
-    pub fn on_lookup_started(&mut self) {
+    pub(crate) fn on_lookup_started(&mut self) {
         self.last_lookup_time = Some(Instant::now());
         self.lookup_in_progress = true;
     }
@@ -166,7 +166,7 @@ impl DhtPeriodicLookup {
     /// next lookup.
     ///
     /// C++: `DHTGetPeersCommand::execute()` — task finished handling
-    pub fn on_lookup_completed(&mut self, current_peer_count: usize) {
+    pub(crate) fn on_lookup_completed(&mut self, current_peer_count: usize) {
         self.lookup_in_progress = false;
         self.lookup_completion_pending = false;
         self.last_lookup_time = Some(Instant::now());
@@ -191,29 +191,31 @@ impl DhtPeriodicLookup {
     }
 
     /// Get the current retry count.
-    pub fn retry_count(&self) -> u32 {
+    pub(crate) fn retry_count(&self) -> u32 {
         self.num_retry
     }
 
     /// Whether a lookup is currently in progress.
-    pub fn is_lookup_in_progress(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn is_lookup_in_progress(&self) -> bool {
         self.lookup_in_progress
     }
 
     /// Whether a finished result is waiting for PeerStorage admission.
-    pub fn is_lookup_completion_pending(&self) -> bool {
+    pub(crate) fn is_lookup_completion_pending(&self) -> bool {
         self.lookup_completion_pending
     }
 
     /// Get the time elapsed since the last lookup.
-    pub fn time_since_last_lookup(&self) -> Option<Duration> {
+    #[cfg(test)]
+    pub(crate) fn time_since_last_lookup(&self) -> Option<Duration> {
         self.last_lookup_time.map(|t| t.elapsed())
     }
 
     /// Return the time until the next lookup deadline for the current peer
     /// count. An in-flight lookup has its completion notification as the wake
     /// source, so it does not need a timer while it is running.
-    pub fn next_lookup_delay(&self, active_connection_count: usize) -> Option<Duration> {
+    pub(crate) fn next_lookup_delay(&self, active_connection_count: usize) -> Option<Duration> {
         if self.lookup_in_progress || self.lookup_completion_pending {
             return None;
         }
@@ -227,33 +229,37 @@ impl DhtPeriodicLookup {
 
     /// Start a lookup in the background when the adaptive interval allows it.
     ///
-    /// The task owns its `Arc<DhtEngine>` and copied info-hash, so the command
-    /// can continue processing pieces while the network lookup is pending.
-    pub fn start_lookup(
+    /// The task owns the family-scoped engine handles and copied info-hash,
+    /// so the command can keep processing pieces while lookups are pending.
+    pub(crate) fn start_lookup(
         &mut self,
-        dht_engine: Option<&Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+        dht_engines: &crate::engine::dht_engine_set::DhtEngineSet,
         info_hash: [u8; 20],
+        announce_port: u16,
         active_connection_count: usize,
     ) -> bool {
         if !self.should_lookup(active_connection_count) {
             return false;
         }
-        let Some(engine) = dht_engine else {
+        if dht_engines.is_empty() {
             return false;
-        };
+        }
 
         debug!(
             info_hash = %hex::encode(info_hash),
             peers = active_connection_count,
             retry = self.retry_count(),
-            "Scheduling periodic DHT get_peers lookup"
+            announce_port,
+            "Scheduling periodic DHT peer lookup and announce"
         );
         self.on_lookup_started();
-        let engine = Arc::clone(engine);
+        let engines = dht_engines.clone();
         let result_slot = Arc::clone(&self.lookup_result);
         let notify = Arc::clone(&self.lookup_notify);
         self.lookup_task = Some(tokio::spawn(async move {
-            let result = engine.find_peers(&info_hash).await;
+            let result = engines
+                .find_peers_and_announce(&info_hash, announce_port)
+                .await;
             *result_slot
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
@@ -263,7 +269,7 @@ impl DhtPeriodicLookup {
     }
 
     /// Return the completion notification used by the download loop.
-    pub fn completion_notifier(&self) -> Arc<Notify> {
+    pub(crate) fn completion_notifier(&self) -> Arc<Notify> {
         Arc::clone(&self.lookup_notify)
     }
 
@@ -272,7 +278,7 @@ impl DhtPeriodicLookup {
     /// Returns `true` only when the background task published a result. An
     /// unfinished lookup has no result to take, so callers remain responsive
     /// without inspecting `JoinHandle::is_finished()` on every loop turn.
-    pub fn take_completed_lookup(
+    pub(crate) fn take_completed_lookup(
         &mut self,
         new_peers: &mut Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
     ) -> bool {
@@ -326,7 +332,7 @@ impl DhtPeriodicLookup {
     /// `Drop` still aborts as a synchronous fallback, but normal command
     /// teardown awaits the aborted task so its engine reference and any local
     /// lookup state are released before the command lifecycle ends.
-    pub async fn cancel_pending_lookup(&mut self) {
+    pub(crate) async fn cancel_pending_lookup(&mut self) {
         if let Some(task) = self.lookup_task.take() {
             task.abort();
             let _ = task.await;
@@ -367,10 +373,11 @@ impl Drop for DhtPeriodicLookup {
 /// Returns `true` if a lookup was started or a previous result was collected.
 /// The caller must invoke [`DhtPeriodicLookup::on_lookup_completed`] after it
 /// admits the returned peers so retry decisions use the final tracked count.
-pub async fn check_periodic_dht_lookup(
+pub(crate) async fn check_periodic_dht_lookup(
     dht_lookup: &mut DhtPeriodicLookup,
-    dht_engine: Option<&std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    dht_engines: &crate::engine::dht_engine_set::DhtEngineSet,
     info_hash: &[u8; 20],
+    announce_port: u16,
     active_connection_count: usize,
     new_peers: &mut Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
 ) -> bool {
@@ -378,7 +385,12 @@ pub async fn check_periodic_dht_lookup(
     if completed {
         return true;
     }
-    let started = dht_lookup.start_lookup(dht_engine, *info_hash, active_connection_count);
+    let started = dht_lookup.start_lookup(
+        dht_engines,
+        *info_hash,
+        announce_port,
+        active_connection_count,
+    );
     completed || started
 }
 
@@ -507,7 +519,9 @@ mod tests {
         let mut lookup = DhtPeriodicLookup::with_peer_limits(1, 2);
         let mut peers = Vec::new();
 
-        assert!(lookup.start_lookup(Some(&engine), [0x42; 20], 0));
+        let mut engines = crate::engine::dht_engine_set::DhtEngineSet::default();
+        engines.insert(Arc::clone(&engine));
+        assert!(lookup.start_lookup(&engines, [0x42; 20], 0, 0));
         assert!(lookup.is_lookup_in_progress());
 
         let notify = lookup.completion_notifier();
@@ -538,7 +552,9 @@ mod tests {
         .expect("local DHT engine should start");
         let mut lookup = DhtPeriodicLookup::new();
 
-        assert!(lookup.start_lookup(Some(&engine), [0x24; 20], 0));
+        let mut engines = crate::engine::dht_engine_set::DhtEngineSet::default();
+        engines.insert(Arc::clone(&engine));
+        assert!(lookup.start_lookup(&engines, [0x24; 20], 0, 0));
         lookup.cancel_pending_lookup().await;
 
         assert!(!lookup.is_lookup_in_progress());

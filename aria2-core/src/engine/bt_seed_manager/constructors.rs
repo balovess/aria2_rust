@@ -161,7 +161,7 @@ impl BtSeedManager {
         config: BtSeedingConfig,
         exit_condition: SeedExitCondition,
         total_downloaded: u64,
-        announcer: Option<TrackerAnnouncer>,
+        tracker_actor: Option<crate::engine::bt_download_execute::BtTrackerAnnouncerActor>,
         peer_id: [u8; 20],
         incoming_peers: Option<crate::engine::bt_peer_listener::IncomingPeerReceiver>,
         upload_counter: Arc<AtomicU64>,
@@ -175,10 +175,11 @@ impl BtSeedManager {
             total_downloaded,
             CancellationToken::new(),
             incoming_peers,
-            announcer,
+            None,
             peer_id,
             swarm,
         );
+        manager.tracker_actor = tracker_actor;
         manager.upload_counter = upload_counter;
         manager
     }
@@ -243,6 +244,7 @@ impl BtSeedManager {
             // the full rotation interval before receiving an unchoke.
             last_choke_time: Instant::now() - Duration::from_secs(CHOKE_ROUND_INTERVAL_SECS),
             announcer: announcer.map(|announcer| Arc::new(tokio::sync::Mutex::new(announcer))),
+            tracker_actor: None,
             pending_tracker_announce: None,
             peer_id,
             incoming_peers,

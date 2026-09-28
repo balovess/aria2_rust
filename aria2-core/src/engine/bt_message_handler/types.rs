@@ -39,6 +39,13 @@ pub struct PieceDownloadResult {
     pub failed_peers: Vec<SocketAddr>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PieceRequestPlan {
+    pub(crate) piece_index: u32,
+    pub(crate) piece_length: u32,
+    pub(crate) num_blocks: u32,
+}
+
 /// Internal result carrying stable peer identities alongside the public
 /// endpoint/index attribution contract.
 pub(crate) struct ActorAwarePieceDownloadResult {
@@ -49,4 +56,20 @@ pub(crate) struct ActorAwarePieceDownloadResult {
     pub(crate) availability_changed_actor_ids: Vec<PeerActorId>,
     /// Peers discovered through negotiated BEP 11 messages during the attempt.
     pub(crate) pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    /// Peers discovered by the torrent-scoped tracker actor during the attempt.
+    pub(crate) tracker_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+}
+
+pub(crate) struct ActorAwarePieceBatchEntry {
+    pub(crate) piece_index: u32,
+    pub(crate) result: std::result::Result<PieceDownloadResult, String>,
+    /// Actor IDs aligned with `result.peer_bytes` when the piece completed.
+    pub(crate) peer_actor_ids: Vec<PeerActorId>,
+}
+
+pub(crate) struct ActorAwarePieceBatchResult {
+    pub(crate) pieces: Vec<ActorAwarePieceBatchEntry>,
+    pub(crate) availability_changed_actor_ids: Vec<PeerActorId>,
+    pub(crate) pex_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
+    pub(crate) tracker_peers: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>,
 }

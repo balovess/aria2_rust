@@ -132,6 +132,20 @@ impl MirrorCoordinator {
         Some((mirror_idx, mirror_url, seg_info))
     }
 
+    /// Select a mirror for a dynamically sized range within the next parent.
+    pub fn select_mirror_for_range_excluding(
+        &mut self,
+        excluded_mirrors: &[usize],
+        max_lengths: &[u64],
+    ) -> Option<(usize, String, (u32, u64, u64))> {
+        let result = self
+            .segment_manager
+            .select_mirror_for_next_range_excluding(excluded_mirrors, max_lengths)?;
+        let (mirror_idx, range) = result;
+        let mirror_url = self.urls.get(mirror_idx).cloned()?;
+        Some((mirror_idx, mirror_url, range))
+    }
+
     /// Report a successful segment download.
     ///
     /// This updates server statistics with the measured speed and
@@ -162,6 +176,28 @@ impl MirrorCoordinator {
         }
 
         success
+    }
+
+    /// Report a successful dynamic subrange and return whether its parent
+    /// piece is now complete.
+    pub fn on_range_complete(
+        &mut self,
+        mirror_idx: usize,
+        seg_idx: u32,
+        len: u64,
+        bytes_per_sec: u64,
+    ) -> Option<bool> {
+        let is_multi = self.segment_manager.mirror_active_segments(mirror_idx) > 1;
+        let complete = self.segment_manager.report_segment_range_complete(
+            seg_idx,
+            len,
+            bytes_per_sec,
+            is_multi,
+        );
+        if complete.is_some() {
+            self.maybe_rebalance_connections();
+        }
+        complete
     }
 
     /// Report a failed segment download.

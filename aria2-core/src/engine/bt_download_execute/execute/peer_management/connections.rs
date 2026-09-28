@@ -40,17 +40,9 @@ impl BtDownloadCommand {
         checkpoint.save(&bitfield, self.completed_bytes).await
     }
 
-    async fn announce_stopped_for_halt(&mut self, info_hash: &[u8; 20], total_size: u64) {
-        if let Some(announcer) = self.tracker_announcer.as_mut() {
-            announcer
-                .announce_stopped(
-                    info_hash,
-                    &self.local_peer_id,
-                    self.completed_bytes,
-                    total_size.saturating_sub(self.completed_bytes),
-                    self.total_uploaded,
-                )
-                .await;
+    async fn announce_stopped_for_halt(&mut self) {
+        if let Some(actor) = self.tracker_actor.as_ref() {
+            let _ = actor.stop().await;
         }
     }
 
@@ -114,7 +106,8 @@ impl BtDownloadCommand {
             let group = self.group.recover();
             let mut options =
                 BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
-            options.dht_enabled = group.options().enable_dht && !self.is_private;
+            options.dht_enabled =
+                (group.options().enable_dht || group.options().enable_dht6) && !self.is_private;
             options.listen_port = (self.listen_port != 0).then_some(self.listen_port);
             options.hybrid_info_hash_v2 = info_hash_v2;
             options
@@ -173,8 +166,7 @@ impl BtDownloadCommand {
         if self.group.recover().is_halt_requested() {
             self.return_checked_out_peers(&checked_out);
             self.persist_checkpoint_for_halt().await?;
-            self.announce_stopped_for_halt(info_hash_raw, total_size)
-                .await;
+            self.announce_stopped_for_halt().await;
             return Err(Aria2Error::DownloadFailed(
                 "BitTorrent download halted".into(),
             ));
@@ -204,8 +196,7 @@ impl BtDownloadCommand {
                     if self.group.recover().is_halt_requested() {
                         self.return_checked_out_peers(&checked_out);
                         self.persist_checkpoint_for_halt().await?;
-                        self.announce_stopped_for_halt(info_hash_raw, total_size)
-                            .await;
+                        self.announce_stopped_for_halt().await;
                         return Err(Aria2Error::DownloadFailed(
                             "BitTorrent download halted".into(),
                         ));

@@ -61,9 +61,9 @@ impl BtSeedManager {
             let Some(discovery) = self.peer_discovery.as_mut() else {
                 return;
             };
-            let Some(dht_engine) = discovery.dht_engine.as_ref() else {
+            if discovery.dht_engines.is_empty() {
                 return;
-            };
+            }
 
             let max_peers = discovery.group.recover().options().bt_max_peers;
             let min_peers = if max_peers == 0 {
@@ -75,8 +75,9 @@ impl BtSeedManager {
             let mut peers = Vec::new();
             crate::engine::bt_download_execute::execute::check_periodic_dht_lookup(
                 &mut discovery.dht_lookup,
-                Some(dht_engine),
+                &discovery.dht_engines,
                 &self.info_hash,
+                discovery.listen_port,
                 self.swarm.len(),
                 &mut peers,
             )
@@ -218,10 +219,10 @@ impl BtSeedManager {
             .map(|actor| actor.stats.peer_id)
             .collect::<HashSet<_>>();
         peer_ids.insert(self.peer_id);
-        let dht_engine = self
+        let dht_engines = self
             .peer_discovery
             .as_ref()
-            .and_then(|discovery| discovery.dht_engine.clone());
+            .map(|discovery| discovery.dht_engines.clone());
         let pex_enabled = self
             .peer_discovery
             .as_ref()
@@ -256,7 +257,9 @@ impl BtSeedManager {
 
             let actor_id = match self.swarm.spawn_peer(
                 connection,
-                dht_engine.clone(),
+                dht_engines
+                    .as_ref()
+                    .and_then(|engines| engines.for_peer(endpoint)),
                 Arc::clone(&self.piece_provider),
             ) {
                 Ok(actor_id) => actor_id,

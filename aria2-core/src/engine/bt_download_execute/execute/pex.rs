@@ -155,7 +155,8 @@ impl BtDownloadCommand {
             let group = self.group.recover();
             let mut options =
                 BtPeerConnectionOptions::from_download_options(group.options(), self.local_peer_id);
-            options.dht_enabled = group.options().enable_dht && !self.is_private;
+            options.dht_enabled =
+                (group.options().enable_dht || group.options().enable_dht6) && !self.is_private;
             options.listen_port = (self.listen_port != 0).then_some(self.listen_port);
             options
         };
@@ -165,11 +166,8 @@ impl BtDownloadCommand {
         let command: &BtDownloadCommand = self;
         let options = &connection_options;
         let mut results = stream::iter(peers_to_connect.iter().cloned())
-            .map(|peer| {
-                let command = command;
-                let options = options;
-                async move {
-                    let result = command
+            .map(|peer| async move {
+                let result = command
                     .connect_peer_ready_unless_halted(
                         &peer,
                         info_hash_raw,
@@ -179,8 +177,7 @@ impl BtDownloadCommand {
                         total_size,
                     )
                     .await;
-                    (peer, result)
-                }
+                (peer, result)
             })
             .buffer_unordered(peers_to_connect.len().max(1));
         let mut connected = Vec::with_capacity(peers_to_connect.len());
@@ -339,9 +336,7 @@ mod tests {
         )
         .expect("test command should construct");
 
-        let good_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let good_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let good_addr = good_listener.local_addr().unwrap();
         let good_peer = tokio::spawn(async move {
             loop {
@@ -354,9 +349,7 @@ mod tests {
             }
         });
 
-        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let slow_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let slow_addr = slow_listener.local_addr().unwrap();
         let slow_peer = tokio::spawn(async move {
             while let Ok((stream, _)) = slow_listener.accept().await {

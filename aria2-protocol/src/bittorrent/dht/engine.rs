@@ -358,7 +358,7 @@ impl DhtEngine {
                 "Loaded DHT routing table from disk"
             );
             for pnode in data.nodes {
-                let node = DhtNode::new(pnode.id, pnode.addr);
+                let node = DhtNode::unverified(pnode.id, pnode.addr);
                 routing_table.insert(node);
             }
         }
@@ -605,7 +605,6 @@ impl DhtEngine {
         // Save routing table to disk
         if let Some(ref path) = self.context.config.dht_file_path {
             let path = path.clone();
-            let persistence_max_age = self.context.config.persistence_max_age;
             // Serialize before taking the snapshot so an older automatic
             // snapshot cannot overwrite this final shutdown snapshot later.
             let save_guard = Arc::clone(&self.context.routing_table_save_lock)
@@ -618,12 +617,7 @@ impl DhtEngine {
             let save_path = path.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _save_guard = save_guard;
-                super::persistence::DhtPersistence::merge_and_save_to_file_sync_with_max_age(
-                    &save_path,
-                    &self_id,
-                    &nodes,
-                    persistence_max_age,
-                )
+                super::persistence::DhtPersistence::save_to_file_sync(&save_path, &self_id, &nodes)
             })
             .await;
             match result {

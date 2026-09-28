@@ -20,7 +20,8 @@
 //!
 //! When we are still downloading, we unchoke peers that are sending us
 //! data (regular unchokers: peerInterested AND received data within 30 s),
-//! sorted by download speed. Round 0 triggers a planned optimistic unchoke.
+//! ranked by the same rolling 10-second download rate as aria2 `SpeedCalc`.
+//! Round 0 triggers a planned optimistic unchoke.
 //!
 //! # C++ Equivalence
 //!
@@ -83,8 +84,7 @@ struct SeederPeerEntry {
 }
 
 impl SeederPeerEntry {
-    fn from_peer(index: usize, peer: &PeerStats) -> Self {
-        let now = Instant::now();
+    fn from_peer(index: usize, peer: &PeerStats, upload_speed: u64, now: Instant) -> Self {
         let last_am_unchoking = peer.last_unchoke_at;
         let recent_unchoking =
             now.duration_since(last_am_unchoking) < SEEDER_RECENT_UNCHOKE_TIME_FRAME;
@@ -94,7 +94,7 @@ impl SeederPeerEntry {
             outstanding_upload: peer.outstanding_upload_count > 0,
             last_am_unchoking,
             recent_unchoking,
-            upload_speed: peer.upload_speed as i64,
+            upload_speed: upload_speed.min(i64::MAX as u64) as i64,
         }
     }
 }
@@ -175,7 +175,7 @@ struct LeecherPeerEntry {
     identity: crate::engine::choking_algorithm::PeerIdentity,
     /// Index back into the caller's active peer list.
     index: usize,
-    /// Peer's download speed (bytes/sec), primary ranking criterion
+    /// Peer's rolling download speed (bytes/sec), primary ranking criterion
     download_speed: i64,
     /// Whether this peer is a regular unchoker (interested AND sent data
     /// within `LEECHER_REGULAR_UNCHOKE_WINDOW`)
@@ -183,16 +183,15 @@ struct LeecherPeerEntry {
 }
 
 impl LeecherPeerEntry {
-    fn from_peer(index: usize, peer: &PeerStats) -> Self {
-        let now = Instant::now();
+    fn from_peer(index: usize, peer: &mut PeerStats, now: Instant) -> Self {
         let regular_unchoker = peer.peer_interested
             && peer
                 .last_data_time
                 .is_some_and(|t| now.duration_since(t) < LEECHER_REGULAR_UNCHOKE_WINDOW);
         Self {
-            identity: peer.into(),
+            identity: (&*peer).into(),
             index,
-            download_speed: peer.download_speed as i64,
+            download_speed: peer.recent_download_speed_at(now).min(i64::MAX as u64) as i64,
             regular_unchoker,
         }
     }
@@ -267,7 +266,8 @@ impl BtLeecherStateChoke {
 
     pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
         tracing::debug!("Leecher state, {} choke round started", self.round);
-        self.last_round = Some(Instant::now());
+        let now = Instant::now();
+        self.last_round = Some(now);
 
         // Phase 1: reset all peers to choked, collect entries (skip snubbed)
         let mut entries: Vec<LeecherPeerEntry> = Vec::new();
@@ -280,7 +280,7 @@ impl BtLeecherStateChoke {
                 peer.opt_unchoking = false;
                 continue;
             }
-            entries.push(LeecherPeerEntry::from_peer(i, peer));
+            entries.push(LeecherPeerEntry::from_peer(i, peer, now));
         }
 
         // Phase 2: planned optimistic unchoke (round 0 only)
@@ -511,8 +511,16 @@ impl BtSeederStateChoke {
     }
 
     pub fn execute_choke(&mut self, peers: &mut [&mut PeerStats]) {
+        self.execute_choke_at(peers, Instant::now());
+    }
+
+    /// Execute one choke round using a supplied monotonic timestamp.
+    ///
+    /// This keeps the public production entrypoint on the system clock while
+    /// allowing deterministic verification of time-window ranking.
+    pub(crate) fn execute_choke_at(&mut self, peers: &mut [&mut PeerStats], now: Instant) {
         tracing::debug!("Seeder state, {} choke round started", self.round);
-        self.last_round = Some(Instant::now());
+        self.last_round = Some(now);
 
         // Phase 1: reset all peers to choked, collect interested peers
         let mut entries: Vec<SeederPeerEntry> = Vec::new();
@@ -522,7 +530,13 @@ impl BtSeederStateChoke {
             }
             peer.am_choking = true;
             if peer.peer_interested {
-                entries.push(SeederPeerEntry::from_peer(i, peer));
+                let recent_upload_speed = peer.recent_upload_speed_at(now);
+                entries.push(SeederPeerEntry::from_peer(
+                    i,
+                    peer,
+                    recent_upload_speed,
+                    now,
+                ));
                 continue;
             }
             // Not interested → no optimistic unchoke either

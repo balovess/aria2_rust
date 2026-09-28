@@ -78,6 +78,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_seeder_ranks_by_recent_upload_rate_after_old_burst_expires() {
+        let now = Instant::now();
+        let mut peers = [
+            {
+                let mut peer = make_peer();
+                peer.peer_interested = true;
+                peer.last_unchoke_at = now - Duration::from_secs(60);
+                peer.upload_speed = 100_000.0;
+                peer.record_upload_rate_at(100_000, now - Duration::from_secs(11));
+                peer
+            },
+            {
+                let mut peer = make_peer();
+                peer.peer_interested = true;
+                peer.last_unchoke_at = now - Duration::from_secs(60);
+                peer.upload_speed = 100.0;
+                peer.record_upload_rate_at(100, now - Duration::from_secs(1));
+                peer
+            },
+        ];
+
+        assert!(
+            peers[0].upload_speed > peers[1].upload_speed,
+            "the expired historical EMA is intentionally larger"
+        );
+        let mut refs = to_choke_refs(&mut peers);
+        let mut choke = BtSeederStateChoke::with_slots(1);
+        choke.set_round(2);
+        choke.execute_choke_at(&mut refs[..], now);
+
+        assert!(!peers[1].am_choking, "recently uploaded peer ranks first");
+        assert!(
+            peers[0].am_choking,
+            "expired upload burst must not win a slot"
+        );
+    }
+
+    #[test]
     fn test_seeder_optimistic_unchoke_rounds_0_1() {
         let mut peers: Vec<PeerStats> = (0..6)
             .map(|_| {
@@ -185,6 +223,63 @@ pub(crate) mod tests {
         assert!(
             !peers[1].am_choking,
             "Regular unchoker peer should be unchoked"
+        );
+    }
+
+    #[test]
+    fn test_leecher_ranks_by_recent_download_rate_after_old_burst_expires() {
+        let now = Instant::now();
+        let mut peers = [
+            {
+                let mut peer = make_peer();
+                peer.peer_interested = true;
+                peer.last_data_time = Some(now - Duration::from_secs(11));
+                peer.download_speed = 100_000.0;
+                peer.record_download_rate_at(1_100_000, now - Duration::from_secs(11));
+                peer
+            },
+            {
+                let mut peer = make_peer();
+                peer.peer_interested = true;
+                peer.last_data_time = Some(now - Duration::from_secs(1));
+                peer.download_speed = 300.0;
+                peer.record_download_rate_at(300, now - Duration::from_secs(1));
+                peer
+            },
+            {
+                let mut peer = make_peer();
+                peer.peer_interested = true;
+                peer.last_data_time = Some(now - Duration::from_secs(1));
+                peer.download_speed = 200.0;
+                peer.record_download_rate_at(200, now - Duration::from_secs(1));
+                peer
+            },
+            {
+                let mut peer = make_peer();
+                peer.peer_interested = true;
+                peer.last_data_time = Some(now - Duration::from_secs(1));
+                peer.download_speed = 100.0;
+                peer.record_download_rate_at(100, now - Duration::from_secs(1));
+                peer
+            },
+        ];
+
+        assert!(peers[0].download_speed > peers[1].download_speed);
+        assert_eq!(peers[0].recent_download_speed_at(now), 0);
+        assert!(peers[1].recent_download_speed_at(now) > peers[2].recent_download_speed_at(now));
+
+        let mut refs = to_choke_refs(&mut peers);
+        let mut choke = BtLeecherStateChoke::new();
+        choke.set_round(1);
+        choke.execute_choke(&mut refs[..]);
+
+        assert!(
+            peers[0].am_choking,
+            "expired historical EMA must not win a regular unchoke slot"
+        );
+        assert!(
+            peers[1..].iter().all(|peer| !peer.am_choking),
+            "the three peers with recent download activity should get the regular slots"
         );
     }
 

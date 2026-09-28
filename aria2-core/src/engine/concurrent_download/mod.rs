@@ -1,5 +1,6 @@
 //! Concurrent download module — split into sub-modules for maintainability.
 
+mod fixed_piece_size;
 mod pipeline;
 mod segment;
 
@@ -52,6 +53,31 @@ pub(crate) fn server_stat_error_code(error: &Aria2Error) -> u16 {
         ) => 404,
         Aria2Error::Recoverable(RecoverableError::Timeout) => 408,
         _ => crate::constants::HTTP_DEFAULT_ERROR_CODE,
+    }
+}
+
+/// HTTP responses and HTTP/2 stream errors that indicate server-side
+/// concurrency pressure. These trigger rollback of the current connection
+/// probe while preserving the incumbent topology.
+pub(crate) fn is_capacity_limited_error(error: &Aria2Error) -> bool {
+    match error {
+        Aria2Error::Recoverable(RecoverableError::ServerError { code }) => {
+            matches!(*code, 429 | 503)
+        }
+        Aria2Error::Recoverable(
+            RecoverableError::TemporaryNetworkFailure { message }
+            | RecoverableError::HttpProtocolError { message },
+        ) => {
+            let message = message.to_ascii_uppercase();
+            [
+                "REFUSED_STREAM",
+                "ENHANCE_YOUR_CALM",
+                "MAX_CONCURRENT_STREAMS",
+            ]
+            .iter()
+            .any(|signal| message.contains(signal))
+        }
+        _ => false,
     }
 }
 
@@ -129,6 +155,9 @@ pub struct ConcurrentDownloader {
     /// When `Some`, tokens are acquired after the per-download limiter
     /// in `segment.rs` and `pipeline.rs`.
     pub(crate) global_limiter: Option<RateLimiter>,
+    /// Protocol observed by the redirect-aware Range probe, scoped to its
+    /// final authority so multi-mirror downloads do not infer other servers.
+    pub(crate) initial_http_protocol: Option<(String, reqwest::Version)>,
 }
 
 pub(super) async fn flush_requested_control_file(
@@ -188,6 +217,7 @@ impl ConcurrentDownloader {
             mmap_threshold,
             file_allocation,
             global_limiter,
+            initial_http_protocol: None,
         }
     }
 
@@ -195,6 +225,18 @@ impl ConcurrentDownloader {
         if !clients.is_empty() {
             self.range_clients = clients;
         }
+        self
+    }
+
+    pub(crate) fn with_initial_http_version(
+        mut self,
+        uri: &str,
+        version: Option<reqwest::Version>,
+    ) -> Self {
+        self.initial_http_protocol = version.and_then(|version| {
+            crate::engine::http_segment_request_executor::authority_key(uri)
+                .map(|authority| (authority, version))
+        });
         self
     }
 
@@ -241,7 +283,8 @@ impl ConcurrentDownloader {
     /// concurrent download and delegates accordingly.
     pub async fn execute_with_retry(
         &mut self,
-        uri: &str,
+        source_uri: &str,
+        effective_uri: &str,
         total_length: u64,
         resume_state: &ResumeState,
         max_retries_per_segment: u32,
@@ -258,10 +301,29 @@ impl ConcurrentDownloader {
             max_retries_per_segment
         );
 
-        let all_uris: Vec<String> = {
+        let source_uris: Vec<String> = {
             let g = self.group.recover();
             g.uris().iter().map(|uri| uri.to_string()).collect()
         };
+        // Redirect targets can be appended to RequestGroup's URI list so the
+        // next attempt can use them. For this active attempt, replace its
+        // source URI with the already-probed final URL and collapse duplicate
+        // entries; otherwise the redirect source and target are scheduled as
+        // two mirrors, wasting a Range request per segment.
+        let mut all_uris = Vec::with_capacity(source_uris.len().max(1));
+        for source in source_uris {
+            let effective = if source == source_uri {
+                effective_uri
+            } else {
+                source.as_str()
+            };
+            if !all_uris.iter().any(|existing| existing == effective) {
+                all_uris.push(effective.to_owned());
+            }
+        }
+        if !all_uris.iter().any(|existing| existing == effective_uri) {
+            all_uris.insert(0, effective_uri.to_owned());
+        }
 
         if all_uris.len() > 1 {
             tracing::info!(
@@ -279,7 +341,7 @@ impl ConcurrentDownloader {
         } else {
             segment::execute(
                 self,
-                uri,
+                effective_uri,
                 total_length,
                 resume_state,
                 max_retries_per_segment,
@@ -291,7 +353,10 @@ impl ConcurrentDownloader {
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_segment_count, server_stat_error_code, should_retry_segment};
+    use super::{
+        effective_segment_count, is_capacity_limited_error, server_stat_error_code,
+        should_retry_segment,
+    };
     use crate::engine::retry_policy::RetryPolicy;
     use crate::error::{Aria2Error, RecoverableError};
 
@@ -327,6 +392,21 @@ mod tests {
             )),
             crate::constants::HTTP_DEFAULT_ERROR_CODE
         );
+    }
+
+    #[test]
+    fn detects_http_capacity_responses_and_refused_h2_streams() {
+        let capacity_status = Aria2Error::Recoverable(RecoverableError::ServerError { code: 429 });
+        let refused_stream = Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "HTTP/2 stream error: REFUSED_STREAM".into(),
+        });
+        let ordinary_reset = Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
+            message: "connection reset by peer".into(),
+        });
+
+        assert!(is_capacity_limited_error(&capacity_status));
+        assert!(is_capacity_limited_error(&refused_stream));
+        assert!(!is_capacity_limited_error(&ordinary_reset));
     }
 
     #[test]

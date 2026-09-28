@@ -62,7 +62,7 @@ impl BtDownloadCommand {
         self.track_peer_for_upload_choking(&connection.stats);
         let actor_id = match swarm.spawn_peer(
             connection,
-            self.dht_engine.clone(),
+            self.dht_engines.for_peer(endpoint),
             std::sync::Arc::clone(&upload.provider),
         ) {
             Ok(actor_id) => actor_id,

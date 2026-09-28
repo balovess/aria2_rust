@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::engine::choking_algorithm::ChokingAlgorithm;
+use crate::engine::dht_engine_set::DhtEngineSet;
 use crate::engine::lpd_manager::LpdManager;
 use crate::engine::multi_file_layout::MultiFileLayout;
 use crate::rate_limiter::RateLimiter;
@@ -76,7 +77,7 @@ impl Drop for BtDownloadCommand {
         if let Some(registry) = self.bt_registry.as_ref()
             && let Ok(mut registry) = registry.write()
         {
-            if let Some(engine) = self.dht_engine.as_ref() {
+            for engine in self.dht_engines.iter() {
                 registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
             }
             let gid = self.group.recover().gid().value();
@@ -118,15 +119,13 @@ pub struct BtDownloadCommand {
     pub(crate) seed_time: Option<std::time::Duration>,
     pub(crate) seed_ratio: Option<f64>,
     pub(crate) total_uploaded: u64,
-    /// Unified tracker announcer (HTTP + UDP) using BtAnnounce state machine.
-    /// Created during execute() from the torrent announce list.
-    pub(crate) tracker_announcer: Option<crate::engine::bt_tracker_comm::TrackerAnnouncer>,
+    /// Torrent-scoped actor owns the tracker announce state and deadlines.
+    pub(crate) tracker_actor: Option<crate::engine::bt_download_execute::BtTrackerAnnouncerActor>,
     /// Actual TCP listener port advertised to trackers for this command.
     pub(crate) listen_port: u16,
     pub(crate) bt_runtime: std::sync::Arc<BtRuntimeState>,
     pub(crate) peer_coordinator: crate::engine::bt_peer_coordinator::BtPeerCoordinator,
-    pub(crate) dht_engine:
-        Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    pub(crate) dht_engines: DhtEngineSet,
     pub(crate) public_trackers:
         Option<std::sync::Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>>,
     pub(crate) choking_algo: Option<ChokingAlgorithm>,
@@ -263,13 +262,15 @@ impl BtDownloadCommand {
         // The DHT engine owns background receive/maintenance tasks and its
         // final routing-table snapshot. Shut it down before the command is
         // dropped; DhtEngine::Drop only aborts tasks and cannot persist state.
-        if let Some(engine) = self.dht_engine.as_ref()
-            && let Some(registry) = self.bt_registry.as_ref()
+        let engines = std::mem::take(&mut self.dht_engines).into_vec();
+        if let Some(registry) = self.bt_registry.as_ref()
             && let Ok(mut registry) = registry.write()
         {
-            registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
+            for engine in &engines {
+                registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
+            }
         }
-        if let Some(engine) = self.dht_engine.take() {
+        for engine in engines {
             let is_global = self
                 .bt_registry
                 .as_ref()
@@ -285,20 +286,8 @@ impl BtDownloadCommand {
             let info_hash_hex = hex::encode(info_hash);
             manager.unregister_torrent(&info_hash_hex).await;
         }
-        if let Ok(meta) =
-            aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&self.torrent_data)
-            && let Some(ref mut announcer) = self.tracker_announcer
-        {
-            let total_size = meta.total_size();
-            announcer
-                .announce_stopped(
-                    &meta.network_info_hash(),
-                    &self.local_peer_id,
-                    self.completed_bytes,
-                    total_size.saturating_sub(self.completed_bytes),
-                    self.total_uploaded,
-                )
-                .await;
+        if let Some(actor) = self.tracker_actor.take() {
+            let _ = actor.stop().await;
         }
         self.bt_peer_route.take();
     }
@@ -346,7 +335,7 @@ mod tests {
         )
         .await
         .expect("local DHT engine should start");
-        command.dht_engine = Some(dht);
+        command.dht_engines.insert(dht);
 
         command.shutdown().await;
 
@@ -378,7 +367,7 @@ mod tests {
         )
         .await
         .expect("local DHT engine should start");
-        command.dht_engine = Some(std::sync::Arc::clone(&dht));
+        command.dht_engines.insert(std::sync::Arc::clone(&dht));
         registry
             .write()
             .expect("BT registry should be writable")

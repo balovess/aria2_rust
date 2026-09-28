@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use crate::engine::bt_download_execute::{EndgameState, types::PeerKey};
+use crate::engine::bt_peer_connection::PeerActorId;
 
 use super::peer_actor::{PeerGeneration, TryRequestError};
 use super::peer_snapshot::PeerSchedulingSnapshot;
@@ -78,16 +79,16 @@ pub(super) fn fill_request_windows(
     piece_index: u32,
     endgame_state: &mut EndgameState,
     failed_peers: &mut Vec<SocketAddr>,
-) -> bool {
+) -> Vec<(PeerActorId, tokio::sync::watch::Receiver<u64>)> {
     if block_requests.is_empty() {
-        return false;
+        return Vec::new();
     }
 
-    let mut queue_blocked = false;
+    let mut queue_waiters = Vec::new();
     for peer_index in 0..peers.len() {
         if !live[peer_index]
-            || !peers.peers()[peer_index].has_piece
-            || !peers.peer_can_request(peer_index)
+            || !peers.has_piece(peer_index, piece_index)
+            || !peers.peer_can_request(peer_index, piece_index)
         {
             continue;
         }
@@ -140,8 +141,8 @@ pub(super) fn fill_request_windows(
                         );
                     }
                 }
-                Err(TryRequestError::Full) => {
-                    queue_blocked = true;
+                Err(TryRequestError::Full(capacity_updates)) => {
+                    queue_waiters.push((actor_id, capacity_updates));
                     break;
                 }
                 Err(TryRequestError::Closed) => {
@@ -160,7 +161,7 @@ pub(super) fn fill_request_windows(
             }
         }
     }
-    queue_blocked
+    queue_waiters
 }
 
 #[allow(clippy::too_many_arguments)]

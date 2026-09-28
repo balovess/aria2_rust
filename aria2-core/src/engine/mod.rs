@@ -5,6 +5,8 @@ pub(crate) mod concurrent_download;
 pub mod concurrent_segment_manager;
 #[cfg(feature = "bittorrent")]
 pub(crate) mod dht_config;
+#[cfg(feature = "bittorrent")]
+pub(crate) mod dht_engine_set;
 pub mod download_command;
 pub(crate) mod download_cookie;
 pub mod download_engine;

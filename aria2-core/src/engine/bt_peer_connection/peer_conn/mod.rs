@@ -52,7 +52,6 @@ pub(crate) enum InnerConnection {
 pub(crate) struct PeerActorStartup {
     pub(crate) peer_agent: String,
     pub(crate) listen_port: Option<u16>,
-    pub(crate) dht_enabled: bool,
     pub(crate) allowed_fast: Vec<u32>,
 }
 

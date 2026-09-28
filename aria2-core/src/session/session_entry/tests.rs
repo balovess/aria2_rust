@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::http::HttpVersion;
 use crate::request::request_group::{DownloadOptions, FollowMode};
 use crate::session::session_entry::{SessionEntry, download_options_to_map};
 
@@ -412,6 +413,9 @@ fn test_download_options_to_map_all_fields() {
     let opts = DownloadOptions {
         split: Some(8),
         max_connection_per_server: Some(4),
+        max_http2_sessions_per_server: Some(3),
+        max_http2_streams_per_session: Some(4),
+        http_version: HttpVersion::Http2,
         max_download_limit: Some(102400),
         max_upload_limit: Some(51200),
         dir: Some("/downloads".to_string()),
@@ -558,6 +562,9 @@ fn test_download_options_to_map_all_fields() {
     };
 
     let map = download_options_to_map(&opts);
+    assert_eq!(map.get("max-http2-sessions-per-server").unwrap(), "3");
+    assert_eq!(map.get("max-http2-streams-per-session").unwrap(), "4");
+    assert_eq!(map.get("http-version").unwrap(), "2");
 
     // File allocation
     assert_eq!(map.get("file-allocation").unwrap(), "trunc");
@@ -683,6 +690,9 @@ fn test_download_options_to_map_all_fields() {
 
     // The same canonical string map is consumed by session restoration.
     let restored = DownloadOptions::from_option_strings(&map);
+    assert_eq!(restored.max_http2_sessions_per_server, Some(3));
+    assert_eq!(restored.max_http2_streams_per_session, Some(4));
+    assert_eq!(restored.http_version, HttpVersion::Http2);
     assert!(restored.continue_download);
     assert!(!restored.auto_file_renaming);
     assert!(!restored.always_resume);

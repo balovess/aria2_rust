@@ -48,8 +48,9 @@ async fn seeding_tracker_and_pex_discovery_connect_peers_as_swarm_actors() {
         );
     let discovery = super::SeedPeerDiscovery {
         group,
-        dht_engine: None,
+        dht_engines: crate::engine::dht_engine_set::DhtEngineSet::default(),
         dht_lookup: crate::engine::bt_download_execute::execute::DhtPeriodicLookup::new(),
+        listen_port: 0,
         connection_options,
         total_size: 16,
         utp_socket: None,
@@ -241,8 +242,13 @@ async fn incoming_seeding_actor_forwards_peer_dht_port_to_the_dht_engine() {
     ));
     let discovery = super::SeedPeerDiscovery {
         group,
-        dht_engine: Some(Arc::clone(&dht_engine)),
+        dht_engines: {
+            let mut engines = crate::engine::dht_engine_set::DhtEngineSet::default();
+            engines.insert(Arc::clone(&dht_engine));
+            engines
+        },
         dht_lookup: crate::engine::bt_download_execute::execute::DhtPeriodicLookup::new(),
+        listen_port: 0,
         connection_options:
             crate::engine::bt_peer_interaction::BtPeerConnectionOptions::from_download_options(
                 &options, [0x86; 20],

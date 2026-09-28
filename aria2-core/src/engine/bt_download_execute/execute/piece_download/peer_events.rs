@@ -4,8 +4,6 @@ use crate::engine::bt_download_command::BtDownloadCommand;
 use crate::engine::bt_message_handler::{PeerEvent, PeerSwarm};
 use crate::util::rwlock_ext::RwLockRecover;
 
-const PUBLIC_TRACKER_REFRESH_POLL_SECS: u64 = 30;
-
 pub(super) enum PeerWaitEvent {
     Incoming(crate::engine::bt_peer_listener::IncomingPeer),
     Actor(PeerEvent),
@@ -68,27 +66,12 @@ impl BtDownloadCommand {
         let now = Instant::now();
         let mut deadline = now + Duration::from_secs(24 * 60 * 60);
 
-        if self.dht_engine.is_some()
+        if !self.dht_engines.is_empty()
             && let Some(delay) = self
                 .dht_periodic_lookup
                 .next_lookup_delay(connected_peer_count)
         {
             deadline = deadline.min(now + delay);
-        }
-        if let Some(delay) = self
-            .tracker_announcer
-            .as_ref()
-            .and_then(|announcer| announcer.next_default_announce_delay())
-        {
-            deadline = deadline.min(now + delay);
-        }
-        if !self.is_private
-            && self.group.recover().options().enable_public_trackers
-            && self.public_trackers.is_some()
-        {
-            // A catalog refresh can add trackers after all current tiers have
-            // failed, so keep a bounded wake-up for the merge path above.
-            deadline = deadline.min(now + Duration::from_secs(PUBLIC_TRACKER_REFRESH_POLL_SECS));
         }
         if let Some(stop_timeout_deadline) = stop_timeout_deadline {
             deadline = deadline.min(stop_timeout_deadline);

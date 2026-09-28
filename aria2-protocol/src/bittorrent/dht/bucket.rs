@@ -156,9 +156,9 @@ impl Bucket {
         &self.cached_nodes
     }
 
-    /// Returns the number of good (non-bad) nodes.
+    /// Returns the number of recently verified good nodes.
     pub fn good_node_count(&self) -> usize {
-        self.nodes.iter().filter(|n| !n.is_bad()).count()
+        self.nodes.iter().filter(|n| n.is_good()).count()
     }
 
     // -----------------------------------------------------------------------
@@ -462,9 +462,9 @@ impl Bucket {
         self.last_updated = Instant::now();
     }
 
-    /// Collect good nodes (non-bad) from this bucket.
+    /// Collect recently verified good nodes from this bucket.
     pub fn get_good_nodes(&self) -> Vec<DhtNode> {
-        self.nodes.iter().filter(|n| !n.is_bad()).cloned().collect()
+        self.nodes.iter().filter(|n| n.is_good()).cloned().collect()
     }
 
     /// Count questionable nodes in this bucket.

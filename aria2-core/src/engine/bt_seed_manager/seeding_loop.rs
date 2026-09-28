@@ -128,7 +128,12 @@ impl BtSeedManager {
             .load(std::sync::atomic::Ordering::Relaxed);
         self.publish_upload_stats();
 
-        if let Some(announcer) = self.announcer.as_ref() {
+        if let Some(actor) = self.tracker_actor.take() {
+            self.announcer = actor
+                .stop()
+                .await
+                .map(|announcer| Arc::new(tokio::sync::Mutex::new(announcer)));
+        } else if let Some(announcer) = self.announcer.as_ref() {
             announcer
                 .lock()
                 .await
@@ -187,7 +192,7 @@ impl BtSeedManager {
             deadline = deadline.min(upload_speed_deadline);
         }
         if let Some(discovery) = self.peer_discovery.as_ref()
-            && discovery.dht_engine.is_some()
+            && !discovery.dht_engines.is_empty()
             && let Some(delay) = discovery.dht_lookup.next_lookup_delay(self.swarm.len())
         {
             deadline = deadline.min(now + delay);
@@ -203,10 +208,7 @@ impl BtSeedManager {
         let incoming_receiver = self.incoming_peers.clone();
         let mut event_receiver = self.swarm.lease_event_receiver();
         let dht_notifier = self.peer_discovery.as_ref().and_then(|discovery| {
-            discovery
-                .dht_engine
-                .as_ref()
-                .map(|_| discovery.dht_lookup.completion_notifier())
+            (!discovery.dht_engines.is_empty()).then(|| discovery.dht_lookup.completion_notifier())
         });
         let pending_connections = self
             .pending_peer_connection
@@ -261,7 +263,7 @@ impl BtSeedManager {
     }
 
     fn start_tracker_announce(&mut self) {
-        if self.pending_tracker_announce.is_some() {
+        if self.tracker_actor.is_some() || self.pending_tracker_announce.is_some() {
             return;
         }
         let Some(announcer) = self.announcer.as_ref() else {
@@ -320,16 +322,18 @@ impl BtSeedManager {
 
     fn start_seed_peer_actors(&mut self) {
         let connections = std::mem::take(&mut self.pending_connections);
-        let dht_engine = self
+        let dht_engines = self
             .peer_discovery
             .as_ref()
-            .and_then(|discovery| discovery.dht_engine.clone());
+            .map(|discovery| discovery.dht_engines.clone());
         for connection in connections {
-            if let Err(connection) = self.swarm.spawn_peer(
-                connection,
-                dht_engine.clone(),
-                Arc::clone(&self.piece_provider),
-            ) {
+            let dht_engine = connection
+                .remote_endpoint()
+                .and_then(|endpoint| dht_engines.as_ref()?.for_peer(endpoint));
+            if let Err(connection) =
+                self.swarm
+                    .spawn_peer(connection, dht_engine, Arc::clone(&self.piece_provider))
+            {
                 let endpoint = connection.remote_endpoint();
                 drop(connection);
                 if let Some(endpoint) = endpoint {
@@ -360,7 +364,6 @@ impl BtSeedManager {
             | PeerEvent::ChokeStateChanged { .. }
             | PeerEvent::PeerChokingChanged { .. }
             | PeerEvent::UploadQueueChanged { .. }
-            | PeerEvent::AvailabilityChanged { .. }
             | PeerEvent::PeerAvailabilityChanged { .. }
             | PeerEvent::PeerAvailabilitySnapshot { .. }
             | PeerEvent::AllowedFast { .. }
@@ -375,6 +378,11 @@ impl BtSeedManager {
                 {
                     self.store_peer_addresses(peers);
                 }
+            }
+            PeerEvent::TrackerPeers { peers } => {
+                self.store_tracker_peers(
+                    peers.into_iter().map(|peer| (peer.ip, peer.port)).collect(),
+                );
             }
             PeerEvent::Message { actor_id, .. } => {
                 tracing::trace!(
@@ -456,10 +464,10 @@ impl BtSeedManager {
             return;
         }
 
-        let dht_engine = self
+        let dht_engines = self
             .peer_discovery
             .as_ref()
-            .and_then(|discovery| discovery.dht_engine.clone());
+            .map(|discovery| discovery.dht_engines.clone());
 
         let Some(mut coordinator) = self.swarm.lease_event_receiver() else {
             self.release_peer(endpoint);
@@ -468,7 +476,9 @@ impl BtSeedManager {
         };
         let actor_id = match coordinator.spawn_peer(
             connection,
-            dht_engine,
+            dht_engines
+                .as_ref()
+                .and_then(|engines| engines.for_peer(endpoint)),
             Arc::clone(&self.piece_provider),
         ) {
             Ok(actor_id) => actor_id,

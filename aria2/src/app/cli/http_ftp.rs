@@ -102,7 +102,7 @@ pub struct HttpFtpArgs {
     #[arg(long = "retry-wait")]
     pub retry_wait: Option<u64>,
 
-    /// Maximum concurrent segment requests per download
+    /// Per-download budget for simultaneous HTTP Range requests; actual concurrency adapts below it
     #[arg(short = 's', long)]
     pub split: Option<u64>,
 
@@ -110,9 +110,21 @@ pub struct HttpFtpArgs {
     #[arg(short = 'k', long = "min-split-size")]
     pub min_split_size: Option<String>,
 
-    /// HTTP max connections per server; adaptive download may lower it
+    /// Hard per-download, per-server TCP connection ceiling; HTTP/2 Range streams may share a connection
     #[arg(short = 'x', long = "max-connection-per-server")]
     pub max_connection_per_server: Option<u64>,
+
+    /// Maximum independent HTTP/2 client pools per server and download; capped by -x (default: 4)
+    #[arg(long = "max-http2-sessions-per-server")]
+    pub max_http2_sessions_per_server: Option<u64>,
+
+    /// Fixed HTTP/2 Range streams per physical session (default: 4)
+    #[arg(long = "max-http2-streams-per-session")]
+    pub max_http2_streams_per_session: Option<u64>,
+
+    /// HTTP version: prefer HTTP/2 with HTTP/1.1 fallback, or force one version
+    #[arg(long = "http-version", value_parser = ["auto", "1.1", "2"])]
+    pub http_version: Option<String>,
 
     /// Max pipelined HTTP requests per connection
     #[arg(long = "max-http-pipelining", hide = true)]

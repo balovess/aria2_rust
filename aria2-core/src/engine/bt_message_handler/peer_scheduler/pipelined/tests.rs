@@ -394,6 +394,7 @@ async fn active_download_updates_choke_peer_stats_before_piece_completion() {
     let remote_peer_id = [0x53u8; 20];
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (release_remote, hold_remote) = tokio::sync::oneshot::channel();
     let remote = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request_handshake = [0u8; 68];
@@ -429,6 +430,7 @@ async fn active_download_updates_choke_peer_stats_before_piece_completion() {
             .unwrap();
         let mut closed = [0u8; 1];
         let _ = stream.read(&mut closed).await;
+        let _ = hold_remote.await;
     });
 
     let mut connection = BtPeerConn::connect_plain_with_options(
@@ -465,13 +467,14 @@ async fn active_download_updates_choke_peer_stats_before_piece_completion() {
     .await
     .expect("incomplete piece attempt did not time out");
 
-    remote.await.unwrap();
     assert!(result.is_err());
     assert_eq!(choking_algo.peers()[0].downloaded_bytes, BLOCK_LEN as u64);
     assert_eq!(
         swarm.actor(actor_id).unwrap().stats.downloaded_bytes,
         BLOCK_LEN as u64
     );
+    release_remote.send(()).unwrap();
+    remote.await.unwrap();
     swarm.shutdown_all().await;
 }
 
@@ -562,6 +565,7 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
     let remote_peer_id = [0x47u8; 20];
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
+    let (release_remote, hold_remote) = tokio::sync::oneshot::channel();
     let remote = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request_handshake = [0u8; 68];
@@ -580,6 +584,7 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
             .unwrap();
 
         wait_for_request_and_unchoke(&mut stream).await;
+        let _ = hold_remote.await;
         vec![1]
     });
 
@@ -632,11 +637,9 @@ async fn endgame_applies_choke_rotation_deadline_without_peer_messages() {
     .expect("endgame piece attempt did not respect request timeout");
 
     assert!(result.is_err());
-    assert!(
-        !choking_algo.peers()[0].am_choking,
-        "endgame loop must rotate the eligible peer to unchoked"
-    );
+    assert!(!choking_algo.peers()[0].am_choking);
     assert!(!swarm.actor(actor_id).unwrap().stats.am_choking);
+    release_remote.send(()).unwrap();
     assert_eq!(remote.await.unwrap().as_slice(), &[1]);
     swarm.shutdown_all().await;
 }

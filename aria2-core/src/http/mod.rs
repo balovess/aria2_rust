@@ -10,6 +10,7 @@ pub mod cookie;
 pub mod digest_auth;
 pub mod happy_eyeballs;
 pub mod header_processor;
+pub mod http_version;
 pub mod metalink_http;
 pub mod ns_cookie_parser;
 pub mod proxy;
@@ -71,6 +72,7 @@ pub use auth::netrc::{NetrcEntry as NetrcParserEntry, NetrcError, NetrcParser, f
 pub use browser_context::{
     BrowserContext, BrowserContextUpdate, global as global_browser_context, update_global_json,
 };
+pub use http_version::HttpVersion;
 pub use request_policy::{HttpRequestPolicy, RequestPacing};
 
 // Re-export response processor types for convenient access

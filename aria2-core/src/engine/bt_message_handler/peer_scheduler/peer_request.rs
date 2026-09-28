@@ -68,14 +68,15 @@ impl PeerRequestLedger {
             .map(|(generation, _)| generation)
     }
 
-    pub(super) fn drain_generation(
+    pub(super) fn drain_piece_before_generation(
         &mut self,
+        piece_index: u32,
         generation: RequestGeneration,
     ) -> Vec<(u32, BlockRequest)> {
         let stale = self
             .requests
             .iter()
-            .filter(|(_, (active, _))| *active != generation)
+            .filter(|((piece, _), (active, _))| *piece == piece_index && *active != generation)
             .map(|(key, (_, request))| (key.0, *request))
             .collect::<Vec<_>>();
         for (piece_index, request) in &stale {
@@ -84,14 +85,15 @@ impl PeerRequestLedger {
         stale
     }
 
-    pub(super) fn drain_exact_generation(
+    pub(super) fn drain_piece_generation(
         &mut self,
+        piece_index: u32,
         generation: RequestGeneration,
     ) -> Vec<(u32, BlockRequest)> {
         let matching = self
             .requests
             .iter()
-            .filter(|(_, (active, _))| *active == generation)
+            .filter(|((piece, _), (active, _))| *piece == piece_index && *active == generation)
             .map(|(key, (_, request))| (key.0, *request))
             .collect::<Vec<_>>();
         for (piece_index, request) in &matching {
@@ -138,18 +140,46 @@ mod tests {
     }
 
     #[test]
-    fn generation_change_drains_prior_inflight_requests() {
-        let old_generation = RequestGeneration(20);
-        let current_generation = RequestGeneration(21);
-        let request = request();
+    fn beginning_a_piece_retry_preserves_other_piece_requests() {
+        let old_generation = RequestGeneration(40);
+        let current_generation = RequestGeneration(41);
+        let first = request();
+        let second = BlockRequest {
+            block_index: 3,
+            offset: 48 * 1024,
+            length: 16 * 1024,
+        };
         let mut ledger = PeerRequestLedger::default();
-        ledger.record(old_generation, 7, request);
+        ledger.record(old_generation, 7, first);
+        ledger.record(old_generation, 8, second);
 
         assert_eq!(
-            ledger.drain_generation(current_generation),
-            vec![(7, request)]
+            ledger.drain_piece_before_generation(7, current_generation),
+            vec![(7, first)]
         );
-        assert_eq!(ledger.complete(7, request.offset), None);
+        assert_eq!(ledger.complete(8, second.offset), Some(old_generation));
+        assert_eq!(ledger.complete(7, first.offset), None);
+    }
+
+    #[test]
+    fn ending_a_piece_generation_preserves_other_piece_requests() {
+        let generation = RequestGeneration(50);
+        let first = request();
+        let second = BlockRequest {
+            block_index: 3,
+            offset: 48 * 1024,
+            length: 16 * 1024,
+        };
+        let mut ledger = PeerRequestLedger::default();
+        ledger.record(generation, 7, first);
+        ledger.record(generation, 8, second);
+
+        assert_eq!(
+            ledger.drain_piece_generation(7, generation),
+            vec![(7, first)]
+        );
+        assert_eq!(ledger.complete(8, second.offset), Some(generation));
+        assert_eq!(ledger.len(), 0);
     }
 
     #[test]

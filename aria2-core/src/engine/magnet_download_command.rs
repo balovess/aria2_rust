@@ -7,6 +7,7 @@ use tracing::{info, warn};
 
 use crate::engine::bt_tracker_comm::TrackerAnnouncer;
 use crate::engine::command::{Command, CommandStatus};
+use crate::engine::dht_engine_set::DhtEngineSet;
 use crate::engine::download_command::{ProxyTarget, add_reqwest_proxy};
 use crate::engine::download_event_hooks::{DownloadEventHooks, MetadataResolvedEvent};
 use crate::engine::metadata_exchange::{MetadataExchangeConfig, MetadataExchangeSession};
@@ -80,7 +81,7 @@ pub struct MagnetDownloadCommand {
     started: bool,
     completed_bytes: u64,
     metadata_complete: bool,
-    dht_engine: Option<std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    dht_engines: DhtEngineSet,
     /// Process-wide rate limiter from `DownloadEngine::global_limiter`.
     /// Carried through to the internally-created `BtDownloadCommand`.
     global_limiter: Option<RateLimiter>,
@@ -183,7 +184,7 @@ impl MagnetDownloadCommand {
             started: false,
             completed_bytes: 0,
             metadata_complete: false,
-            dht_engine: None,
+            dht_engines: DhtEngineSet::default(),
             global_limiter: None,
             outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
             #[cfg(feature = "bittorrent")]
@@ -230,31 +231,72 @@ impl MagnetDownloadCommand {
         self.group.recover()
     }
 
-    fn register_dht_engine(
-        &self,
-        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
-    ) {
+    fn clear_registered_dht_engines(&self) {
         if let Some(registry) = self.bt_registry.as_ref()
             && let Ok(mut registry) = registry.write()
         {
-            registry.set_dht_engine_for_gid(self.group.recover().gid().value(), Arc::clone(engine));
+            let gid = self.group.recover().gid().value();
+            for engine in self.dht_engines.iter() {
+                registry.clear_dht_engine_for_gid_if(gid, engine);
+            }
         }
     }
 
-    fn clear_registered_dht_engine(
-        &self,
-        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
-    ) {
-        if let Some(registry) = self.bt_registry.as_ref()
-            && let Ok(mut registry) = registry.write()
-        {
-            registry.clear_dht_engine_for_gid_if(self.group.recover().gid().value(), engine);
+    async fn ensure_dht_engines(&mut self, options: &DownloadOptions) -> Result<()> {
+        let gid = self.group.recover().gid().value();
+        for (use_ipv6, enabled) in [(false, options.enable_dht), (true, options.enable_dht6)] {
+            let family_present = if use_ipv6 {
+                self.dht_engines.ipv6().is_some()
+            } else {
+                self.dht_engines.ipv4().is_some()
+            };
+            if !enabled || family_present {
+                continue;
+            }
+
+            if self
+                .dht_engines
+                .attach_global_if_present(self.bt_registry.as_ref(), gid, use_ipv6)
+            {
+                continue;
+            }
+
+            let config = crate::engine::dht_config::build_dht_engine_config_for_family(
+                options,
+                &self.outbound_network_policy,
+                use_ipv6,
+            )
+            .await?;
+            match self
+                .dht_engines
+                .start_or_join(self.bt_registry.as_ref(), gid, config)
+                .await
+            {
+                Ok(()) => info!(ipv6 = use_ipv6, "Magnet: DHT family engine ready"),
+                Err(error) => {
+                    warn!(ipv6 = use_ipv6, %error, "Magnet: DHT family engine start failed")
+                }
+            }
         }
+
+        Ok(())
+    }
+
+    async fn handoff_dht_engine_to_bt(
+        &mut self,
+        bt_command: &mut crate::engine::bt_download_command::BtDownloadCommand,
+    ) {
+        let options = bt_command.group.recover().options().clone();
+        let dht_enabled = !bt_command.is_private && (options.enable_dht || options.enable_dht6);
+        if !dht_enabled {
+            return;
+        }
+        bt_command.dht_engines = std::mem::take(&mut self.dht_engines);
     }
 
     async fn discover_magnet_peers(
         &self,
-        engine: &std::sync::Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+        engines: &DhtEngineSet,
         info_hash: &[u8; 20],
     ) -> Vec<std::net::SocketAddr> {
         const MAX_ATTEMPTS: usize = 4;
@@ -264,12 +306,24 @@ impl MagnetDownloadCommand {
             Duration::from_secs(2),
         ];
 
-        if let Err(error) = engine.wait_until_ready(Duration::from_secs(5)).await {
-            warn!("Magnet: DHT did not become ready before lookup: {}", error);
+        if engines.is_empty() {
+            return Vec::new();
+        }
+        let readiness = futures::future::join_all(engines.iter().map(|engine| async move {
+            (
+                engine.local_addr(),
+                engine.wait_until_ready(Duration::from_secs(5)).await,
+            )
+        }))
+        .await;
+        for (address, result) in readiness {
+            if let Err(error) = result {
+                warn!(%address, %error, "Magnet: DHT family engine did not become ready before lookup");
+            }
         }
 
         for attempt in 0..MAX_ATTEMPTS {
-            match engine.find_peers(info_hash).await {
+            match engines.find_peers(info_hash).await {
                 Ok(result) if !result.peers.is_empty() => {
                     info!(
                         "Magnet: DHT discovered {} peers (contacted {} nodes, attempt {})",
@@ -421,9 +475,16 @@ impl MagnetDownloadCommand {
     }
 
     async fn shutdown_dht_engine(&mut self) {
-        if let Some(engine) = self.dht_engine.take() {
-            self.clear_registered_dht_engine(&engine);
-            engine.shutdown_async().await;
+        self.clear_registered_dht_engines();
+        for engine in std::mem::take(&mut self.dht_engines).into_vec() {
+            let is_shared = self
+                .bt_registry
+                .as_ref()
+                .and_then(|registry| registry.read().ok())
+                .is_some_and(|registry| registry.is_global_dht_engine(&engine));
+            if !is_shared {
+                engine.shutdown_async().await;
+            }
         }
     }
 
@@ -929,6 +990,7 @@ impl MagnetDownloadCommand {
             return Ok(metadata);
         }
 
+        let outbound_network_policy = Arc::clone(&self.outbound_network_policy);
         let metadata_session = |max_peers_to_try| {
             MetadataExchangeSession::new(MetadataExchangeConfig {
                 max_peers_to_try,
@@ -937,27 +999,8 @@ impl MagnetDownloadCommand {
                 piece_size: 16 * 1024,
                 ..MetadataExchangeConfig::default()
             })
-            .with_outbound_network_policy(Arc::clone(&self.outbound_network_policy))
+            .with_outbound_network_policy(Arc::clone(&outbound_network_policy))
         };
-
-        if enable_dht && self.dht_engine.is_none() {
-            let dht_config = crate::engine::dht_config::build_dht_engine_config_with_policy(
-                &options,
-                &self.outbound_network_policy,
-            )
-            .await?;
-            match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
-                Ok(engine) => {
-                    self.dht_engine = Some(engine);
-                    let engine = self.dht_engine.as_ref().unwrap();
-                    self.register_dht_engine(engine);
-                    info!("Magnet: DHT engine started for peer discovery");
-                }
-                Err(error) => {
-                    warn!("Magnet: DHT engine start failed: {}", error);
-                }
-            }
-        }
 
         // Magnet links commonly carry tracker URLs, and tracker discovery is
         // available even when DHT bootstrap is blocked by NAT or a firewall.
@@ -981,8 +1024,12 @@ impl MagnetDownloadCommand {
             }
         }
 
-        let dht_peers = if let Some(ref engine) = self.dht_engine {
-            self.discover_magnet_peers(engine, &magnet.info_hash).await
+        if enable_dht || options.enable_dht6 {
+            self.ensure_dht_engines(&options).await?;
+        }
+        let dht_peers = if !self.dht_engines.is_empty() {
+            self.discover_magnet_peers(&self.dht_engines, &magnet.info_hash)
+                .await
         } else {
             warn!("Magnet: DHT disabled and tracker discovery returned no usable peers");
             Vec::new()
@@ -1009,18 +1056,19 @@ impl MagnetDownloadCommand {
 
     /// BEP 0027 (Private Torrent) enforcement after metadata exchange.
     ///
-    /// For magnet links, the DHT engine is started BEFORE metadata arrives
+    /// For magnet links, a DHT engine may be borrowed or started BEFORE metadata arrives
     /// because DHT-based peer discovery is required to find peers that can
     /// serve the metadata via BEP 0010 (Extension for Peers to Send Metadata
     /// File). Once the metadata has been fetched, if the torrent's `private`
-    /// flag is set, DHT must be shut down to comply with BEP 0027 which
-    /// forbids DHT, PEX, and LPD for private torrents.
+    /// flag is set, this torrent must stop using DHT to comply with BEP 0027,
+    /// which forbids DHT, PEX, and LPD for private torrents. A process-global
+    /// engine borrowed by this command remains alive for other torrents.
     ///
     /// This method parses the fetched `torrent_bytes`, checks `is_private()`,
-    /// and if true, shuts down the DHT engine asynchronously and clears the
-    /// `dht_engine` field so the downstream `BtDownloadCommand` (created from
-    /// the same bytes) will not see a running DHT engine and will itself
-    /// honour BEP 0027 by not starting a new one.
+    /// and if true, releases the magnet's DHT handle. An exclusively owned
+    /// temporary engine is shut down; a shared process engine is left running.
+    /// The downstream `BtDownloadCommand` then enforces BEP 0027 and will not
+    /// use or start DHT for this torrent.
     ///
     /// Extracted as a standalone async method so the policy logic can be
     /// unit tested without mocking the BEP 0010 metadata exchange network I/O.
@@ -1038,11 +1086,8 @@ impl MagnetDownloadCommand {
         if is_private {
             info!("Private torrent detected after metadata exchange: shutting down DHT (BEP 0027)");
             self.shutdown_dht_engine().await;
-            // Clear the field so the trailing shutdown() call in execute()
-            // does not attempt to shut down an already-stopped engine, and
-            // so the downstream BtDownloadCommand cannot accidentally reuse
-            // the engine.
-            self.dht_engine = None;
+            // shutdown_dht_engine empties this family-scoped set, so the
+            // downstream BtDownloadCommand cannot accidentally reuse it.
         }
 
         Ok(())
@@ -1195,6 +1240,8 @@ impl Command for MagnetDownloadCommand {
         if let Some(manager) = self.lpd_manager.clone() {
             bt_cmd.set_lpd_manager(manager);
         }
+
+        self.handoff_dht_engine_to_bt(&mut bt_cmd).await;
 
         bt_cmd.execute().await?;
 
@@ -1465,7 +1512,7 @@ mod tests {
         server.await.expect("exact-source server should finish");
 
         assert_eq!(metadata, torrent);
-        assert!(command.dht_engine.is_none());
+        assert!(command.dht_engines.is_empty());
     }
 
     #[tokio::test]
@@ -1493,7 +1540,7 @@ mod tests {
             .expect("file exact source should return metadata");
 
         assert_eq!(metadata, torrent);
-        assert!(command.dht_engine.is_none());
+        assert!(command.dht_engines.is_empty());
     }
 
     #[tokio::test]
@@ -1804,13 +1851,16 @@ mod tests {
 
     /// BEP 0027: After metadata exchange, a private torrent must cause the
     /// DHT engine (started for peer discovery) to be shut down and the
-    /// `dht_engine` field cleared so the downstream `BtDownloadCommand`
+    /// family-scoped `dht_engines` set emptied so the downstream `BtDownloadCommand`
     /// cannot accidentally reuse it.
     #[tokio::test]
     async fn test_magnet_private_torrent_dht_shutdown_after_metadata() {
         let mut cmd = make_test_command();
-        cmd.dht_engine = Some(start_test_dht_engine().await);
-        assert!(cmd.dht_engine.is_some(), "precondition: DHT engine present");
+        cmd.dht_engines.insert(start_test_dht_engine().await);
+        assert!(
+            !cmd.dht_engines.is_empty(),
+            "precondition: DHT engine present"
+        );
 
         let torrent_bytes = build_private_test_torrent();
 
@@ -1819,8 +1869,8 @@ mod tests {
             .expect("enforce_bep0027 should succeed for private torrent");
 
         assert!(
-            cmd.dht_engine.is_none(),
-            "DHT engine must be None after private torrent metadata (BEP 0027)"
+            cmd.dht_engines.is_empty(),
+            "DHT engines must be empty after private torrent metadata (BEP 0027)"
         );
     }
 
@@ -1831,7 +1881,7 @@ mod tests {
     async fn test_magnet_public_torrent_dht_continues() {
         let mut cmd = make_test_command();
         let engine = start_test_dht_engine().await;
-        cmd.dht_engine = Some(engine.clone());
+        cmd.dht_engines.insert(Arc::clone(&engine));
 
         let torrent_bytes = build_test_torrent();
 
@@ -1840,7 +1890,7 @@ mod tests {
             .expect("enforce_bep0027 should succeed for public torrent");
 
         assert!(
-            cmd.dht_engine.is_some(),
+            !cmd.dht_engines.is_empty(),
             "DHT engine must remain active for public torrent"
         );
 
@@ -1848,13 +1898,149 @@ mod tests {
         engine.shutdown_async().await;
     }
 
+    #[tokio::test]
+    async fn private_magnet_does_not_shutdown_a_shared_global_dht_engine() {
+        let mut cmd = make_test_command();
+        let registry = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::engine::bt_registry::BtRegistry::new(),
+        ));
+        let engine = start_test_dht_engine().await;
+        registry
+            .write()
+            .expect("BT registry should be writable")
+            .set_global_dht_engine(std::sync::Arc::clone(&engine));
+        cmd.set_bt_registry(std::sync::Arc::clone(&registry));
+        let gid = cmd.group().gid().value();
+        assert!(
+            cmd.dht_engines
+                .attach_global_if_present(Some(&registry), gid, false,)
+        );
+
+        cmd.enforce_bep0027_after_metadata(&build_private_test_torrent())
+            .await
+            .expect("private metadata should be accepted");
+
+        assert!(cmd.dht_engines.is_empty());
+        assert_eq!(
+            engine.state().await,
+            aria2_protocol::bittorrent::dht::engine::DhtEngineState::Running
+        );
+        assert!(
+            registry
+                .read()
+                .expect("BT registry should be readable")
+                .get_global_dht_engine_for_peer(engine.local_addr())
+                .is_some_and(|global| std::sync::Arc::ptr_eq(&global, &engine))
+        );
+
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn public_magnet_hands_its_dht_engine_to_the_payload_command() {
+        use crate::engine::bt_download_command::BtDownloadCommand;
+
+        let mut cmd = make_test_command();
+        let registry = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::engine::bt_registry::BtRegistry::new(),
+        ));
+        cmd.set_bt_registry(std::sync::Arc::clone(&registry));
+        let gid = cmd.group().gid().value();
+        cmd.dht_engines
+            .start_or_join(
+                Some(&registry),
+                gid,
+                aria2_protocol::bittorrent::dht::engine::DhtEngineConfig::local(),
+            )
+            .await
+            .expect("magnet should start and register its shared DHT engine");
+        let engine = cmd
+            .dht_engines
+            .ipv4()
+            .expect("magnet should retain the IPv4 DHT handle");
+
+        let torrent = build_test_torrent();
+        let options = DownloadOptions::default();
+        let mut payload = BtDownloadCommand::new(GroupId::new(1), &torrent, &options, None)
+            .expect("public torrent should construct");
+        payload.set_bt_registry(std::sync::Arc::clone(&registry));
+
+        cmd.handoff_dht_engine_to_bt(&mut payload).await;
+
+        let transferred = payload
+            .dht_engines
+            .ipv4()
+            .expect("payload command should receive the DHT engine");
+        assert!(std::sync::Arc::ptr_eq(&transferred, &engine));
+        assert!(cmd.dht_engines.is_empty());
+        assert!(
+            registry
+                .read()
+                .expect("BT registry should be readable")
+                .get_global_dht_engine_for_peer(engine.local_addr())
+                .is_some_and(|global| std::sync::Arc::ptr_eq(&global, &engine))
+        );
+
+        engine.shutdown_async().await;
+    }
+
+    #[tokio::test]
+    async fn public_magnet_prefers_an_existing_global_dht_engine_at_handoff() {
+        use crate::engine::bt_download_command::BtDownloadCommand;
+
+        let mut cmd = make_test_command();
+        let registry = std::sync::Arc::new(std::sync::RwLock::new(
+            crate::engine::bt_registry::BtRegistry::new(),
+        ));
+        let global_engine = start_test_dht_engine().await;
+        registry
+            .write()
+            .expect("BT registry should be writable")
+            .set_global_dht_engine(std::sync::Arc::clone(&global_engine));
+        cmd.set_bt_registry(std::sync::Arc::clone(&registry));
+        cmd.ensure_dht_engines(&DownloadOptions {
+            enable_dht: true,
+            ..DownloadOptions::default()
+        })
+        .await
+        .expect("magnet should attach to the existing family engine");
+        assert!(
+            cmd.dht_engines
+                .ipv4()
+                .as_ref()
+                .is_some_and(|engine| std::sync::Arc::ptr_eq(engine, &global_engine))
+        );
+
+        let torrent = build_test_torrent();
+        let options = DownloadOptions::default();
+        let mut payload = BtDownloadCommand::new(GroupId::new(1), &torrent, &options, None)
+            .expect("public torrent should construct");
+        payload.set_bt_registry(std::sync::Arc::clone(&registry));
+
+        cmd.handoff_dht_engine_to_bt(&mut payload).await;
+
+        assert_eq!(
+            global_engine.state().await,
+            aria2_protocol::bittorrent::dht::engine::DhtEngineState::Running
+        );
+        assert!(
+            payload
+                .dht_engines
+                .ipv4()
+                .as_ref()
+                .is_some_and(|engine| std::sync::Arc::ptr_eq(engine, &global_engine))
+        );
+
+        global_engine.shutdown_async().await;
+    }
+
     /// When DHT was never started (e.g. enable_dht = false), the enforcement
     /// method must still parse the metadata and succeed without error. There
-    /// is nothing to shut down, so `dht_engine` stays `None`.
+    /// is nothing to shut down, so the DHT engine set stays empty.
     #[tokio::test]
     async fn test_magnet_enforce_bep0027_no_dht_engine() {
         let mut cmd = make_test_command();
-        assert!(cmd.dht_engine.is_none(), "precondition: no DHT engine");
+        assert!(cmd.dht_engines.is_empty(), "precondition: no DHT engine");
 
         let torrent_bytes = build_private_test_torrent();
 
@@ -1862,7 +2048,7 @@ mod tests {
             .await
             .expect("should succeed even when DHT engine is absent");
 
-        assert!(cmd.dht_engine.is_none());
+        assert!(cmd.dht_engines.is_empty());
     }
 
     /// Corrupt metadata bytes must produce a fatal config error rather than
@@ -1884,8 +2070,8 @@ mod tests {
         // the parse error, but we do not preemptively shut down DHT since the
         // caller may want to retry metadata fetch from a different peer).
         assert!(
-            cmd.dht_engine.is_none(),
-            "DHT engine field should be unchanged on parse error"
+            cmd.dht_engines.is_empty(),
+            "DHT engine set should be unchanged on parse error"
         );
     }
 }

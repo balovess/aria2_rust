@@ -3,6 +3,7 @@ use std::{cmp::Reverse, collections::BinaryHeap, time::Duration};
 
 use crate::engine::bt_download_execute::execute::incoming::PeerActorUploadContext;
 use crate::engine::bt_download_execute::types::PeerKey;
+use crate::engine::bt_message_handler::types::BLOCK_SIZE;
 use crate::engine::bt_message_handler::{PeerCommand, PeerEvent};
 use crate::engine::bt_peer_connection::BtPeerConn;
 use crate::engine::bt_piece_selector::BtPieceSelector;
@@ -17,6 +18,8 @@ use tracing::{debug, info, warn};
 use super::{PieceDownloadSession, PieceLoopAction};
 
 const MAX_WEB_SEED_PIECES_IN_FLIGHT: usize = 4;
+const MAX_BT_PIECES_IN_FLIGHT: usize = 8;
+const MAX_BT_PIECE_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 struct WebSeedRetries {
@@ -81,7 +84,7 @@ type WebSeedTaskCompletion = Option<
 >;
 
 enum PieceDownloadWait {
-    Completed(PieceLoopAction),
+    Completed(Vec<(usize, PieceLoopAction)>),
     Incoming(Option<crate::engine::bt_peer_listener::IncomingPeer>),
     StopTimeout,
 }
@@ -96,6 +99,25 @@ async fn wait_for_incoming_peer(
 }
 
 impl PieceDownloadSession<'_> {
+    fn normal_piece_batch_limit(&self, first_piece_index: usize) -> usize {
+        if self.endgame_state.is_endgame_active() {
+            return 1;
+        }
+        let piece_length = self.actual_piece_length(first_piece_index).max(1) as usize;
+        let blocks_per_piece = piece_length.div_ceil(BLOCK_SIZE as usize).max(1);
+        let aggregate_request_window = self
+            .swarm
+            .iter()
+            .filter(|peer| !peer.dead)
+            .map(|peer| peer.max_outstanding_requests)
+            .sum::<usize>();
+        let window_limited = aggregate_request_window.div_ceil(blocks_per_piece).max(1);
+        let memory_limited = (MAX_BT_PIECE_BUFFER_BYTES / piece_length).max(1);
+        window_limited
+            .min(MAX_BT_PIECES_IN_FLIGHT)
+            .min(memory_limited)
+    }
+
     pub(super) async fn run(mut self) -> Result<()> {
         let mut web_seed_tasks = tokio::task::JoinSet::new();
         let mut active_web_seed_pieces = std::collections::HashSet::new();
@@ -187,6 +209,25 @@ impl PieceDownloadSession<'_> {
                 return Err(Aria2Error::DownloadFailed(
                     "BitTorrent download halted".into(),
                 ));
+            }
+
+            // Tracker results use the same Swarm event stream even while there
+            // is no connected peer or a piece batch is waiting on a response.
+            // Admit them at the next coordinator turn before entering an idle
+            // wait, so an empty swarm cannot strand discovered endpoints.
+            let tracker_peers = std::mem::take(&mut self.pending_tracker_peers);
+            if !tracker_peers.is_empty() {
+                for peer in &tracker_peers {
+                    self.command.add_pex_peer(peer.clone());
+                }
+                let connected = self
+                    .connect_to_discovered_swarm_peers(&tracker_peers, BtPeerSource::Tracker)
+                    .await;
+                if connected > 0 {
+                    self.announce_available_pieces().await;
+                    let group = self.command.group.recover();
+                    super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
+                }
             }
 
             let current_uri_generation = self.command.group.recover().uri_generation();
@@ -283,39 +324,9 @@ impl PieceDownloadSession<'_> {
                 }
             }
 
-            // Keep tracker numwant aligned with the live peer command count,
-            // then re-announce when the tracker interval permits it.
+            // The tracker actor reads this live count when its announce
+            // deadline fires; no piece-loop timer or network I/O is needed.
             self.command.update_tracker_peer_state(self.swarm.len());
-            if self.command.should_discover_more_peers(self.swarm.len()) {
-                let new_peers = self
-                    .command
-                    .periodic_tracker_announce(
-                        &self.meta.network_info_hash(),
-                        self.command.completed_bytes,
-                        self.total_size.saturating_sub(self.command.completed_bytes),
-                        self.command.total_uploaded,
-                    )
-                    .await;
-                if !new_peers.is_empty() {
-                    info!(
-                        "[BT] Periodic tracker announce found {} new peers",
-                        new_peers.len()
-                    );
-                    for peer in &new_peers {
-                        self.command.add_pex_peer(peer.clone());
-                    }
-                    // Connect to newly discovered peers
-                    let connected = self
-                        .connect_to_discovered_swarm_peers(&new_peers, BtPeerSource::Tracker)
-                        .await;
-                    if connected > 0 {
-                        self.announce_available_pieces().await;
-                        info!("[BT] Connected to {} new peers", connected);
-                        let group = self.command.group.recover();
-                        super::super::sync_peer_snapshots_with_swarm(&group, self.swarm);
-                    }
-                }
-            }
 
             // DHTGetPeersCommand counterpart. The lookup runs in a background
             // task and publishes its result through an event slot, so DHT
@@ -327,8 +338,9 @@ impl PieceDownloadSession<'_> {
             let mut dht_peers = Vec::new();
             super::super::super::check_periodic_dht_lookup(
                 &mut self.command.dht_periodic_lookup,
-                self.command.dht_engine.as_ref(),
+                &self.command.dht_engines,
                 &self.meta.network_info_hash(),
+                self.command.listen_port,
                 self.swarm.len(),
                 &mut dht_peers,
             )
@@ -439,10 +451,10 @@ impl PieceDownloadSession<'_> {
                     );
                     self.announce_available_pieces().await;
                 }
-                if interest_changed {
+                let released_upload_slot = self.remove_dead_swarm_peers().await;
+                if interest_changed || released_upload_slot {
                     self.apply_upload_choke_round().await;
                 }
-                self.remove_dead_swarm_peers().await;
                 continue;
             }
 
@@ -531,20 +543,37 @@ impl PieceDownloadSession<'_> {
                         );
                         self.announce_available_pieces().await;
                     }
-                    if interest_changed {
+                    let released_upload_slot = self.remove_dead_swarm_peers().await;
+                    if interest_changed || released_upload_slot {
                         self.apply_upload_choke_round().await;
                     }
-                    self.remove_dead_swarm_peers().await;
                     continue;
                 }
             };
 
+            let batch_limit = self.normal_piece_batch_limit(next_piece_idx);
+            let mut selected_pieces = vec![next_piece_idx];
             self.piece_picker
                 .mark_in_progress(next_piece_idx as u32, true);
+            while selected_pieces.len() < batch_limit {
+                let remaining = self.piece_picker.remaining_count();
+                let next = self
+                    .piece_selector
+                    .select_next_piece(&mut self.piece_picker, remaining)
+                    .piece_index;
+                let Some(next) = next else {
+                    break;
+                };
+                if selected_pieces.contains(&next) {
+                    break;
+                }
+                self.piece_picker.mark_in_progress(next as u32, true);
+                selected_pieces.push(next);
+            }
             let incoming_receiver = self.command.incoming_peers.clone();
             let wait = if let Some(deadline) = self.stop_timeout.deadline() {
                 tokio::select! {
-                    action = self.download_piece(next_piece_idx) => PieceDownloadWait::Completed(action?),
+                    actions = self.download_piece_batch(&selected_pieces) => PieceDownloadWait::Completed(actions?),
                     incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming),
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                         PieceDownloadWait::StopTimeout
@@ -552,7 +581,7 @@ impl PieceDownloadSession<'_> {
                 }
             } else {
                 tokio::select! {
-                    action = self.download_piece(next_piece_idx) => PieceDownloadWait::Completed(action?),
+                    actions = self.download_piece_batch(&selected_pieces) => PieceDownloadWait::Completed(actions?),
                     incoming = wait_for_incoming_peer(incoming_receiver) => PieceDownloadWait::Incoming(incoming),
                 }
             };
@@ -571,27 +600,39 @@ impl PieceDownloadSession<'_> {
                         },
                     );
                     self.announce_available_pieces().await;
-                    self.piece_picker
-                        .mark_in_progress(next_piece_idx as u32, false);
+                    for piece_index in &selected_pieces {
+                        self.piece_picker
+                            .mark_in_progress(*piece_index as u32, false);
+                    }
                     continue;
                 }
                 PieceDownloadWait::Incoming(None) => {
                     self.command.incoming_peers = None;
-                    self.piece_picker
-                        .mark_in_progress(next_piece_idx as u32, false);
+                    for piece_index in &selected_pieces {
+                        self.piece_picker
+                            .mark_in_progress(*piece_index as u32, false);
+                    }
                     continue;
                 }
                 PieceDownloadWait::StopTimeout => {
-                    self.piece_picker
-                        .mark_in_progress(next_piece_idx as u32, false);
+                    for piece_index in &selected_pieces {
+                        self.piece_picker
+                            .mark_in_progress(*piece_index as u32, false);
+                    }
                     continue;
                 }
             };
-            if matches!(action, PieceLoopAction::Retry) {
-                self.piece_picker
-                    .mark_in_progress(next_piece_idx as u32, false);
+            let mut refresh_progress = false;
+            for (piece_index, action) in action {
+                match action {
+                    PieceLoopAction::Retry => {
+                        self.piece_picker
+                            .mark_in_progress(piece_index as u32, false);
+                    }
+                    PieceLoopAction::RefreshProgress => refresh_progress = true,
+                }
             }
-            if matches!(action, PieceLoopAction::RefreshProgress) {
+            if refresh_progress {
                 self.refresh_download_progress();
             }
         }
@@ -672,6 +713,10 @@ impl PieceDownloadSession<'_> {
                 self.pending_pex_peers.extend(peers.iter().cloned());
                 false
             }
+            PeerEvent::TrackerPeers { peers } => {
+                self.pending_tracker_peers.extend(peers.iter().cloned());
+                false
+            }
             PeerEvent::AllowedFast { .. } => false,
             PeerEvent::PexNegotiated { .. } => false,
             PeerEvent::Message {
@@ -689,12 +734,11 @@ impl PieceDownloadSession<'_> {
             }
             PeerEvent::Disconnected { .. }
             | PeerEvent::RequestFailed { .. }
-            | PeerEvent::AvailabilityChanged { .. }
             | PeerEvent::Message { .. } => false,
         }
     }
 
-    pub(super) async fn remove_dead_swarm_peers(&mut self) {
+    pub(super) async fn remove_dead_swarm_peers(&mut self) -> bool {
         let dead = self
             .swarm
             .iter()
@@ -708,8 +752,18 @@ impl PieceDownloadSession<'_> {
             })
             .collect::<Vec<_>>();
         if dead.is_empty() {
-            return;
+            return false;
         }
+
+        let released_upload_slot = self.command.choking_algo.as_ref().is_some_and(|algo| {
+            dead.iter().any(|(identity, _, _)| {
+                algo.peers().iter().any(|peer| {
+                    PeerIdentity::from(peer) == *identity
+                        && peer.peer_interested
+                        && !peer.am_choking
+                })
+            })
+        });
 
         let identities = dead
             .iter()
@@ -734,6 +788,7 @@ impl PieceDownloadSession<'_> {
         for (_, endpoint) in removed {
             peer_storage.return_peer_by_endpoint(&endpoint.ip().to_string(), endpoint.port());
         }
+        released_upload_slot
     }
 
     fn schedule_web_seed_pieces(
@@ -885,7 +940,6 @@ impl PieceDownloadSession<'_> {
         let max_peers = self.command.group.recover().options().bt_max_peers;
         let caretaker_id = self.command.group.recover().gid().value();
         let mut seen_endpoints = std::collections::HashSet::with_capacity(new_connections.len());
-        let dht_engine = self.command.dht_engine.clone();
         let provider = std::sync::Arc::clone(&self.upload_provider);
         let mut admitted = 0;
 
@@ -939,7 +993,7 @@ impl PieceDownloadSession<'_> {
                 .swarm
                 .spawn_peer(
                     connection,
-                    dht_engine.clone(),
+                    self.command.dht_engines.for_peer(endpoint),
                     std::sync::Arc::clone(&provider),
                 )
                 .is_err()

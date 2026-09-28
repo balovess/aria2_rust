@@ -2,6 +2,13 @@ use super::{DownloadOptions, FollowMode};
 use url::Url;
 
 impl DownloadOptions {
+    /// Effective fixed per-session HTTP/2 Range stream limit.
+    pub fn http2_streams_per_session(&self) -> usize {
+        self.max_http2_streams_per_session
+            .unwrap_or(crate::constants::DEFAULT_HTTP2_STREAMS_PER_SESSION as u16)
+            .clamp(1, 256) as usize
+    }
+
     /// Whether a memory follow mode is configured.
     ///
     /// This is an option-level predicate only. Callers that are deciding how

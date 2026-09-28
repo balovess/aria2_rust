@@ -222,7 +222,42 @@ impl crate::config::OptionRegistry {
             default_value: OptionValue::Int(16),
             min: Some(1),
             max: Some(16),
-            description: "Max concurrent segment requests per HTTP server".into(),
+            description: "Max TCP connections per HTTP server for one download; HTTP/2 may multiplex requests".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-http2-sessions-per-server".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as i64,
+            ),
+            min: Some(1),
+            max: Some(crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u64),
+            description: "Maximum separate HTTP/2 client pools used for concurrent Range traffic to one server; effective sessions are capped by available pools and max-connection-per-server".into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "max-http2-streams-per-session".into(),
+            opt_type: OptionType::Integer,
+            default_value: OptionValue::Int(
+                crate::constants::DEFAULT_HTTP2_STREAMS_PER_SESSION as i64,
+            ),
+            min: Some(1),
+            max: Some(256),
+            description:
+                "Fixed maximum concurrent Range streams per HTTP/2 connection; not auto-tuned"
+                    .into(),
+            category: OptionCategory::HttpFtp,
+            ..Default::default()
+        });
+        self.register(OptionDef {
+            name: "http-version".into(),
+            opt_type: OptionType::Enum,
+            default_value: OptionValue::Str("auto".into()),
+            allowed_values: &["auto", "1.1", "2"],
+            description: "HTTP protocol selection: auto prefers HTTP/2 over TLS and falls back to HTTP/1.1; 1.1 and 2 force one protocol".into(),
             category: OptionCategory::HttpFtp,
             ..Default::default()
         });

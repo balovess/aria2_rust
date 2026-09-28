@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::constants;
 use crate::engine::command::WRITE_CHANNEL_CAPACITY;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
+use crate::engine::http_adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTracker, WriteChunk};
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
@@ -26,6 +26,7 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::fixed_piece_size::calculate_fixed_piece_size;
 use super::{ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count};
 
 /// Run the single-mirror concurrent download pipeline.
@@ -47,6 +48,20 @@ pub async fn execute(
     let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
     let min_split_size = dl.group.recover().effective_min_split_size();
     let split = effective_segment_count(total_length, requested_split, min_split_size);
+    let piece_size = resume_state
+        .control_file
+        .as_ref()
+        .filter(|control_file| {
+            control_file.total_length() == total_length && !control_file.is_torrent_checkpoint()
+        })
+        .and_then(ControlFile::piece_length)
+        .map(u64::from)
+        .unwrap_or_else(|| calculate_fixed_piece_size(total_length));
+    let piece_length = u32::try_from(piece_size).map_err(|_| {
+        Aria2Error::InvalidArgument(format!(
+            "HTTP fixed piece length is not representable: {piece_size}"
+        ))
+    })?;
     let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
@@ -56,11 +71,22 @@ pub async fn execute(
         options.retry_wait.saturating_mul(1000),
     );
     let authority_key = authority_key(uri).unwrap_or_else(|| uri.to_string());
-    let mut adaptive = HttpAdaptiveConcurrency::new(max_conn, options.retry_wait);
-    let seg_size = total_length.div_ceil(split as u64).max(1);
+    let session_limit = options
+        .max_http2_sessions_per_server
+        .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
+        .clamp(1, max_conn as u16) as usize;
+    let session_limit = session_limit.min(dl.range_clients.len().max(1));
+    let mut adaptive = HttpAdaptiveConcurrency::new(
+        split,
+        max_conn,
+        session_limit,
+        options.http2_streams_per_session(),
+        options.retry_wait,
+    );
+    let seg_size = piece_size;
 
     tracing::info!(
-        "Concurrent download started: split={}, requested_split={}, min_split_size={}, max_conn={}, segment_size={} bytes, total={}",
+        "Concurrent download started: split_budget={}, requested_split={}, min_split_size={}, max_conn={}, fixed_piece_size={} bytes, total={}",
         split,
         requested_split,
         min_split_size,
@@ -82,18 +108,6 @@ pub async fn execute(
     let fallback_threshold_consecutive = 3u32;
     let fallback_threshold_ratio = 0.2f64;
     let mut should_fallback = false;
-
-    if resume_state.should_resume {
-        manager.mark_completed_up_to(resume_state.start_offset, resume_state.existing_length);
-        dl.progress_updater.reset(resume_state.start_offset);
-        tracing::debug!(
-            "Resume: marked {} bytes as completed, continuing from offset {}",
-            resume_state.existing_length,
-            resume_state.start_offset
-        );
-    } else {
-        dl.progress_updater.reset(0);
-    }
 
     let cookie_hdr = dl.cookie_helper.build_cookie_header(uri);
 
@@ -122,8 +136,41 @@ pub async fn execute(
     let num_pieces = manager.num_segments().max(1);
     let ctrl_path = ControlFile::control_path_for(&dl.output_path);
     dl.group.recover().set_control_file_path(ctrl_path.clone());
-    let mut ctrl_file =
-        match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
+    let expected_bitfield_len = num_pieces.div_ceil(8);
+    let compatible_control_file = resume_state.control_file.as_ref().filter(|control_file| {
+        control_file.total_length() == total_length
+            && !control_file.is_torrent_checkpoint()
+            && control_file.piece_length() == Some(piece_length)
+            && control_file.bitfield().len() == expected_bitfield_len
+    });
+    let has_untrusted_control_file = resume_state.control_file.is_none() && ctrl_path.exists();
+    let can_initialize_control_file = if compatible_control_file.is_some() {
+        true
+    } else if has_untrusted_control_file || resume_state.control_file.is_some() {
+        match tokio::fs::remove_file(&ctrl_path).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => {
+                tracing::warn!(
+                    path = %ctrl_path.display(),
+                    %error,
+                    "Failed to replace stale single-source control file"
+                );
+                false
+            }
+        }
+    } else {
+        true
+    };
+    let can_restore_prefix = resume_state.control_file.is_none()
+        && resume_state.should_resume
+        && (!has_untrusted_control_file || can_initialize_control_file);
+    let mut ctrl_file = if let Some(control_file) = compatible_control_file {
+        Some(control_file.clone())
+    } else if can_initialize_control_file {
+        match ControlFile::open_or_create_with_piece_length(&ctrl_path, total_length, piece_length)
+            .await
+        {
             Ok(cf) => Some(cf),
             Err(e) => {
                 tracing::warn!(
@@ -133,11 +180,50 @@ pub async fn execute(
                 );
                 None
             }
-        };
-    // If resuming, update the control file with existing progress
+        }
+    } else {
+        None
+    };
+
+    let persisted_prefix = resume_state
+        .control_file
+        .as_ref()
+        .map(ControlFile::completed_length)
+        .filter(|&length| length > 0)
+        .or_else(|| {
+            (resume_state.control_file.is_none() && resume_state.should_resume)
+                .then_some(resume_state.start_offset)
+        })
+        .unwrap_or(0);
+    let initial_completed = if let Some(control_file) = ctrl_file.as_ref() {
+        if compatible_control_file.is_some() && control_file.completed_pieces() > 0 {
+            manager.restore_completed_from_bitfield(control_file.bitfield())
+        } else if compatible_control_file.is_some() || can_restore_prefix {
+            manager.restore_completed_prefix(persisted_prefix)
+        } else {
+            0
+        }
+    } else if can_restore_prefix {
+        manager.restore_completed_prefix(resume_state.start_offset)
+    } else {
+        0
+    };
+    dl.progress_updater.reset(initial_completed);
+    dl.progress.set_completed_length(initial_completed);
+    if resume_state.should_resume {
+        tracing::debug!(
+            existing_length = resume_state.existing_length,
+            start_offset = resume_state.start_offset,
+            restored_bytes = initial_completed,
+            "Resuming single-source download from persisted segment state"
+        );
+    }
+
+    // Persist the restored progress before issuing more ranges.
     if let Some(ref mut cf) = ctrl_file {
-        if resume_state.should_resume && resume_state.start_offset > 0 {
-            cf.update_completed_length(resume_state.start_offset);
+        cf.update_completed_length(initial_completed);
+        if let Err(e) = cf.save().await {
+            tracing::warn!("Failed to save initial control file: {}", e);
         }
         if let Err(e) = cf.save().await {
             tracing::warn!("Failed to save initial control file: {}", e);
@@ -149,12 +235,7 @@ pub async fn execute(
     let ctrl_save_interval = total_length / num_pieces.max(1) as u64;
     let mut ctrl_bytes_since_save: u64 = 0;
 
-    let mut active_segs: HashMap<u32, (u64, u64)> = HashMap::new();
-    let initial_completed = if resume_state.should_resume {
-        resume_state.start_offset
-    } else {
-        0
-    };
+    let mut active_segs: HashMap<u32, (u64, std::time::Instant, u64)> = HashMap::new();
     let progress_tracker = SegmentProgressTracker::new(initial_completed, Arc::clone(&dl.progress));
     let mut segment_progress: HashMap<u32, Arc<SegmentProgress>> = HashMap::new();
     let mut completed_bytes = initial_completed;
@@ -179,6 +260,16 @@ pub async fn execute(
         std::slice::from_ref(&authority_key),
         max_conn,
     );
+    if let Some((known_authority, version)) = &dl.initial_http_protocol
+        && known_authority == &authority_key
+    {
+        executor.set_protocol(&authority_key, *version);
+        let is_http2 = *version == reqwest::Version::HTTP_2;
+        executor.set_target(&authority_key, adaptive.range_target(is_http2));
+        if is_http2 {
+            executor.set_active_h2_sessions(&authority_key, adaptive.connection_target(is_http2));
+        }
+    }
     let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
 
     // Lifecycle changes wake the scheduler even when all segment requests are
@@ -210,13 +301,33 @@ pub async fn execute(
             return Err(e);
         }
 
-        while adaptive.can_start(executor.in_flight_for(&authority_key)) {
+        let is_http2 = executor.is_http2(&authority_key);
+        if executor.in_flight_for(&authority_key) == 0 && !manager.is_complete() {
+            let update = adaptive.finish_round(is_http2);
+            if let Some(connections) = update.connection_target {
+                tracing::info!(
+                    target_connections = connections,
+                    range_target = adaptive.range_target(is_http2),
+                    split_budget = split,
+                    "HTTP adaptive physical connection count changed"
+                );
+            }
+        }
+        let is_http2 = executor.is_http2(&authority_key);
+        executor.set_target(&authority_key, adaptive.range_target(is_http2));
+        if is_http2 {
+            executor.set_active_h2_sessions(&authority_key, adaptive.connection_target(is_http2));
+        }
+
+        while adaptive.can_start(
+            executor.in_flight_for(&authority_key),
+            executor.is_http2(&authority_key),
+        ) {
             match manager.next_pending_segment_for_mirror(0) {
                 Some((seg_idx, offset, length)) => {
                     let progress = progress_tracker.new_segment();
                     segment_progress.insert(seg_idx, Arc::clone(&progress));
-                    active_segs.insert(seg_idx, (offset, 0));
-
+                    active_segs.insert(seg_idx, (offset, std::time::Instant::now(), 0));
                     let submitted = executor.try_submit(HttpSegmentRequest {
                         segment_index: seg_idx,
                         authority_key: authority_key.clone(),
@@ -235,11 +346,12 @@ pub async fn execute(
                         break;
                     };
                     if let Some(active) = active_segs.get_mut(&seg_idx) {
-                        active.1 = task_id;
+                        active.2 = task_id;
                     }
                     connection_guard.set(executor.in_flight());
                     tracing::debug!(
                         seg_idx = seg_idx,
+                        task_id,
                         offset = offset,
                         length = length,
                         "Submitted segment to HTTP connection pool"
@@ -269,14 +381,6 @@ pub async fn execute(
                 tracing::debug!("All segments complete");
                 break;
             }
-            if let Some(new_target) = adaptive.finish_round() {
-                executor.set_target(&authority_key, new_target);
-                tracing::info!(
-                    old_target = adaptive.hard_limit().min(max_conn),
-                    new_target,
-                    "HTTP adaptive concurrency reduced after 429/503"
-                );
-            }
             if let Some(wait) = adaptive.cooldown_remaining() {
                 dl.wait_for_retry(wait).await?;
                 continue;
@@ -288,9 +392,30 @@ pub async fn execute(
                     },
                 ));
             }
+            let incomplete_segments = (0..manager.num_segments())
+                .filter_map(|index| {
+                    let status = manager.segment_status(index)?;
+                    (status != crate::engine::concurrent_segment_manager::SegmentStatus::Done)
+                        .then_some((index, status))
+                })
+                .collect::<Vec<_>>();
             tracing::warn!(
-                "Concurrent download stuck: no active or pending segments but not complete"
+                completed_bytes = manager.completed_bytes(),
+                total_bytes = total_length,
+                pending_segments = manager.has_pending_segments(),
+                failed_segments = manager.has_failed_segments(),
+                tracked_active_segments = ?active_segs.keys().collect::<Vec<_>>(),
+                tracked_active_requests = ?active_segs
+                    .iter()
+                    .map(|(segment_index, (offset, _, task_id))| (*segment_index, *offset, *task_id))
+                    .collect::<Vec<_>>(),
+                finished_executor_tasks = ?executor.finished_tasks(),
+                incomplete_segments = ?incomplete_segments,
+                mirror_active_segments = manager.mirror_active_segments(0),
+                mirror_connection_limit = manager.get_mirror_max_connections(0),
+                "Concurrent download stalled; falling back to fill incomplete ranges"
             );
+            should_fallback = true;
             break;
         }
 
@@ -318,12 +443,28 @@ pub async fn execute(
         tokio::select! {
             // A segment completed
             Some(pool_result) = executor.next_result() => {
+                executor.reap_task(pool_result.task_id).await;
                 connection_guard.set(executor.in_flight());
                 let seg_idx = pool_result.segment_index;
-                let Some((_, active_task_id)) = active_segs.get(&seg_idx).copied() else {
+                let Some((_, _segment_started_at, active_task_id)) =
+                    active_segs.get(&seg_idx).copied()
+                else {
+                    tracing::warn!(
+                        segment_index = seg_idx,
+                        result_task_id = pool_result.task_id,
+                        in_flight = executor.in_flight_for(&authority_key),
+                        tracked_active_segments = ?active_segs.keys().collect::<Vec<_>>(),
+                        "Received HTTP Range completion for an untracked segment"
+                    );
                     continue;
                 };
                 if active_task_id != pool_result.task_id {
+                    tracing::warn!(
+                        segment_index = seg_idx,
+                        active_task_id,
+                        result_task_id = pool_result.task_id,
+                        "Received HTTP Range completion for a replaced task"
+                    );
                     continue;
                 }
                 let result = pool_result.result;
@@ -356,10 +497,7 @@ pub async fn execute(
                     })?;
                 }
 
-                let _offset = active_segs
-                    .remove(&seg_idx)
-                    .map(|(offset, _)| offset)
-                    .unwrap_or(0);
+                let _active = active_segs.remove(&seg_idx);
 
                 // The request has emitted its completion only after all
                 // progress writes, so the atomic segment handle is already
@@ -368,14 +506,22 @@ pub async fn execute(
 
                 match result {
                     Ok(total_written) => {
-                        adaptive.record(AdaptiveOutcome::Success);
-                        manager.complete_segment(seg_idx, total_written as usize);
+                        let Some(parent_complete) = manager.complete_range(seg_idx, total_written)
+                        else {
+                            return Err(Aria2Error::Fatal(
+                                crate::error::FatalError::Config(format!(
+                                    "HTTP segment scheduler rejected completed range for parent {seg_idx}"
+                                )),
+                            ));
+                        };
                         completed_bytes += total_written;
 
                         // ADR-0001: Update control file with segment progress.
                         // Mark the piece done and periodically save to disk.
                         if let Some(ref mut cf) = ctrl_file {
-                            cf.mark_piece_done(seg_idx as usize);
+                            if parent_complete {
+                                cf.mark_piece_done(seg_idx as usize);
+                            }
                             ctrl_bytes_since_save += total_written;
                             if ctrl_bytes_since_save >= ctrl_save_interval {
                                 cf.update_completed_length(completed_bytes);
@@ -418,6 +564,7 @@ pub async fn execute(
                             e
                         };
                         tracing::warn!(seg_idx = seg_idx, error = %e, "Segment download failed");
+                        let is_http2 = executor.is_http2(&authority_key);
                         let is_file_not_found = matches!(
                             &e,
                             Aria2Error::Recoverable(
@@ -442,16 +589,10 @@ pub async fn execute(
                             .await?;
                             return Err(e);
                         }
-                        let is_capacity_limited = matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::ServerError { code })
-                                if matches!(*code, 429 | 503)
-                        );
-                        adaptive.record(if is_capacity_limited {
-                            AdaptiveOutcome::CapacityLimited
-                        } else {
-                            AdaptiveOutcome::OtherFailure
-                        });
+                        let is_capacity_limited = super::is_capacity_limited_error(&e);
+                        if is_capacity_limited {
+                            adaptive.record_capacity_failure(is_http2);
+                        }
                         let is_416 = matches!(
                             &e,
                             Aria2Error::Recoverable(RecoverableError::RangeNotSatisfiable { .. })
@@ -483,12 +624,15 @@ pub async fn execute(
                             consecutive_416_count = 0;
                         }
                         let retry_count = manager.segment_retry_count(seg_idx);
-                        let retry_allowed = super::should_retry_segment(
-                            &retry_policy,
-                            retry_count,
-                            &e,
-                            file_not_found_retry_allowed,
-                        );
+                        let adaptive_capacity_retry = is_capacity_limited
+                            && adaptive.preserve_retry_budget(is_http2);
+                        let retry_allowed = adaptive_capacity_retry
+                            || super::should_retry_segment(
+                                &retry_policy,
+                                retry_count,
+                                &e,
+                                file_not_found_retry_allowed,
+                            );
                         if !retry_allowed {
                             cancel_and_persist(
                                 executor,
@@ -502,7 +646,7 @@ pub async fn execute(
                             .await?;
                             return Err(e);
                         }
-                        if is_capacity_limited && adaptive.preserve_retry_budget() {
+                        if adaptive_capacity_retry {
                             manager.requeue_segment(seg_idx);
                         } else {
                             manager.fail_segment(seg_idx);

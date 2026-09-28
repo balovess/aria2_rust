@@ -56,6 +56,14 @@ impl ControlFile {
     pub fn total_length(&self) -> u64 {
         self.total_length
     }
+
+    /// Piece length explicitly represented by this native checkpoint layout.
+    ///
+    /// Legacy A2CF checkpoints did not store a generic piece length, so they
+    /// return `None` and must not be interpreted using a new segment layout.
+    pub fn piece_length(&self) -> Option<u32> {
+        self.native_piece_length.or(self.torrent_piece_length)
+    }
     pub fn completed_length(&self) -> u64 {
         self.completed_length
     }
@@ -146,24 +154,67 @@ impl ControlFile {
             Ok(control_file)
         } else {
             let piece_length = piece_length_for(total_length, num_pieces)?;
-            let actual_num_pieces = piece_count(total_length, piece_length)?;
-            let bitfield_len = actual_num_pieces.div_ceil(8);
-            Ok(Self {
-                path: ctrl_path.to_path_buf(),
-                total_length,
-                completed_length: 0,
-                upload_length: 0,
-                bitfield: vec![0u8; bitfield_len],
-                num_pieces: actual_num_pieces,
-                checksum_algo: 0,
-                checksum_value: Vec::new(),
-                torrent_checkpoint: false,
-                torrent_info_hash: None,
-                torrent_piece_length: None,
-                native_piece_length: Some(piece_length),
-                native_layout: false,
-            })
+            Self::new_with_piece_length(ctrl_path, total_length, piece_length)
         }
+    }
+
+    /// Open an existing checkpoint only when it uses this exact fixed-piece
+    /// layout, or create a new checkpoint with the supplied piece length.
+    pub async fn open_or_create_with_piece_length(
+        ctrl_path: &Path,
+        total_length: u64,
+        piece_length: u32,
+    ) -> Result<Self> {
+        if piece_length == 0 {
+            return Err(Aria2Error::InvalidArgument(
+                "Control file piece length must not be 0".to_string(),
+            ));
+        }
+        if ctrl_path.exists() {
+            let control_file = Self::load(ctrl_path).await?.ok_or_else(|| {
+                Aria2Error::FileIo(format!(
+                    "Failed to load control file: {}",
+                    ctrl_path.display()
+                ))
+            })?;
+            let expected_pieces = piece_count(total_length, piece_length)?;
+            if control_file.total_length() == total_length
+                && control_file.piece_length() == Some(piece_length)
+                && control_file.bitfield().len() == expected_pieces.div_ceil(8)
+            {
+                return Ok(control_file);
+            }
+            return Err(Aria2Error::InvalidArgument(format!(
+                "Control file layout does not match piece length {}: {}",
+                piece_length,
+                ctrl_path.display()
+            )));
+        }
+        Self::new_with_piece_length(ctrl_path, total_length, piece_length)
+    }
+
+    fn new_with_piece_length(
+        ctrl_path: &Path,
+        total_length: u64,
+        piece_length: u32,
+    ) -> Result<Self> {
+        let actual_num_pieces = piece_count(total_length, piece_length)?;
+        let bitfield_len = actual_num_pieces.div_ceil(8);
+        Ok(Self {
+            path: ctrl_path.to_path_buf(),
+            total_length,
+            completed_length: 0,
+            upload_length: 0,
+            bitfield: vec![0u8; bitfield_len],
+            num_pieces: actual_num_pieces,
+            checksum_algo: 0,
+            checksum_value: Vec::new(),
+            torrent_checkpoint: false,
+            torrent_info_hash: None,
+            torrent_piece_length: None,
+            native_piece_length: Some(piece_length),
+            native_layout: false,
+        })
     }
 
     pub async fn load(path: &Path) -> Result<Option<Self>> {
@@ -1060,6 +1111,32 @@ mod tests {
         assert!(
             data.windows(PROJECT_EXTENSION_MAGIC.len())
                 .any(|window| { window == PROJECT_EXTENSION_MAGIC })
+        );
+    }
+
+    #[tokio::test]
+    async fn fixed_piece_checkpoint_persists_the_exact_piece_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixed-piece.bin.aria2");
+        let total_length: u64 = 101 * 1024 * 1024;
+        let piece_length = 2 * 1024 * 1024;
+        let pieces = total_length.div_ceil(piece_length as u64) as usize;
+
+        let checkpoint =
+            ControlFile::open_or_create_with_piece_length(&path, total_length, piece_length)
+                .await
+                .unwrap();
+        assert_eq!(checkpoint.piece_length(), Some(piece_length));
+        assert_eq!(checkpoint.bitfield().len(), pieces.div_ceil(8));
+        checkpoint.save().await.unwrap();
+
+        let loaded = ControlFile::load(&path).await.unwrap().unwrap();
+        assert_eq!(loaded.piece_length(), Some(piece_length));
+        assert_eq!(loaded.bitfield().len(), pieces.div_ceil(8));
+        assert!(
+            ControlFile::open_or_create_with_piece_length(&path, total_length, piece_length / 2,)
+                .await
+                .is_err()
         );
     }
 

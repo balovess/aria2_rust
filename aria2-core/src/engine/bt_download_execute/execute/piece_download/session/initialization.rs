@@ -303,14 +303,16 @@ impl<'a> PieceDownloadSession<'a> {
             .collect::<Vec<_>>();
         let upload_progress = std::sync::Arc::clone(&command.progress);
         let last_uploaded = command.total_uploaded;
-        let dht_engine = command.dht_engine.clone();
         let provider = std::sync::Arc::clone(&upload_provider);
         for mut connection in active_connections {
             connection.set_upload_progress(std::sync::Arc::clone(&upload_progress));
             command.track_peer_for_upload_choking(&connection.stats);
+            let peer_dht_engine = connection
+                .remote_endpoint()
+                .and_then(|endpoint| command.dht_engines.for_peer(endpoint));
             if let Err(_connection) = swarm.spawn_peer(
                 connection,
-                dht_engine.clone(),
+                peer_dht_engine,
                 std::sync::Arc::clone(&provider),
             ) {
                 swarm.shutdown_all().await;
@@ -358,6 +360,7 @@ impl<'a> PieceDownloadSession<'a> {
             num_pieces,
             web_seed_manager,
             pending_pex_peers: Vec::new(),
+            pending_tracker_peers: Vec::new(),
             last_pex_send,
             pex_send_interval_secs,
             writer,

@@ -533,12 +533,13 @@ impl PeerSwarm {
                     actor.ut_pex_id = *ut_pex_id;
                 }
             }
-            PeerEvent::Disconnected { actor_id } | PeerEvent::RequestFailed { actor_id, .. } => {
+            PeerEvent::Disconnected { actor_id } => {
                 self.mark_dead(*actor_id);
             }
-            PeerEvent::AvailabilityChanged { .. }
-            | PeerEvent::Message { stats: None, .. }
-            | PeerEvent::PexPeers { .. } => {}
+            PeerEvent::RequestFailed { .. } => {}
+            PeerEvent::Message { stats: None, .. }
+            | PeerEvent::PexPeers { .. }
+            | PeerEvent::TrackerPeers { .. } => {}
         }
         let publishes_peer_state = matches!(
             event,
@@ -655,6 +656,42 @@ mod tests {
     use aria2_protocol::bittorrent::message::types::{BtMessage, PieceBlockRequest};
     use aria2_protocol::bittorrent::peer::connection::PeerConnection;
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn request_failure_keeps_peer_alive_until_transport_disconnect() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let remote_stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        let (local_stream, endpoint) = listener.accept().await.unwrap();
+        let connection = BtPeerConn::from_incoming_plain(
+            PeerConnection::from_stream_with_peer(local_stream, [0; 20], false, true),
+            endpoint,
+        );
+        let actor_id = connection.actor_id;
+        let provider: Arc<dyn PieceDataProvider> = Arc::new(InMemoryPieceProvider::new(16, 1));
+        let mut swarm = PeerSwarm::new(8);
+        assert_eq!(
+            swarm.spawn_peer(connection, None, provider).ok(),
+            Some(actor_id)
+        );
+
+        swarm.apply_event(&PeerEvent::RequestFailed {
+            actor_id,
+            generation: RequestGeneration::allocate(),
+            piece_index: 0,
+            request: BlockRequest {
+                block_index: 0,
+                offset: 0,
+                length: 16,
+            },
+        });
+        assert!(!swarm.actor(actor_id).unwrap().dead);
+
+        swarm.apply_event(&PeerEvent::Disconnected { actor_id });
+        assert!(swarm.actor(actor_id).unwrap().dead);
+        swarm.shutdown_all().await;
+        drop(remote_stream);
+    }
 
     #[tokio::test]
     async fn swarm_registry_preserves_ipv6_peer_endpoints() {
@@ -1151,13 +1188,7 @@ mod tests {
                 request: PieceBlockRequest::new(2, 0, 16),
             }
         );
-        peer_handle
-            .send(PeerCommand::EndGeneration {
-                generation: first_generation,
-                piece_index: 2,
-            })
-            .await
-            .unwrap();
+        peer_handle.end_generation(first_generation, 2).unwrap();
         assert_eq!(
             timeout(Duration::from_secs(1), remote.read_message())
                 .await
@@ -1382,11 +1413,13 @@ mod tests {
         let actor = swarm.actor(actor_id).unwrap();
         assert!(actor.seeder);
         assert_eq!(actor.bitfield, [0x80]);
-        let snapshots = peer_snapshots
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(snapshots.len(), 1);
-        assert_eq!(snapshots[0].seeder, Some(true));
+        {
+            let snapshots = peer_snapshots
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert_eq!(snapshots.len(), 1);
+            assert_eq!(snapshots[0].seeder, Some(true));
+        }
 
         swarm.shutdown_all().await;
     }

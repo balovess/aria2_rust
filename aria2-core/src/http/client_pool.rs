@@ -11,11 +11,11 @@ use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration;
 
+use crate::http::HttpVersion;
 use dashmap::DashMap;
 
 const HTTP2_DOWNLOAD_STREAM_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
 const HTTP2_DOWNLOAD_CONNECTION_WINDOW_SIZE: u32 = 16 * 1024 * 1024;
-pub(crate) const HTTP2_DOWNLOAD_SESSION_COUNT: usize = 4;
 
 /// Configure receive flow control for HTTP/2 response bodies.
 ///
@@ -57,14 +57,7 @@ pub fn ensure_rustls_provider() {
 /// - Apply method change rules (301/302/303 → GET; 307/308 → preserve)
 static GLOBAL_CLIENT: Lazy<Arc<Client>> = Lazy::new(|| {
     ensure_rustls_provider();
-    Arc::new(build_bound_client(None, false))
-});
-
-static GLOBAL_DOWNLOAD_CLIENTS: Lazy<Arc<Vec<Client>>> = Lazy::new(|| {
-    let mut clients = Vec::with_capacity(HTTP2_DOWNLOAD_SESSION_COUNT);
-    clients.push(GLOBAL_CLIENT.as_ref().clone());
-    clients.extend((1..HTTP2_DOWNLOAD_SESSION_COUNT).map(|_| build_bound_client(None, false)));
-    Arc::new(clients)
+    Arc::new(build_bound_client(None, false, HttpVersion::Auto))
 });
 
 /// Get the global shared HTTP client instance.
@@ -77,9 +70,10 @@ pub fn get_global_client() -> Arc<Client> {
     GLOBAL_CLIENT.clone()
 }
 
-type BoundClientKey = (Option<IpAddr>, bool);
+type BoundClientKey = (Option<IpAddr>, bool, HttpVersion);
 type BoundClients = DashMap<BoundClientKey, Arc<Client>>;
-type BoundDownloadClients = DashMap<BoundClientKey, Arc<Vec<Client>>>;
+type BoundDownloadClientKey = (Option<IpAddr>, bool, usize, HttpVersion);
+type BoundDownloadClients = DashMap<BoundDownloadClientKey, Arc<Vec<Client>>>;
 
 static BOUND_CLIENTS: Lazy<BoundClients> = Lazy::new(DashMap::new);
 static BOUND_DOWNLOAD_CLIENTS: Lazy<BoundDownloadClients> = Lazy::new(DashMap::new);
@@ -90,42 +84,49 @@ static BOUND_DOWNLOAD_CLIENTS: Lazy<BoundDownloadClients> = Lazy::new(DashMap::n
 /// one lazily-created connection pool. Clients are reused by every download
 /// using the same source and gzip mode.
 pub fn get_bound_client(local_address: Option<IpAddr>, accept_gzip: bool) -> Arc<Client> {
-    if local_address.is_none() && !accept_gzip {
+    get_bound_client_with_version(local_address, accept_gzip, HttpVersion::Auto)
+}
+
+/// Return a reusable client configured for the requested HTTP version.
+pub(crate) fn get_bound_client_with_version(
+    local_address: Option<IpAddr>,
+    accept_gzip: bool,
+    http_version: HttpVersion,
+) -> Arc<Client> {
+    if local_address.is_none() && !accept_gzip && http_version == HttpVersion::Auto {
         return get_global_client();
     }
-    let key = (local_address, accept_gzip);
+    let key = (local_address, accept_gzip, http_version);
     if let Some(client) = BOUND_CLIENTS.get(&key) {
         return Arc::clone(client.value());
     }
 
-    let client = Arc::new(build_bound_client(local_address, accept_gzip));
+    let client = Arc::new(build_bound_client(local_address, accept_gzip, http_version));
     let entry = BOUND_CLIENTS
         .entry(key)
         .or_insert_with(|| Arc::clone(&client));
     Arc::clone(entry.value())
 }
 
-/// Return independent HTTP clients for concurrent Range traffic. Each client
-/// owns a separate HTTP/2 connection pool; the segment executor warms one
-/// session per client before multiplexing additional streams onto it.
-pub(crate) fn get_bound_download_clients(
+/// Return independent clients for concurrent Range traffic using one
+/// consistent protocol selection across every pool.
+pub(crate) fn get_bound_download_clients_with_version(
     local_address: Option<IpAddr>,
     accept_gzip: bool,
+    session_count: usize,
+    http_version: HttpVersion,
 ) -> Arc<Vec<Client>> {
-    if local_address.is_none() && !accept_gzip {
-        return Arc::clone(&GLOBAL_DOWNLOAD_CLIENTS);
-    }
-
-    let key = (local_address, accept_gzip);
+    let session_count = session_count.clamp(1, crate::constants::DEFAULT_MAX_CONNECTION_PER_SERVER);
+    let key = (local_address, accept_gzip, session_count, http_version);
     if let Some(clients) = BOUND_DOWNLOAD_CLIENTS.get(&key) {
         return Arc::clone(clients.value());
     }
 
-    let primary = get_bound_client(local_address, accept_gzip);
-    let mut clients = Vec::with_capacity(HTTP2_DOWNLOAD_SESSION_COUNT);
+    let primary = get_bound_client_with_version(local_address, accept_gzip, http_version);
+    let mut clients = Vec::with_capacity(session_count);
     clients.push(primary.as_ref().clone());
     clients.extend(
-        (1..HTTP2_DOWNLOAD_SESSION_COUNT).map(|_| build_bound_client(local_address, accept_gzip)),
+        (1..session_count).map(|_| build_bound_client(local_address, accept_gzip, http_version)),
     );
     let clients = Arc::new(clients);
     let entry = BOUND_DOWNLOAD_CLIENTS
@@ -159,14 +160,19 @@ pub fn create_custom_client(
             crate::constants::HTTP_DEFAULT_TCP_KEEPALIVE_SECS,
         )))
         .tcp_nodelay(true);
-    let client = configure_http2_download_client(builder)
+    let client = HttpVersion::Auto
+        .configure(configure_http2_download_client(builder))
         .build()
         .expect("Failed to create custom HTTP client");
 
     Arc::new(client)
 }
 
-fn build_bound_client(local_address: Option<IpAddr>, accept_gzip: bool) -> Client {
+fn build_bound_client(
+    local_address: Option<IpAddr>,
+    accept_gzip: bool,
+    http_version: HttpVersion,
+) -> Client {
     ensure_rustls_provider();
     let mut builder = Client::builder()
         .connect_timeout(Duration::from_secs(
@@ -186,7 +192,8 @@ fn build_bound_client(local_address: Option<IpAddr>, accept_gzip: bool) -> Clien
     if let Some(address) = local_address {
         builder = builder.local_address(address);
     }
-    configure_http2_download_client(builder)
+    http_version
+        .configure(configure_http2_download_client(builder))
         .build()
         .expect("bound HTTP client construction should be infallible")
 }
@@ -221,6 +228,22 @@ mod tests {
         let gzip = get_bound_client(source, true);
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &gzip));
+    }
+
+    #[test]
+    fn download_client_pool_cache_is_keyed_by_session_count() {
+        let source = Some("127.0.0.55".parse().unwrap());
+        let two_sessions =
+            get_bound_download_clients_with_version(source, false, 2, HttpVersion::Auto);
+        let two_sessions_again =
+            get_bound_download_clients_with_version(source, false, 2, HttpVersion::Auto);
+        let four_sessions =
+            get_bound_download_clients_with_version(source, false, 4, HttpVersion::Auto);
+
+        assert_eq!(two_sessions.len(), 2);
+        assert_eq!(four_sessions.len(), 4);
+        assert!(Arc::ptr_eq(&two_sessions, &two_sessions_again));
+        assert!(!Arc::ptr_eq(&two_sessions, &four_sessions));
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ use crate::download::DownloadContext;
 use crate::engine::bt_peer_storage::PeerStorage;
 use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::bt_tracker_comm::BtAnnounce;
+use crate::engine::dht_engine_set::DhtEngineSet;
 use crate::segment::piece_storage::PieceStorage;
 
 impl BtRegistry {
@@ -131,7 +132,6 @@ impl BtRegistry {
     /// Equivalent to C++ `BtRegistry::remove(a2_gid_t)`.
     pub fn remove(&mut self, gid: u64) -> bool {
         self.dht_engines.remove(&gid);
-        self.refresh_dht_engine_alias();
         if let Some(old) = self.pool.remove(&gid) {
             self.cleanup_info_hash_index(gid, &old);
             trace!(gid, "BtRegistry::remove: entry removed");
@@ -153,7 +153,7 @@ impl BtRegistry {
         self.pool.clear();
         self.info_hash_index.clear();
         self.dht_engines.clear();
-        self.dht_engine = None;
+        self.global_dht_engines = DhtEngineSet::default();
     }
 
     // -----------------------------------------------------------------------
@@ -224,34 +224,108 @@ impl BtRegistry {
     // DHT engine management
     // -----------------------------------------------------------------------
 
-    /// Set the shared DHT engine for this session.
-    ///
-    /// In C++ aria2, the DHT node is a process-level singleton accessed
-    /// via `DHT::getInstance()`. Here the engine is explicitly set on the
-    /// registry, making it testable and lifecycle-managed.
-    pub fn set_dht_engine(
-        &mut self,
-        engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
-    ) {
-        trace!("BtRegistry::set_dht_engine");
-        self.dht_engine = Some(engine);
-    }
-
-    /// Set the process-wide DHT engine shared by all BT downloads.
+    /// Set the process-wide DHT engine for its bound address family.
     pub fn set_global_dht_engine(
         &mut self,
         engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
     ) {
         trace!("BtRegistry::set_global_dht_engine");
-        self.global_dht_engine = Some(Arc::clone(&engine));
-        self.dht_engine = Some(engine);
+        self.global_dht_engines.insert(engine);
     }
 
-    /// Get the process-wide DHT engine, if the BT session has started it.
-    pub fn get_global_dht_engine(
-        &self,
+    pub(crate) fn attach_global_dht_engine_for_gid(
+        &mut self,
+        gid: u64,
+        use_ipv6: bool,
     ) -> Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
-        self.global_dht_engine.as_ref().map(Arc::clone)
+        let engine = if use_ipv6 {
+            self.global_dht_engines.ipv6()
+        } else {
+            self.global_dht_engines.ipv4()
+        }?;
+        self.set_dht_engine_for_gid(gid, Arc::clone(&engine));
+        Some(engine)
+    }
+
+    /// Install the process DHT engine only if one has not already been
+    /// published, returning the canonical shared handle in either case.
+    ///
+    /// Callers hold the registry write lock across this operation, so
+    /// concurrent first-use startup converges on one engine rather than
+    /// replacing the process engine with whichever startup finishes last.
+    pub fn get_or_install_global_dht_engine(
+        &mut self,
+        candidate: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
+    ) -> Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine> {
+        if let Some(engine) = self.global_dht_engines.for_peer(candidate.local_addr()) {
+            return engine;
+        }
+
+        self.global_dht_engines.insert(Arc::clone(&candidate));
+        candidate
+    }
+
+    /// Start the process DHT engine for this configuration's address family,
+    /// or attach the download to the already-running family engine.
+    ///
+    /// The family startup gate is acquired without holding the registry lock,
+    /// then the registry is checked again before binding a UDP socket. This
+    /// keeps concurrent torrent starts from creating throwaway DHT engines.
+    pub async fn get_or_start_global_dht_engine(
+        registry: &Arc<std::sync::RwLock<Self>>,
+        gid: u64,
+        config: aria2_protocol::bittorrent::dht::engine::DhtEngineConfig,
+    ) -> std::io::Result<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        let use_ipv6 = config.listen_addr.is_some_and(|address| address.is_ipv6());
+        let startup_lock = {
+            let registry = registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(&registry.dht_engine_start_locks[usize::from(use_ipv6)])
+        };
+        let startup_guard = startup_lock.lock().await;
+
+        let existing = {
+            let registry = registry
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if use_ipv6 {
+                registry.global_dht_engines.ipv6()
+            } else {
+                registry.global_dht_engines.ipv4()
+            }
+        };
+        if let Some(engine) = existing {
+            registry
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .set_dht_engine_for_gid(gid, Arc::clone(&engine));
+            return Ok(engine);
+        }
+
+        let candidate = aria2_protocol::bittorrent::dht::engine::DhtEngine::start(config).await?;
+        let engine = {
+            let mut registry = registry
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let engine = registry.get_or_install_global_dht_engine(Arc::clone(&candidate));
+            registry.set_dht_engine_for_gid(gid, Arc::clone(&engine));
+            engine
+        };
+
+        drop(startup_guard);
+        if !Arc::ptr_eq(&candidate, &engine) {
+            candidate.shutdown_async().await;
+        }
+        Ok(engine)
+    }
+
+    /// Get the process-wide DHT engine that can contact this peer address.
+    pub fn get_global_dht_engine_for_peer(
+        &self,
+        address: std::net::SocketAddr,
+    ) -> Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        self.global_dht_engines.for_peer(address)
     }
 
     /// Return whether a command handle refers to the process-wide engine.
@@ -259,24 +333,16 @@ impl BtRegistry {
         &self,
         engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
     ) -> bool {
-        self.global_dht_engine
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, engine))
+        self.global_dht_engines
+            .iter()
+            .any(|current| Arc::ptr_eq(current, engine))
     }
 
-    /// Take the process-wide engine during final session shutdown.
-    pub fn take_global_dht_engine(
+    /// Take all process engines during final session shutdown.
+    pub fn take_global_dht_engines(
         &mut self,
-    ) -> Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
-        let engine = self.global_dht_engine.take();
-        if engine.as_ref().is_some_and(|current| {
-            self.dht_engine
-                .as_ref()
-                .is_some_and(|alias| Arc::ptr_eq(alias, current))
-        }) {
-            self.dht_engine = None;
-        }
-        engine
+    ) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
+        std::mem::take(&mut self.global_dht_engines).into_vec()
     }
 
     /// Register the DHT engine owned by one active download.
@@ -286,42 +352,7 @@ impl BtRegistry {
         engine: Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
     ) {
         trace!(gid, "BtRegistry::set_dht_engine_for_gid");
-        self.dht_engines.insert(gid, Arc::clone(&engine));
-        self.dht_engine = Some(engine);
-    }
-
-    /// Get a reference to the shared DHT engine.
-    ///
-    /// Returns `None` if no DHT engine has been set.
-    pub fn get_dht_engine(
-        &self,
-    ) -> Option<&Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
-        self.dht_engine.as_ref()
-    }
-
-    /// Remove the DHT engine reference.
-    ///
-    /// Called during shutdown to release the engine.
-    pub fn clear_dht_engine(&mut self) {
-        trace!("BtRegistry::clear_dht_engine");
-        self.dht_engine = None;
-    }
-
-    /// Clear the shared DHT engine only when it still belongs to the caller.
-    ///
-    /// Multiple BitTorrent commands can finish out of order. Pointer identity
-    /// prevents an older command from clearing a newer command's live engine.
-    pub fn clear_dht_engine_if(
-        &mut self,
-        engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
-    ) {
-        if self
-            .dht_engine
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, engine))
-        {
-            self.dht_engine = None;
-        }
+        self.dht_engines.entry(gid).or_default().insert(engine);
     }
 
     /// Remove one download's DHT engine only when the handle still matches.
@@ -330,41 +361,27 @@ impl BtRegistry {
         gid: u64,
         engine: &Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>,
     ) {
-        if self
-            .dht_engines
-            .get(&gid)
-            .is_some_and(|current| Arc::ptr_eq(current, engine))
-        {
-            self.dht_engines.remove(&gid);
-            self.refresh_dht_engine_alias();
-        } else {
-            self.clear_dht_engine_if(engine);
+        if let Some(engines) = self.dht_engines.get_mut(&gid) {
+            engines.remove_if(engine);
+            if engines.is_empty() {
+                self.dht_engines.remove(&gid);
+            }
         }
     }
 
     /// Clone all currently registered DHT engines for a status snapshot.
     pub fn get_dht_engines(&self) -> Vec<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>> {
-        let mut engines = Vec::with_capacity(self.dht_engines.len() + 1);
-        if let Some(engine) = self.global_dht_engine.as_ref() {
-            engines.push(Arc::clone(engine));
-        }
-        for engine in self.dht_engines.values() {
+        let mut engines = Vec::with_capacity(self.dht_engines.len() * 2 + 2);
+        for engine in self
+            .global_dht_engines
+            .iter()
+            .chain(self.dht_engines.values().flat_map(DhtEngineSet::iter))
+        {
             if !engines.iter().any(|current| Arc::ptr_eq(current, engine)) {
                 engines.push(Arc::clone(engine));
             }
         }
-        if engines.is_empty() {
-            self.dht_engine.iter().cloned().collect()
-        } else {
-            engines
-        }
-    }
-
-    fn refresh_dht_engine_alias(&mut self) {
-        self.dht_engine = self
-            .global_dht_engine
-            .clone()
-            .or_else(|| self.dht_engines.values().next().cloned());
+        engines
     }
 
     // -----------------------------------------------------------------------

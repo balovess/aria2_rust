@@ -35,6 +35,8 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "max-concurrent-downloads",
     "max-connection-per-server",
     "max-download-limit",
+    "max-http2-sessions-per-server",
+    "max-http2-streams-per-session",
     "max-download-result",
     "max-mmap-limit",
     "max-overall-download-limit",
@@ -53,6 +55,7 @@ pub const RUNTIME_GLOBAL_CHANGEABLE_OPTIONS: &[&str] = &[
     "lowest-speed-limit",
     "max-file-not-found",
     "max-tries",
+    "http-version",
     "no-netrc",
     "piece-length",
     "remote-time",
@@ -269,6 +272,9 @@ pub const INITIAL_REQUEST_OPTIONS: &[&str] = &[
     "max-connection-per-server",
     "max-download-limit",
     "max-file-not-found",
+    "max-http2-sessions-per-server",
+    "max-http2-streams-per-session",
+    "http-version",
     "max-mmap-limit",
     "max-resume-failure-tries",
     "max-tries",
@@ -393,7 +399,10 @@ pub const RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS: &[&str] = &[
     "hash-check-only",
     "max-connection-per-server",
     "max-download-limit",
+    "max-http2-sessions-per-server",
     "max-mmap-limit",
+    "max-http2-streams-per-session",
+    "http-version",
     "max-resume-failure-tries",
     "min-split-size",
     "no-file-allocation-limit",
@@ -623,9 +632,9 @@ mod tests {
     fn task_policy_matches_original_changeability_axes() {
         assert_eq!(RUNTIME_CHANGEABLE_OPTIONS.len(), 7);
         #[cfg(feature = "bittorrent")]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 128);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 131);
         #[cfg(not(feature = "bittorrent"))]
-        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 127);
+        assert_eq!(RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS.len(), 130);
         assert_eq!(
             is_option_changeable("max-download-limit", true),
             ChangeableKind::Immediate

@@ -19,6 +19,14 @@ mod streaming;
 #[path = "tests/mod.rs"]
 mod tests;
 
+#[derive(Debug, Clone)]
+pub(crate) struct RangeProbeResult {
+    pub(crate) supports_range: bool,
+    pub(crate) effective_url: String,
+    pub(crate) total_length: u64,
+    pub(crate) version: Option<reqwest::Version>,
+}
+
 pub struct WriteChunk {
     pub offset: u64,
     pub data: bytes::Bytes,
@@ -31,6 +39,7 @@ pub struct HttpSegmentDownloader {
     auth_options: Option<AuthResolveOptions>,
     netrc_path: Option<String>,
     last_peer_addr: std::sync::Mutex<Option<std::net::SocketAddr>>,
+    last_http_version: std::sync::Mutex<Option<reqwest::Version>>,
 }
 
 /// Validates that a partial response covers exactly the requested byte range.
@@ -103,6 +112,7 @@ impl HttpSegmentDownloader {
             auth_options: None,
             netrc_path: None,
             last_peer_addr: std::sync::Mutex::new(None),
+            last_http_version: std::sync::Mutex::new(None),
         }
     }
 
@@ -191,5 +201,24 @@ impl HttpSegmentDownloader {
     /// Clear per-request connection metadata before reusing this downloader.
     pub fn clear_last_peer_addr(&self) {
         self.remember_peer(None);
+    }
+
+    pub fn last_http_version(&self) -> Option<reqwest::Version> {
+        self.last_http_version
+            .lock()
+            .ok()
+            .and_then(|version| *version)
+    }
+
+    pub(crate) fn remember_http_version(&self, version: reqwest::Version) {
+        if let Ok(mut slot) = self.last_http_version.lock() {
+            *slot = Some(version);
+        }
+    }
+
+    pub fn clear_last_http_version(&self) {
+        if let Ok(mut slot) = self.last_http_version.lock() {
+            *slot = None;
+        }
     }
 }

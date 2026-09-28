@@ -20,4 +20,4 @@ mod pipelined;
 pub(crate) use endgame_pipeline::download_piece_blocks_endgame;
 pub(crate) use peer_actor::{PeerActorControl, PeerActorTask, PeerCommand, PeerEvent};
 pub(crate) use peer_registry::PeerSwarm;
-pub(crate) use pipelined::download_piece_blocks;
+pub(crate) use pipelined::{download_piece_blocks, download_piece_blocks_batch};

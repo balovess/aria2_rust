@@ -494,6 +494,14 @@ impl TrackerAnnouncer {
         self.public_tracker_urls = public_tracker_urls;
     }
 
+    pub(crate) fn subscribe_public_tracker_updates(
+        &self,
+    ) -> Option<tokio::sync::watch::Receiver<u64>> {
+        self.public_tracker_catalog
+            .as_ref()
+            .map(|catalog| catalog.subscribe_updates())
+    }
+
     /// Apply the download's tracker exclusion policy to future catalog merges.
     pub fn set_excluded_tracker_urls(&mut self, excluded: Vec<String>) {
         self.excluded_tracker_urls = excluded;

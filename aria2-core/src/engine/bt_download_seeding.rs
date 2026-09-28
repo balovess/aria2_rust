@@ -119,21 +119,23 @@ impl BtDownloadCommand {
 
         // Reuse the download announcer so the completed event and tracker
         // timing state remain part of one lifecycle.
-        let announcer = self.tracker_announcer.take();
+        let tracker_actor = self.tracker_actor.clone();
         let peer_id = self.local_peer_id;
         let mut connection_options =
             BtPeerConnectionOptions::from_download_options(&group_options, peer_id);
-        connection_options.dht_enabled = group_options.enable_dht && !self.is_private;
+        connection_options.dht_enabled =
+            (group_options.enable_dht || group_options.enable_dht6) && !self.is_private;
         connection_options.listen_port = (self.listen_port != 0).then_some(self.listen_port);
         connection_options.hybrid_info_hash_v2 = info_hash_v2;
         let discovery = SeedPeerDiscovery {
             group: std::sync::Arc::clone(&self.group),
-            dht_engine: if self.is_private {
-                None
+            dht_engines: if self.is_private {
+                crate::engine::dht_engine_set::DhtEngineSet::default()
             } else {
-                self.dht_engine.clone()
+                self.dht_engines.clone()
             },
             dht_lookup: std::mem::take(&mut self.dht_periodic_lookup),
+            listen_port: self.listen_port,
             connection_options,
             total_size,
             utp_socket: self.utp_socket.clone(),
@@ -148,7 +150,7 @@ impl BtDownloadCommand {
             config,
             exit_cond,
             self.completed_bytes,
-            announcer,
+            tracker_actor,
             peer_id,
             self.incoming_peers.take(),
             upload_counter,
@@ -179,7 +181,7 @@ impl BtDownloadCommand {
                 _ = &mut lifecycle_changed => {}
             }
         };
-        self.tracker_announcer = manager.take_announcer();
+        let _ = manager.take_announcer();
         seeding_result?;
 
         if manager.halt_requested() {

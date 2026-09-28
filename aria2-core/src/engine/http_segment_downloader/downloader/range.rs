@@ -11,7 +11,9 @@ use crate::http::auth_challenge_handler::{self, AuthChallengeResult};
 use crate::http::skip_response::MAX_REDIRECT_COUNT;
 use crate::http::{AuthScheme, HttpAuthChallenge};
 
-use super::{HttpSegmentDownloader, classify_range_status, validate_content_range};
+use super::{
+    HttpSegmentDownloader, RangeProbeResult, classify_range_status, validate_content_range,
+};
 
 impl HttpSegmentDownloader {
     /// Send a Range request through the same manual redirect seam as the
@@ -207,6 +209,55 @@ impl HttpSegmentDownloader {
         }
     }
 
+    /// Probe byte-range support with the same redirect, cookie, and auth path
+    /// used by actual range downloads. `Accept-Ranges` from HEAD is only a
+    /// hint; a valid 206 and exact one-byte Content-Range is the evidence that
+    /// this resource can be split.
+    pub(crate) async fn probe_range_metadata(
+        &self,
+        url: &str,
+        cookie_header: Option<&str>,
+    ) -> Result<RangeProbeResult> {
+        let (response, effective_url) = self
+            .send_range_request(url, "bytes=0-0", cookie_header, &[])
+            .await?;
+
+        let version = response.version();
+        let status = response.status();
+        if !matches!(status.as_u16(), 200 | 206 | 416)
+            && let Some(error) = classify_range_status(status, "bytes=0-0")
+        {
+            return Err(error);
+        }
+        let content_length = response.content_length().unwrap_or(0);
+        let content_range = response
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok());
+        let parsed_range = content_range
+            .and_then(crate::http::response_processor::range::parse_content_range_value);
+        let supports_range = status.as_u16() == 206
+            && parsed_range.is_some_and(|(start, end, total)| start == 0 && end == 0 && total > 0);
+        let total_length = if supports_range {
+            parsed_range.map(|(_, _, total)| total).unwrap_or(0)
+        } else if status.as_u16() == 200 && content_length > 0 {
+            content_length
+        } else if status.as_u16() == 416 {
+            content_range
+                .and_then(parse_unsatisfied_content_range_length)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        Ok(RangeProbeResult {
+            supports_range,
+            effective_url: effective_url.to_string(),
+            total_length,
+            version: Some(version),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn download_range(
         &self,
@@ -305,4 +356,8 @@ impl HttpSegmentDownloader {
         // Freeze BytesMut to immutable Bytes (zero-cost conversion)
         Ok(data.freeze())
     }
+}
+
+fn parse_unsatisfied_content_range_length(value: &str) -> Option<u64> {
+    value.trim().strip_prefix("bytes */")?.trim().parse().ok()
 }

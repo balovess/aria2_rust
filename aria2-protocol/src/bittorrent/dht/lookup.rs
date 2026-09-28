@@ -133,10 +133,20 @@ pub async fn iterative_sample_infohashes(
         let Some(result) = pending.next().await else {
             break;
         };
+        let queried_node_id = result.node_id;
         if let Some(tracked) = result.response {
             contacted += 1;
             let message = tracked.message;
-            mark_node_good(&tracked.from, &message, routing_table).await;
+            if let Some(responding_node_id) =
+                mark_node_good(&tracked.from, &queried_node_id, &message, routing_table).await
+            {
+                replace_lookup_node_id(
+                    &mut entries,
+                    &tracked.from,
+                    &queried_node_id,
+                    &responding_node_id,
+                );
+            }
             if response.is_none() {
                 response = message
                     .r
@@ -144,12 +154,12 @@ pub async fn iterative_sample_infohashes(
                     .and_then(|value| SampleInfoHashesResponse::from_bencode(value).ok());
             }
             for (addr, node_id) in extract_compact_nodes_from_response(&message) {
-                add_node_to_table(routing_table, DhtNode::new(node_id, addr)).await;
+                add_node_to_table(routing_table, DhtNode::unverified(node_id, addr)).await;
                 insert_entry(&mut entries, node_id, addr, target, self_id);
             }
             sort_and_dedup(&mut entries, target);
         } else {
-            mark_node_bad(&result.node_id, routing_table).await;
+            mark_node_bad(&queried_node_id, routing_table).await;
         }
         send_batch_with_seq(&request, None, &mut entries, &mut pending).await;
     }
@@ -199,18 +209,28 @@ pub async fn iterative_find_node(
         // on its own tracked transaction, so concurrent lookups cannot steal
         // one another's responses.
         if let Some(result) = pending.next().await {
+            let queried_node_id = result.node_id;
             if let Some(response) = result.response {
                 let from = response.from;
                 let message = response.message;
                 nodes_contacted += 1;
 
                 // Mark the responding node as good
-                mark_node_good(&from, &message, routing_table).await;
+                if let Some(responding_node_id) =
+                    mark_node_good(&from, &queried_node_id, &message, routing_table).await
+                {
+                    replace_lookup_node_id(
+                        &mut entries,
+                        &from,
+                        &queried_node_id,
+                        &responding_node_id,
+                    );
+                }
 
                 // Extract nodes from the response and add to entries
                 let new_nodes = extract_compact_nodes_from_response(&message);
                 for (addr, nid) in new_nodes {
-                    let new_node = DhtNode::new(nid, addr);
+                    let new_node = DhtNode::unverified(nid, addr);
                     add_node_to_table(routing_table, new_node).await;
                     insert_entry(&mut entries, nid, addr, target, self_id);
                 }
@@ -218,7 +238,7 @@ pub async fn iterative_find_node(
                 // Sort entries by distance and dedup
                 sort_and_dedup(&mut entries, target);
             } else {
-                mark_node_bad(&result.node_id, routing_table).await;
+                mark_node_bad(&queried_node_id, routing_table).await;
             }
         }
 
@@ -230,7 +250,7 @@ pub async fn iterative_find_node(
     let closest_nodes: Vec<DhtNode> = entries
         .iter()
         .take(K)
-        .map(|e| DhtNode::new(e.node_id, e.addr))
+        .map(|e| DhtNode::unverified(e.node_id, e.addr))
         .collect();
 
     NodeLookupResult {
@@ -273,12 +293,22 @@ pub async fn iterative_get_peers(
         rounds += 1;
 
         if let Some(result) = pending.next().await {
+            let queried_node_id = result.node_id;
             if let Some(response) = result.response {
                 let from = response.from;
                 let message = response.message;
                 nodes_contacted += 1;
 
-                mark_node_good(&from, &message, routing_table).await;
+                let responding_node_id =
+                    mark_node_good(&from, &queried_node_id, &message, routing_table).await;
+                if let Some(responding_node_id) = responding_node_id {
+                    replace_lookup_node_id(
+                        &mut entries,
+                        &from,
+                        &queried_node_id,
+                        &responding_node_id,
+                    );
+                }
 
                 // Extract peers
                 let peers = extract_compact_peers_from_response(&message);
@@ -289,27 +319,22 @@ pub async fn iterative_get_peers(
                 // Extract token from response (for subsequent announce)
                 if let Some(r) = &message.r
                     && let Some(token_val) = r.dict_get(b"token").and_then(|v| v.as_bytes())
+                    && let Some(node_id) = responding_node_id
                 {
-                    // Find the node ID for this address
-                    let node_id = entries
-                        .iter()
-                        .find(|e| e.addr == from)
-                        .map(|e| e.node_id)
-                        .unwrap_or([0u8; 20]);
                     token_nodes.push((from, node_id, token_val.to_vec()));
                 }
 
                 // Extract nodes from response
                 let new_nodes = extract_compact_nodes_from_response(&message);
                 for (addr, nid) in new_nodes {
-                    let new_node = DhtNode::new(nid, addr);
+                    let new_node = DhtNode::unverified(nid, addr);
                     add_node_to_table(routing_table, new_node).await;
                     insert_entry(&mut entries, nid, addr, info_hash, self_id);
                 }
 
                 sort_and_dedup(&mut entries, info_hash);
             } else {
-                mark_node_bad(&result.node_id, routing_table).await;
+                mark_node_bad(&queried_node_id, routing_table).await;
             }
         }
 
@@ -417,14 +442,21 @@ async fn iterative_get_item_with_token_collection(
         let Some(result) = pending.next().await else {
             break;
         };
+        let queried_node_id = result.node_id;
         if let Some(response) = result.response {
             contacted += 1;
             let from = response.from;
             let message = response.message;
-            mark_node_good(&from, &message, routing_table).await;
+            let responding_node_id =
+                mark_node_good(&from, &queried_node_id, &message, routing_table).await;
+            if let Some(responding_node_id) = responding_node_id {
+                replace_lookup_node_id(&mut entries, &from, &queried_node_id, &responding_node_id);
+            }
             if let Some(result) = message.r.as_ref() {
-                if let Some(token) = result.dict_get(b"token").and_then(|v| v.as_bytes()) {
-                    tokens.push((from, result_node_id(&message), token.to_vec()));
+                if let Some(token) = result.dict_get(b"token").and_then(|v| v.as_bytes())
+                    && let Some(node_id) = responding_node_id
+                {
+                    tokens.push((from, node_id, token.to_vec()));
                 }
                 if item.is_none()
                     && let Some(candidate) = parse_stored_item(target, result)
@@ -440,12 +472,12 @@ async fn iterative_get_item_with_token_collection(
                 break;
             }
             for (addr, nid) in extract_compact_nodes_from_response(&message) {
-                add_node_to_table(routing_table, DhtNode::new(nid, addr)).await;
+                add_node_to_table(routing_table, DhtNode::unverified(nid, addr)).await;
                 insert_entry(&mut entries, nid, addr, target, self_id);
             }
             sort_and_dedup(&mut entries, target);
         } else {
-            mark_node_bad(&result.node_id, routing_table).await;
+            mark_node_bad(&queried_node_id, routing_table).await;
         }
         send_batch_with_seq(&request, seq, &mut entries, &mut pending).await;
     }
@@ -624,14 +656,13 @@ async fn send_batch_with_seq(
     }
 }
 
-fn result_node_id(message: &DhtMessage) -> [u8; 20] {
+fn result_node_id(message: &DhtMessage) -> Option<[u8; 20]> {
     message
         .r
         .as_ref()
         .and_then(|r| r.dict_get(b"id"))
         .and_then(|v| v.as_bytes())
         .and_then(|v| v.try_into().ok())
-        .unwrap_or([0u8; 20])
 }
 
 fn parse_stored_item(
@@ -719,27 +750,36 @@ fn xor_distance(a: &[u8; 20], b: &[u8; 20]) -> [u8; 20] {
 /// Mark a node as good in the routing table.
 async fn mark_node_good(
     addr: &SocketAddr,
+    queried_node_id: &[u8; 20],
     message: &DhtMessage,
     routing_table: &Arc<tokio::sync::RwLock<RoutingTable>>,
-) {
-    let Some(node_id) = message
-        .r
-        .as_ref()
-        .and_then(|result| result.dict_get(b"id"))
-        .and_then(|id| id.as_bytes())
-        .filter(|id| id.len() == 20)
-        .map(|id| {
-            let mut node_id = [0u8; 20];
-            node_id.copy_from_slice(id);
-            node_id
-        })
-    else {
-        return;
-    };
+) -> Option<[u8; 20]> {
+    let node_id = result_node_id(message)?;
 
     let mut rt = routing_table.write().await;
+    if &node_id != queried_node_id {
+        rt.remove(queried_node_id);
+    }
     rt.mark_good(&node_id);
     rt.insert(DhtNode::new(node_id, *addr));
+    Some(node_id)
+}
+
+fn replace_lookup_node_id(
+    entries: &mut [LookupEntry],
+    addr: &SocketAddr,
+    old_node_id: &[u8; 20],
+    new_node_id: &[u8; 20],
+) {
+    if old_node_id == new_node_id {
+        return;
+    }
+    if let Some(entry) = entries
+        .iter_mut()
+        .find(|entry| entry.addr == *addr && &entry.node_id == old_node_id)
+    {
+        entry.node_id = *new_node_id;
+    }
 }
 
 /// Mark a node as failed after its tracked lookup expires.

@@ -21,11 +21,19 @@ pub(crate) async fn build_dht_engine_config(
         .await
 }
 
+#[cfg(test)]
 pub(crate) async fn build_dht_engine_config_with_policy(
     options: &DownloadOptions,
     policy: &crate::network::OutboundNetworkPolicy,
 ) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
-    let use_ipv6 = options.enable_dht6;
+    build_dht_engine_config_for_family(options, policy, options.enable_dht6).await
+}
+
+pub(crate) async fn build_dht_engine_config_for_family(
+    options: &DownloadOptions,
+    policy: &crate::network::OutboundNetworkPolicy,
+    use_ipv6: bool,
+) -> Result<aria2_protocol::bittorrent::dht::engine::DhtEngineConfig> {
     let port_range = options
         .dht_listen_port
         .as_deref()
@@ -270,6 +278,32 @@ mod tests {
             .expect("DHT4 config should select a compatible policy source");
 
         assert_eq!(config4.listen_addr, Some("127.0.0.2".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn dual_stack_options_build_independent_family_configs_and_snapshots() {
+        let options = DownloadOptions {
+            enable_dht: true,
+            enable_dht6: true,
+            dht_listen_addr: Some("127.0.0.1".to_string()),
+            dht_listen_addr6: Some("::1".to_string()),
+            dht_file_path: Some("v4.dat".to_string()),
+            dht_file_path6: Some("v6.dat".to_string()),
+            ..Default::default()
+        };
+        let policy = crate::network::OutboundNetworkPolicy::direct();
+
+        let config4 = build_dht_engine_config_for_family(&options, &policy, false)
+            .await
+            .expect("IPv4 DHT options should build independently");
+        let config6 = build_dht_engine_config_for_family(&options, &policy, true)
+            .await
+            .expect("IPv6 DHT options should build independently");
+
+        assert_eq!(config4.listen_addr, Some("127.0.0.1".parse().unwrap()));
+        assert_eq!(config6.listen_addr, Some("::1".parse().unwrap()));
+        assert_eq!(config4.dht_file_path.as_deref(), Some(Path::new("v4.dat")));
+        assert_eq!(config6.dht_file_path.as_deref(), Some(Path::new("v6.dat")));
     }
 
     #[tokio::test]

@@ -179,8 +179,20 @@ impl DhtEngine {
                                 }
                             }
                             Ok(_) => { /* empty packet, ignore */ }
-                            Err(e) => {
-                                debug!("DHT recv error: {}", e);
+                            Err(error)
+                                if error.kind() == std::io::ErrorKind::ConnectionReset =>
+                            {
+                                // Windows reports ICMP Port Unreachable for an outbound UDP
+                                // query as WSAECONNRESET on the next receive. That is a
+                                // per-datagram network result, not a failure of the DHT socket.
+                                debug!(
+                                    local_addr = %context.socket.local_addr(),
+                                    %error,
+                                    "Ignoring DHT UDP connection reset"
+                                );
+                            }
+                            Err(error) => {
+                                debug!("DHT recv error: {}", error);
                                 break;
                             }
                         }
@@ -285,13 +297,10 @@ impl DhtEngineContext {
         // Resolve the public defaults here. Task-specific bootstrap endpoints
         // are resolved by the core configuration seam before engine start.
         let entry_points = if self.config.bootstrap_nodes.is_empty() {
-            DhtBootstrap::resolve_bootstrap_nodes().await
+            DhtBootstrap::resolve_bootstrap_nodes_for_family(self.socket.local_addr().is_ipv6())
+                .await
         } else {
-            self.config
-                .bootstrap_nodes
-                .iter()
-                .map(|addr| DhtNode::new([0u8; 20], *addr))
-                .collect()
+            DhtBootstrap::nodes_from_addresses(self.config.bootstrap_nodes.iter().copied())
         };
 
         if entry_points.is_empty() {
@@ -496,7 +505,6 @@ impl DhtEngineContext {
             return Err("DHT persistence is disabled (dht-file-path is not set)".to_string());
         };
         let path = configured_path.clone();
-        let persistence_max_age = self.config.persistence_max_age;
         // Acquire the save lock before taking the snapshot. Otherwise a
         // shutdown snapshot can be newer than an auto-save snapshot but
         // still be written first, allowing the older snapshot to win.
@@ -507,12 +515,7 @@ impl DhtEngineContext {
         let save_path = path.clone();
         tokio::task::spawn_blocking(move || {
             let _save_guard = save_guard;
-            super::persistence::DhtPersistence::merge_and_save_to_file_sync_with_max_age(
-                &save_path,
-                &self_id,
-                &nodes,
-                persistence_max_age,
-            )
+            super::persistence::DhtPersistence::save_to_file_sync(&save_path, &self_id, &nodes)
         })
         .await
         .map_err(|error| format!("DHT routing table save task failed: {error}"))?

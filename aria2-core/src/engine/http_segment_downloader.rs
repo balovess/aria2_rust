@@ -13,6 +13,7 @@ mod segment_size;
 
 // Public re-exports — preserve the original `http_segment_downloader::X` API surface
 pub use connection_limiter::ConnectionLimiter;
+pub(crate) use downloader::RangeProbeResult;
 pub use downloader::{HttpSegmentDownloader, WriteChunk};
 pub(crate) use progress::{SegmentProgress, SegmentProgressTracker};
 pub use segment_size::calculate_dynamic_segment_size;

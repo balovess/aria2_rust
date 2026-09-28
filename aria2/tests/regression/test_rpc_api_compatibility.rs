@@ -701,7 +701,12 @@ async fn regression_change_global_option_returns_ok() {
     let req = make_request(
         "aria2.changeGlobalOption",
         serde_json::json!([
-            {"max-concurrent-downloads": 5}
+            {
+                "max-concurrent-downloads": 5,
+                "max-http2-sessions-per-server": 7,
+                "max-http2-streams-per-session": 8,
+                "http-version": "2"
+            }
         ]),
     );
     let resp = engine.handle_request(&req).await;
@@ -709,6 +714,37 @@ async fn regression_change_global_option_returns_ok() {
     assert_success(&resp);
     let result: String = serde_json::from_value(resp.result.unwrap()).unwrap();
     assert_eq!(result, "OK");
+    let global_options = engine
+        .handle_request(&make_request(
+            "aria2.getGlobalOption",
+            serde_json::json!([]),
+        ))
+        .await;
+    assert_success(&global_options);
+    assert_eq!(
+        global_options
+            .result
+            .as_ref()
+            .and_then(|value| value.get("max-http2-sessions-per-server"))
+            .and_then(serde_json::Value::as_str),
+        Some("7")
+    );
+    assert_eq!(
+        global_options
+            .result
+            .as_ref()
+            .and_then(|value| value.get("max-http2-streams-per-session"))
+            .and_then(serde_json::Value::as_str),
+        Some("8")
+    );
+    assert_eq!(
+        global_options
+            .result
+            .as_ref()
+            .and_then(|value| value.get("http-version"))
+            .and_then(serde_json::Value::as_str),
+        Some("2")
+    );
 }
 
 /// Test: zero removes the process-wide concurrency limit.
@@ -842,7 +878,7 @@ async fn regression_change_option_validates_keys() {
     assert_success(&invalid_resp);
 }
 
-/// Test: aria2.changeOption accepts max-connection-per-server (runtime-changeable).
+/// Test: aria2.changeOption accepts per-server HTTP connection and H2 pool limits.
 #[tokio::test]
 async fn regression_change_option_accepts_max_connection_per_server() {
     let engine = core_engine();
@@ -858,7 +894,12 @@ async fn regression_change_option_accepts_max_connection_per_server() {
     // Change max-connection-per-server — should succeed (not -32602)
     let req = make_request(
         "aria2.changeOption",
-        serde_json::json!([gid, {"max-connection-per-server": 4}]),
+        serde_json::json!([gid, {
+            "max-connection-per-server": 4,
+            "max-http2-sessions-per-server": 2,
+            "max-http2-streams-per-session": 8,
+            "http-version": "1.1"
+        }]),
     );
     let resp = engine.handle_request(&req).await;
     assert_success(&resp);

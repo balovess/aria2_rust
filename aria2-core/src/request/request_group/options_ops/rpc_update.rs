@@ -233,6 +233,30 @@ pub(super) fn apply_rpc_option(
             opts.max_connection_per_server = Some(value);
             Ok(true)
         }
+        "max-http2-sessions-per-server" => {
+            let value = rpc_option_u16(value, key)?;
+            if value == 0 {
+                return Err(format!("Option '{}' must be greater than zero", key));
+            }
+            opts.max_http2_sessions_per_server = Some(value);
+            Ok(true)
+        }
+        "max-http2-streams-per-session" => {
+            let value = rpc_option_u16(value, key)?;
+            if !(1..=256).contains(&value) {
+                return Err(format!("Option '{}' must be between 1 and 256", key));
+            }
+            opts.max_http2_streams_per_session = Some(value);
+            Ok(true)
+        }
+        "http-version" => {
+            let value = rpc_option_string(value, key)?;
+            let Some(version) = crate::http::HttpVersion::parse_option(&value) else {
+                return Err(format!("Option '{}' must be one of: auto, 1.1, 2", key));
+            };
+            opts.http_version = version;
+            Ok(true)
+        }
         "max-file-not-found" => {
             opts.max_file_not_found = rpc_option_u32(value, key)?;
             Ok(true)

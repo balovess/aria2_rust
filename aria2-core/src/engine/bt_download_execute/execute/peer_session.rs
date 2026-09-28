@@ -41,7 +41,7 @@ impl BtDownloadCommand {
                     message: "BitTorrent listener manager is not configured".to_string(),
                 })
             })?;
-            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy, dht_enabled) = {
+            let (listen_ports, max_peers, caretaker_id, disable_ipv6, crypto_policy) = {
                 let group = self.group.recover();
                 let ports = group
                     .options()
@@ -66,9 +66,10 @@ impl BtDownloadCommand {
                             .eq_ignore_ascii_case("arc4")
                             || group.options().bt_force_encrypt,
                     },
-                    group.options().enable_dht && !self.is_private,
                 )
             };
+            let dht_enabled_ipv4 = !self.is_private && self.dht_engines.ipv4().is_some();
+            let dht_enabled_ipv6 = !self.is_private && self.dht_engines.ipv6().is_some();
             let register = |bind_ip: std::net::IpAddr| {
                 listener_manager.register(crate::engine::bt_peer_listener::BtPeerRouteConfig {
                     bind_ip,
@@ -80,7 +81,11 @@ impl BtDownloadCommand {
                     max_peers,
                     peer_storage: std::sync::Arc::clone(&self.peer_storage),
                     crypto_policy,
-                    dht_enabled,
+                    dht_enabled: if bind_ip.is_ipv6() {
+                        dht_enabled_ipv6
+                    } else {
+                        dht_enabled_ipv4
+                    },
                 })
             };
             let route = if disable_ipv6 {
@@ -118,8 +123,12 @@ impl BtDownloadCommand {
             );
         }
 
+        let swarm = PeerSwarm::new(64);
+        let peer_event_tx = swarm
+            .event_sender()
+            .expect("new torrent swarm must own an event sender");
         let peer_addrs = self
-            .discover_peers(meta, total_size, &network_info_hash)
+            .discover_peers_with_events(meta, total_size, &network_info_hash, Some(peer_event_tx))
             .await?;
 
         // Initialize PEX known peers list from discovered peers for BEP 11 exchange.
@@ -166,7 +175,7 @@ impl BtDownloadCommand {
         Ok(TorrentSession {
             initial_peer_addrs: peer_addrs,
             network_info_hash,
-            swarm: PeerSwarm::new(64),
+            swarm,
             upload_counter: Arc::new(std::sync::atomic::AtomicU64::new(self.total_uploaded)),
             web_seed_manager,
             last_pex_send,

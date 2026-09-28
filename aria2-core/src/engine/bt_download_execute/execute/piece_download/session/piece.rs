@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::engine::bt_download_command::BtDownloadCommand;
-use crate::engine::bt_message_handler::types::BLOCK_SIZE;
-use crate::engine::bt_message_handler::{download_piece_blocks, download_piece_blocks_endgame};
+use crate::engine::bt_message_handler::types::{BLOCK_SIZE, PieceDownloadResult, PieceRequestPlan};
+use crate::engine::bt_message_handler::{
+    download_piece_blocks, download_piece_blocks_batch, download_piece_blocks_endgame,
+};
 use crate::engine::bt_piece_selector::BtPieceSelector;
 use crate::error::{Aria2Error, Result};
 use crate::request::request_group::DownloadResultCode;
@@ -162,7 +164,6 @@ impl PieceDownloadSession<'_> {
             num_blocks,
             actual_piece_len
         );
-        let mut piece_ok = false;
         let max_attempts = self.command.group.recover().options().max_retries;
 
         // Phase 14 - B1: Use endgame-aware download when in endgame mode
@@ -248,14 +249,147 @@ impl PieceDownloadSession<'_> {
                 ));
             }
         };
+        let (piece_result, peer_actor_ids) = match download_result {
+            Ok(actor_result) => {
+                self.pending_pex_peers.extend(actor_result.pex_peers);
+                self.pending_tracker_peers
+                    .extend(actor_result.tracker_peers);
+                super::availability::sync_swarm_actor_availability(
+                    self.swarm,
+                    &actor_result.availability_changed_actor_ids,
+                    &mut self.peer_tracker,
+                    &mut self.peer_last_data_time,
+                );
+                (Ok(actor_result.piece), actor_result.peer_actor_ids)
+            }
+            Err(error) => (Err(error), Vec::new()),
+        };
+        self.process_piece_download_result(
+            next_piece_idx,
+            actual_piece_len,
+            piece_result,
+            peer_actor_ids,
+        )
+        .await
+    }
 
+    pub(super) async fn download_piece_batch(
+        &mut self,
+        piece_indices: &[usize],
+    ) -> Result<Vec<(usize, PieceLoopAction)>> {
+        if piece_indices.len() < 2 {
+            let Some(&piece_index) = piece_indices.first() else {
+                return Ok(Vec::new());
+            };
+            return Ok(vec![(piece_index, self.download_piece(piece_index).await?)]);
+        }
+
+        self.swarm
+            .set_wanted_pieces(Arc::from(self.piece_picker.missing_pieces_bitfield()))
+            .await;
+        let plans = piece_indices
+            .iter()
+            .map(|&piece_index| {
+                let piece_length = self.actual_piece_length(piece_index);
+                PieceRequestPlan {
+                    piece_index: piece_index as u32,
+                    piece_length,
+                    num_blocks: BtPieceSelector::calculate_num_blocks(piece_length, BLOCK_SIZE),
+                }
+            })
+            .collect::<Vec<_>>();
+        let max_attempts = self.command.group.recover().options().max_retries;
+        let lifecycle_notify = self.command.group.recover().lifecycle_notifier();
+        let lifecycle_wait = lifecycle_notify.notified();
+        tokio::pin!(lifecycle_wait);
+        lifecycle_wait.as_mut().enable();
+        let batch_download = download_piece_blocks_batch(
+            self.swarm,
+            &plans,
+            Some(self.command.progress.as_ref()),
+            self.request_timeout,
+            max_attempts,
+            self.command.choking_algo.as_mut(),
+        );
+        let batch_result = tokio::select! {
+            result = batch_download => result?,
+            _ = &mut lifecycle_wait => {
+                let halt_requested = {
+                    let group = self.command.group.recover();
+                    group.is_force_halt_requested() || group.is_halt_requested()
+                };
+                if !halt_requested {
+                    return Ok(piece_indices
+                        .iter()
+                        .copied()
+                        .map(|piece_index| (piece_index, PieceLoopAction::Retry))
+                        .collect());
+                }
+
+                self.writer.flush().await.map_err(|error| {
+                    Aria2Error::FileIo(format!("Failed to flush halted BT output: {error}"))
+                })?;
+                self.writer.close().await.map_err(|error| {
+                    Aria2Error::FileIo(format!("Failed to close halted BT output: {error}"))
+                })?;
+                if let Some(checkpoint) = self.command.checkpoint.as_mut() {
+                    let bitfield = super::super::super::checkpoint::snapshot_completed_bitfield(
+                        &self.completed_bitfield,
+                    );
+                    checkpoint
+                        .save(&bitfield, self.command.completed_bytes)
+                        .await
+                        .map_err(|error| {
+                            Aria2Error::FileIo(format!(
+                                "Failed to save halted BT checkpoint: {error}"
+                            ))
+                        })?;
+                    self.command.group.recover().take_save_control_file_request();
+                }
+                return Err(Aria2Error::DownloadFailed(
+                    "BitTorrent download halted".into(),
+                ));
+            }
+        };
+
+        self.pending_pex_peers.extend(batch_result.pex_peers);
+        self.pending_tracker_peers
+            .extend(batch_result.tracker_peers);
+        super::availability::sync_swarm_actor_availability(
+            self.swarm,
+            &batch_result.availability_changed_actor_ids,
+            &mut self.peer_tracker,
+            &mut self.peer_last_data_time,
+        );
+
+        let mut actions = Vec::with_capacity(batch_result.pieces.len());
+        for entry in batch_result.pieces {
+            let piece_index = entry.piece_index as usize;
+            let piece_length = self.actual_piece_length(piece_index);
+            let result = entry.result.map_err(Aria2Error::Network);
+            let action = self
+                .process_piece_download_result(
+                    piece_index,
+                    piece_length,
+                    result,
+                    entry.peer_actor_ids,
+                )
+                .await?;
+            actions.push((piece_index, action));
+        }
+        Ok(actions)
+    }
+
+    async fn process_piece_download_result(
+        &mut self,
+        next_piece_idx: usize,
+        actual_piece_len: u32,
+        download_result: Result<PieceDownloadResult>,
+        peer_actor_ids: Vec<crate::engine::bt_peer_connection::PeerActorId>,
+    ) -> Result<PieceLoopAction> {
+        let mut piece_ok = false;
         match download_result {
-            Ok(actor_aware_result) => {
-                let peer_actor_ids = actor_aware_result.peer_actor_ids;
-                let availability_changed_actor_ids =
-                    actor_aware_result.availability_changed_actor_ids;
-                self.pending_pex_peers.extend(actor_aware_result.pex_peers);
-                let piece_result = actor_aware_result.piece;
+            Ok(piece_result) => {
                 let piece_data = piece_result.data;
                 let piece_data_len = piece_data.len();
 
@@ -278,22 +412,12 @@ impl PieceDownloadSession<'_> {
                         .insert(PeerKey::new(actor.endpoint), Instant::now());
                 }
 
-                super::availability::sync_swarm_actor_availability(
-                    self.swarm,
-                    &availability_changed_actor_ids,
-                    &mut self.peer_tracker,
-                    &mut self.peer_last_data_time,
-                );
-                let mut choke_round_needed = false;
                 for actor in self.swarm.iter_mut() {
                     if piece_result.failed_peers.contains(&actor.endpoint) {
-                        choke_round_needed |=
-                            actor.stats.peer_interested && !actor.stats.am_choking;
                         actor.dead = true;
                     }
                 }
-                self.remove_dead_swarm_peers().await;
-                if choke_round_needed {
+                if self.remove_dead_swarm_peers().await {
                     self.apply_upload_choke_round().await;
                 }
                 self.command.update_tracker_peer_state(self.swarm.len());
@@ -405,14 +529,10 @@ impl PieceDownloadSession<'_> {
                             piece = next_piece_idx,
                             "Rejected and removed peer after a piece hash mismatch"
                         );
-                        let mut choke_round_needed = false;
                         for actor in self.swarm.iter_mut().filter(|actor| actor.endpoint == peer) {
-                            choke_round_needed |=
-                                actor.stats.peer_interested && !actor.stats.am_choking;
                             actor.dead = true;
                         }
-                        self.remove_dead_swarm_peers().await;
-                        if choke_round_needed {
+                        if self.remove_dead_swarm_peers().await {
                             self.apply_upload_choke_round().await;
                         }
                         self.command.update_tracker_peer_state(self.swarm.len());

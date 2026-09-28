@@ -13,11 +13,39 @@ use super::super::tracker::QueryType;
 use super::{DhtEngine, DhtEngineState, FindPeersResult};
 
 impl DhtEngine {
+    /// Return the UDP socket address this engine is bound to.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.context.socket.local_addr()
+    }
+
     /// Look up peers for the given info hash via the DHT network.
     ///
     /// Performs an iterative `get_peers` lookup with alpha-parallelism,
     /// returning discovered peer addresses.
     pub async fn find_peers(&self, info_hash: &[u8; 20]) -> std::io::Result<FindPeersResult> {
+        self.run_peer_lookup(info_hash, 0, "DHT peer lookup task was cancelled")
+            .await
+    }
+
+    /// Look up peers and announce `port` using tokens from the same lookup.
+    ///
+    /// This is the periodic BitTorrent discovery path: it avoids running a
+    /// second `get_peers` traversal solely to obtain tokens for `announce_peer`.
+    pub async fn find_peers_and_announce(
+        &self,
+        info_hash: &[u8; 20],
+        port: u16,
+    ) -> std::io::Result<FindPeersResult> {
+        self.run_peer_lookup(info_hash, port, "DHT peer lookup task was cancelled")
+            .await
+    }
+
+    async fn run_peer_lookup(
+        &self,
+        info_hash: &[u8; 20],
+        announce_port: u16,
+        cancelled_message: &'static str,
+    ) -> std::io::Result<FindPeersResult> {
         let state = self.state().await;
         if state != DhtEngineState::Running && state != DhtEngineState::Bootstrapping {
             return Ok(FindPeersResult {
@@ -26,29 +54,30 @@ impl DhtEngine {
             });
         }
 
-        debug!(info_hash = %hex::encode(info_hash), "Starting DHT get_peers lookup");
+        debug!(
+            info_hash = %hex::encode(info_hash),
+            announce_port,
+            "Starting DHT peer lookup"
+        );
 
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let accepted = self
             .task_queue
             .add_immediate_task(self.context.task_factory.create_peer_lookup_task(
                 *info_hash,
-                0,
+                announce_port,
                 Some(result_tx),
             ))
             .await;
         if !accepted {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
-                "DHT peer lookup task was cancelled",
+                cancelled_message,
             ));
         }
-        let result = result_rx.await.map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "DHT peer lookup task was cancelled",
-            )
-        })?;
+        let result = result_rx
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Interrupted, cancelled_message))?;
 
         Ok(FindPeersResult {
             peers: result.peers,
@@ -61,39 +90,8 @@ impl DhtEngine {
     /// Performs a `get_peers` lookup first to obtain tokens, then sends
     /// `announce_peer` queries to the closest K nodes that provided tokens.
     pub async fn announce_peer(&self, info_hash: &[u8; 20], port: u16) -> std::io::Result<()> {
-        let state = self.state().await;
-        if state != DhtEngineState::Running && state != DhtEngineState::Bootstrapping {
-            return Ok(());
-        }
-
-        debug!(
-            info_hash = %hex::encode(info_hash),
-            port,
-            "Starting DHT announce_peer"
-        );
-
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let accepted = self
-            .task_queue
-            .add_immediate_task(self.context.task_factory.create_peer_lookup_task(
-                *info_hash,
-                port,
-                Some(result_tx),
-            ))
-            .await;
-        if !accepted {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "DHT announce task was cancelled",
-            ));
-        }
-        result_rx.await.map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "DHT announce task was cancelled",
-            )
-        })?;
-
+        self.run_peer_lookup(info_hash, port, "DHT announce task was cancelled")
+            .await?;
         Ok(())
     }
 

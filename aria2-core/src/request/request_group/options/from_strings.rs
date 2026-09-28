@@ -59,6 +59,12 @@ impl DownloadOptions {
                 .map(|v| v == "true")
                 .unwrap_or(false),
             max_connection_per_server: positive_u16("max-connection-per-server"),
+            max_http2_sessions_per_server: positive_u16("max-http2-sessions-per-server"),
+            max_http2_streams_per_session: positive_u16("max-http2-streams-per-session"),
+            http_version: options
+                .get("http-version")
+                .and_then(|value| crate::http::HttpVersion::parse_option(value))
+                .unwrap_or_default(),
             max_download_limit: positive_size_u64("max-download-limit"),
             max_upload_limit: positive_size_u64("max-upload-limit"),
             dir: options.get("dir").cloned(),

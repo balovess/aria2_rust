@@ -22,6 +22,9 @@ use crate::bittorrent::bencode::codec::BencodeValue;
 
 /// Maximum number of closest nodes to return in find_node / get_peers responses.
 const K: usize = 8;
+/// Keep `get_peers` values below the UDP payload size used by the original
+/// implementation to avoid path-MTU fragmentation.
+const MAX_PEERS_IN_GET_PEERS_RESPONSE: usize = 25;
 
 /// Result of processing an inbound query.
 pub struct HandleResult {
@@ -184,9 +187,10 @@ impl DhtQueryHandler {
             }
         };
 
+        let mark_good = response.as_ref().is_some_and(DhtMessage::is_response);
         HandleResult {
             response,
-            mark_good: true,
+            mark_good,
             sender_id,
         }
     }
@@ -452,7 +456,7 @@ impl DhtQueryHandler {
     fn handle_find_node(
         &self,
         tx: &[u8],
-        _from: SocketAddr,
+        from: SocketAddr,
         query: &DhtMessage,
         routing_table: &RoutingTable,
         _token_tracker: &TokenTracker,
@@ -477,13 +481,21 @@ impl DhtQueryHandler {
         };
 
         let closest = routing_table.find_closest(&target_id, K);
-        let compact_nodes = Self::encode_compact_nodes(&closest);
-
-        Some(DhtMessageBuilder::find_node_response(
-            tx,
-            &self.self_id,
-            &compact_nodes,
-        ))
+        if from.is_ipv6() {
+            let compact_nodes = Self::encode_compact_nodes6(&closest);
+            Some(DhtMessageBuilder::find_node_response6(
+                tx,
+                &self.self_id,
+                &compact_nodes,
+            ))
+        } else {
+            let compact_nodes = Self::encode_compact_nodes(&closest);
+            Some(DhtMessageBuilder::find_node_response(
+                tx,
+                &self.self_id,
+                &compact_nodes,
+            ))
+        }
     }
 
     /// Handle a get_peers query: return peers if known, otherwise closest nodes.
@@ -520,7 +532,9 @@ impl DhtQueryHandler {
         let token_bytes = token.as_bytes().to_vec();
 
         // Check if we know any peers for this info_hash
-        let peers = peer_storage.get_peers(&info_hash);
+        let mut peers = peer_storage.get_peers(&info_hash);
+        peers.retain(|peer| peer.is_ipv4() == from.is_ipv4());
+        peers.truncate(MAX_PEERS_IN_GET_PEERS_RESPONSE);
 
         if !peers.is_empty() {
             Some(DhtMessageBuilder::get_peers_response_with_peers(
@@ -532,13 +546,23 @@ impl DhtQueryHandler {
         } else {
             // No peers known — return closest nodes instead
             let closest = routing_table.find_closest(&info_hash, K);
-            let compact_nodes = Self::encode_compact_nodes(&closest);
-            Some(DhtMessageBuilder::get_peers_response_with_nodes(
-                tx,
-                &self.self_id,
-                &token_bytes,
-                &compact_nodes,
-            ))
+            if from.is_ipv6() {
+                let compact_nodes = Self::encode_compact_nodes6(&closest);
+                Some(DhtMessageBuilder::get_peers_response_with_nodes6(
+                    tx,
+                    &self.self_id,
+                    &token_bytes,
+                    &compact_nodes,
+                ))
+            } else {
+                let compact_nodes = Self::encode_compact_nodes(&closest);
+                Some(DhtMessageBuilder::get_peers_response_with_nodes(
+                    tx,
+                    &self.self_id,
+                    &token_bytes,
+                    &compact_nodes,
+                ))
+            }
         }
     }
 
@@ -586,35 +610,41 @@ impl DhtQueryHandler {
             return Some(DhtMessageBuilder::error_response(tx, 203, "Protocol Error"));
         }
 
-        // Extract port — if "implied_port" is set, use the source port
-        let port: u16 =
-            if let Some(implied) = args.dict_get(b"implied_port").and_then(|v| v.as_int()) {
-                if implied != 0 {
-                    from.port()
-                } else {
-                    args.dict_get(b"port").and_then(|v| v.as_int()).unwrap_or(0) as u16
-                }
-            } else {
-                args.dict_get(b"port").and_then(|v| v.as_int()).unwrap_or(0) as u16
+        // Extract port — if "implied_port" is set, use the source port.
+        let port = if args
+            .dict_get(b"implied_port")
+            .and_then(|value| value.as_int())
+            .is_some_and(|implied| implied != 0)
+        {
+            from.port()
+        } else {
+            let Some(port) = args
+                .dict_get(b"port")
+                .and_then(|value| value.as_int())
+                .and_then(|port| u16::try_from(port).ok())
+                .filter(|port| *port != 0)
+            else {
+                debug!(from = %from, "announce_peer with invalid/missing port");
+                return Some(DhtMessageBuilder::error_response(tx, 203, "Protocol Error"));
             };
+            port
+        };
 
-        if port > 0 {
-            let peer_addr: SocketAddr = match from {
-                SocketAddr::V4(v4) => SocketAddr::V4(std::net::SocketAddrV4::new(*v4.ip(), port)),
-                SocketAddr::V6(v6) => SocketAddr::V6(std::net::SocketAddrV6::new(
-                    *v6.ip(),
-                    port,
-                    v6.flowinfo(),
-                    v6.scope_id(),
-                )),
-            };
-            peer_storage.add_peer(info_hash, peer_addr);
-            trace!(
-                info_hash = %hex::encode(info_hash),
-                peer = %peer_addr,
-                "Stored announced peer"
-            );
-        }
+        let peer_addr: SocketAddr = match from {
+            SocketAddr::V4(v4) => SocketAddr::V4(std::net::SocketAddrV4::new(*v4.ip(), port)),
+            SocketAddr::V6(v6) => SocketAddr::V6(std::net::SocketAddrV6::new(
+                *v6.ip(),
+                port,
+                v6.flowinfo(),
+                v6.scope_id(),
+            )),
+        };
+        peer_storage.add_peer(info_hash, peer_addr);
+        trace!(
+            info_hash = %hex::encode(info_hash),
+            peer = %peer_addr,
+            "Stored announced peer"
+        );
 
         Some(DhtMessageBuilder::announce_peer_response(tx, &self.self_id))
     }
@@ -722,6 +752,38 @@ mod tests {
         assert!(nodes.is_some());
         // 8 nodes × 26 bytes each for IPv4
         assert_eq!(nodes.unwrap().len(), 8 * 26);
+    }
+
+    #[test]
+    fn ipv6_find_node_response_serializes_closest_nodes_as_nodes6() {
+        let handler = make_handler();
+        let mut rt = RoutingTable::new([0xAA; 20]);
+        for index in 1..=8u8 {
+            rt.insert(DhtNode::new(
+                [index; 20],
+                format!("[2001:db8::{index}]:6881").parse().unwrap(),
+            ));
+        }
+        let tt = TokenTracker::new();
+        let ps = DhtPeerStorage::new();
+        let query = DhtMessageBuilder::find_node(1234, &[0xBB; 20], &[0x05; 20]);
+        let handled = handler.handle_query(
+            &query,
+            "[2001:db8::100]:6881".parse().unwrap(),
+            &rt,
+            &tt,
+            &ps,
+        );
+        let encoded = handled.response.unwrap().encode().unwrap();
+        let response = DhtMessage::decode(&encoded).expect("valid find_node wire response");
+        let body = response.r.expect("find_node response body");
+
+        assert!(body.dict_get(b"nodes").is_none());
+        let nodes6 = body
+            .dict_get(b"nodes6")
+            .and_then(BencodeValue::as_bytes)
+            .expect("IPv6 find_node response must use the BEP 5 nodes6 field");
+        assert_eq!(nodes6.len(), 8 * 38);
     }
 
     #[test]
@@ -846,6 +908,107 @@ mod tests {
     }
 
     #[test]
+    fn get_peers_response_filters_family_and_caps_values_for_path_mtu() {
+        let handler = make_handler();
+        let rt = make_routing_table();
+        let tt = TokenTracker::new();
+        let ps = DhtPeerStorage::new();
+        let info_hash = [0xCC; 20];
+
+        for index in 1..=30u16 {
+            let ipv6: SocketAddr = format!("[2001:db8::{index}]:{}", 5000 + index)
+                .parse()
+                .unwrap();
+            ps.add_peer(info_hash, ipv6);
+        }
+        for index in 1..=20u16 {
+            let ipv4 = SocketAddr::new(format!("192.0.2.{index}").parse().unwrap(), 6000 + index);
+            ps.add_peer(info_hash, ipv4);
+        }
+
+        let ipv6_query = DhtMessageBuilder::get_peers(9999, &[0xBB; 20], &info_hash);
+        let ipv6_result = handler.handle_query(
+            &ipv6_query,
+            "[2001:db8::100]:6881".parse().unwrap(),
+            &rt,
+            &tt,
+            &ps,
+        );
+        let ipv6_response = ipv6_result.response.unwrap();
+        let ipv6_values = ipv6_response
+            .r
+            .as_ref()
+            .and_then(|result| result.dict_get(b"values"))
+            .and_then(BencodeValue::as_list)
+            .expect("IPv6 response should contain compact peer values");
+        assert_eq!(ipv6_values.len(), 25);
+        assert!(
+            ipv6_values
+                .iter()
+                .all(|value| { value.as_bytes().is_some_and(|compact| compact.len() == 18) })
+        );
+        assert!(ipv6_response.encode().unwrap().len() <= 1024);
+
+        let ipv4_query = DhtMessageBuilder::get_peers(10000, &[0xBC; 20], &info_hash);
+        let ipv4_result = handler.handle_query(
+            &ipv4_query,
+            "192.0.2.100:6881".parse().unwrap(),
+            &rt,
+            &tt,
+            &ps,
+        );
+        let ipv4_response = ipv4_result.response.unwrap();
+        let ipv4_values = ipv4_response
+            .r
+            .as_ref()
+            .and_then(|result| result.dict_get(b"values"))
+            .and_then(BencodeValue::as_list)
+            .expect("IPv4 response should contain compact peer values");
+        assert_eq!(ipv4_values.len(), 20);
+        assert!(
+            ipv4_values
+                .iter()
+                .all(|value| { value.as_bytes().is_some_and(|compact| compact.len() == 6) })
+        );
+    }
+
+    #[test]
+    fn ipv6_get_peers_fallback_serializes_closest_nodes_as_nodes6() {
+        let handler = make_handler();
+        let mut rt = RoutingTable::new([0xAA; 20]);
+        for index in 1..=8u8 {
+            rt.insert(DhtNode::new(
+                [index; 20],
+                format!("[2001:db8::{index}]:6881").parse().unwrap(),
+            ));
+        }
+        let tt = TokenTracker::new();
+        let ps = DhtPeerStorage::new();
+        let info_hash = [0xCC; 20];
+        ps.add_peer(info_hash, "192.0.2.1:5000".parse().unwrap());
+
+        let query = DhtMessageBuilder::get_peers(1234, &[0xBB; 20], &info_hash);
+        let handled = handler.handle_query(
+            &query,
+            "[2001:db8::100]:6881".parse().unwrap(),
+            &rt,
+            &tt,
+            &ps,
+        );
+        let encoded = handled.response.unwrap().encode().unwrap();
+        let response = DhtMessage::decode(&encoded).expect("valid get_peers wire response");
+        let body = response.r.expect("get_peers response body");
+
+        assert!(body.dict_get(b"values").is_none());
+        assert!(body.dict_get(b"nodes").is_none());
+        let nodes6 = body
+            .dict_get(b"nodes6")
+            .and_then(BencodeValue::as_bytes)
+            .expect("IPv6 fallback must use the BEP 5 nodes6 field");
+        assert_eq!(nodes6.len(), 8 * 38);
+    }
+
+    #[test]
     fn test_handle_announce_peer_valid_token() {
         let handler = make_handler();
         let rt = make_routing_table();
@@ -909,11 +1072,47 @@ mod tests {
         let query = DhtMessage::new_query(1111, "announce_peer", BencodeValue::Dict(args));
         let result = handler.handle_query(&query, from, &rt, &tt, &ps);
 
+        assert!(
+            !result.mark_good,
+            "a rejected announce must not promote its sender to a good node"
+        );
         let resp = result.response.unwrap();
         assert!(resp.is_error());
 
         // Peer should NOT be stored
         let peers = ps.get_peers(&info_hash);
         assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn announce_peer_rejects_negative_port_on_krpc_boundary() {
+        let handler = make_handler();
+        let rt = make_routing_table();
+        let tt = TokenTracker::new();
+        let ps = DhtPeerStorage::new();
+        let info_hash = [0xA5; 20];
+        let from: SocketAddr = "10.0.0.99:6881".parse().unwrap();
+        let token = tt.generate_token(&info_hash, &from);
+
+        let mut args = BTreeMap::new();
+        args.insert(b"id".to_vec(), BencodeValue::Bytes(vec![0xBB; 20]));
+        args.insert(
+            b"info_hash".to_vec(),
+            BencodeValue::Bytes(info_hash.to_vec()),
+        );
+        args.insert(b"port".to_vec(), BencodeValue::Int(-1));
+        args.insert(b"token".to_vec(), BencodeValue::Bytes(token.into_bytes()));
+        let request = DhtMessage::new_query(1112, "announce_peer", BencodeValue::Dict(args));
+        let request = DhtMessage::decode(&request.encode().unwrap()).unwrap();
+
+        let handled = handler.handle_query(&request, from, &rt, &tt, &ps);
+        assert!(!handled.mark_good);
+        let response = handled
+            .response
+            .expect("malformed announce must return an error");
+        let response = DhtMessage::decode(&response.encode().unwrap()).unwrap();
+
+        assert_eq!(response.e.map(|(code, _)| code), Some(203));
+        assert!(ps.get_peers(&info_hash).is_empty());
     }
 }

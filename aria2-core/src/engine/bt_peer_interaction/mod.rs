@@ -164,7 +164,6 @@ impl BtPeerInteraction {
         conn.actor_startup = Some(PeerActorStartup {
             peer_agent: connection_options.peer_agent.clone(),
             listen_port: connection_options.listen_port,
-            dht_enabled: connection_options.dht_enabled,
             allowed_fast: if conn.is_fast_extension_enabled() {
                 aria2_protocol::bittorrent::fast_set::compute_fast_set(
                     &addr.ip,

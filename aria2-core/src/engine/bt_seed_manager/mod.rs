@@ -50,6 +50,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::engine::bt_choke_manager::BtSeederStateChoke;
+use crate::engine::bt_download_execute::BtTrackerAnnouncerActor;
 use crate::engine::bt_download_execute::execute::DhtPeriodicLookup;
 use crate::engine::bt_message_handler::PeerSwarm;
 use crate::engine::bt_peer_connection::BtPeerConn;
@@ -64,8 +65,9 @@ use crate::request::request_group::{AtomicProgress, BtPeerSnapshot, ConnectionSt
 /// alive across the leech-to-seed transition.
 pub(crate) struct SeedPeerDiscovery {
     pub(crate) group: Arc<std::sync::RwLock<crate::request::request_group::RequestGroup>>,
-    pub(crate) dht_engine: Option<Arc<aria2_protocol::bittorrent::dht::engine::DhtEngine>>,
+    pub(crate) dht_engines: crate::engine::dht_engine_set::DhtEngineSet,
     pub(crate) dht_lookup: DhtPeriodicLookup,
+    pub(crate) listen_port: u16,
     pub(crate) connection_options: BtPeerConnectionOptions,
     pub(crate) total_size: u64,
     pub(crate) utp_socket:
@@ -150,6 +152,9 @@ pub struct BtSeedManager {
     /// Tracker announcer for periodic re-announce while seeding
     /// (mirrors C++ SeedCheckCommand keeping the swarm informed).
     announcer: Option<Arc<tokio::sync::Mutex<TrackerAnnouncer>>>,
+    /// The production download path keeps one tracker actor across the
+    /// leech-to-seed handoff; direct public constructors are adapted on run.
+    tracker_actor: Option<BtTrackerAnnouncerActor>,
     pending_tracker_announce:
         Option<tokio::task::JoinHandle<Option<crate::engine::bt_tracker_comm::AnnounceResult>>>,
     /// Our peer id, sent with tracker announces.
@@ -308,6 +313,9 @@ impl BtSeedManager {
     }
 
     fn publish_connection_state(&self) {
+        if let Some(actor) = self.tracker_actor.as_ref() {
+            actor.set_active_connections(self.swarm.len());
+        }
         if let Some(connection_state) = self.connection_state.as_ref() {
             connection_state.set_bt(self.num_sessions());
         }

@@ -51,17 +51,22 @@ impl BtDownloadCommand {
             }
         }
 
-        if let Some(ref engine) = self.dht_engine
-            && let Some(port) = dht_announce_port(self.listen_port)
-        {
-            if let Err(error) = engine.announce_peer(&meta.network_info_hash(), port).await {
-                warn!(%error, "BT DHT announce failed");
-            } else {
-                info!(
-                    port,
-                    "BT DHT announce_peer sent for {}",
-                    meta.info_hash.as_hex()
-                );
+        if let Some(port) = dht_announce_port(self.listen_port) {
+            for (engine_addr, result) in self
+                .dht_engines
+                .announce_peer(&meta.network_info_hash(), port)
+                .await
+            {
+                if let Err(error) = result {
+                    warn!(%engine_addr, %error, "BT DHT announce failed");
+                } else {
+                    info!(
+                        %engine_addr,
+                        port,
+                        "BT DHT announce_peer sent for {}",
+                        meta.info_hash.as_hex()
+                    );
+                }
             }
         }
 

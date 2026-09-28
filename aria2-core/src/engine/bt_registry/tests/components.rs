@@ -265,7 +265,7 @@ fn test_get_torrent_name() {
 #[test]
 fn test_dht_engine_default_none() {
     let registry = BtRegistry::new();
-    assert!(registry.get_dht_engine().is_none());
+    assert!(registry.get_dht_engines().is_empty());
 }
 
 #[test]
@@ -279,13 +279,59 @@ fn test_dht_engine_set_and_get() {
     let engine = rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
     let mut registry = BtRegistry::new();
-    registry.set_dht_engine(engine);
+    registry.set_global_dht_engine(engine);
 
-    assert!(registry.get_dht_engine().is_some());
+    assert!(
+        registry
+            .get_global_dht_engine_for_peer("127.0.0.1:6881".parse().unwrap())
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn global_dht_engine_install_returns_the_existing_canonical_engine() {
+    use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
+
+    let first = DhtEngine::start(DhtEngineConfig::local())
+        .await
+        .expect("first local DHT engine should start");
+    let second = DhtEngine::start(DhtEngineConfig::local())
+        .await
+        .expect("second local DHT engine should start");
+    let ipv6 = DhtEngine::start(DhtEngineConfig {
+        listen_addr: Some("::1".parse().expect("parse IPv6 loopback")),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("local IPv6 DHT engine should start");
+    let mut registry = BtRegistry::new();
+
+    let installed = registry.get_or_install_global_dht_engine(Arc::clone(&first));
+    let concurrent_candidate = registry.get_or_install_global_dht_engine(Arc::clone(&second));
+    let installed_ipv6 = registry.get_or_install_global_dht_engine(Arc::clone(&ipv6));
+
+    assert!(Arc::ptr_eq(&installed, &first));
+    assert!(Arc::ptr_eq(&concurrent_candidate, &first));
+    assert!(Arc::ptr_eq(&installed_ipv6, &ipv6));
+    assert_eq!(registry.get_dht_engines().len(), 2);
+    assert!(
+        registry
+            .get_global_dht_engine_for_peer("127.0.0.1:6881".parse().unwrap())
+            .is_some_and(|engine| Arc::ptr_eq(&engine, &first))
+    );
+    assert!(
+        registry
+            .get_global_dht_engine_for_peer("[::1]:6881".parse().unwrap())
+            .is_some_and(|engine| Arc::ptr_eq(&engine, &ipv6))
+    );
+
+    first.shutdown_async().await;
+    second.shutdown_async().await;
+    ipv6.shutdown_async().await;
 }
 
 #[test]
-fn test_dht_engine_clear() {
+fn test_dht_engines_are_taken_for_final_shutdown() {
     use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -295,11 +341,12 @@ fn test_dht_engine_clear() {
     let engine = rt.block_on(async { DhtEngine::start(config).await.unwrap() });
 
     let mut registry = BtRegistry::new();
-    registry.set_dht_engine(engine);
-    assert!(registry.get_dht_engine().is_some());
+    registry.set_global_dht_engine(Arc::clone(&engine));
+    assert_eq!(registry.get_dht_engines().len(), 1);
 
-    registry.clear_dht_engine();
-    assert!(registry.get_dht_engine().is_none());
+    let engines = registry.take_global_dht_engines();
+    assert_eq!(engines.len(), 1);
+    assert!(registry.get_dht_engines().is_empty());
 }
 
 #[test]
@@ -364,6 +411,6 @@ fn test_registry_blocklist_accessors() {
 fn test_debug_includes_dht_and_index() {
     let registry = BtRegistry::new();
     let debug_str = format!("{:?}", registry);
-    assert!(debug_str.contains("has_dht_engine: false"));
+    assert!(debug_str.contains("dht_engine_count: 0"));
     assert!(debug_str.contains("info_hash_index_len: 0"));
 }

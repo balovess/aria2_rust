@@ -2,12 +2,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+use super::BtDownloadCommand;
 use crate::engine::bt_progress_info_file::BtProgressManager;
 use crate::engine::hook_manager::HookManager;
 use crate::engine::lpd_manager::LpdManager;
-use crate::util::rwlock_ext::RwLockRecover;
-
-use super::BtDownloadCommand;
 
 // ==================== P1/P2 Integration API ====================
 
@@ -115,17 +113,6 @@ impl BtDownloadCommand {
     ) {
         info!("BtRegistry reference set for BT download self-registration");
         self.bt_registry = Some(registry);
-    }
-
-    /// Publish the command's live DHT engine so RPC status can aggregate it.
-    pub(crate) fn register_dht_engine(&self) {
-        let (Some(registry), Some(engine)) = (&self.bt_registry, &self.dht_engine) else {
-            return;
-        };
-        if let Ok(mut registry) = registry.write() {
-            registry.set_global_dht_engine(Arc::clone(engine));
-            registry.set_dht_engine_for_gid(self.group.recover().gid().value(), Arc::clone(engine));
-        }
     }
 
     /// Attach the engine-owned process listener used for info-hash routing.

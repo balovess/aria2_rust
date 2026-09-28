@@ -16,6 +16,7 @@ use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 use aria2_core::error::{Aria2Error, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
+use aria2_core::http::HttpVersion;
 use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_core::session::save_session_command::SaveSessionCommand;
@@ -265,7 +266,8 @@ async fn test_concurrent_download_assembles_file_correctly() {
     // Clean up any leftover from previous runs
     let _ = std::fs::remove_file(&out_path);
 
-    let options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    let mut options = make_options(Some(4), Some(2), &tmp_dir, &out_name);
+    options.http_version = HttpVersion::Http11;
     let mut cmd = make_concurrent_command(
         GroupId::new(1),
         &url,
@@ -414,6 +416,112 @@ async fn test_concurrent_download_multiple_range_requests() {
 
     // Cleanup
     let _ = std::fs::remove_file(&out_path);
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Redirected metadata must not suppress concurrent Range downloads
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn head_redirect_with_zero_length_still_downloads_ranges_from_final_url() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+
+    let data = generate_test_data(4 * 1024 * 1024, 31);
+    server.on_get("/entry", |_req: &Request<Incoming>| -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::FOUND)
+            .header("Location", "/cdn/file")
+            .header("Content-Length", 0)
+            .body(empty_body())
+            .unwrap()
+    });
+
+    let final_data = data.clone();
+    server.on_get(
+        "/cdn/file",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", final_data.len())
+                    .body(empty_body())
+                    .unwrap();
+            }
+            range_response(req, &final_data)
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("Failed to create temporary directory");
+    let options = make_options(
+        Some(4),
+        Some(4),
+        &dir.path().to_string_lossy(),
+        "redirected-range.bin",
+    );
+    let url = make_url(&server.base_url(), "/entry");
+    let mut command = make_concurrent_command(
+        GroupId::new(407),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some("redirected-range.bin"),
+    );
+
+    command
+        .execute()
+        .await
+        .expect("Redirected concurrent download should succeed");
+
+    let output = std::fs::read(dir.path().join("redirected-range.bin"))
+        .expect("Should read redirected output file");
+    assert_eq!(output, data, "Output content should match source data");
+
+    let log = server.take_request_log();
+    assert!(
+        log.iter()
+            .any(|entry| entry.method == "HEAD" && entry.path == "/entry"),
+        "Expected the original URL to receive the metadata HEAD request: {log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|entry| entry.method == "HEAD" && entry.path == "/cdn/file"),
+        "Expected HEAD redirect to be followed to the final URL: {log:?}"
+    );
+
+    let original_payload_ranges: Vec<_> = log
+        .iter()
+        .filter(|entry| entry.path == "/entry" && has_range_header(entry))
+        .filter(|entry| {
+            !entry
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("range") && value == "bytes=0-0")
+        })
+        .collect();
+    assert!(
+        original_payload_ranges.is_empty(),
+        "Payload ranges must go directly to the final URL: {original_payload_ranges:?}; all requests: {log:?}"
+    );
+
+    let final_payload_ranges: Vec<_> = log
+        .iter()
+        .filter(|entry| entry.path == "/cdn/file" && has_range_header(entry))
+        .filter(|entry| {
+            !entry
+                .headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("range") && value == "bytes=0-0")
+        })
+        .collect();
+    assert!(
+        final_payload_ranges.len() > 1,
+        "Expected concurrent payload Range requests at the final URL, got {final_payload_ranges:?}"
+    );
+
     server.shutdown().await;
 }
 
@@ -866,6 +974,7 @@ async fn test_multi_mirror_resume_restores_completed_segments() {
                         .map(|(_, value)| value)
                 }),
         )
+        .filter(|range| range != "bytes=0-0")
         .collect::<Vec<_>>();
     assert!(!first_ranges.is_empty(), "resume must issue Range requests");
     assert!(
@@ -1276,17 +1385,6 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
                 .unwrap();
         }
 
-        let current = active_for_handler.fetch_add(1, Ordering::AcqRel) + 1;
-        max_active_for_handler.fetch_max(current, Ordering::AcqRel);
-        if current > 2 {
-            active_for_handler.fetch_sub(1, Ordering::AcqRel);
-            rate_limited_for_handler.fetch_add(1, Ordering::AcqRel);
-            return Response::builder()
-                .status(StatusCode::TOO_MANY_REQUESTS)
-                .body(crate::e2e_helpers::mock_http_server::empty_body())
-                .unwrap();
-        }
-
         let Some(range) = req
             .headers()
             .get("Range")
@@ -1302,6 +1400,30 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
         };
         let start: usize = range.0.parse().unwrap();
         let end: usize = range.1.parse().unwrap();
+
+        // The capability probe is a separate one-byte request. It must not
+        // consume the mock server's concurrent payload capacity.
+        if start == 0 && end == 0 {
+            return Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Range", format!("bytes=0-0/{}", body.len()))
+                .header("Content-Length", 1)
+                .body(full_body(Bytes::copy_from_slice(&body[..1])))
+                .unwrap();
+        }
+
+        let current = active_for_handler.fetch_add(1, Ordering::AcqRel) + 1;
+        max_active_for_handler.fetch_max(current, Ordering::AcqRel);
+        if current > 2 {
+            active_for_handler.fetch_sub(1, Ordering::AcqRel);
+            rate_limited_for_handler.fetch_add(1, Ordering::AcqRel);
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .body(crate::e2e_helpers::mock_http_server::empty_body())
+                .unwrap();
+        }
+
         let chunk = body[start..=end].to_vec();
         let active_for_body = Arc::clone(&active_for_handler);
         let stream = futures::stream::once(async move {
@@ -1349,21 +1471,30 @@ async fn test_adaptive_pool_requeues_rate_limited_ranges() {
                 .find(|(name, _)| name.eq_ignore_ascii_case("range"))
                 .map(|(_, value)| value)
         })
+        .filter(|range| range != "bytes=0-0")
         .collect::<Vec<_>>();
-    assert_eq!(range_requests.len(), 6);
-    for (range, expected_count) in [
-        ("bytes=0-1048575", 1),
-        ("bytes=1048576-2097151", 1),
-        ("bytes=2097152-3145727", 2),
-        ("bytes=3145728-4194303", 2),
+    // Exclude the separate one-byte capability probe; these assertions cover
+    // only payload ranges scheduled by the concurrent downloader.
+    assert_eq!(
+        range_requests.len(),
+        4 + rate_limited.load(Ordering::Acquire),
+        "each 429 should correspond to one retried payload Range: {range_requests:?}"
+    );
+    for range in [
+        "bytes=0-1048575",
+        "bytes=1048576-2097151",
+        "bytes=2097152-3145727",
+        "bytes=3145728-4194303",
     ] {
-        assert_eq!(
-            range_requests
-                .iter()
-                .filter(|request| *request == range)
-                .count(),
-            expected_count,
-            "unexpected request count for {range}"
+        let count = range_requests
+            .iter()
+            .filter(|request| *request == range)
+            .count();
+        assert!(
+            (1..=2).contains(&count),
+            "every payload Range should complete with at most one 429 retry: range_requests={range_requests:?}, rate_limited={}, max_active={}",
+            rate_limited.load(Ordering::Acquire),
+            max_active.load(Ordering::Acquire)
         );
     }
     assert_eq!(std::fs::read(&out_path).unwrap(), data);
@@ -1419,7 +1550,7 @@ async fn test_stalled_range_is_reclaimed_and_requeued() {
             };
 
             let end = end.min(body.len().saturating_sub(1));
-            if start == 0 {
+            if start == 0 && end > 0 {
                 let should_stall = {
                     let mut first = first_range_attempt_for_handler
                         .lock()

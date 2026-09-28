@@ -56,25 +56,6 @@ impl BtDownloadCommand {
         let max_peers = self.group.recover().options().bt_max_peers;
         self.bt_runtime.set_max_peers(max_peers);
         self.bt_runtime.set_connections(active_connections);
-        if let Some(announcer) = self.tracker_announcer.as_mut() {
-            announcer.set_less_than_min_peers(self.bt_runtime.less_than_min_peers());
-        }
-    }
-
-    pub(in crate::engine::bt_download_execute::execute) fn should_discover_more_peers(
-        &self,
-        active_connections: usize,
-    ) -> bool {
-        if self.peer_coordinator.should_replenish(active_connections) {
-            return true;
-        }
-
-        let group = self.group.recover();
-        download_speed_is_below_peer_request_limit(
-            group.download_speed(),
-            group.options().bt_request_peer_speed_limit,
-            group.options().max_download_limit,
-        )
     }
 
     pub(in crate::engine::bt_download_execute::execute) fn should_admit_incoming_peer(

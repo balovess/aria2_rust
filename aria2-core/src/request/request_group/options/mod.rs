@@ -18,6 +18,14 @@ pub struct DownloadOptions {
     /// server supports ranges and `split` is greater than one.
     pub force_sequential: bool,
     pub max_connection_per_server: Option<u16>,
+    /// Maximum independent HTTP/2 client pools available for Range traffic
+    /// per server. The effective session count is capped by `-x`.
+    pub max_http2_sessions_per_server: Option<u16>,
+    /// Fixed per-connection HTTP/2 Range stream limit; never auto-tuned.
+    pub max_http2_streams_per_session: Option<u16>,
+    /// HTTP protocol selection: automatic negotiation, forced HTTP/1.1, or
+    /// forced HTTP/2.
+    pub http_version: crate::http::HttpVersion,
     pub max_download_limit: Option<u64>,
     pub max_upload_limit: Option<u64>,
     pub dir: Option<String>,

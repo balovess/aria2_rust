@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use futures::stream::{FuturesUnordered, StreamExt};
 use tracing::{trace, warn};
 
 use crate::constants;
@@ -21,7 +22,10 @@ use super::endgame_requests::{
     fill_request_windows, record_failed_peer, take_peer_pending,
 };
 use super::normal_pipeline::piece_attempt_budget_exhausted;
-use super::peer_actor::{PeerEvent, PeerGeneration, apply_choke_round, apply_interest_change};
+use super::peer_actor::{
+    PeerEvent, PeerGeneration, apply_choke_round, apply_interest_change,
+    rebalance_upload_slots_after_peer_disconnect,
+};
 use super::peer_registry::PeerSwarm;
 use super::peer_snapshot::PeerSchedulingSnapshot;
 use super::pipelined::BlockRequest;
@@ -60,8 +64,9 @@ pub(crate) async fn download_piece_blocks_endgame(
         .collect::<Vec<_>>();
     let mut attempts = 0u32;
     let mut availability_changed_actor_ids = HashSet::new();
-    let mut peers = PeerSchedulingSnapshot::capture(swarm, piece_index);
-    let mut workers = PeerGeneration::from_swarm(swarm, piece_index).await;
+    let mut tracker_peers = Vec::new();
+    let mut peers = PeerSchedulingSnapshot::capture(swarm);
+    let mut workers = PeerGeneration::from_swarm(swarm, &[piece_index]).await;
     let mut download_speed = DownloadSpeedSampler::new();
     let Some(mut event_rx) = swarm.lease_event_receiver() else {
         return Err(Aria2Error::Fatal(FatalError::Config(
@@ -99,7 +104,7 @@ pub(crate) async fn download_piece_blocks_endgame(
         let mut complete = false;
 
         loop {
-            let queue_blocked = fill_request_windows(
+            let queue_waiters = fill_request_windows(
                 &mut workers,
                 &block_requests,
                 &completed,
@@ -113,6 +118,14 @@ pub(crate) async fn download_piece_blocks_endgame(
                 endgame_state,
                 &mut failed_peers,
             );
+            let queue_blocked = !queue_waiters.is_empty();
+            let mut queue_ready = FuturesUnordered::new();
+            for (actor_id, mut capacity_updates) in queue_waiters {
+                queue_ready.push(async move {
+                    let _ = capacity_updates.changed().await;
+                    actor_id
+                });
+            }
             if completed_blocks == block_count {
                 complete = true;
                 break;
@@ -122,21 +135,22 @@ pub(crate) async fn download_piece_blocks_endgame(
                 .values()
                 .map(|request| request.sent_at + request_timeout)
                 .min()
-                .unwrap_or(last_activity + request_timeout);
+                .or_else(|| (!queue_blocked).then_some(last_activity + request_timeout));
             let choke_deadline = choking_algo
                 .as_deref()
                 .and_then(ChokingAlgorithm::next_choke_rotation_deadline);
-            let mut wake_deadline =
-                choke_deadline.map_or(request_deadline, |deadline| deadline.min(request_deadline));
+            let mut wake_deadline = request_deadline;
+            if let Some(choke_deadline) = choke_deadline {
+                wake_deadline = Some(
+                    wake_deadline.map_or(choke_deadline, |deadline| deadline.min(choke_deadline)),
+                );
+            }
             if network_activity.is_some()
                 && let Some(deadline) = download_speed.next_deadline()
             {
-                wake_deadline = wake_deadline.min(deadline);
+                wake_deadline =
+                    Some(wake_deadline.map_or(deadline, |current| current.min(deadline)));
             }
-            if queue_blocked {
-                wake_deadline = wake_deadline.min(Instant::now() + Duration::from_millis(10));
-            }
-            let wait = wake_deadline.saturating_duration_since(Instant::now());
 
             tokio::select! {
                 event = event_rx.recv() => {
@@ -154,7 +168,7 @@ pub(crate) async fn download_piece_blocks_endgame(
                                 continue;
                             };
                             peers.update_peer_choking(actor_id, peer_choking);
-                            if peer_choking && !peers.peer_can_request(peer_index) {
+                            if peer_choking && !peers.peer_can_request(peer_index, piece_index) {
                                 let cancelled = take_peer_pending(
                                     peer_index,
                                     &mut pending,
@@ -174,14 +188,15 @@ pub(crate) async fn download_piece_blocks_endgame(
                                 continue;
                             };
                             peers.add_peer_allowed_fast(actor_id, allowed_piece);
-                            if peers.peer_can_request(peer_index) {
+                            if peers.peer_can_request(peer_index, piece_index) {
                                 rejected[peer_index].clear();
                             }
                             last_activity = Instant::now();
                         }
-                        PeerEvent::AvailabilityChanged { actor_id, generation, has_piece } => {
-                            if generation == workers.generation() {
-                                peers.update_peer_availability(actor_id, piece_index, has_piece);
+                        PeerEvent::PeerAvailabilityChanged { actor_id, piece_index: changed_piece, has_piece } => {
+                            workers.record_availability_change(actor_id);
+                            peers.update_peer_availability(actor_id, changed_piece, has_piece);
+                            if changed_piece == piece_index {
                                 if let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) {
                                     if has_piece {
                                         rejected[peer_index].clear();
@@ -200,35 +215,12 @@ pub(crate) async fn download_piece_blocks_endgame(
                                 last_activity = Instant::now();
                             }
                         }
-                        PeerEvent::PeerAvailabilityChanged { actor_id, piece_index: changed_piece, has_piece } => {
-                            workers.record_availability_change(actor_id);
-                            peers.update_peer_availability(actor_id, changed_piece, has_piece);
-                            if changed_piece == piece_index {
-                                if let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) {
-                                    if has_piece {
-                                        rejected[peer_index].clear();
-                                    } else {
-                                        let cancelled = take_peer_pending(
-                                            peer_index,
-                                            &mut pending,
-                                            &mut in_flight,
-                                            piece_index,
-                                            endgame_state,
-                                            &peers,
-                                        );
-                                        if let Some(actor_id) = peers.actor_id(peer_index) {
-                                            workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
-                                        }
-                                    }
-                                }
-                                last_activity = Instant::now();
-                            }
-                        }
-                        PeerEvent::PeerAvailabilitySnapshot { actor_id, bitfield, .. } => {
+                        PeerEvent::PeerAvailabilitySnapshot { actor_id, bitfield, seeder } => {
                             workers.record_availability_change(actor_id);
                             peers.update_peer_bitfield(actor_id, &bitfield);
+                            peers.update_peer_seeder(actor_id, seeder);
                             if let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) {
-                                if peers.peers()[peer_index].has_piece {
+                                if peers.has_piece(peer_index, piece_index) {
                                     rejected[peer_index].clear();
                                 } else {
                                     let cancelled = take_peer_pending(
@@ -247,6 +239,7 @@ pub(crate) async fn download_piece_blocks_endgame(
                             }
                         }
                         PeerEvent::PexPeers { peers, .. } => workers.record_pex_peers(peers),
+                        PeerEvent::TrackerPeers { peers } => tracker_peers.extend(peers),
                         PeerEvent::PexNegotiated { .. } => {}
                         PeerEvent::InterestChanged { actor_id, snapshot } => {
                             if peers.peer_index_by_actor_id(actor_id).is_none() {
@@ -363,8 +356,8 @@ pub(crate) async fn download_piece_blocks_endgame(
                                 _ => {}
                             }
                         }
-                        PeerEvent::RequestFailed { actor_id, generation, request } => {
-                            if generation != workers.generation() {
+                        PeerEvent::RequestFailed { actor_id, generation, piece_index: failed_piece, request } => {
+                            if generation != workers.generation() || failed_piece != piece_index {
                                 continue;
                             }
                             let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
@@ -387,6 +380,7 @@ pub(crate) async fn download_piece_blocks_endgame(
                             let Some(peer_index) = peers.peer_index_by_actor_id(actor_id) else {
                                 continue;
                             };
+                            let identity = peers.peer_identity(peer_index);
                             let cancelled = take_peer_pending(
                                 peer_index,
                                 &mut pending,
@@ -397,11 +391,21 @@ pub(crate) async fn download_piece_blocks_endgame(
                             );
                             workers.cancel_peer_requests(actor_id, &cancelled, piece_index);
                             record_failed_peer(peer_index, &mut live, &peers, &mut failed_peers);
+                            if let Some(identity) = identity {
+                                rebalance_upload_slots_after_peer_disconnect(
+                                    &mut workers,
+                                    &peers,
+                                    choking_algo.as_deref_mut(),
+                                    identity,
+                                )
+                                .await;
+                            }
                             last_activity = Instant::now();
                         }
                     }
                 }
-                _ = tokio::time::sleep(wait) => {
+                Some(_) = queue_ready.next(), if !queue_ready.is_empty() => {}
+                _ = wait_for_deadline(wake_deadline) => {
                     let now = Instant::now();
                     if let Some(progress) = network_activity
                         && download_speed.next_deadline().is_some_and(|deadline| now >= deadline)
@@ -472,6 +476,7 @@ pub(crate) async fn download_piece_blocks_endgame(
                     .into_iter()
                     .collect(),
                 pex_peers: workers.take_pex_peers(),
+                tracker_peers,
             });
         }
 
@@ -490,7 +495,7 @@ pub(crate) async fn download_piece_blocks_endgame(
             break;
         }
         tokio::time::sleep(Duration::from_millis(constants::BT_RETRY_DELAY_MS)).await;
-        workers.advance_generation(piece_index).await;
+        workers.advance_generations().await;
     }
 
     Err(Aria2Error::Network(format!(
@@ -502,4 +507,12 @@ pub(crate) async fn download_piece_blocks_endgame(
             max_attempts
         }
     )))
+}
+
+async fn wait_for_deadline(deadline: Option<Instant>) {
+    if let Some(deadline) = deadline {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+    } else {
+        std::future::pending().await
+    }
 }

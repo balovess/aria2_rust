@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::constants;
 use crate::engine::command::WRITE_CHANNEL_CAPACITY;
 use crate::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use crate::engine::http_adaptive_concurrency::{AdaptiveOutcome, HttpAdaptiveConcurrency};
+use crate::engine::http_adaptive_concurrency::HttpAdaptiveConcurrency;
 use crate::engine::http_segment_downloader::{SegmentProgress, SegmentProgressTracker, WriteChunk};
 use crate::engine::http_segment_request_executor::{
     HttpSegmentRequest, HttpSegmentRequestExecutor, authority_key,
@@ -26,6 +26,7 @@ use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
 use crate::request::request_group::ActiveConnectionGuard;
 use crate::util::rwlock_ext::RwLockRecover;
 
+use super::fixed_piece_size::calculate_fixed_piece_size;
 use super::{
     ConcurrentDownloadResult, ConcurrentDownloader, effective_segment_count,
     flush_requested_control_file,
@@ -39,22 +40,33 @@ pub async fn execute_with_coordinator(
     resume_state: &ResumeState,
     max_retries_per_segment: u32,
 ) -> Result<ConcurrentDownloadResult> {
-    let requested_split = dl
-        .group
-        .recover()
-        .options()
-        .split
-        .unwrap_or(constants::DEFAULT_SPLIT);
+    let options = dl.group.recover().options_arc();
+    let requested_split = options.split.unwrap_or(constants::DEFAULT_SPLIT);
     let min_split_size = dl.group.recover().effective_min_split_size();
     let split = effective_segment_count(total_length, requested_split, min_split_size);
-    let segment_size = total_length.div_ceil(split as u64).max(1);
-    let max_conn = dl
-        .group
-        .recover()
-        .options()
+    let piece_size = resume_state
+        .control_file
+        .as_ref()
+        .filter(|control_file| {
+            control_file.total_length() == total_length && !control_file.is_torrent_checkpoint()
+        })
+        .and_then(ControlFile::piece_length)
+        .map(u64::from)
+        .unwrap_or_else(|| calculate_fixed_piece_size(total_length));
+    let piece_length = u32::try_from(piece_size).map_err(|_| {
+        Aria2Error::InvalidArgument(format!(
+            "HTTP fixed piece length is not representable: {piece_size}"
+        ))
+    })?;
+    let max_conn = options
         .max_connection_per_server
         .unwrap_or(constants::DEFAULT_MAX_CONNECTION_PER_SERVER as u16)
         .clamp(1, 16) as usize;
+    let requested_session_limit = options
+        .max_http2_sessions_per_server
+        .unwrap_or(constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER as u16)
+        .clamp(1, max_conn as u16) as usize;
+    let session_limit = requested_session_limit.min(dl.range_clients.len().max(1));
 
     let mirror_config = crate::engine::mirror_coordinator::MirrorConfig {
         max_connections_per_mirror: split,
@@ -73,7 +85,7 @@ pub async fn execute_with_coordinator(
     let segment_manager = ConcurrentSegmentManager::new_with_selector(
         total_length,
         uris.to_vec(),
-        Some(segment_size),
+        Some(piece_size),
         crate::selector::server_stat_man::ServerStatMan::shared().clone(),
         selector,
     );
@@ -110,6 +122,15 @@ pub async fn execute_with_coordinator(
     }
 
     let num_pieces = coordinator.num_segments().max(1);
+    tracing::info!(
+        split_budget = split,
+        requested_split,
+        min_split_size,
+        max_conn,
+        fixed_piece_size = piece_size,
+        piece_count = coordinator.num_segments(),
+        "Concurrent multi-mirror download started"
+    );
     let ctrl_path = ControlFile::control_path_for(&dl.output_path);
     dl.group.recover().set_control_file_path(ctrl_path.clone());
     let expected_bitfield_len = num_pieces.div_ceil(8);
@@ -125,6 +146,8 @@ pub async fn execute_with_coordinator(
         .unwrap_or(0);
     let compatible_control_file = resume_state.control_file.as_ref().filter(|control_file| {
         control_file.total_length() == total_length
+            && !control_file.is_torrent_checkpoint()
+            && control_file.piece_length() == Some(piece_length)
             && control_file.bitfield().len() == expected_bitfield_len
     });
 
@@ -168,7 +191,9 @@ pub async fn execute_with_coordinator(
                 "Discarding stale control-file layout before multi-mirror resume"
             );
         }
-        match ControlFile::open_or_create(&ctrl_path, total_length, num_pieces).await {
+        match ControlFile::open_or_create_with_piece_length(&ctrl_path, total_length, piece_length)
+            .await
+        {
             Ok(control_file) => Some(control_file),
             Err(error) => {
                 tracing::warn!(
@@ -243,15 +268,22 @@ pub async fn execute_with_coordinator(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let retry_wait = dl.group.recover().options().retry_wait;
+    let retry_wait = options.retry_wait;
     let retry_policy = RetryPolicy::new(max_retries_per_segment, retry_wait.saturating_mul(1000));
     let mut adaptive = HashMap::new();
     for key in &server_keys {
         adaptive.insert(
             key.clone(),
-            HttpAdaptiveConcurrency::new(max_conn, retry_wait),
+            HttpAdaptiveConcurrency::new(
+                split,
+                max_conn,
+                session_limit,
+                options.http2_streams_per_session(),
+                retry_wait,
+            ),
         );
     }
+    let range_lengths = vec![piece_size; uris.len()];
     let mut executor = HttpSegmentRequestExecutor::new_with_clients(
         &dl.client,
         dl.range_clients.as_slice(),
@@ -263,6 +295,9 @@ pub async fn execute_with_coordinator(
         &server_keys,
         max_conn,
     );
+    if let Some((known_authority, version)) = &dl.initial_http_protocol {
+        executor.set_protocol(known_authority, *version);
+    }
     let connection_guard = ActiveConnectionGuard::new(Arc::clone(&dl.group));
     let (write_tx, mut write_rx) = mpsc::channel::<WriteChunk>(WRITE_CHANNEL_CAPACITY);
     let mut active: HashMap<u32, (usize, Instant, u64)> = HashMap::new();
@@ -300,15 +335,22 @@ pub async fn execute_with_coordinator(
         // Each authority closes its feedback round independently. A slow
         // mirror must not delay a capacity decision for another server.
         for (key, controller) in &mut adaptive {
-            if executor.in_flight_for(key) == 0
-                && let Some(new_target) = controller.finish_round()
-            {
-                executor.set_target(key, new_target);
-                tracing::info!(
-                    server = key,
-                    new_target,
-                    "HTTP adaptive concurrency reduced after 429/503"
-                );
+            let is_http2 = executor.is_http2(key);
+            if executor.in_flight_for(key) == 0 {
+                let update = controller.finish_round(is_http2);
+                if let Some(connections) = update.connection_target {
+                    tracing::info!(
+                        server = key,
+                        target_connections = connections,
+                        range_target = controller.range_target(is_http2),
+                        split_budget = split,
+                        "HTTP adaptive physical connection count changed"
+                    );
+                }
+            }
+            executor.set_target(key, controller.range_target(is_http2));
+            if is_http2 {
+                executor.set_active_h2_sessions(key, controller.connection_target(is_http2));
             }
         }
 
@@ -320,11 +362,12 @@ pub async fn execute_with_coordinator(
                 .filter_map(|(mirror_idx, uri)| {
                     let key = authority_key(uri).unwrap_or_else(|| uri.clone());
                     let controller = adaptive.get_mut(&key)?;
-                    (!controller.can_start(executor.in_flight_for(&key))).then_some(mirror_idx)
+                    (!controller.can_start(executor.in_flight_for(&key), executor.is_http2(&key)))
+                        .then_some(mirror_idx)
                 })
                 .collect();
             let Some((mirror_idx, mirror_url, (seg_idx, offset, length))) =
-                coordinator.select_mirror_for_segment_excluding(&excluded_mirrors)
+                coordinator.select_mirror_for_range_excluding(&excluded_mirrors, &range_lengths)
             else {
                 break;
             };
@@ -335,7 +378,7 @@ pub async fn execute_with_coordinator(
 
             let submitted = executor.try_submit(HttpSegmentRequest {
                 segment_index: seg_idx,
-                authority_key: key,
+                authority_key: key.clone(),
                 url: mirror_url.clone(),
                 offset,
                 length,
@@ -351,7 +394,6 @@ pub async fn execute_with_coordinator(
             };
 
             connection_guard.set(executor.in_flight());
-
             active.insert(seg_idx, (mirror_idx, Instant::now(), task_id));
             segment_progress.insert(seg_idx, progress);
             tracing::debug!(
@@ -418,10 +460,25 @@ pub async fn execute_with_coordinator(
                     },
                 ));
             }
+
+            if !coordinator.is_complete() {
+                let active_segments: Vec<u32> = active.keys().copied().collect();
+                tracing::warn!(
+                    completed_bytes = coordinator.completed_bytes(),
+                    total_bytes = total_length,
+                    segment_count = coordinator.num_segments(),
+                    active_segments = ?active_segments,
+                    active_progress_segments = ?segment_progress.keys().collect::<Vec<_>>(),
+                    "Multi-mirror HTTP download has incomplete ranges but no active work; falling back to fill gaps"
+                );
+                should_fallback = true;
+                break;
+            }
         }
 
         tokio::select! {
             Some(pool_result) = executor.next_result() => {
+                executor.reap_task(pool_result.task_id).await;
                 connection_guard.set(executor.in_flight());
                 let seg_idx = pool_result.segment_index;
                 let Some((_, _, active_task_id)) = active.get(&seg_idx).copied() else {
@@ -438,27 +495,26 @@ pub async fn execute_with_coordinator(
                 let result_authority_key = pool_result.authority_key.clone();
                 match pool_result.result {
                     Ok(bytes_downloaded) => {
-                        if let Some(controller) = adaptive.get_mut(&result_authority_key) {
-                            controller.record(AdaptiveOutcome::Success);
-                        }
                         let elapsed = seg_start.elapsed();
                         let speed = if elapsed.as_secs_f64() > 0.0 {
                             (bytes_downloaded as f64 / elapsed.as_secs_f64()) as u64
                         } else {
                             0
                         };
-                        let completed_len = usize::try_from(bytes_downloaded).map_err(|_| {
-                            Aria2Error::Fatal(crate::error::FatalError::Config(
-                                "Completed segment length exceeds platform limits".into(),
-                            ))
-                        })?;
-                        if !coordinator.on_segment_complete(mirror_idx, seg_idx, completed_len, speed) {
+                        let Some(parent_complete) = coordinator.on_range_complete(
+                            mirror_idx,
+                            seg_idx,
+                            bytes_downloaded,
+                            speed,
+                        ) else {
                             return Err(Aria2Error::Fatal(crate::error::FatalError::Config(
                                 format!("Segment {} completed with invalid length {}", seg_idx, bytes_downloaded),
                             )));
-                        }
+                        };
                         if let Some(control_file) = ctrl_file.as_mut() {
-                            control_file.mark_piece_done(seg_idx as usize);
+                            if parent_complete {
+                                control_file.mark_piece_done(seg_idx as usize);
+                            }
                             ctrl_bytes_since_save =
                                 ctrl_bytes_since_save.saturating_add(bytes_downloaded);
                             if ctrl_bytes_since_save >= ctrl_save_interval {
@@ -504,17 +560,12 @@ pub async fn execute_with_coordinator(
                             return Err(e);
                         }
                         let error_code = super::server_stat_error_code(&e);
-                        let is_capacity_limited = matches!(
-                            &e,
-                            Aria2Error::Recoverable(RecoverableError::ServerError { code })
-                                if matches!(*code, 429 | 503)
-                        );
-                        if let Some(controller) = adaptive.get_mut(&result_authority_key) {
-                            controller.record(if is_capacity_limited {
-                                AdaptiveOutcome::CapacityLimited
-                            } else {
-                                AdaptiveOutcome::OtherFailure
-                            });
+                        let is_capacity_limited = super::is_capacity_limited_error(&e);
+                        let is_http2 = executor.is_http2(&result_authority_key);
+                        if let Some(controller) = adaptive.get_mut(&result_authority_key)
+                            && is_capacity_limited
+                        {
+                            controller.record_capacity_failure(is_http2);
                         }
                         let is_416 = matches!(
                             &e,
@@ -532,13 +583,20 @@ pub async fn execute_with_coordinator(
                         if should_fallback {
                             break;
                         }
+                        let adaptive_capacity_retry = is_capacity_limited
+                            && adaptive
+                                .get(&result_authority_key)
+                                .is_some_and(|controller| {
+                                    controller.preserve_retry_budget(is_http2)
+                                });
                         let retry_count = coordinator.segment_retry_count(seg_idx);
-                        let retry_allowed = super::should_retry_segment(
-                            &retry_policy,
-                            retry_count,
-                            &e,
-                            file_not_found_retry_allowed,
-                        );
+                        let retry_allowed = adaptive_capacity_retry
+                            || super::should_retry_segment(
+                                &retry_policy,
+                                retry_count,
+                                &e,
+                                file_not_found_retry_allowed,
+                            );
                         if !retry_allowed {
                             let failed_over = coordinator.num_mirrors() > 1
                                 && coordinator
@@ -558,10 +616,7 @@ pub async fn execute_with_coordinator(
                                 return Err(e);
                             }
                         } else {
-                            let preserve_retry_budget = adaptive
-                                .get(&result_authority_key)
-                                .is_some_and(HttpAdaptiveConcurrency::preserve_retry_budget);
-                            if is_capacity_limited && preserve_retry_budget {
+                            if adaptive_capacity_retry {
                                 coordinator.requeue_segment(seg_idx);
                             } else {
                                 coordinator.on_segment_failed(

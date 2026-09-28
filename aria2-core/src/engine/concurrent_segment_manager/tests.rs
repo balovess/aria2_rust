@@ -77,6 +77,25 @@ fn test_complete_and_assemble() {
 }
 
 #[test]
+fn dynamic_subranges_keep_parent_incomplete_until_all_bytes_succeed() {
+    let mut mgr = ConcurrentSegmentManager::new(100, vec!["http://x.com/f".to_string()], Some(100));
+
+    assert_eq!(mgr.next_pending_range_for_mirror(0, 30), Some((0, 0, 30)));
+    assert_eq!(mgr.complete_range(0, 30), Some(false));
+    assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.completed_bytes(), 30);
+    assert!(mgr.completed_ranges().is_empty());
+
+    assert_eq!(mgr.next_pending_range_for_mirror(0, 40), Some((0, 30, 40)));
+    assert_eq!(mgr.complete_range(0, 40), Some(false));
+    assert_eq!(mgr.next_pending_range_for_mirror(0, 40), Some((0, 70, 30)));
+    assert_eq!(mgr.complete_range(0, 30), Some(true));
+    assert!(mgr.is_complete());
+    assert_eq!(mgr.completed_ranges(), vec![(0, 100)]);
+    assert_eq!(mgr.completed_bytes(), 100);
+}
+
+#[test]
 fn test_completed_ranges_exclude_partial_or_failed_segments() {
     let mut mgr = ConcurrentSegmentManager::new(300, vec!["http://x.com/f".to_string()], Some(100));
     mgr.allocate_segments();
@@ -111,13 +130,14 @@ fn test_restore_completed_segments_from_bitfield() {
 }
 
 #[test]
-fn test_restore_completed_prefix_ignores_partial_segment() {
+fn test_restore_completed_prefix_tracks_partial_parent_offset() {
     let mut mgr = ConcurrentSegmentManager::new(400, vec!["http://x.com/f".to_string()], Some(100));
 
-    assert_eq!(mgr.restore_completed_prefix(250), 200);
+    assert_eq!(mgr.restore_completed_prefix(250), 250);
     assert_eq!(mgr.segment_status(0), Some(SegmentStatus::Done));
     assert_eq!(mgr.segment_status(1), Some(SegmentStatus::Done));
     assert_eq!(mgr.segment_status(2), Some(SegmentStatus::Pending));
+    assert_eq!(mgr.next_pending_range_for_mirror(0, 50), Some((2, 250, 50)));
 }
 
 #[test]

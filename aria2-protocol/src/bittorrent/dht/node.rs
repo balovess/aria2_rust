@@ -6,6 +6,7 @@ pub struct DhtNode {
     pub(crate) addr: std::net::SocketAddr,
     pub(crate) last_seen: Instant,
     pub(crate) failed_count: u8,
+    pub(crate) verified: bool,
 }
 
 impl DhtNode {
@@ -15,6 +16,18 @@ impl DhtNode {
             addr,
             last_seen: Instant::now(),
             failed_count: 0,
+            verified: true,
+        }
+    }
+
+    /// Create a discovered node that has not yet answered a valid query.
+    pub(crate) fn unverified(id: [u8; 20], addr: std::net::SocketAddr) -> Self {
+        Self {
+            id,
+            addr,
+            last_seen: Instant::now(),
+            failed_count: 0,
+            verified: false,
         }
     }
 
@@ -35,11 +48,11 @@ impl DhtNode {
     }
 
     pub fn is_good(&self) -> bool {
-        self.failed_count < 3 && self.last_seen.elapsed().as_secs() < 900
+        self.verified && self.failed_count < 3 && self.last_seen.elapsed().as_secs() < 900
     }
 
     pub fn is_questionable(&self) -> bool {
-        self.last_seen.elapsed().as_secs() >= 900
+        !self.is_bad() && (!self.verified || self.last_seen.elapsed().as_secs() >= 900)
     }
 
     pub fn is_bad(&self) -> bool {
@@ -49,6 +62,7 @@ impl DhtNode {
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
         self.failed_count = 0;
+        self.verified = true;
     }
 
     pub fn record_failure(&mut self) {
@@ -100,12 +114,25 @@ mod tests {
     }
 
     #[test]
+    fn discovered_node_is_questionable_until_a_valid_response() {
+        let mut node = DhtNode::unverified([5u8; 20], "127.0.0.1:6881".parse().unwrap());
+
+        assert!(!node.is_good());
+        assert!(node.is_questionable());
+
+        node.touch();
+        assert!(node.is_good());
+        assert!(!node.is_questionable());
+    }
+
+    #[test]
     fn test_node_failures() {
         let mut node = DhtNode::new([2u8; 20], "0.0.0.0:0".parse().unwrap());
         for _ in 0..3 {
             node.record_failure();
         }
         assert!(node.is_bad());
+        assert!(!node.is_questionable());
 
         let mut good_node = DhtNode::new([3u8; 20], "0.0.0.0:0".parse().unwrap());
         for _ in 0..3 {

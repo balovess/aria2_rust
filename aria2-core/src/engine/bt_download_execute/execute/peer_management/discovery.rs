@@ -58,14 +58,26 @@ impl BtDownloadCommand {
     ///
     /// Uses the `TrackerAnnouncer` state machine for proper HTTP/WebSocket/UDP dispatch,
     /// tier rotation, and event management (Started → Downloading → Completed/Stopped).
+    #[cfg(test)]
     pub(in crate::engine::bt_download_execute::execute) async fn discover_peers(
         &mut self,
         meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
         total_size: u64,
         info_hash_raw: &[u8; 20],
     ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
-        let my_peer_id = self.local_peer_id;
+        self.discover_peers_with_events(meta, total_size, info_hash_raw, None)
+            .await
+    }
 
+    pub(in crate::engine::bt_download_execute::execute) async fn discover_peers_with_events(
+        &mut self,
+        meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+        total_size: u64,
+        info_hash_raw: &[u8; 20],
+        peer_event_tx: Option<
+            tokio::sync::mpsc::Sender<crate::engine::bt_message_handler::PeerEvent>,
+        >,
+    ) -> Result<Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr>> {
         // Initialize the unified TrackerAnnouncer from the torrent's announce list.
         // This replaces the separate HTTP-only + ad-hoc UDP approach with a single
         // state machine that properly routes HTTP, WebSocket, and UDP based on
@@ -158,47 +170,24 @@ impl BtDownloadCommand {
             announcer.set_runtime_snapshot(runtime);
         }
 
-        let mut peer_addrs: Vec<(String, u16)> = Vec::new();
-
-        // Try tracker announces through the state machine (handles HTTP,
-        // WebSocket, and UDP).
-        let mut announce_attempts = 0;
-        const MAX_ANNOUNCE_ATTEMPTS: usize = MAX_PUBLIC_TRACKERS_TO_TRY;
-
-        while announcer.is_announce_ready() && announce_attempts < MAX_ANNOUNCE_ATTEMPTS {
-            if let Some(result) = announcer
-                .announce(info_hash_raw, &my_peer_id, 0, total_size, 0)
-                .await
-            {
-                debug!(
-                    "[BT] Tracker announce result: {} peers from {} (event={:?}, interval={}s, seeders={:?}, leechers={:?})",
-                    result.peers.len(),
-                    result.tracker_url,
-                    result.event,
-                    result.interval.as_secs(),
-                    result.seeders,
-                    result.leechers
-                );
-                peer_addrs.extend(result.peers);
-
-                // If we got peers, no need to try more trackers immediately
-                if !peer_addrs.is_empty() {
-                    break;
-                }
-            }
-            announce_attempts += 1;
-        }
-
-        // Store the announcer for periodic re-announce during download
-        self.tracker_announcer = Some(announcer);
+        let (tracker_actor, peer_addrs) =
+            crate::engine::bt_download_execute::BtTrackerAnnouncerActor::start(
+                announcer,
+                *info_hash_raw,
+                self.local_peer_id,
+                total_size,
+                Arc::clone(&self.progress),
+                Arc::clone(&self.bt_runtime),
+                enable_public_trackers,
+                peer_event_tx,
+            )
+            .await;
+        self.tracker_actor = Some(tracker_actor);
 
         let mut peer_addrs: Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> =
             peer_addrs
                 .into_iter()
-                .filter(|(ip, _)| !self.is_peer_temporarily_rejected(ip))
-                .map(|(ip, port)| {
-                    aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
-                })
+                .filter(|peer| !self.is_peer_temporarily_rejected(&peer.ip))
                 .collect();
 
         // Register before reading the peer registry and send one announce
@@ -266,36 +255,44 @@ impl BtDownloadCommand {
 
         // BEP 0027 (Private Torrent): DHT must be disabled for private torrents
         // to prevent leaking the info_hash to the public DHT network.
-        let enable_dht = { self.group.recover().options().enable_dht } && !self.is_private;
+        let options = { self.group.recover().options().clone() };
         if self.is_private {
             info!("[BT] Private torrent: DHT disabled (BEP 0027)");
         }
-        if enable_dht && self.dht_engine.is_none() {
-            let shared_engine = self.bt_registry.as_ref().and_then(|registry| {
-                registry
-                    .read()
-                    .ok()
-                    .and_then(|registry| registry.get_global_dht_engine())
-            });
-            if let Some(engine) = shared_engine {
-                self.dht_engine = Some(engine);
-                self.register_dht_engine();
-            } else {
-                let options = { self.group.recover().options().clone() };
-                let dht_config = crate::engine::dht_config::build_dht_engine_config_with_policy(
+        if !self.is_private {
+            let gid = self.group.recover().gid().value();
+            for (use_ipv6, enabled) in [(false, options.enable_dht), (true, options.enable_dht6)] {
+                let family_present = if use_ipv6 {
+                    self.dht_engines.ipv6().is_some()
+                } else {
+                    self.dht_engines.ipv4().is_some()
+                };
+                if !enabled || family_present {
+                    continue;
+                }
+
+                if self.dht_engines.attach_global_if_present(
+                    self.bt_registry.as_ref(),
+                    gid,
+                    use_ipv6,
+                ) {
+                    continue;
+                }
+
+                let dht_config = crate::engine::dht_config::build_dht_engine_config_for_family(
                     &options,
                     &self.outbound_network_policy,
+                    use_ipv6,
                 )
                 .await?;
-
-                match aria2_protocol::bittorrent::dht::engine::DhtEngine::start(dht_config).await {
-                    Ok(engine) => {
-                        self.dht_engine = Some(engine);
-                        self.register_dht_engine();
-                        tracing::info!("[BT] shared DHT engine started");
-                    }
-                    Err(e) => {
-                        warn!("[BT] DHT engine start failed: {}", e);
+                match self
+                    .dht_engines
+                    .start_or_join(self.bt_registry.as_ref(), gid, dht_config)
+                    .await
+                {
+                    Ok(()) => tracing::info!(ipv6 = use_ipv6, "[BT] DHT family engine ready"),
+                    Err(error) => {
+                        warn!(ipv6 = use_ipv6, %error, "[BT] DHT family engine start failed")
                     }
                 }
             }
@@ -313,75 +310,5 @@ impl BtDownloadCommand {
         }
 
         Ok(peer_addrs)
-    }
-
-    /// Periodic tracker re-announce for peer discovery during download.
-    ///
-    /// C++ aria2 uses `TrackerWatcherCommand` which checks `BtAnnounce::isAnnounceReady()`
-    /// on each iteration and dispatches a new announce when the interval has elapsed.
-    /// This method replicates that behavior by checking the `TrackerAnnouncer` state
-    /// machine and dispatching an announce if ready.
-    ///
-    /// Returns any newly discovered peers (may be empty if announce not ready yet).
-    pub(in crate::engine::bt_download_execute::execute) async fn periodic_tracker_announce(
-        &mut self,
-        info_hash: &[u8; 20],
-        downloaded: u64,
-        left: u64,
-        uploaded: u64,
-    ) -> Vec<aria2_protocol::bittorrent::peer::connection::PeerAddr> {
-        let enable_public_trackers =
-            !self.is_private && self.group.recover().options().enable_public_trackers;
-        if enable_public_trackers && let Some(announcer) = self.tracker_announcer.as_mut() {
-            let added = announcer
-                .sync_public_trackers(MAX_PUBLIC_TRACKERS_TO_TRY)
-                .await;
-            if added > 0 {
-                debug!(
-                    added,
-                    "[BT] Added refreshed public trackers to running download"
-                );
-            }
-        }
-
-        let Some(ref mut announcer) = self.tracker_announcer else {
-            return Vec::new();
-        };
-
-        if !announcer.is_announce_ready() {
-            return Vec::new();
-        }
-
-        let my_peer_id = self.local_peer_id;
-
-        match announcer
-            .announce(info_hash, &my_peer_id, downloaded, left, uploaded)
-            .await
-        {
-            Some(result) => {
-                if result.peers.is_empty() {
-                    debug!(
-                        "[BT] Periodic tracker announce to {} returned no new peers",
-                        result.tracker_url
-                    );
-                    Vec::new()
-                } else {
-                    info!(
-                        "[BT] Periodic tracker announce discovered {} peers from {} (event={:?})",
-                        result.peers.len(),
-                        result.tracker_url,
-                        result.event
-                    );
-                    result
-                        .peers
-                        .into_iter()
-                        .map(|(ip, port)| {
-                            aria2_protocol::bittorrent::peer::connection::PeerAddr::new(&ip, port)
-                        })
-                        .collect()
-                }
-            }
-            None => Vec::new(),
-        }
     }
 }

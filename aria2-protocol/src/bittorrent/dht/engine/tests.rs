@@ -2,7 +2,7 @@ use super::{DhtEngine, DhtEngineConfig, DhtEngineState};
 use crate::bittorrent::dht::message::{DhtMessage, DhtMessageBuilder};
 use crate::bittorrent::dht::modern::{MutableValue, StoredItem};
 use crate::bittorrent::dht::node::DhtNode;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -70,6 +70,97 @@ async fn test_dht_engine_binds_configured_ipv6_udp_source() {
         "::1".parse::<IpAddr>().unwrap()
     );
 
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn save_state_does_not_restore_a_node_removed_from_the_live_routing_table() {
+    use crate::bittorrent::dht::persistence::DhtPersistence;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let path = temp_dir.path().join("dht.dat");
+    let stale_id = [0xA7; 20];
+    let stale_node = DhtNode::new(stale_id, "127.0.0.1:6881".parse().unwrap());
+    DhtPersistence::save_to_file_sync(&path, &[0xA8; 20], &[stale_node])
+        .expect("seed a persisted routing-table snapshot");
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        dht_file_path: Some(path.clone()),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("local DHT engine should load the snapshot");
+    assert!(
+        engine.context.routing_table.write().await.remove(&stale_id),
+        "the test node should be present in the live routing table"
+    );
+
+    engine
+        .save_state()
+        .await
+        .expect("saving the live routing table should succeed");
+    let saved = DhtPersistence::load_from_file_sync(&path)
+        .expect("saved routing-table snapshot should remain readable");
+    assert!(
+        saved.nodes.is_empty(),
+        "a node removed from the live routing table must not be merged back from disk"
+    );
+
+    engine.shutdown_async().await;
+}
+
+#[tokio::test]
+async fn configured_bootstrap_endpoints_are_all_seeded() {
+    use crate::bittorrent::dht::persistence::DhtPersistence;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let dht_file_path = temp_dir.path().join("dht.dat");
+    let bootstrap_nodes = [
+        "192.0.2.1:6881",
+        "192.0.2.2:6881",
+        "192.0.2.3:6881",
+        "192.0.2.4:6881",
+        "192.0.2.5:6881",
+    ]
+    .into_iter()
+    .map(|addr| addr.parse().unwrap())
+    .collect::<Vec<_>>();
+    let expected_count = bootstrap_nodes.len();
+    let engine = DhtEngine::start(DhtEngineConfig {
+        port: 0,
+        bootstrap_nodes,
+        dht_file_path: Some(dht_file_path.clone()),
+        query_timeout: Duration::from_secs(30),
+        bootstrap_timeout: Duration::from_secs(5),
+        ..DhtEngineConfig::default()
+    })
+    .await
+    .expect("engine should bind and seed configured bootstrap endpoints");
+
+    engine
+        .wait_until_ready(Duration::from_secs(5))
+        .await
+        .expect("configured bootstrap setup should finish");
+    let stats = engine.stats().await;
+
+    assert_eq!(
+        stats.total_nodes, expected_count,
+        "every configured endpoint must be represented as a distinct routing-table node"
+    );
+    assert_eq!(
+        stats.good_nodes, 0,
+        "unverified bootstrap endpoints must not be treated as live good nodes"
+    );
+    engine
+        .save_state()
+        .await
+        .expect("saving an unverified routing table should succeed");
+    let saved = DhtPersistence::load_from_file_sync(&dht_file_path)
+        .expect("saved DHT snapshot should be readable");
+    assert!(
+        saved.nodes.is_empty(),
+        "bootstrap endpoints must not be persisted as live good nodes before responding"
+    );
     engine.shutdown_async().await;
 }
 
@@ -267,22 +358,32 @@ async fn test_public_dht_find_peers_interoperability() {
     .await
     .expect("public DHT engine should bind an ephemeral port");
 
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if engine.stats().await.good_nodes > 0 {
-                break engine.find_peers(&[0x3Cu8; 20]).await;
-            }
-            if engine.state().await == DhtEngineState::Running {
-                break engine.find_peers(&[0x3Cu8; 20]).await;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .expect("public DHT bootstrap or lookup timed out")
-    .expect("public DHT lookup failed");
-    assert!(result.nodes_contacted > 0);
+    engine
+        .wait_until_ready(Duration::from_secs(30))
+        .await
+        .expect("public DHT engine did not finish bootstrap setup");
+    let local_addr = engine.local_addr();
+    let bootstrap_stats = engine.stats().await;
+    assert!(
+        bootstrap_stats.total_nodes > 0,
+        "public DHT bootstrap resolved no nodes for the bound address family: local_addr={local_addr}"
+    );
+    let result = tokio::time::timeout(Duration::from_secs(30), engine.find_peers(&[0x3Cu8; 20]))
+        .await
+        .expect("public DHT lookup timed out")
+        .expect("public DHT lookup failed");
+    let stats = engine.stats().await;
     engine.shutdown_async().await;
+
+    assert!(
+        result.nodes_contacted > 0,
+        "public DHT lookup received no node responses: local_addr={local_addr}, bootstrap_nodes={}, bootstrap_good_nodes={}, total_nodes={}, good_nodes={}, pending_transactions={}",
+        bootstrap_stats.total_nodes,
+        bootstrap_stats.good_nodes,
+        stats.total_nodes,
+        stats.good_nodes,
+        stats.pending_transactions,
+    );
 }
 
 #[tokio::test]
@@ -360,6 +461,219 @@ async fn test_find_peers_when_stopped() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let result = engine.find_peers(&[0u8; 20]).await;
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn get_peers_replaces_a_node_whose_id_changed_at_the_same_endpoint() {
+    const INFO_HASH: [u8; 20] = [0x34; 20];
+    let old_node_id = [0xA5; 20];
+    let new_node_id = [0xB6; 20];
+    let latest_node_id = [0xC7; 20];
+    let peer: std::net::SocketAddr = "127.0.0.1:6882".parse().unwrap();
+    let responder = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("local UDP responder should bind"),
+    );
+    let responder_addr = responder.local_addr().expect("responder address");
+    let responder_task = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        let mut get_peers_responses = 0;
+        while get_peers_responses < 2 {
+            let (len, from) =
+                tokio::time::timeout(Duration::from_secs(2), responder.recv_from(&mut buf))
+                    .await
+                    .expect("engine should send its DHT queries")
+                    .expect("local responder should receive UDP packet");
+            let query = DhtMessage::decode(&buf[..len]).expect("valid KRPC query");
+            assert!(query.is_query());
+            let response = match query.q.as_ref().map(|method| method.0.as_str()) {
+                Some("ping") => DhtMessageBuilder::ping_response(&query.t, &old_node_id),
+                Some("find_node") => {
+                    DhtMessageBuilder::find_node_response(&query.t, &latest_node_id, &[])
+                }
+                Some("get_peers") => {
+                    let args = query.a.as_ref().expect("get_peers query arguments");
+                    assert_eq!(
+                        args.dict_get(b"info_hash").and_then(|v| v.as_bytes()),
+                        Some(&INFO_HASH[..])
+                    );
+                    let response_node_id = if get_peers_responses == 0 {
+                        new_node_id
+                    } else {
+                        latest_node_id
+                    };
+                    get_peers_responses += 1;
+                    DhtMessageBuilder::get_peers_response_with_peers(
+                        &query.t,
+                        &response_node_id,
+                        b"fixture-token",
+                        &[peer],
+                    )
+                }
+                method => panic!("unexpected DHT query: {method:?}"),
+            };
+            let encoded = response.encode().expect("response should encode");
+            responder
+                .send_to(&encoded, from)
+                .await
+                .expect("send DHT response");
+        }
+    });
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        query_timeout: Duration::from_millis(500),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT engine should start");
+    engine.add_node(responder_addr).await;
+    let result = engine
+        .find_peers(&INFO_HASH)
+        .await
+        .expect("get_peers lookup should complete");
+    assert_eq!(result.peers, vec![peer]);
+    assert_eq!(result.nodes_contacted, 1);
+
+    let lookup = crate::bittorrent::dht::lookup::iterative_get_peers(
+        &INFO_HASH,
+        &engine.context.handler_self_id,
+        &engine.context.routing_table,
+        &engine.context.socket,
+        &engine.context.tracker,
+        Duration::from_millis(500),
+    )
+    .await;
+    assert_eq!(lookup.peers, vec![peer]);
+    assert_eq!(lookup.nodes_contacted, 1);
+    assert_eq!(lookup.token_nodes.len(), 1);
+    assert_eq!(lookup.token_nodes[0].0, responder_addr);
+    assert_eq!(lookup.token_nodes[0].1, latest_node_id);
+    assert_eq!(lookup.token_nodes[0].2, b"fixture-token");
+
+    let routing_table = engine.context.routing_table.read().await;
+    let nodes = routing_table
+        .get_all_buckets()
+        .into_iter()
+        .flat_map(|bucket| bucket.nodes().iter())
+        .collect::<Vec<_>>();
+    assert!(
+        nodes.iter().all(|node| node.id() != &old_node_id),
+        "the superseded node ID must be removed after a valid response from the same endpoint"
+    );
+    assert!(
+        nodes.iter().all(|node| node.id() != &new_node_id),
+        "an intermediate node ID must be replaced when the endpoint changes identity again"
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|node| node.id() == &latest_node_id && node.is_good()),
+        "the responding node ID must replace the stale identity as a live good node"
+    );
+    drop(routing_table);
+
+    engine.shutdown_async().await;
+    responder_task.await.expect("responder task should finish");
+}
+
+#[tokio::test]
+async fn peer_lookup_can_announce_with_the_token_from_that_same_lookup() {
+    const INFO_HASH: [u8; 20] = [0x39; 20];
+    const ANNOUNCE_PORT: u16 = 51413;
+    let node_id = [0xD7; 20];
+    let peer: SocketAddr = "127.0.0.1:6882".parse().unwrap();
+    let responder = Arc::new(
+        UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("local UDP responder should bind"),
+    );
+    let responder_addr = responder.local_addr().expect("responder address");
+    let responder_task = tokio::spawn(async move {
+        let mut buf = [0u8; 4096];
+        let mut get_peers_count = 0;
+        loop {
+            let (len, from) =
+                tokio::time::timeout(Duration::from_secs(2), responder.recv_from(&mut buf))
+                    .await
+                    .expect("combined peer lookup should finish its wire exchange")
+                    .expect("local responder should receive UDP packet");
+            let query = DhtMessage::decode(&buf[..len]).expect("valid KRPC query");
+            assert!(query.is_query());
+            let (response, announced) = match query.q.as_ref().map(|method| method.0.as_str()) {
+                Some("ping") => (DhtMessageBuilder::ping_response(&query.t, &node_id), false),
+                Some("find_node") => (
+                    DhtMessageBuilder::find_node_response(&query.t, &node_id, &[]),
+                    false,
+                ),
+                Some("get_peers") => {
+                    get_peers_count += 1;
+                    let args = query.a.as_ref().expect("get_peers query arguments");
+                    assert_eq!(
+                        args.dict_get(b"info_hash")
+                            .and_then(|value| value.as_bytes()),
+                        Some(&INFO_HASH[..])
+                    );
+                    (
+                        DhtMessageBuilder::get_peers_response_with_peers(
+                            &query.t,
+                            &node_id,
+                            b"fixture-token",
+                            &[peer],
+                        ),
+                        false,
+                    )
+                }
+                Some("announce_peer") => {
+                    assert_eq!(get_peers_count, 1, "announce should reuse one lookup");
+                    let args = query.a.as_ref().expect("announce_peer query arguments");
+                    assert_eq!(
+                        args.dict_get(b"info_hash")
+                            .and_then(|value| value.as_bytes()),
+                        Some(&INFO_HASH[..])
+                    );
+                    assert_eq!(
+                        args.dict_get(b"token").and_then(|value| value.as_bytes()),
+                        Some(&b"fixture-token"[..])
+                    );
+                    assert_eq!(
+                        args.dict_get(b"port").and_then(|value| value.as_int()),
+                        Some(i64::from(ANNOUNCE_PORT))
+                    );
+                    (
+                        DhtMessageBuilder::announce_peer_response(&query.t, &node_id),
+                        true,
+                    )
+                }
+                method => panic!("unexpected DHT query: {method:?}"),
+            };
+            let encoded = response.encode().expect("response should encode");
+            responder
+                .send_to(&encoded, from)
+                .await
+                .expect("send DHT response");
+            if announced {
+                break;
+            }
+        }
+    });
+
+    let engine = DhtEngine::start(DhtEngineConfig {
+        query_timeout: Duration::from_millis(500),
+        ..DhtEngineConfig::local()
+    })
+    .await
+    .expect("DHT engine should start");
+    engine.add_node(responder_addr).await;
+    let result = engine
+        .find_peers_and_announce(&INFO_HASH, ANNOUNCE_PORT)
+        .await
+        .expect("combined DHT lookup and announce should succeed");
+
+    assert_eq!(result.peers, vec![peer]);
+    assert_eq!(result.nodes_contacted, 1);
+    responder_task.await.expect("responder task should finish");
+    engine.shutdown_async().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

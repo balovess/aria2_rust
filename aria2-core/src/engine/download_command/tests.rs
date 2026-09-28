@@ -9,6 +9,28 @@ use crate::network::OutboundNetworkPolicy;
 use crate::request::request_group::{DownloadOptions, FollowMode, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
 
+#[test]
+fn http2_session_pool_count_is_limited_by_max_connection_per_server() {
+    let options = DownloadOptions {
+        max_http2_sessions_per_server: Some(16),
+        max_connection_per_server: Some(1),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(super::range_client_pool_count(&options), 1);
+
+    let options = DownloadOptions {
+        max_http2_sessions_per_server: Some(2),
+        max_connection_per_server: Some(4),
+        ..DownloadOptions::default()
+    };
+    assert_eq!(super::range_client_pool_count(&options), 2);
+
+    assert_eq!(
+        super::range_client_pool_count(&DownloadOptions::default()),
+        crate::constants::DEFAULT_HTTP2_SESSIONS_PER_SERVER
+    );
+}
+
 impl DownloadCommand {
     fn has_progress_sender(&self) -> bool {
         self.progress_sender.is_some()

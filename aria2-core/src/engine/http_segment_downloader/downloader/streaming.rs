@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::debug;
 
@@ -88,11 +89,17 @@ impl HttpSegmentDownloader {
         let range_header = format!("bytes={}-{}", offset, offset + length.saturating_sub(1));
         debug!("HTTP Range request (streaming): {} ({})", range_header, url);
 
+        let collect_timing = progress.is_some() && tracing::enabled!(tracing::Level::DEBUG);
+        let request_started = collect_timing.then(Instant::now);
         let (response, effective_url) = self
             .send_range_request(url, &range_header, cookie_header, headers)
             .await?;
+        let response_headers_wait = request_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
 
         self.remember_peer(response.remote_addr());
+        self.remember_http_version(response.version());
         let status = response.status();
         if let Some(error) = classify_range_status(status, &range_header) {
             return Err(error);
@@ -105,13 +112,25 @@ impl HttpSegmentDownloader {
         let mut current_offset = offset;
         let mut total_written = 0u64;
         let mut last_reported_progress = 0u64;
+        let mut response_body_wait = Duration::ZERO;
+        let mut write_queue_wait = Duration::ZERO;
+        let mut response_chunks = 0u64;
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            let read_started = collect_timing.then(Instant::now);
+            let next_chunk = stream.next().await;
+            if let Some(started) = read_started {
+                response_body_wait = response_body_wait.saturating_add(started.elapsed());
+            }
+            let Some(chunk_result) = next_chunk else {
+                break;
+            };
             let bytes = chunk_result.map_err(|e| {
                 Aria2Error::Recoverable(RecoverableError::TemporaryNetworkFailure {
                     message: format!("Stream read error: {}", e),
                 })
             })?;
+            response_chunks = response_chunks.saturating_add(1);
             let chunk_len = bytes.len() as u64;
             if chunk_len > 0
                 && let Some(StreamingProgress::Segment(segment)) = progress
@@ -131,14 +150,17 @@ impl HttpSegmentDownloader {
             }
 
             // Send chunk to writer immediately — no accumulation
-            if write_tx
+            let write_started = collect_timing.then(Instant::now);
+            let write_result = write_tx
                 .send(WriteChunk {
                     offset: current_offset,
                     data: bytes,
                 })
-                .await
-                .is_err()
-            {
+                .await;
+            if let Some(started) = write_started {
+                write_queue_wait = write_queue_wait.saturating_add(started.elapsed());
+            }
+            if write_result.is_err() {
                 return Err(Aria2Error::DownloadFailed(
                     "download writer channel closed".into(),
                 ));
@@ -183,6 +205,18 @@ impl HttpSegmentDownloader {
                     ),
                 },
             ));
+        }
+
+        if collect_timing {
+            debug!(
+                offset,
+                length,
+                response_headers_wait_ms = response_headers_wait.as_millis() as u64,
+                response_body_wait_ms = response_body_wait.as_millis() as u64,
+                write_queue_wait_ms = write_queue_wait.as_millis() as u64,
+                response_chunks,
+                "HTTP Range transfer phase timing"
+            );
         }
 
         Ok(total_written)

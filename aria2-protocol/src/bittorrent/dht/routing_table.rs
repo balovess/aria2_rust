@@ -65,6 +65,9 @@ impl RoutingTable {
 
         let node_id = node.id;
         let node_addr = node.addr;
+        let last_seen = node.last_seen;
+        let failed_count = node.failed_count;
+        let verified = node.verified;
 
         // Find the leaf bucket for this node.
         let leaf = find_tree_node_for_mut(&mut self.root, &node_id);
@@ -92,7 +95,13 @@ impl RoutingTable {
                     self.num_buckets += 1;
 
                     // Find the correct child and add the node with original address.
-                    let node_for_retry = DhtNode::new(node_id, node_addr);
+                    let node_for_retry = DhtNode {
+                        id: node_id,
+                        addr: node_addr,
+                        last_seen,
+                        failed_count,
+                        verified,
+                    };
                     let child = find_tree_node_for_mut(&mut self.root, &node_id);
                     if let BucketTreeNode::Leaf { bucket } = child {
                         bucket.add_node(node_for_retry);
@@ -103,7 +112,13 @@ impl RoutingTable {
                     }
                 } else {
                     // Cannot split — cache the node for potential replacement.
-                    let cache_node = DhtNode::new(node_id, node_addr);
+                    let cache_node = DhtNode {
+                        id: node_id,
+                        addr: node_addr,
+                        last_seen,
+                        failed_count,
+                        verified,
+                    };
                     bucket.cache_node(cache_node);
                     debug!(
                         id = %hex::encode(node_id),
@@ -178,7 +193,7 @@ impl RoutingTable {
         self.get_all_buckets().iter().map(|b| b.count_node()).sum()
     }
 
-    /// Return the number of good (non-bad) nodes across all buckets.
+    /// Return the number of recently verified good nodes across all buckets.
     pub fn good_node_count(&self) -> usize {
         self.get_all_buckets()
             .iter()
@@ -408,6 +423,23 @@ mod tests {
 
         // The node should be added (possibly after split).
         assert!(table.total_node_count() >= super::super::bucket::K);
+    }
+
+    #[test]
+    fn bucket_split_preserves_discovered_node_verification_state() {
+        let mut table = RoutingTable::new([0u8; 20]);
+        for i in 1..=super::super::bucket::K as u8 {
+            table.insert(DhtNode::new([i; 20], make_addr(6881 + i as u16)));
+        }
+
+        table.insert(DhtNode::unverified([0x80u8; 20], make_addr(9999)));
+
+        assert_eq!(table.total_node_count(), super::super::bucket::K + 1);
+        assert_eq!(
+            table.good_node_count(),
+            super::super::bucket::K,
+            "inserting across a bucket split must not promote an unverified node"
+        );
     }
 
     #[test]

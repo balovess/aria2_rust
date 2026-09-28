@@ -27,6 +27,18 @@ pub fn download_options_to_map(opts: &DownloadOptions) -> HashMap<String, String
     if let Some(v) = opts.max_connection_per_server {
         map.insert("max-connection-per-server".to_string(), v.to_string());
     }
+    if let Some(v) = opts.max_http2_sessions_per_server {
+        map.insert("max-http2-sessions-per-server".to_string(), v.to_string());
+    }
+    if let Some(v) = opts.max_http2_streams_per_session {
+        map.insert("max-http2-streams-per-session".to_string(), v.to_string());
+    }
+    if opts.http_version != crate::http::HttpVersion::Auto {
+        map.insert(
+            "http-version".to_string(),
+            opts.http_version.option_value().to_string(),
+        );
+    }
     if let Some(v) = opts.max_download_limit {
         map.insert("max-download-limit".to_string(), v.to_string());
     }

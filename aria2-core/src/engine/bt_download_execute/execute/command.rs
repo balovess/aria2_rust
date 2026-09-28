@@ -221,29 +221,14 @@ impl Command for BtDownloadCommand {
             .await;
         self.group.recover().clear_bt_peer_snapshots();
         if let Err(error) = piece_result {
-            if let Some(ref mut announcer) = self.tracker_announcer {
-                announcer
-                    .announce_stopped(
-                        &network_info_hash,
-                        &self.local_peer_id,
-                        self.completed_bytes,
-                        total_size.saturating_sub(self.completed_bytes),
-                        self.total_uploaded,
-                    )
-                    .await;
+            if let Some(actor) = self.tracker_actor.as_ref() {
+                let _ = actor.stop().await;
             }
             return Err(error);
         }
 
-        if let Some(ref mut announcer) = self.tracker_announcer {
-            announcer
-                .announce_completed(
-                    &network_info_hash,
-                    &self.local_peer_id,
-                    self.completed_bytes,
-                    self.total_uploaded,
-                )
-                .await;
+        if let Some(actor) = self.tracker_actor.as_ref() {
+            actor.announce_completed().await;
         }
 
         if self.seed_enabled {
@@ -278,6 +263,9 @@ impl Command for BtDownloadCommand {
         } else {
             info!("Skipping seeding (enabled={})", self.seed_enabled,);
             session.swarm.shutdown_all().await;
+            if let Some(actor) = self.tracker_actor.as_ref() {
+                let _ = actor.stop().await;
+            }
         }
 
         let started_at = self.started_at.unwrap_or_else(Instant::now);
