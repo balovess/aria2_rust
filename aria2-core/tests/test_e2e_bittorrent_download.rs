@@ -3,11 +3,11 @@
 mod e2e_helpers;
 mod fixtures;
 
-use aria2_core::engine::bt_download_command::BtDownloadCommand;
-use aria2_core::engine::bt_progress_info_file::{
+use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
+use aria2_core::engine::bittorrent::persistence::progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats,
 };
-use aria2_core::engine::bt_tracker_comm::TrackerAnnouncer;
+use aria2_core::engine::bittorrent::tracker::communication::TrackerAnnouncer;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::download_event_hooks::{

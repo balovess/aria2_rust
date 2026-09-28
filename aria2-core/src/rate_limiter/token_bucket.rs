@@ -291,6 +291,39 @@ impl TokenBucket {
         }
     }
 
+    /// Return the monotonic wait required before `acquire(bytes)` can make
+    /// progress. This is a scheduling hint: another concurrent caller may
+    /// consume tokens first, so callers must still retry the acquisition.
+    pub(crate) fn time_until_acquire(&self, bytes: u64) -> Duration {
+        if self.unlimited.load(Ordering::Relaxed) {
+            return Duration::ZERO;
+        }
+
+        self.refill();
+        let needed_milli = bytes.saturating_mul(1000);
+        let current = self.tokens_milli.load(Ordering::Relaxed);
+        if current >= needed_milli {
+            return Duration::ZERO;
+        }
+
+        let rate_milli = self.rate_milli_per_sec.load(Ordering::Relaxed);
+        if rate_milli == 0 {
+            // `acquire` treats this defensive configuration as unlimited.
+            return Duration::ZERO;
+        }
+
+        let deficit_milli = needed_milli - current;
+        let wait_ns = (deficit_milli as u128)
+            .saturating_mul(NS_PER_SEC as u128)
+            .div_ceil(rate_milli as u128)
+            .min(u64::MAX as u128) as u64;
+        Duration::from_nanos(wait_ns.max(1))
+    }
+
+    pub(crate) fn subscribe_rate_changes(&self) -> watch::Receiver<u64> {
+        self.rate_changed.subscribe()
+    }
+
     /// Non-blocking attempt to acquire `bytes` tokens.
     /// Returns `true` if tokens were available and deducted, `false` otherwise.
     pub fn try_acquire(&self, bytes: u64) -> bool {

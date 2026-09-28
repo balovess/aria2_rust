@@ -3,7 +3,7 @@
 
 #[cfg(test)]
 mod j2_j5_integration_tests {
-    use crate::engine::http_segment_downloader::{
+    use crate::engine::http::segment_downloader::{
         ConnectionLimiter, calculate_dynamic_segment_size,
     };
     use crate::http::conditional_get::{

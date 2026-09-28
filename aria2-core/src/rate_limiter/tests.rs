@@ -57,6 +57,18 @@ async fn test_token_bucket_try_acquire() {
 }
 
 #[test]
+fn token_bucket_reports_the_wait_for_a_token_deadline() {
+    let tb = TokenBucket::new(1000, Some(0));
+
+    assert_eq!(tb.time_until_acquire(0), Duration::ZERO);
+    let wait = tb.time_until_acquire(8);
+    assert!(
+        (Duration::from_millis(7)..=Duration::from_millis(8)).contains(&wait),
+        "8 bytes at 1000 bytes/sec should be ready in about 8 ms, got {wait:?}"
+    );
+}
+
+#[test]
 fn test_token_bucket_available_tokens() {
     let tb = TokenBucket::new(1000, Some(5000));
     let initial = tb.available_tokens();

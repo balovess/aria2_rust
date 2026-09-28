@@ -6,8 +6,10 @@ use aria2_core::auth::credential_store::CredentialStore;
 use aria2_core::auth::digest_auth::{
     AuthChallenge, DigestAlgorithm, DigestAuthProvider, parse_www_authenticate,
 };
-use aria2_core::engine::bt_progress_info_file::{BtProgress, BtProgressManager, DownloadStats};
-use aria2_core::engine::lpd_manager::{LpdManager, parse_lpd_announcement};
+use aria2_core::engine::bittorrent::discovery::lpd::{LpdManager, parse_lpd_announcement};
+use aria2_core::engine::bittorrent::persistence::progress_info_file::{
+    BtProgress, BtProgressManager, DownloadStats, PeerAddr,
+};
 use aria2_core::http::stream_filter::{ChunkedDecoder, GZipDecoder, StreamFilter, process_filters};
 use aria2_protocol::bittorrent::extension::mse_crypto::Arc4Cipher;
 use aria2_protocol::bittorrent::extension::mse_dh::MseDhKeyExchange;
@@ -87,7 +89,7 @@ fn create_large_progress(num_pieces: u32) -> BtProgress {
         .map(|i| if i < bitfield_len - 1 { 0xFF } else { 0x0F })
         .collect();
     let peers: Vec<_> = (0..10.min(num_pieces))
-        .map(|i| aria2_core::engine::bt_progress_info_file::PeerAddr {
+        .map(|i| PeerAddr {
             ip: format!("192.168.1.{}", i),
             port: 6881 + i as u16,
         })

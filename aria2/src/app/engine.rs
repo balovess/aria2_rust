@@ -13,7 +13,7 @@ use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
-use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
+use aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use aria2_core::network::OutboundNetworkPolicy;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use aria2_core::util::rwlock_ext::RwLockRecover;
@@ -173,7 +173,7 @@ impl App {
                         std::net::IpAddr::V6(_) => None,
                     })
             });
-            let lpd_manager = match aria2_core::engine::lpd_manager::LpdManager::with_interval_and_interface_and_port(
+            let lpd_manager = match aria2_core::engine::bittorrent::discovery::lpd::LpdManager::with_interval_and_interface_and_port(
                 aria2_core::constants::LPD_DEFAULT_ANNOUNCE_INTERVAL_SECS,
                 lpd_interface,
                 lpd_port,
@@ -184,7 +184,7 @@ impl App {
                         %error,
                         "Using default LPD manager because configured LPD setup failed"
                     );
-                    Arc::new(aria2_core::engine::lpd_manager::LpdManager::new())
+                    Arc::new(aria2_core::engine::bittorrent::discovery::lpd::LpdManager::new())
                 }
             };
 

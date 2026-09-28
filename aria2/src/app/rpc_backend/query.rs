@@ -5,7 +5,7 @@ use std::sync::Arc;
 #[cfg(feature = "bittorrent")]
 use aria2_core::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
 #[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_tracker_comm::TrackerRuntimeSnapshot;
+use aria2_core::engine::bittorrent::tracker::communication::TrackerRuntimeSnapshot;
 use aria2_core::request::request_group::{DownloadStatus, RequestGroup};
 use aria2_core::segment::piece_storage::BitfieldMan;
 use aria2_core::util::rwlock_ext::RwLockRecover;

@@ -25,9 +25,9 @@
 //!   merging (defaults → env → file → CLI), `ConfigManager` runtime manager,
 //!   NetRC authentication parser, and URI list file parser.
 //!
-//! - **[`engine`]** — Download engine with event-loop architecture (`DownloadEngine`),
-//!   command queue, timer system, tick-based scheduling. Includes `BtDownloadCommand`
-//!   with pluggable progress/LPD/hook managers.
+//! - **[`engine`]** — Shared event loop, task lifecycle, scheduling, and protocol
+//!   command assembly. Protocol-specific execution lives under `engine::http`,
+//!   `engine::ftp`, `engine::sftp`, `engine::bittorrent`, and `engine::metalink`.
 //!
 //! - **[`request`]** — Request management layer: `RequestGroupMan` (global task manager),
 //!   `RequestGroup` (per-task lifecycle: Waiting → Active → Paused → Complete/Error/Removed),
@@ -37,12 +37,13 @@
 //!   [`DigestAuthProvider`](auth::digest_auth::DigestAuthProvider), thread-safe
 //!   [`CredentialStore`](auth::credential_store::CredentialStore) with automatic secret zeroing.
 //!
-//! - **[`http`]** — HTTP client with connection pooling, redirect following (iterative with loop detection),
-//!   stream filters ([`GzDecoder`](http::stream_filter::GzDecoder), [`ChunkedDecoder`](http::stream_filter::ChunkedDecoder)),
-//!   cookie jar, and auth header builders.
+//! - **[`http`]** — HTTP request policy and reusable helpers for authentication,
+//!   redirects, cookies, response processing, TLS identity, and stream filters
+//!   ([`GzDecoder`](http::stream_filter::GzDecoder), [`ChunkedDecoder`](http::stream_filter::ChunkedDecoder)).
 //!
-//! - **[`ftp`]** — FTP/SFTP protocol handler with passive/active modes, fast-path LIST parser,
-//!   REST resume support, and control file management.
+//! - **[`ftp`]** — FTP control/data connection support, passive/active negotiation,
+//!   listing parsing, proxy handling, and connection pooling. SFTP lives in its
+//!   own protocol module.
 //!
 //! - **[`filesystem`]** — Disk I/O abstraction: `DiskAdaptor`, `DiskWriter`,
 //!   file pre-allocation strategies, write cache (LRU eviction), and checksum verification.
@@ -82,9 +83,10 @@
 //! }
 //! ```
 //!
-//! The companion `aria2-protocol` crate owns wire formats and protocol
-//! transports, such as Bencode, BT messages, Handshake, and `Bitfield`.
-//! Download policy and torrent-domain state intentionally belong here.
+//! The companion `aria2-protocol` crate owns reusable protocol wire formats,
+//! parsers, and clients, such as Bencode, BitTorrent messages, Handshake, and
+//! `Bitfield`. `aria2-core::engine` assembles them with download policy,
+//! request state, and storage.
 //! Applications should import the task-facing types from `aria2_core` rather
 //! than from `aria2_protocol`.
 //!
@@ -185,14 +187,16 @@ pub mod validation;
 // Re-export commonly used types for downstream crates.
 // This avoids forcing consumers to depend on internal module paths.
 #[cfg(feature = "bittorrent")]
-pub use engine::bt_message_validation::{
+pub use engine::bittorrent::peer::message_validation::{
     BtMessageValidationError, BtMessageValidator, MAX_BLOCK_LENGTH,
 };
 #[cfg(feature = "bittorrent")]
-pub use engine::bt_piece::{
+pub use engine::bittorrent::piece::{
     Bitfield, PeerBitfieldEntry, PeerBitfieldTracker, PeerTrackerStats, PickedPiece, PieceInfo,
     PieceManager, PiecePicker, PiecePickerConfig, PiecePriorityMode, PieceSelectionStrategy,
 };
+#[cfg(feature = "bittorrent")]
+pub use engine::bittorrent::torrent::file_layout::TorrentFileEntry;
 pub use engine::download_engine::DownloadEngine;
 pub use engine::download_event_hooks::{
     DownloadEvent, DownloadEventHooks, DownloadEventListener, DownloadEventListenerId,
@@ -201,8 +205,6 @@ pub use engine::download_event_hooks::{
 pub use engine::download_manager::{
     DownloadEngineHandle, DownloadHandle, DownloadManager, DownloadManagerError,
 };
-#[cfg(feature = "bittorrent")]
-pub use engine::multi_file_layout::TorrentFileEntry;
 pub use request::request_group::{
     ChangeableKind, DownloadOptions, DownloadResult, DownloadStatus, DownloadStatusSnapshot,
     FileEntry, GroupId, RUNTIME_CHANGEABLE_FOR_RESERVED_OPTIONS, RUNTIME_CHANGEABLE_OPTIONS,

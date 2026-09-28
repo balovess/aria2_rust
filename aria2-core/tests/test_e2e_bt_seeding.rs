@@ -1,7 +1,7 @@
 #![cfg(feature = "bittorrent")]
 
-use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
-use aria2_core::engine::bt_upload_session::{
+use aria2_core::engine::bittorrent::download::seed_manager::{BtSeedManager, SeedExitCondition};
+use aria2_core::engine::bittorrent::peer::upload_session::{
     BtSeedingConfig, InMemoryPieceProvider, PieceDataProvider,
 };
 use aria2_protocol::bittorrent::message::handshake::Handshake;

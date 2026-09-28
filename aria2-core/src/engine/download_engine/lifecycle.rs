@@ -100,6 +100,7 @@ impl DownloadEngine {
             .ok()
             .map(|mut registry| registry.take_global_dht_engines())
             .unwrap_or_default();
+        #[cfg(feature = "bittorrent")]
         for engine in engines {
             engine.shutdown_async().await;
         }

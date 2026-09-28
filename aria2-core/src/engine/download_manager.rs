@@ -142,7 +142,7 @@ impl DownloadManager {
                 .map_err(DownloadManagerError::Preparation)?;
         }
 
-        super::bt_download_command::prepare_group_metadata(
+        super::bittorrent::download::command::prepare_group_metadata(
             Arc::clone(&group),
             &data,
             &options,
@@ -184,7 +184,7 @@ impl DownloadManager {
             ));
         }
 
-        let converter = super::metalink_to_request_group::MetalinkToRequestGroup::new()
+        let converter = super::metalink::to_request_group::MetalinkToRequestGroup::new()
             .with_pause_requested(options.pause);
         let mut resource_gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
         let resource_groups = converter

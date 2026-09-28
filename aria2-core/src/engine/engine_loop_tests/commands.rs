@@ -40,12 +40,14 @@ async fn state_changing_command_marks_dirty_and_persists() {
         ),
         #[cfg(feature = "bittorrent")]
         bt_registry: Arc::new(std::sync::RwLock::new(
-            crate::engine::bt_registry::BtRegistry::new(),
+            crate::engine::bittorrent::registry::BtRegistry::new(),
         )),
         #[cfg(feature = "bittorrent")]
-        bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+        bt_listener: Arc::new(
+            crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+        ),
         #[cfg(feature = "bittorrent")]
-        lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+        lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
     };
 
     // Send an AddDownload command through the engine-command channel.

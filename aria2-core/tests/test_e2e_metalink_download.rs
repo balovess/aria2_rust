@@ -2,7 +2,7 @@
 
 mod fixtures;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use fixtures::test_metalink_builder::{
     MEDIUM_PATTERN, SMALL_CONTENT, build_metalink_v3, build_metalink_v4, compute_sha256,

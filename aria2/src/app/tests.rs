@@ -1356,7 +1356,7 @@ async fn test_standard_session_restores_metalink_graph() {
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_session_save_then_restart_restores_metalink_graph() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");
@@ -1479,7 +1479,7 @@ async fn test_session_save_then_restart_restores_metalink_graph() {
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_process_restart_executes_restored_metalink_graph() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadStatus, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");
@@ -1603,7 +1603,7 @@ async fn test_process_restart_executes_restored_metalink_graph() {
 #[tokio::test]
 async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() {
     use aria2_core::checksum::message_digest::{HashType, MessageDigest};
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::filesystem::control_file::ControlFile;
     use aria2_core::request::request_group::{DownloadStatus, GroupId};
 
@@ -1764,7 +1764,7 @@ async fn test_process_restart_executes_nonzero_metalink_graph_from_checkpoint() 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadStatus, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");
@@ -1934,7 +1934,7 @@ async fn test_process_restart_executes_paused_metalink_graph_after_unpause() {
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
 #[tokio::test]
 async fn test_paused_session_graph_unpauses_both_groups() {
-    use aria2_core::engine::metalink_request_graph::MetalinkRequestGraph;
+    use aria2_core::engine::metalink::request_graph::MetalinkRequestGraph;
     use aria2_core::request::request_group::{DownloadOptions, DownloadStatus, GroupId};
 
     let temp_dir = TempDir::new().expect("temporary session directory");

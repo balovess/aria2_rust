@@ -34,7 +34,7 @@ impl CoreRpcBackend {
                 .map_err(|_| BackendError::Internal("Failed to lock request group".into()))?
                 .options()
                 .clone();
-            if let Err(error) = aria2_core::engine::bt_download_command::prepare_group_metadata(
+            if let Err(error) = aria2_core::engine::bittorrent::download::command::prepare_group_metadata(
                 Arc::clone(&group),
                 data,
                 &options,
@@ -132,7 +132,7 @@ impl CoreRpcBackend {
         {
             let (download_options, snapshot) = self.merged_task_options(options).await?;
             let converter =
-                aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup::new();
+                aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup::new();
             let mut gids = std::iter::from_fn(|| Some(self.group_man.next_available_gid()));
             let resource_groups = converter
                 .create_resource_groups_from_bytes(&data, &download_options, &mut gids)

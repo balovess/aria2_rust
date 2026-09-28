@@ -1,0 +1,867 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
+
+use crate::config::{parse_index_out, parse_integer_segments};
+use crate::constants;
+use crate::engine::bittorrent::peer::choking_algorithm::{ChokingAlgorithm, ChokingConfig};
+use crate::engine::bittorrent::torrent::file_layout::MultiFileLayout;
+use crate::error::{Aria2Error, FatalError, Result};
+use crate::filesystem::file_lock::DownloadPathLock;
+use crate::rate_limiter::{RateLimiter, RateLimiterConfig};
+use crate::request::request_group::{BtFileMapping, DownloadOptions, GroupId, RequestGroup};
+use crate::util::rwlock_ext::RwLockRecover;
+use crate::util::uri::percent_encode;
+
+use super::BtDownloadCommand;
+
+fn normalized_announce_list(announce_list: &[Vec<String>], announce: &str) -> Vec<Vec<String>> {
+    if announce_list.is_empty() && !announce.is_empty() {
+        vec![vec![announce.to_string()]]
+    } else {
+        announce_list.to_vec()
+    }
+}
+
+fn normalized_web_seed_list(torrent_seeds: &[String], additional_seeds: &[String]) -> Vec<String> {
+    let mut seeds = Vec::with_capacity(torrent_seeds.len() + additional_seeds.len());
+    seeds.extend(torrent_seeds.iter().cloned());
+    seeds.extend(additional_seeds.iter().cloned());
+    seeds.sort_unstable();
+    seeds.dedup();
+    seeds
+}
+
+fn file_web_seed_urls(
+    web_seeds: &[String],
+    torrent_name: &str,
+    file_path: &[String],
+    single_file: bool,
+) -> Vec<String> {
+    if single_file {
+        let filename = percent_encode(torrent_name);
+        return web_seeds
+            .iter()
+            .map(|seed| {
+                if seed.ends_with('/') {
+                    format!("{seed}{filename}")
+                } else {
+                    seed.clone()
+                }
+            })
+            .collect();
+    }
+
+    let mut path = String::with_capacity(
+        torrent_name.len() + file_path.iter().map(String::len).sum::<usize>() + file_path.len(),
+    );
+    path.push_str(&percent_encode(torrent_name));
+    for component in file_path {
+        path.push('/');
+        path.push_str(&percent_encode(component));
+    }
+    web_seeds
+        .iter()
+        .map(|seed| {
+            if seed.ends_with('/') {
+                format!("{seed}{path}")
+            } else {
+                format!("{seed}/{path}")
+            }
+        })
+        .collect()
+}
+
+/// Build the protocol-specific context that aria2 installs after torrent
+/// metadata has been resolved.
+///
+/// Keeping this separate from command construction lets a dependency resolve
+/// torrent metadata into an existing payload RequestGroup.
+pub(crate) fn build_download_context_from_meta(
+    meta: &aria2_protocol::bittorrent::torrent::parser::TorrentMeta,
+    path: String,
+    additional_web_seeds: &[String],
+) -> crate::error::Result<crate::download::DownloadContext> {
+    use crate::download::DownloadContext;
+    use crate::download::download_context::{BtFileMode, ContextAttributeType, TorrentAttribute};
+    use crate::download::file_entry::FileEntry;
+
+    let web_seeds = normalized_web_seed_list(&meta.web_seeds, additional_web_seeds);
+    let is_single_file = meta.is_single_file();
+    let mut ctx = if is_single_file {
+        DownloadContext::new(meta.info.piece_length, meta.total_size(), path)
+    } else {
+        let base_dir = std::path::Path::new(&path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&meta.info.name);
+        let v1_files = meta.info.files.as_deref();
+        let v2_files = meta.info.v2_files.as_deref();
+        let file_count = v1_files
+            .map(|files| {
+                files
+                    .iter()
+                    .filter(|file| {
+                        !file
+                            .path
+                            .first()
+                            .is_some_and(|component| component == ".pad")
+                    })
+                    .count()
+            })
+            .or_else(|| v2_files.map(|files| files.len()))
+            .unwrap_or(0);
+        let mut entries = Vec::with_capacity(file_count);
+        let mut offset = 0u64;
+        let mut add_entry = |length: u64, path: &Vec<String>, offset: &mut u64| {
+            let original_name = path.join("/");
+            let file_path = base_dir.join(std::path::Path::new(&original_name));
+            let web_seed_urls = file_web_seed_urls(&web_seeds, &meta.info.name, path, false);
+            let mut entry = FileEntry::new(
+                file_path.to_string_lossy().into_owned(),
+                length,
+                *offset,
+                web_seed_urls,
+            );
+            entry.set_original_name(original_name.clone());
+            entry.set_suffix_path(original_name);
+            entries.push(entry);
+            *offset = offset.saturating_add(length);
+        };
+        if let Some(files) = v1_files {
+            for file in files {
+                if file
+                    .path
+                    .first()
+                    .is_some_and(|component| component == ".pad")
+                {
+                    offset = offset.saturating_add(file.length);
+                    continue;
+                }
+                add_entry(file.length, &file.path, &mut offset);
+            }
+        } else if let Some(files) = v2_files {
+            for file in files {
+                offset =
+                    offset.div_ceil(meta.info.piece_length as u64) * meta.info.piece_length as u64;
+                add_entry(file.length, &file.path, &mut offset);
+            }
+        }
+        let mut context = DownloadContext::new_default();
+        context.set_piece_length(meta.info.piece_length);
+        context.set_file_entries(entries);
+        context
+    };
+    if meta.is_single_file()
+        && let Some(entry) = ctx.get_file_entries_mut().first_mut()
+    {
+        entry.set_original_name(meta.info.name.clone());
+        entry.set_suffix_path(meta.info.name.clone());
+        let web_seed_urls = file_web_seed_urls(&web_seeds, &meta.info.name, &[], true);
+        entry.add_uris(&web_seed_urls);
+    }
+    if meta.info.meta_version != Some(2) {
+        let piece_hashes_hex: Vec<String> = meta.info.pieces.iter().map(hex::encode).collect();
+        ctx.set_piece_hashes("sha-1".to_string(), piece_hashes_hex);
+    }
+
+    let torrent_attr = TorrentAttribute {
+        name: meta.info.name.clone(),
+        mode: if meta.is_single_file() {
+            BtFileMode::Single
+        } else {
+            BtFileMode::Multi
+        },
+        announce_list: normalized_announce_list(&meta.announce_list, &meta.announce),
+        nodes: meta.nodes.clone(),
+        info_hash: meta.info_hash.as_hex(),
+        metadata: Vec::new(),
+        metadata_size: 0,
+        private_torrent: meta.is_private(),
+        creation_date: meta.creation_date.unwrap_or(0),
+        comment: meta.comment.clone().unwrap_or_default(),
+        created_by: meta.created_by.clone().unwrap_or_default(),
+        url_list: web_seeds,
+    };
+    ctx.set_attribute(ContextAttributeType::BitTorrent, Box::new(torrent_attr));
+    Ok(ctx)
+}
+
+/// Parse local torrent metadata into an existing request group before the
+/// download command is promoted.
+///
+/// The original libaria2 path has a parsed `DownloadContext` available to a
+/// caller after `addTorrent`, even when the task is paused. Keeping this
+/// preparation separate from command construction gives RPC and library
+/// callers the same observable file metadata without starting network work.
+pub fn prepare_group_metadata(
+    group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+    torrent_bytes: &[u8],
+    options: &DownloadOptions,
+    output_dir: Option<&str>,
+    additional_web_seeds: &[String],
+) -> Result<()> {
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+        .map_err(|error| {
+            Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {error}")))
+        })?;
+    let dir = output_dir
+        .map(str::to_owned)
+        .or_else(|| options.dir.clone())
+        .unwrap_or_else(|| ".".to_string());
+    let path = std::path::PathBuf::from(&dir).join(&meta.info.name);
+    let mut context = build_download_context_from_meta(
+        &meta,
+        path.to_string_lossy().into_owned(),
+        additional_web_seeds,
+    )?;
+    apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
+    apply_select_file_filter(&mut context, options.select_file.as_deref())?;
+
+    let group = group.recover();
+    group.set_bt_metadata(
+        meta.num_pieces() as u32,
+        meta.info.piece_length,
+        meta.info_hash.as_hex(),
+    );
+    group.set_download_context(std::sync::Arc::new(context));
+    Ok(())
+}
+
+/// Apply Metalink-selected paths and mirrors to a parsed torrent context.
+///
+/// The torrent parser owns the canonical file order and byte offsets. This
+/// helper only changes the selected entries' destination and URI metadata, so
+/// both dependency resolution and command fallback use the same mapping rule.
+pub(crate) fn apply_file_mappings(
+    context: &mut crate::download::DownloadContext,
+    mappings: &[BtFileMapping],
+) -> Result<()> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+
+    let entries = context.get_file_entries_mut();
+    if entries.len() == 1 && mappings.len() == 1 && mappings[0].original_name.is_empty() {
+        apply_file_mapping(&mut entries[0], &mappings[0]);
+        return Ok(());
+    }
+
+    for entry in entries.iter_mut() {
+        entry.set_requested(false);
+    }
+
+    for mapping in mappings {
+        let entry = entries
+            .iter_mut()
+            .find(|entry| entry.original_name() == mapping.original_name)
+            .ok_or_else(|| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "No entry '{}' in torrent metadata",
+                    mapping.original_name
+                )))
+            })?;
+        apply_file_mapping(entry, mapping);
+    }
+    Ok(())
+}
+
+fn apply_file_mapping(entry: &mut crate::download::file_entry::FileEntry, mapping: &BtFileMapping) {
+    entry.set_requested(true);
+    entry.set_path(mapping.path.clone());
+    entry.set_uris(&mapping.uris);
+    entry.set_max_connection_per_server(mapping.max_connection_per_server);
+    entry.set_unique_protocol(mapping.unique_protocol);
+}
+
+/// Apply the user-facing `select-file` syntax to a torrent context.
+///
+/// The parser is shared with the rest of the configuration system. File
+/// indices remain 1-based at this seam, while the context owns the mapping to
+/// requested file entries. An empty value has the same meaning as an omitted
+/// filter: request every file.
+pub(crate) fn apply_select_file_filter(
+    context: &mut crate::download::DownloadContext,
+    select_file: Option<&str>,
+) -> Result<()> {
+    let Some(select_file) = select_file else {
+        return Ok(());
+    };
+
+    if select_file.trim().is_empty() {
+        context.set_file_filter(Vec::new());
+        return Ok(());
+    }
+
+    let max_index = i64::try_from(usize::MAX).unwrap_or(i64::MAX);
+    let ranges = parse_integer_segments(select_file, 1, max_index)
+        .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
+        .into_iter()
+        .map(|range| -> Result<_> {
+            let start = usize::try_from(*range.start()).map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "select-file index does not fit the current platform".to_string(),
+                ))
+            })?;
+            let end = usize::try_from(*range.end()).map_err(|_| {
+                Aria2Error::Fatal(FatalError::Config(
+                    "select-file index does not fit the current platform".to_string(),
+                ))
+            })?;
+            Ok(start..=end)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    context.set_file_filter_ranges(&ranges);
+    Ok(())
+}
+
+fn apply_index_out_paths(
+    context: &mut crate::download::DownloadContext,
+    index_out: Option<&str>,
+    dir: &str,
+) -> Result<()> {
+    let Some(index_out) = index_out else {
+        return Ok(());
+    };
+
+    for (index, suffix_path) in
+        parse_index_out(index_out).map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?
+    {
+        let path = std::path::Path::new(dir).join(suffix_path);
+        context
+            .set_file_path_with_index(index, path.to_string_lossy().into_owned())
+            .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+    }
+    Ok(())
+}
+
+impl BtDownloadCommand {
+    /// Construct a BitTorrent command while retaining an externally managed
+    /// RequestGroup owned by RequestGroupMan.
+    pub fn new_with_group(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+    ) -> Result<Self> {
+        Self::new_with_group_and_mappings(group, torrent_bytes, options, output_dir, &[])
+    }
+
+    /// Construct a command with the engine's outbound source policy already
+    /// installed, so the shared uTP socket is bound correctly at creation.
+    pub(crate) fn new_with_group_and_mappings_with_policy(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        Self::new_with_group_and_mappings_inner(
+            group,
+            torrent_bytes,
+            options,
+            output_dir,
+            file_mappings,
+            policy,
+        )
+    }
+
+    /// Construct a command for an externally owned group and remap selected
+    /// torrent entries to Metalink output paths and mirrors.
+    pub(crate) fn new_with_group_and_mappings(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+    ) -> Result<Self> {
+        Self::new_with_group_and_mappings_inner(
+            group,
+            torrent_bytes,
+            options,
+            output_dir,
+            file_mappings,
+            &crate::network::OutboundNetworkPolicy::direct(),
+        )
+    }
+
+    fn new_with_group_and_mappings_inner(
+        group: std::sync::Arc<std::sync::RwLock<RequestGroup>>,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        file_mappings: &[BtFileMapping],
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        let gid = group.recover().gid();
+        let mut command = Self::new_with_policy(gid, torrent_bytes, options, output_dir, policy)?;
+        let current_info_hash = command.group.recover().get_bt_info_hash_hex();
+        let existing_context = group.recover().get_download_context();
+        let parsed_context = if existing_context.as_ref().is_some_and(|context| {
+            context.get_bt_info_hash_hex().is_some_and(|info_hash| {
+                current_info_hash
+                    .as_deref()
+                    .is_some_and(|current| info_hash.eq_ignore_ascii_case(current))
+            })
+        }) {
+            // A dependency may have already installed a context carrying
+            // Metalink-selected paths and mirrors. Reuse it only when it
+            // belongs to this exact torrent; a stale session context must not
+            // leak piece hashes or output mappings into a new torrent.
+            existing_context
+        } else if file_mappings.is_empty() {
+            command.group.recover().get_download_context()
+        } else {
+            let meta =
+                aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+                    .map_err(|error| {
+                        Aria2Error::Fatal(FatalError::Config(format!(
+                            "Torrent parse failed: {error}"
+                        )))
+                    })?;
+            let dir = output_dir
+                .map(str::to_owned)
+                .or_else(|| options.dir.clone())
+                .unwrap_or_else(|| ".".to_string());
+            let context_path = if meta.is_single_file() {
+                command.output_path.to_string_lossy().into_owned()
+            } else {
+                std::path::Path::new(&dir)
+                    .join(&meta.info.name)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let mut context = build_download_context_from_meta(&meta, context_path, &[])?;
+            apply_index_out_paths(&mut context, options.index_out.as_deref(), &dir)?;
+            apply_file_mappings(&mut context, file_mappings)?;
+            apply_select_file_filter(&mut context, options.select_file.as_deref())?;
+            Some(std::sync::Arc::new(context))
+        };
+        let (piece_count, piece_length, info_hash) = {
+            let temporary = command.group.recover();
+            (
+                temporary.get_bt_num_pieces(),
+                temporary.get_bt_piece_length(),
+                temporary.get_bt_info_hash_hex(),
+            )
+        };
+        {
+            let external = group.recover();
+            if let Some(context) = parsed_context {
+                external.set_download_context(context);
+            }
+            if let Some(info_hash) = info_hash {
+                external.set_bt_metadata(piece_count, piece_length, info_hash);
+            }
+            external.set_rate_limiter(command.torrent_upload_limiter.clone());
+        }
+        command.group = group;
+        command.progress = command.group.recover().progress.clone();
+        command.total_uploaded = command.group.recover().get_uploaded_length();
+        command.apply_context_paths()?;
+        Ok(command)
+    }
+
+    /// Apply paths from an externally prepared context, such as a Metalink
+    /// torrent dependency. Torrent piece offsets stay unchanged while the
+    /// destination files follow the Metalink mapping.
+    fn apply_context_paths(&mut self) -> Result<()> {
+        let paths = self
+            .group
+            .recover()
+            .get_download_context()
+            .map(|context| {
+                context
+                    .get_file_entries()
+                    .iter()
+                    .map(|entry| std::path::PathBuf::from(entry.path()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(layout) = self.multi_file_layout.as_mut() {
+            if paths.len() == layout.num_files() {
+                for (index, path) in paths.into_iter().enumerate() {
+                    layout
+                        .set_file_absolute_path(index, path)
+                        .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+                }
+            }
+        } else if let Some(path) = paths.into_iter().next()
+            && !path.as_os_str().is_empty()
+        {
+            self.output_path = path;
+        }
+        Ok(())
+    }
+
+    pub fn new(
+        gid: GroupId,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+    ) -> Result<Self> {
+        Self::new_with_policy(
+            gid,
+            torrent_bytes,
+            options,
+            output_dir,
+            &crate::network::OutboundNetworkPolicy::direct(),
+        )
+    }
+
+    pub(crate) fn new_with_policy(
+        gid: GroupId,
+        torrent_bytes: &[u8],
+        options: &DownloadOptions,
+        output_dir: Option<&str>,
+        policy: &crate::network::OutboundNetworkPolicy,
+    ) -> Result<Self> {
+        let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(torrent_bytes)
+            .map_err(|e| {
+            Aria2Error::Fatal(FatalError::Config(format!("Torrent parse failed: {}", e)))
+        })?;
+
+        // BEP 0027 (Private Torrent): capture the private flag at parse time.
+        // When true, the engine must disable DHT, PEX, LPD and public tracker
+        // announcement to honour the privacy contract.
+        let is_private = meta.is_private();
+        if is_private {
+            info!(
+                "[BT] Private torrent detected (BEP 0027): DHT/PEX/LPD and public trackers will be disabled"
+            );
+        }
+
+        let dir = output_dir
+            .map(|d| d.to_string())
+            .or_else(|| options.dir.clone())
+            .unwrap_or_else(|| ".".to_string());
+
+        let filename = meta.info.name.clone();
+        let path = std::path::PathBuf::from(&dir).join(&filename);
+
+        let group = RequestGroup::new(
+            gid,
+            vec![format!("bt://{}", meta.info_hash.as_hex())],
+            options.clone(),
+        );
+        let torrent_upload_limiter =
+            RateLimiter::new(&RateLimiterConfig::new(None, options.max_upload_limit));
+        group.set_rate_limiter(torrent_upload_limiter.clone());
+
+        // Set BT metadata for session persistence (Task 3)
+        group.set_bt_metadata(
+            meta.num_pieces() as u32,
+            meta.info.piece_length,
+            meta.info_hash.as_hex(),
+        );
+
+        // Create DownloadContext from torrent metadata and set TorrentAttribute.
+        // In C++ aria2, this is done by bittorrent_helper::processRootDictionary()
+        // which calls ctx->setAttribute(CTX_ATTR_BT, torrent) with all torrent
+        // metadata fields. We replicate this here.
+        let mut ctx =
+            build_download_context_from_meta(&meta, path.to_string_lossy().to_string(), &[])?;
+        apply_index_out_paths(&mut ctx, options.index_out.as_deref(), &dir)?;
+        apply_select_file_filter(&mut ctx, options.select_file.as_deref())?;
+        group.set_download_context(std::sync::Arc::new(ctx));
+
+        let seed_time = options.seed_time.and_then(|t| {
+            if t <= 0.0 || !t.is_finite() {
+                None
+            } else {
+                // aria2_original treats seed-time as fractional minutes and
+                // truncates the converted value to whole seconds.
+                Some(std::time::Duration::from_secs((t * 60.0).floor() as u64))
+            }
+        });
+        let seed_ratio = options.seed_ratio.filter(|&r| r > 0.0);
+
+        let choking_algo = if options.bt_max_upload_slots.is_some()
+            || options.bt_optimistic_unchoke_interval.is_some()
+            || options.bt_snubbed_timeout.is_some()
+        {
+            let config = ChokingConfig {
+                max_upload_slots: options
+                    .bt_max_upload_slots
+                    .unwrap_or(constants::BT_DEFAULT_MAX_UPLOAD_SLOTS as u32)
+                    as usize,
+                optimistic_unchoke_interval_secs: options
+                    .bt_optimistic_unchoke_interval
+                    .unwrap_or(constants::BT_OPTIMISTIC_UNCHOKE_INTERVAL_SECS),
+                snubbed_timeout_secs: options
+                    .bt_snubbed_timeout
+                    .unwrap_or(constants::BT_SNUBBED_TIMEOUT_SECS),
+                choke_rotation_interval_secs: constants::BT_CHOKE_ROTATION_INTERVAL_SECS,
+            };
+            Some(ChokingAlgorithm::new(config))
+        } else {
+            None
+        };
+
+        let multi_file_root = std::path::PathBuf::from(&dir).join(&filename);
+        let multi_file_layout = if !meta.is_single_file() {
+            let layout_base_dir = multi_file_root.clone();
+            match MultiFileLayout::from_info_dict(&meta.info, &layout_base_dir) {
+                Ok(layout) => Some(layout),
+                Err(e) => {
+                    return Err(Aria2Error::Fatal(FatalError::Config(format!(
+                        "MultiFileLayout creation failed: {}",
+                        e
+                    ))));
+                }
+            }
+        } else {
+            None
+        };
+
+        let effective_output_path = if multi_file_layout.is_some() {
+            multi_file_root
+        } else {
+            path.clone()
+        };
+
+        info!(
+            "BtDownloadCommand created: {} -> {} ({} bytes, {} pieces) seed={:?} ratio={:?} multi_file={}",
+            meta.info.name,
+            effective_output_path.display(),
+            meta.total_size(),
+            meta.num_pieces(),
+            seed_time,
+            seed_ratio,
+            multi_file_layout.is_some()
+        );
+
+        // Acquire download path lock (J6): prevents concurrent instances from
+        // writing to the same output directory. If acquisition fails, log a
+        // warning but do not fail the download -- the lock is a best-effort guard.
+        // NOTE: always pass the output DIRECTORY, not the file path. For
+        // single-file torrents effective_output_path is dir/filename (a file
+        // path); passing it to acquire_for_download would cause create_dir_all to
+        // create filename as a directory, which then makes File::create fail
+        // with "Access denied" (os error 5) on Windows.
+        let download_path_lock =
+            match DownloadPathLock::acquire_for_download(std::path::Path::new(&dir)) {
+                Ok(lock) => Some(lock),
+                Err(e) => {
+                    warn!(
+                        "Failed to acquire download path lock: {}. Proceeding without lock.",
+                        e
+                    );
+                    None
+                }
+            };
+
+        let progress = group.progress.clone();
+        let peer_storage = {
+            let mut storage = crate::engine::bittorrent::peer::storage::DefaultPeerStorage::new();
+            if let Some(path) = options.bt_peer_blocklist.as_deref() {
+                let mut blocklist =
+                    crate::engine::bittorrent::peer::blocklist::BtPeerBlocklist::new();
+                blocklist
+                    .load_from_file(std::path::Path::new(path))
+                    .map_err(|error| Aria2Error::Fatal(FatalError::Config(error)))?;
+                storage.set_peer_blocklist(Arc::new(blocklist));
+            }
+            Arc::new(std::sync::Mutex::new(storage))
+        };
+        let utp_socket = if options.enable_utp {
+            let configured_source = policy.addresses().into_iter().next();
+            let socket = match options.utp_listen_port {
+                Some(port) => configured_source.map_or_else(
+                    || aria2_protocol::bittorrent::utp::UtpSocket::bind_port(port),
+                    |source| {
+                        aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                            std::net::SocketAddr::new(source, port),
+                        )
+                    },
+                ),
+                None => configured_source.map_or_else(
+                    aria2_protocol::bittorrent::utp::UtpSocket::bind_any,
+                    |source| {
+                        aria2_protocol::bittorrent::utp::UtpSocket::bind_addr(
+                            std::net::SocketAddr::new(source, 0),
+                        )
+                    },
+                ),
+            }
+            .map_err(|error| {
+                Aria2Error::Fatal(FatalError::Config(format!(
+                    "Failed to bind uTP socket: {error}"
+                )))
+            })?;
+            Some(Arc::new(tokio::sync::Mutex::new(socket)))
+        } else {
+            None
+        };
+        let mut command = Self {
+            local_peer_id: aria2_protocol::bittorrent::peer::id::generate_peer_id_with_prefix(
+                &options.peer_id_prefix,
+            ),
+            group: Arc::new(std::sync::RwLock::new(group)),
+            progress,
+            output_path: effective_output_path,
+            started: false,
+            started_at: None,
+            completed_bytes: 0,
+            torrent_data: torrent_bytes.to_vec(),
+            // An explicit seed-time=0 is the original way to disable
+            // seeding, even though seed-ratio has a positive default.
+            seed_enabled: options.seed_time != Some(0.0)
+                && (options.seed_time.unwrap_or(0.0) > 0.0
+                    || options.seed_ratio.unwrap_or(0.0) > 0.0),
+            seed_time,
+            seed_ratio,
+            total_uploaded: 0,
+            tracker_actor: None,
+            listen_port: 0,
+            bt_runtime: std::sync::Arc::new(super::BtRuntimeState::new(options.bt_max_peers)),
+            peer_coordinator: crate::engine::bittorrent::peer::coordinator::BtPeerCoordinator::new(
+                options.bt_max_peers,
+                10,
+            ),
+            dht_engines: crate::engine::bittorrent::dht::engine_set::DhtEngineSet::default(),
+            public_trackers: None,
+            choking_algo,
+            multi_file_layout,
+            file_allocation: options
+                .file_allocation
+                .clone()
+                .unwrap_or_else(|| crate::constants::DEFAULT_FILE_ALLOCATION.to_string()),
+            secure_falloc: options.secure_falloc,
+            check_integrity: options.check_integrity,
+            hash_check_only: options.hash_check_only,
+            bt_enable_hook_after_hash_check: options.bt_enable_hook_after_hash_check,
+            bt_hash_check_seed: options.bt_hash_check_seed,
+            bt_seed_unverified: options.bt_seed_unverified,
+            hash_check_completed: false,
+            bt_complete_event_emitted: false,
+
+            // P1/P2 integration field defaults (all None, backward compatible)
+            progress_manager: None,
+            progress_save_interval: Duration::from_secs(60),
+            // LPD is process-wide. The engine/task spawner injects its one
+            // shared manager after construction.
+            lpd_manager: None,
+            lpd_registered_info_hash: None,
+            hook_manager: None,
+
+            // PEX integration fields default values
+            pex_known_peers: Vec::new(),
+            pex_last_send_time: None,
+            pex_send_interval: Duration::from_secs(60),
+
+            // Endgame mode default values
+
+            // Web seed manager (initialized lazily when needed)
+
+            // Periodic DHT peer lookup (C++ DHTGetPeersCommand)
+            dht_periodic_lookup: super::super::execute::DhtPeriodicLookup::new(),
+
+            // Download path lock (J6)
+            download_path_lock,
+
+            // Seeding mode
+
+            // BEP 0027 (Private Torrent) enforcement flag
+            is_private,
+
+            // BtRegistry integration (set via set_bt_registry after construction)
+            bt_registry: None,
+            tracker_runtime: None,
+
+            // Process-wide rate limiter (set via set_global_limiter after construction)
+            global_limiter: None,
+            torrent_upload_limiter,
+            outbound_network_policy: Arc::new(crate::network::OutboundNetworkPolicy::direct()),
+
+            peer_rejection: crate::engine::bittorrent::peer::storage::PeerRejectionState::shared(),
+            peer_storage,
+            incoming_peers: None,
+            utp_socket,
+            // Direct command users do not pass through DownloadEngine's
+            // dependency injector. Give that public construction path a
+            // listener manager; the engine replaces it with its shared
+            // process-level manager before execution.
+            bt_listener: Some(std::sync::Arc::new(
+                crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+            )),
+            bt_peer_route: None,
+            checkpoint: None,
+            checkpoint_bytes_since_save: 0,
+            checkpoint_last_save: Instant::now(),
+        };
+        command.apply_context_paths()?;
+        Ok(command)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{file_web_seed_urls, normalized_announce_list, normalized_web_seed_list};
+
+    #[test]
+    fn fills_a_missing_tier_from_the_single_announce_field() {
+        assert_eq!(
+            normalized_announce_list(&[], "https://tracker.example/announce"),
+            vec![vec!["https://tracker.example/announce".to_string()]]
+        );
+    }
+
+    #[test]
+    fn keeps_existing_tiers_and_does_not_add_an_empty_announce() {
+        let tiers = vec![vec!["https://one.example/announce".to_string()]];
+        assert_eq!(normalized_announce_list(&tiers, ""), tiers);
+        assert!(normalized_announce_list(&[], "").is_empty());
+    }
+
+    #[test]
+    fn combines_and_deduplicates_torrent_and_external_web_seeds() {
+        assert_eq!(
+            normalized_web_seed_list(
+                &[
+                    "https://seed.test/root/".into(),
+                    "https://seed.test/other".into()
+                ],
+                &[
+                    "https://seed.test/root/".into(),
+                    "https://extra.test/".into()
+                ],
+            ),
+            vec![
+                "https://extra.test/",
+                "https://seed.test/other",
+                "https://seed.test/root/",
+            ]
+        );
+    }
+
+    #[test]
+    fn expands_web_seed_roots_to_single_and_multi_file_paths() {
+        let seeds = vec!["https://seed.test/root".to_string()];
+        assert_eq!(
+            file_web_seed_urls(&seeds, "file name.bin", &[], true),
+            vec!["https://seed.test/root".to_string()]
+        );
+        assert_eq!(
+            file_web_seed_urls(
+                &seeds,
+                "release pack",
+                &["sub dir".into(), "a#b.bin".into()],
+                false
+            ),
+            vec!["https://seed.test/root/release%20pack/sub%20dir/a%23b.bin"]
+        );
+        assert_eq!(
+            file_web_seed_urls(
+                &["https://seed.test/root/".into()],
+                "file name.bin",
+                &[],
+                true
+            ),
+            vec!["https://seed.test/root/file%20name.bin"]
+        );
+    }
+}

@@ -11,10 +11,10 @@ mod support;
 #[path = "../../../aria2-core/tests/fixtures/mock_tracker.rs"]
 mod mock_tracker;
 
-use aria2_core::engine::bt_registry::{BtObject, BtRegistry};
-use aria2_core::engine::bt_seed_manager::{BtSeedManager, SeedExitCondition};
-use aria2_core::engine::bt_tracker_comm::{BtAnnounce, TrackerAnnouncer, TrackerRuntimeSnapshot};
-use aria2_core::engine::bt_upload_session::{BtSeedingConfig, InMemoryPieceProvider};
+use aria2_core::engine::bittorrent::registry::{BtObject, BtRegistry};
+use aria2_core::engine::bittorrent::download::seed_manager::{BtSeedManager, SeedExitCondition};
+use aria2_core::engine::bittorrent::tracker::communication::{BtAnnounce, TrackerAnnouncer, TrackerRuntimeSnapshot};
+use aria2_core::engine::bittorrent::peer::upload_session::{BtSeedingConfig, InMemoryPieceProvider};
 use aria2_core::request::request_group::{BtPeerSnapshot, BtPeerSource};
 use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig, DhtEngineState};
 use aria2_protocol::bittorrent::message::handshake::Handshake;

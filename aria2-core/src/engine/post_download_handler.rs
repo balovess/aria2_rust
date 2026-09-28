@@ -227,7 +227,7 @@ pub fn build_handler_chain(options: &DownloadOptions) -> Vec<Box<dyn PostDownloa
     {
         #[cfg(feature = "bittorrent")]
         handlers.push(Box::new(
-            super::bt_torrent_post_download_handler::BtTorrentPostDownloadHandler::new(),
+            super::bittorrent::torrent::post_download_handler::BtTorrentPostDownloadHandler::new(),
         ));
     }
 
@@ -241,7 +241,7 @@ pub fn build_handler_chain(options: &DownloadOptions) -> Vec<Box<dyn PostDownloa
     {
         #[cfg(feature = "metalink")]
         handlers.push(Box::new(
-            super::metalink_post_download_handler::MetalinkPostDownloadHandler::new(),
+            super::metalink::post_download_handler::MetalinkPostDownloadHandler::new(),
         ));
     }
 

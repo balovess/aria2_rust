@@ -3,7 +3,7 @@
 mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::concurrent_segment_manager::{ConcurrentSegmentManager, SegmentStatus};
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use fixtures::test_metalink_builder::{SMALL_CONTENT, build_metalink_v3, compute_sha256};
 use fixtures::test_server::TestServer;
@@ -241,11 +241,12 @@ fn test_segment_manager_fail_reassign() {
 #[test]
 fn test_segment_manager_complete() {
     let mut mgr = ConcurrentSegmentManager::new(200, vec!["http://x.com/f".to_string()], Some(100));
+    mgr.allocate_segments();
 
-    mgr.complete_segment(0, 100);
+    assert!(mgr.complete_segment(0, 100));
     assert!((mgr.progress() - 50.0).abs() < 0.01);
 
-    mgr.complete_segment(1, 100);
+    assert!(mgr.complete_segment(1, 100));
     assert!(mgr.is_complete());
     assert!((mgr.progress() - 100.0).abs() < 0.01);
 

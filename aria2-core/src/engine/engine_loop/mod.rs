@@ -128,15 +128,15 @@ pub struct EngineLoopContext {
 
     /// Engine-owned registry shared by all BitTorrent commands.
     #[cfg(feature = "bittorrent")]
-    pub bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+    pub bt_registry: Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>,
 
     /// Process-level BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
-    pub bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    pub bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
 
     /// Process-level Local Peer Discovery manager and receive loop.
     #[cfg(feature = "bittorrent")]
-    pub lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+    pub lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
 }
 
 /// Tracks a spawned download task for timeout enforcement and cleanup.

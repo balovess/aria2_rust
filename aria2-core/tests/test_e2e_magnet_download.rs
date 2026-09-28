@@ -2,9 +2,9 @@
 
 mod fixtures;
 use aria2_core::engine::command::{Command, CommandStatus};
-use aria2_core::engine::magnet_download_command::MagnetDownloadCommand;
-use aria2_core::engine::metadata_collector::MetadataCollector;
-use aria2_core::engine::metadata_exchange::{
+use aria2_core::engine::bittorrent::magnet::download_command::MagnetDownloadCommand;
+use aria2_core::engine::bittorrent::magnet::metadata_collector::MetadataCollector;
+use aria2_core::engine::bittorrent::magnet::metadata_exchange::{
     MetadataExchangeConfig, MetadataExchangeError, MetadataExchangeSession,
 };
 use aria2_core::network::OutboundNetworkPolicy;
@@ -165,7 +165,7 @@ async fn test_metadata_exchange_no_peers_error() {
     let result = session.fetch_metadata(&target_hash, &empty_peers).await;
     assert!(result.is_err());
     match result.unwrap_err() {
-        aria2_core::engine::metadata_exchange::MetadataExchangeError::NoPeersAvailable => {}
+        aria2_core::engine::bittorrent::magnet::metadata_exchange::MetadataExchangeError::NoPeersAvailable => {}
         other => panic!("Expected NoPeersAvailable, got {:?}", other),
     }
 }

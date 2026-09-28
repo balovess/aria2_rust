@@ -4,7 +4,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aria2_core::engine::bt_registry::BtRegistry;
+use aria2_core::engine::bittorrent::registry::BtRegistry;
 use aria2_protocol::bittorrent::dht::engine::{DhtEngine, DhtEngineConfig};
 use aria2_protocol::bittorrent::dht::message::{DhtMessage, DhtMessageBuilder};
 use aria2_protocol::bittorrent::dht::node::DhtNode;

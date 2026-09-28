@@ -29,11 +29,11 @@ pub(crate) struct CommandDependencies {
     pub(crate) public_tracker_catalog:
         Arc<aria2_protocol::bittorrent::tracker::public_list::PublicTrackerList>,
     #[cfg(feature = "bittorrent")]
-    pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bt_registry::BtRegistry>>,
+    pub(crate) bt_registry: Arc<std::sync::RwLock<crate::engine::bittorrent::registry::BtRegistry>>,
     #[cfg(feature = "bittorrent")]
-    pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    pub(crate) bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
     #[cfg(feature = "bittorrent")]
-    pub(crate) lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+    pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
 }
 
 /// Spawns a download command as a tokio task and wires up the completion
@@ -152,10 +152,10 @@ fn failed_task_result(
     }
 }
 
-fn direct_origin(uri: &str) -> Option<(String, u16)> {
+fn ftp_origin(uri: &str) -> Option<(String, u16)> {
     let parsed = url::Url::parse(uri).ok()?;
     let scheme = parsed.scheme();
-    if !matches!(scheme, "http" | "https" | "ftp" | "ftps") {
+    if !matches!(scheme, "ftp" | "ftps") {
         return None;
     }
     Some((
@@ -179,7 +179,7 @@ async fn create_command_for_group(
     #[cfg(feature = "metalink")]
     if let Some((metalink_data, file_index)) = group.recover().metalink_source() {
         let base_uri = group.recover().metalink_base_uri();
-        let mut command = crate::engine::metalink_download_command::MetalinkDownloadCommand::new_with_group_source_policy(
+        let mut command = crate::engine::metalink::download_command::MetalinkDownloadCommand::new_with_group_source_policy(
             Arc::clone(&group),
             &metalink_data,
             file_index,
@@ -224,7 +224,7 @@ async fn create_command_for_uri(
     // SFTP downloads use the engine-owned group, matching other v2 protocols.
     #[cfg(feature = "sftp")]
     if uri_lower.starts_with("sftp://") {
-        let mut cmd = crate::engine::sftp_download_command::SftpDownloadCommand::new_with_group(
+        let mut cmd = crate::engine::sftp::download_command::SftpDownloadCommand::new_with_group(
             Arc::clone(&group),
             uri,
             options,
@@ -256,7 +256,7 @@ async fn create_command_for_uri(
                     "Resolved BitTorrent payload has no metadata source".to_string(),
                 ))
             })?;
-        let mut cmd = crate::engine::bt_download_command::BtDownloadCommand::new_with_group_and_mappings_with_policy(
+        let mut cmd = crate::engine::bittorrent::download::command::BtDownloadCommand::new_with_group_and_mappings_with_policy(
             group,
             &torrent_bytes,
             options,
@@ -280,7 +280,7 @@ async fn create_command_for_uri(
     if uri_lower.starts_with("magnet:") {
         let output_dir = options.dir.as_deref();
         let mut cmd =
-            crate::engine::magnet_download_command::MagnetDownloadCommand::new_with_group(
+            crate::engine::bittorrent::magnet::download_command::MagnetDownloadCommand::new_with_group(
                 group, output_dir,
             )?;
         cmd.set_bt_listener(Arc::clone(&dependencies.bt_listener));
@@ -298,7 +298,7 @@ async fn create_command_for_uri(
     if uri_lower.starts_with("ftp://") || uri_lower.starts_with("ftps://") {
         let output_dir = options.dir.as_deref();
         let output_name = options.out.as_deref();
-        let mut cmd = crate::engine::ftp_download_command::FtpDownloadCommand::new_with_group(
+        let mut cmd = crate::engine::ftp::download_command::FtpDownloadCommand::new_with_group(
             group,
             output_dir,
             output_name,
@@ -309,7 +309,7 @@ async fn create_command_for_uri(
         cmd.set_outbound_network_policy(Arc::clone(&dependencies.outbound_network_policy));
         if use_async_dns {
             cmd.set_dns_cache(Arc::clone(dns_cache));
-            if let Some((hostname, port)) = direct_origin(uri)
+            if let Some((hostname, port)) = ftp_origin(uri)
                 && let Ok(addresses) = dns_cache
                     .lock()
                     .await
@@ -323,56 +323,16 @@ async fn create_command_for_uri(
     }
 
     // Default: HTTP/HTTPS download command.
-    let output_dir = options.dir.as_deref();
-    let group_output_name = group.recover().output_name();
-    let output_name = group_output_name.as_deref().or(options.out.as_deref());
-    let resolved_addresses = if use_async_dns {
-        if let Some((hostname, port)) = direct_origin(uri) {
-            dns_cache
-                .lock()
-                .await
-                .resolve_with_refresh(&hostname, port)
-                .await
-                .ok()
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let resolved_proxy_addresses = if let Some((hostname, port)) =
-        crate::engine::download_command::http_proxy_origin(uri, options)
-    {
-        if let Ok(address) = hostname.parse::<std::net::IpAddr>() {
-            Some(vec![std::net::SocketAddr::new(address, port)])
-        } else {
-            dns_cache
-                .lock()
-                .await
-                .resolve_with_refresh(&hostname, port)
-                .await
-                .ok()
-        }
-    } else {
-        None
-    };
-    let mut cmd =
-        crate::engine::download_command::DownloadCommand::new_with_group_and_resolved_network_addresses(
-            group,
-            uri,
-            options,
-            output_dir,
-            output_name,
-            crate::engine::download_command::ResolvedNetworkAddresses {
-                target: resolved_addresses,
-                proxy: resolved_proxy_addresses,
-            },
-            Arc::clone(&dependencies.outbound_network_policy),
-        )?;
-    if let Some(limiter) = dependencies.global_limiter {
-        cmd.set_global_limiter(limiter);
-    }
-    Ok(Box::new(cmd))
+    let command = crate::engine::http::command_factory::create_download_command(
+        group,
+        uri,
+        options,
+        Arc::clone(&dependencies.dns_cache),
+        Arc::clone(&dependencies.outbound_network_policy),
+        dependencies.global_limiter,
+    )
+    .await?;
+    Ok(Box::new(command))
 }
 
 #[cfg(test)]
@@ -391,12 +351,14 @@ mod tests {
             ),
             #[cfg(feature = "bittorrent")]
             bt_registry: Arc::new(std::sync::RwLock::new(
-                crate::engine::bt_registry::BtRegistry::new(),
+                crate::engine::bittorrent::registry::BtRegistry::new(),
             )),
             #[cfg(feature = "bittorrent")]
-            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+            bt_listener: Arc::new(
+                crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+            ),
             #[cfg(feature = "bittorrent")]
-            lpd_manager: Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+            lpd_manager: Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
         }
     }
 

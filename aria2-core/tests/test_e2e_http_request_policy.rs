@@ -8,7 +8,7 @@
 mod e2e_helpers;
 
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use e2e_helpers::mock_http_server::{MockHttpServer, RequestLog, full_body};
 use tempfile::TempDir;

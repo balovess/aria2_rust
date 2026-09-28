@@ -12,7 +12,7 @@ use std::sync::Arc;
 use aria2_core::checksum::checksum::Checksum;
 use aria2_core::config::{ConfigManager, project_initial_options};
 #[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_registry::BtRegistry;
+use aria2_core::engine::bittorrent::registry::BtRegistry;
 use aria2_core::engine::engine_command::{EngineCommand, EngineCommandSender};
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_core::request::request_group_man::{GroupIdResolution, RequestGroupMan};

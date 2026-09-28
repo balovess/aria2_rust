@@ -8,8 +8,8 @@ mod fixtures;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
-use aria2_core::engine::metalink_to_request_group::MetalinkToRequestGroup;
+use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
+use aria2_core::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{
     DownloadOptions, DownloadStatus, FollowMode, GroupId, RequestGroup,

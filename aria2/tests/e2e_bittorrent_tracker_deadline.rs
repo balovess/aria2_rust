@@ -314,3 +314,83 @@ async fn cli_announces_stopped_after_completion_when_seeding_is_disabled() {
     );
     tracker.wait_for_event("stopped").await;
 }
+
+#[tokio::test]
+async fn cli_uses_tracker_tier_returned_by_http_announce_and_reports_it_over_rpc() {
+    let output_dir = tempfile::tempdir().expect("temporary download directory");
+    let placeholder = torrent_bytes("http://127.0.0.1:9/announce");
+    let meta = aria2_protocol::bittorrent::torrent::parser::TorrentMeta::parse(&placeholder)
+        .expect("test torrent metadata parses");
+    let mut peer = SlowSeeder::start(meta.info_hash.bytes).await;
+    let discovered_tracker =
+        MockTrackerServer::start_with_peers_and_interval(Vec::new(), false, 1).await;
+    let initial_tracker = MockTrackerServer::start_with_dynamic_announce_list(
+        vec![peer.addr.port()],
+        1,
+        vec![vec![discovered_tracker.announce_url()]],
+        Some(2),
+    )
+    .await;
+    let torrent = torrent_bytes(&initial_tracker.announce_url());
+    let args = [
+        format!("--dir={}", output_dir.path().display()),
+        format!("--listen-port={}", reserve_loopback_port()),
+        "--enable-dht=false".to_owned(),
+        "--enable-public-trackers=false".to_owned(),
+        "--enable-peer-exchange=false".to_owned(),
+        "--bt-enable-web-seed=false".to_owned(),
+        "--bt-request-timeout=10".to_owned(),
+        "--seed-time=0".to_owned(),
+    ];
+    let client = RunningAria2::start_rpc(&args);
+    let torrent_base64 = base64::engine::general_purpose::STANDARD.encode(torrent);
+    let gid = rpc(
+        &client,
+        1,
+        "aria2.addTorrent",
+        json!([torrent_base64, [], {}]),
+    )
+    .as_str()
+    .expect("addTorrent returns a GID")
+    .to_owned();
+
+    assert!(
+        initial_tracker
+            .wait_for_query_count(1, Duration::from_secs(5))
+            .await,
+        "the initial tracker announce did not arrive"
+    );
+    peer.wait_for_request().await;
+    assert!(
+        initial_tracker
+            .wait_for_query_count(2, Duration::from_secs(4))
+            .await,
+        "the initial tracker did not receive the expected failover-triggering announce"
+    );
+    assert!(
+        discovered_tracker
+            .wait_for_query_count(1, Duration::from_secs(4))
+            .await,
+        "the dynamically returned tracker tier was not used after failover"
+    );
+
+    let trackers = rpc(&client, 2, "aria2.getTrackers", json!([gid]));
+    let dynamic_tracker = trackers
+        .as_array()
+        .expect("getTrackers returns a list")
+        .iter()
+        .find(|tracker| tracker["uri"] == discovered_tracker.announce_url())
+        .expect("the dynamically returned tracker is visible through RPC");
+    assert_eq!(dynamic_tracker["tier"], 2);
+    assert_eq!(dynamic_tracker["status"], "succeeded");
+    let status = rpc(
+        &client,
+        3,
+        "aria2.tellStatus",
+        json!([gid, ["completedLength", "totalLength"]]),
+    );
+    assert_eq!(
+        status["completedLength"], "0",
+        "tracker failover should be verified while the peer's piece response is still pending"
+    );
+}

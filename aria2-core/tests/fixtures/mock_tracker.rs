@@ -4,6 +4,15 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, watch};
 
+#[derive(Clone)]
+struct TrackerResponseConfig {
+    peer_ports: Vec<u16>,
+    fail_requests: bool,
+    fail_after_requests: Option<usize>,
+    interval_secs: u64,
+    announce_list: Vec<Vec<String>>,
+}
+
 #[allow(dead_code)]
 pub struct MockTrackerServer {
     addr: SocketAddr,
@@ -36,6 +45,32 @@ impl MockTrackerServer {
         fail_requests: bool,
         interval_secs: u64,
     ) -> Self {
+        Self::start_with_response(peer_ports, fail_requests, interval_secs, Vec::new(), None).await
+    }
+
+    pub async fn start_with_dynamic_announce_list(
+        peer_ports: Vec<u16>,
+        interval_secs: u64,
+        announce_list: Vec<Vec<String>>,
+        fail_after_requests: Option<usize>,
+    ) -> Self {
+        Self::start_with_response(
+            peer_ports,
+            false,
+            interval_secs,
+            announce_list,
+            fail_after_requests,
+        )
+        .await
+    }
+
+    async fn start_with_response(
+        peer_ports: Vec<u16>,
+        fail_requests: bool,
+        interval_secs: u64,
+        announce_list: Vec<Vec<String>>,
+        fail_after_requests: Option<usize>,
+    ) -> Self {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let listener = TcpListener::bind(addr)
             .await
@@ -45,8 +80,13 @@ impl MockTrackerServer {
         let captured_queries = std::sync::Arc::new(Mutex::new(Vec::new()));
         let (query_count, _) = watch::channel(0usize);
 
-        let pp = peer_ports.clone();
-        let fail_requests_for_task = fail_requests;
+        let response_config = TrackerResponseConfig {
+            peer_ports: peer_ports.clone(),
+            fail_requests,
+            fail_after_requests,
+            interval_secs,
+            announce_list,
+        };
         let captured_queries_for_task = std::sync::Arc::clone(&captured_queries);
         let query_count_for_task = query_count.clone();
         tokio::spawn(async move {
@@ -55,15 +95,13 @@ impl MockTrackerServer {
                     result = listener.accept() => {
                         match result {
                             Ok((stream, _)) => {
-                                let pp_inner = pp.clone();
+                                let response_config = response_config.clone();
                                 let captured_queries = std::sync::Arc::clone(&captured_queries_for_task);
                                 let query_count = query_count_for_task.clone();
                                 tokio::spawn(async move {
                                     Self::handle_connection(
                                         stream,
-                                        pp_inner.as_slice(),
-                                        fail_requests_for_task,
-                                        interval_secs,
+                                        response_config,
                                         captured_queries,
                                         query_count,
                                     )
@@ -145,9 +183,7 @@ impl MockTrackerServer {
 
     async fn handle_connection(
         mut stream: tokio::net::TcpStream,
-        peer_ports: &[u16],
-        fail_requests: bool,
-        interval_secs: u64,
+        response_config: TrackerResponseConfig,
         captured_queries: std::sync::Arc<Mutex<Vec<String>>>,
         query_count: watch::Sender<usize>,
     ) {
@@ -157,8 +193,9 @@ impl MockTrackerServer {
         if reader.read_line(&mut request_line).await.is_err() {
             return;
         }
-        if let Some(path) = request_line.strip_prefix("GET ")
-            && let Some(path) = path.split_whitespace().next()
+        let count = if let Some(path) = request_line
+            .strip_prefix("GET ")
+            .and_then(|path| path.split_whitespace().next())
         {
             let count = {
                 let mut queries = captured_queries.lock().await;
@@ -166,9 +203,10 @@ impl MockTrackerServer {
                 queries.len()
             };
             query_count.send_replace(count);
+            count
         } else {
             return;
-        }
+        };
 
         loop {
             let mut line = String::new();
@@ -180,7 +218,11 @@ impl MockTrackerServer {
             }
         }
 
-        if fail_requests {
+        if response_config.fail_requests
+            || response_config
+                .fail_after_requests
+                .is_some_and(|fail_at| count >= fail_at)
+        {
             let body = b"failure";
             let response = format!(
                 "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
@@ -192,7 +234,11 @@ impl MockTrackerServer {
             return;
         }
 
-        let body = build_tracker_response_bencode(peer_ports, interval_secs);
+        let body = build_tracker_response_bencode(
+            &response_config.peer_ports,
+            response_config.interval_secs,
+            &response_config.announce_list,
+        );
 
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
@@ -211,7 +257,11 @@ impl MockTrackerServer {
 }
 
 #[allow(dead_code)]
-fn build_tracker_response_bencode(peer_ports: &[u16], interval_secs: u64) -> Vec<u8> {
+fn build_tracker_response_bencode(
+    peer_ports: &[u16],
+    interval_secs: u64,
+    announce_list: &[Vec<String>],
+) -> Vec<u8> {
     use aria2_protocol::bittorrent::bencode::codec::BencodeValue;
 
     let compact_peers: Vec<u8> = peer_ports
@@ -227,6 +277,23 @@ fn build_tracker_response_bencode(peer_ports: &[u16], interval_secs: u64) -> Vec
     resp_dict.insert(b"complete".to_vec(), BencodeValue::Int(1));
     resp_dict.insert(b"incomplete".to_vec(), BencodeValue::Int(1));
     resp_dict.insert(b"peers".to_vec(), BencodeValue::Bytes(compact_peers));
+    if !announce_list.is_empty() {
+        resp_dict.insert(
+            b"announce-list".to_vec(),
+            BencodeValue::List(
+                announce_list
+                    .iter()
+                    .map(|tier| {
+                        BencodeValue::List(
+                            tier.iter()
+                                .map(|url| BencodeValue::Bytes(url.as_bytes().to_vec()))
+                                .collect(),
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+    }
 
     BencodeValue::Dict(resp_dict).encode()
 }

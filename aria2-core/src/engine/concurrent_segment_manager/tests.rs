@@ -105,7 +105,7 @@ fn test_completed_ranges_exclude_partial_or_failed_segments() {
 
     assert_eq!(mgr.completed_ranges(), vec![(0, 100)]);
     assert_eq!(
-        crate::engine::sequential_download::SequentialDownloader::find_all_gaps(
+        crate::engine::http::sequential_download::SequentialDownloader::find_all_gaps(
             &mgr.completed_ranges(),
             300,
         ),

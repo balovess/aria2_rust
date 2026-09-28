@@ -198,7 +198,7 @@ fn test_fail_spawned_group_removes_from_active_and_records_error() {
 #[test]
 fn batch_pause_operations_cover_both_metalink_graph_groups() {
     let man = RequestGroupMan::new();
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new(
         "https://example.test/file.torrent",
         "file.bin",
         &DownloadOptions::default(),

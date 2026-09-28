@@ -11,12 +11,12 @@ use std::time::{Duration, Instant};
 
 // Import from aria2_core crate (external to integration test)
 use aria2_core::engine::command::{Command, CommandStatus};
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::engine::ftp_download_command::FtpDownloadCommand;
+use aria2_core::engine::ftp::download_command::FtpDownloadCommand;
 #[cfg(feature = "metalink")]
-use aria2_core::engine::metalink_download_command::MetalinkDownloadCommand;
+use aria2_core::engine::metalink::download_command::MetalinkDownloadCommand;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 // Re-export helpers from test harness module
@@ -492,7 +492,7 @@ async fn engine_metalink_download_basic() {
 /// This test verifies the progress save/load API surface directly.
 #[tokio::test]
 async fn engine_bt_progress_persistence() {
-    use aria2_core::engine::bt_download_command::BtDownloadCommand;
+    use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
 
     let temp_dir = setup_temp_dir();
 
@@ -580,7 +580,7 @@ async fn engine_bt_progress_persistence() {
 /// This test validates hook registration and chain execution pattern.
 #[tokio::test]
 async fn engine_bt_hook_chain_fires() {
-    use aria2_core::engine::bt_download_command::BtDownloadCommand;
+    use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
     use aria2_core::engine::hook_manager::HookManager;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -794,7 +794,7 @@ async fn engine_error_cleanup_on_failure() {
 /// GAP: Requires MockTrackerServer + MockBtSeeder infrastructure.
 #[tokio::test]
 async fn engine_bt_download_with_tracker() {
-    use aria2_core::engine::bt_download_command::BtDownloadCommand;
+    use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
 
     let temp_dir = setup_temp_dir();
 

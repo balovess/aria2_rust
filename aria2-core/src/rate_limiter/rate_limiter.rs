@@ -65,6 +65,14 @@ impl RateLimiter {
         self.inner.upload.acquire(bytes).await;
     }
 
+    pub(crate) fn upload_wait(&self, bytes: u64) -> std::time::Duration {
+        self.inner.upload.time_until_acquire(bytes)
+    }
+
+    pub(crate) fn subscribe_upload_rate_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.inner.upload.subscribe_rate_changes()
+    }
+
     /// Return upload tokens reserved for a request that was canceled before
     /// its payload was sent.
     pub fn refund_upload(&self, bytes: u64) {

@@ -2,7 +2,7 @@ mod fixtures;
 
 use std::time::Duration;
 
-use aria2_core::engine::bt_download_command::BtDownloadCommand;
+use aria2_core::engine::bittorrent::download::command::BtDownloadCommand;
 use aria2_core::engine::command::Command;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 use aria2_protocol::bittorrent::message::handshake::Handshake;

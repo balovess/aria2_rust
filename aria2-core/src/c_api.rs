@@ -23,7 +23,7 @@ use crate::config::{ConfigManager, OptionValue};
 use crate::engine::download_engine::DownloadEngine;
 use crate::engine::engine_command::{EngineCommand, EngineCommandSender};
 #[cfg(feature = "metalink")]
-use crate::engine::metalink_to_request_group::MetalinkToRequestGroup;
+use crate::engine::metalink::to_request_group::MetalinkToRequestGroup;
 use crate::error::Result;
 use crate::rate_limiter::RateLimiterConfig;
 use crate::request::request_group::{
@@ -381,7 +381,7 @@ impl Aria2RustSession {
                 .pause()
                 .map_err(|error| error.to_string())?;
         }
-        crate::engine::bt_download_command::prepare_group_metadata(
+        crate::engine::bittorrent::download::command::prepare_group_metadata(
             Arc::clone(&group),
             &data,
             &options,

@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, oneshot};
 use tracing::info;
 
 #[cfg(feature = "bittorrent")]
-use super::bt_registry::BtRegistry;
+use super::bittorrent::registry::BtRegistry;
 use super::engine_command::{
     EngineCommandQueueSnapshot, EngineCommandReceiver, EngineCommandSender, channel,
 };
@@ -65,10 +65,10 @@ pub struct DownloadEngine {
     pub(crate) public_tracker_catalog: Arc<PublicTrackerList>,
     /// Process-wide BitTorrent TCP listener and info-hash router.
     #[cfg(feature = "bittorrent")]
-    pub(crate) bt_listener: Arc<crate::engine::bt_peer_listener::BtPeerListenerManager>,
+    pub(crate) bt_listener: Arc<crate::engine::bittorrent::peer::listener::BtPeerListenerManager>,
     /// Process-wide Local Peer Discovery manager and receive loop.
     #[cfg(feature = "bittorrent")]
-    pub(crate) lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+    pub(crate) lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
     /// Download lifecycle event bus (shell hooks + observers).
     ///
     /// Defaults to the process-wide instance returned by
@@ -94,7 +94,7 @@ impl DownloadEngine {
         {
             Self::with_retry_policy_and_lpd_manager(
                 policy,
-                Arc::new(crate::engine::lpd_manager::LpdManager::new()),
+                Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new()),
             )
         }
 
@@ -105,13 +105,17 @@ impl DownloadEngine {
     /// Construct an engine with the process-wide LPD manager supplied by the
     /// application layer.
     #[cfg(feature = "bittorrent")]
-    pub fn with_lpd_manager(lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>) -> Self {
+    pub fn with_lpd_manager(
+        lpd_manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    ) -> Self {
         Self::with_retry_policy_and_lpd_manager(RetryPolicy::default(), lpd_manager)
     }
 
     fn with_retry_policy_and_lpd_manager(
         policy: RetryPolicy,
-        #[cfg(feature = "bittorrent")] lpd_manager: Arc<crate::engine::lpd_manager::LpdManager>,
+        #[cfg(feature = "bittorrent")] lpd_manager: Arc<
+            crate::engine::bittorrent::discovery::lpd::LpdManager,
+        >,
     ) -> Self {
         let (engine_cmd_tx, engine_cmd_rx) = channel();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -144,7 +148,9 @@ impl DownloadEngine {
             #[cfg(feature = "bittorrent")]
             public_tracker_catalog: Arc::new(PublicTrackerList::new()),
             #[cfg(feature = "bittorrent")]
-            bt_listener: Arc::new(crate::engine::bt_peer_listener::BtPeerListenerManager::new()),
+            bt_listener: Arc::new(
+                crate::engine::bittorrent::peer::listener::BtPeerListenerManager::new(),
+            ),
             #[cfg(feature = "bittorrent")]
             lpd_manager,
             event_hooks: Arc::clone(super::download_event_hooks::DownloadEventHooks::shared()),
@@ -319,7 +325,7 @@ impl DownloadEngine {
 
     /// Get a reference to the BitTorrent registry.
     ///
-    /// The registry maps GID to [`BtObject`](super::bt_registry::BtObject) and
+    /// The registry maps GID to [`BtObject`](super::bittorrent::registry::BtObject) and
     /// supports info-hash reverse lookup, peer blocklist, and BT component
     /// coordination across all active downloads. In C++ aria2, this is a global
     /// singleton owned by `DownloadEngine`.
@@ -336,13 +342,16 @@ impl DownloadEngine {
 
     /// Configure the process-wide Local Peer Discovery manager before `run()`.
     #[cfg(feature = "bittorrent")]
-    pub fn set_lpd_manager(&mut self, manager: Arc<crate::engine::lpd_manager::LpdManager>) {
+    pub fn set_lpd_manager(
+        &mut self,
+        manager: Arc<crate::engine::bittorrent::discovery::lpd::LpdManager>,
+    ) {
         self.lpd_manager = manager;
     }
 
     /// Get the process-wide Local Peer Discovery manager.
     #[cfg(feature = "bittorrent")]
-    pub fn lpd_manager(&self) -> &Arc<crate::engine::lpd_manager::LpdManager> {
+    pub fn lpd_manager(&self) -> &Arc<crate::engine::bittorrent::discovery::lpd::LpdManager> {
         &self.lpd_manager
     }
 
@@ -413,7 +422,7 @@ mod tests {
     #[cfg(feature = "bittorrent")]
     #[test]
     fn test_lpd_manager_is_injected_at_engine_construction() {
-        let manager = Arc::new(crate::engine::lpd_manager::LpdManager::new());
+        let manager = Arc::new(crate::engine::bittorrent::discovery::lpd::LpdManager::new());
         let engine = DownloadEngine::with_lpd_manager(Arc::clone(&manager));
 
         assert!(
@@ -435,7 +444,7 @@ mod tests {
         {
             let mut reg = registry_arc.write().unwrap();
             reg.set_tcp_port(6881);
-            let obj = super::super::bt_registry::BtObject::new();
+            let obj = super::super::bittorrent::registry::BtObject::new();
             reg.put(42, obj);
         }
 
@@ -478,7 +487,7 @@ mod tests {
         let ctx = Arc::new(ctx);
 
         // Register into BtRegistry
-        let obj = super::super::bt_registry::BtObject::builder()
+        let obj = super::super::bittorrent::registry::BtObject::builder()
             .download_context(Arc::clone(&ctx))
             .build();
         {

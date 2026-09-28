@@ -17,7 +17,7 @@ use fixtures::mock_bt_seeder::{MockBtSeeder, SeederConfig};
 use fixtures::mock_tracker::MockTrackerServer;
 use test_harness::{assert_file_contents, generate_test_data, setup_temp_dir};
 
-use aria2_core::engine::bt_progress_info_file::{
+use aria2_core::engine::bittorrent::persistence::progress_info_file::{
     BtProgress, BtProgressManager, DownloadStats as ProgressDownloadStats, PeerAddr,
 };
 use aria2_core::engine::command::Command;
@@ -26,7 +26,7 @@ use aria2_core::engine::hook_manager::{
     DownloadStats as HookDownloadStats, DownloadStatus, ExecHook, HookConfig, HookContext,
     HookManager, MoveHook, PostDownloadHook, TouchHook,
 };
-use aria2_core::engine::lpd_manager::{
+use aria2_core::engine::bittorrent::discovery::lpd::{
     LPD_MULTICAST_ADDR, LPD_PORT, LpdManager, LpdPeer, parse_lpd_announcement,
 };
 use aria2_core::engine::post_download_handler::{
@@ -79,7 +79,7 @@ async fn follow_torrent_mem_http_creates_child_without_source_file() {
     };
     options.dir = Some(dir.path().display().to_string());
 
-    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+    let mut command = aria2_core::engine::http::download_command::DownloadCommand::new(
         GroupId::new(0x700),
         &url,
         &options,
@@ -178,7 +178,7 @@ async fn follow_torrent_mem_http_uses_source_uri_extension() {
     };
     options.dir = Some(dir.path().display().to_string());
 
-    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+    let mut command = aria2_core::engine::http::download_command::DownloadCommand::new(
         GroupId::new(0x702),
         &url,
         &options,
@@ -263,7 +263,7 @@ async fn follow_torrent_mem_http_retries_gateway_timeout() {
     };
     options.dir = Some(dir.path().display().to_string());
 
-    let mut command = aria2_core::engine::download_command::DownloadCommand::new(
+    let mut command = aria2_core::engine::http::download_command::DownloadCommand::new(
         GroupId::new(0x704),
         &url,
         &options,

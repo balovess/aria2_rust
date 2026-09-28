@@ -13,7 +13,7 @@ use super::GroupId;
 #[cfg(feature = "bittorrent")]
 use super::{MetadataInfo, RequestGroup};
 #[cfg(feature = "bittorrent")]
-use crate::engine::bt_download_command::{
+use crate::engine::bittorrent::download::command::{
     apply_file_mappings, apply_select_file_filter, build_download_context_from_meta,
 };
 #[cfg(feature = "bittorrent")]

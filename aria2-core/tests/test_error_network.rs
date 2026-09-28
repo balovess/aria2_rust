@@ -11,7 +11,7 @@ mod fixtures;
 
 use aria2_core::dns::dns_cache::DnsCache;
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::engine::retry_policy::RetryPolicy;
 use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
 use aria2_core::http::connection::{HttpConfig, HttpConnectionManager};

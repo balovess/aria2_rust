@@ -15,7 +15,7 @@ use std::time::Instant;
 use tokio::sync::{Notify, mpsc};
 
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
-use crate::engine::metalink_request_graph::MetalinkRequestGraph;
+use crate::engine::metalink::request_graph::MetalinkRequestGraph;
 use crate::error::Aria2Error;
 use crate::network::ConnectionContext;
 use crate::request::request_group::{GroupId, HaltReason, RequestGroup};

@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use aria2::app::rpc_backend::CoreRpcBackend;
 use aria2_core::config::ConfigManager;
 #[cfg(feature = "bittorrent")]
-use aria2_core::engine::bt_registry::BtRegistry;
+use aria2_core::engine::bittorrent::registry::BtRegistry;
 use aria2_core::engine::engine_command::{EngineCommandReceiver, channel};
 use aria2_core::request::request_group_man::RequestGroupMan;
 use aria2_rpc::engine::RpcEngine;

@@ -547,7 +547,7 @@ async fn test_json_session_roundtrip_preserves_metalink_graph_descriptor() {
         dir: Some(session_dir.to_string_lossy().into_owned()),
         ..Default::default()
     };
-    let graph = crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory_with_fallback_and_mappings(
+    let graph = crate::engine::metalink::request_graph::MetalinkRequestGraph::new_memory_with_fallback_and_mappings(
         "https://example.test/payload.torrent",
         "payload.bin",
         &options,

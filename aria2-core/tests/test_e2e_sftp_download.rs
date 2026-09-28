@@ -8,7 +8,7 @@ use std::time::Duration;
 use aria2_core::engine::command::Command;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
-use aria2_core::engine::sftp_download_command::SftpDownloadCommand;
+use aria2_core::engine::sftp::download_command::SftpDownloadCommand;
 use aria2_core::error::{Aria2Error, FatalError, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::request::request_group::{

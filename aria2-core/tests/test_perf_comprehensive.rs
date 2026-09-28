@@ -465,7 +465,7 @@ mod ftp_connection_tests {
 #[cfg(feature = "bittorrent")]
 mod bt_piece_tests {
     use super::*;
-    use aria2_core::engine::bt_piece_downloader::PieceDownloadState;
+    use aria2_core::engine::bittorrent::piece::downloader::PieceDownloadState;
 
     /// Test BitTorrent piece state management performance
     #[test]
@@ -1631,7 +1631,7 @@ mod regression_tests {
         #[cfg(feature = "bittorrent")]
         {
             let result = measure_repeated("bt_piece_state_create", &config, || {
-                let _ = aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(
+                let _ = aria2_core::engine::bittorrent::piece::downloader::PieceDownloadState::new(
                     0, 262144, 16384,
                 );
             });
@@ -1701,7 +1701,7 @@ mod regression_tests {
         #[cfg(feature = "bittorrent")]
         {
             let result = measure_repeated("bt_piece_state", &config, || {
-                let _ = aria2_core::engine::bt_piece_downloader::PieceDownloadState::new(
+                let _ = aria2_core::engine::bittorrent::piece::downloader::PieceDownloadState::new(
                     0, 262144, 16384,
                 );
             });

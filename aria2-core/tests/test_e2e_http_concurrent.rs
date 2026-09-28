@@ -1,6 +1,6 @@
 use aria2_core::engine::concurrent_segment_manager::ConcurrentSegmentManager;
-use aria2_core::engine::download_command::DownloadCommand;
-use aria2_core::engine::http_segment_downloader::HttpSegmentDownloader;
+use aria2_core::engine::http::download_command::DownloadCommand;
+use aria2_core::engine::http::segment_downloader::HttpSegmentDownloader;
 use aria2_core::request::request_group::{DownloadOptions, GroupId};
 
 fn create_http_command(uri: &str, split: Option<u16>, max_conn: Option<u16>) -> DownloadCommand {

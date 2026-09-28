@@ -11,9 +11,9 @@
 mod e2e_helpers;
 
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
 use aria2_core::engine::download_engine::DownloadEngine;
 use aria2_core::engine::engine_command::EngineCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::error::{Aria2Error, RecoverableError};
 use aria2_core::filesystem::control_file::ControlFile;
 use aria2_core::http::HttpVersion;
@@ -207,6 +207,76 @@ fn range_response(req: &Request<Incoming>, body: &[u8]) -> Response<Body> {
         )
         .header("Content-Length", end - start + 1)
         .body(full_body(body[start..=end].to_vec()))
+        .unwrap()
+}
+
+fn range_response_with_slow_first(
+    req: &Request<Incoming>,
+    body: &[u8],
+    first_range_attempts: &AtomicUsize,
+) -> Response<Body> {
+    if req.method() == hyper::Method::HEAD {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Length", body.len())
+            .body(empty_body())
+            .unwrap();
+    }
+
+    let Some((start, end)) = req
+        .headers()
+        .get("Range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.split_once('-'))
+        .and_then(|(start, end)| Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?)))
+    else {
+        return Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(empty_body())
+            .unwrap();
+    };
+    if start > end || end >= body.len() {
+        return Response::builder()
+            .status(StatusCode::RANGE_NOT_SATISFIABLE)
+            .body(empty_body())
+            .unwrap();
+    }
+
+    let slow_first_attempt =
+        start == 0 && end > start && first_range_attempts.fetch_add(1, Ordering::AcqRel) == 0;
+    let range = Arc::new(body[start..=end].to_vec());
+    let response_body = if slow_first_attempt {
+        let range_for_stream = Arc::clone(&range);
+        StreamBody::new(futures::stream::unfold(0usize, move |offset| {
+            let range = Arc::clone(&range_for_stream);
+            async move {
+                if offset >= range.len() {
+                    return None;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let next = (offset + 32 * 1024).min(range.len());
+                Some((
+                    Ok::<_, Infallible>(Frame::data(Bytes::copy_from_slice(&range[offset..next]))),
+                    next,
+                ))
+            }
+        }))
+        .boxed()
+    } else {
+        full_body(range.as_ref().clone())
+    };
+
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header("Accept-Ranges", "bytes")
+        .header(
+            "Content-Range",
+            format!("bytes={start}-{end}/{}", body.len()),
+        )
+        .header("Content-Length", end - start + 1)
+        .body(response_body)
         .unwrap()
 }
 
@@ -1634,6 +1704,170 @@ async fn test_stalled_range_is_reclaimed_and_requeued() {
             .count()
             >= 2,
         "the stalled first Range must be requested again: {range_requests:?}"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_slow_progressing_range_is_reclaimed_and_requeued() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 4 * 1024 * 1024;
+    let data = generate_test_data(file_size, 131);
+    let first_range_attempts = Arc::new(AtomicUsize::new(0));
+    let first_range_attempts_for_handler = Arc::clone(&first_range_attempts);
+    let body = Arc::new(data.clone());
+
+    server.on_get(
+        "/slow-progress-range",
+        move |req: &Request<Incoming>| -> Response<Body> {
+            if req.method() == hyper::Method::HEAD {
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("Accept-Ranges", "bytes")
+                    .header("Content-Length", body.len())
+                    .body(empty_body())
+                    .unwrap();
+            }
+
+            let Some((start, end)) = req
+                .headers()
+                .get("Range")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("bytes="))
+                .and_then(|value| value.split_once('-'))
+                .and_then(|(start, end)| {
+                    Some((start.parse::<usize>().ok()?, end.parse::<usize>().ok()?))
+                })
+            else {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(empty_body())
+                    .unwrap();
+            };
+            let end = end.min(body.len().saturating_sub(1));
+            let slow_first_attempt = start == 0
+                && end > start
+                && first_range_attempts_for_handler.fetch_add(1, Ordering::AcqRel) == 0;
+            let range = Arc::new(body[start..=end].to_vec());
+            let response_body = if slow_first_attempt {
+                let range_for_stream = Arc::clone(&range);
+                StreamBody::new(futures::stream::unfold(0usize, move |offset| {
+                    let range = Arc::clone(&range_for_stream);
+                    async move {
+                        if offset >= range.len() {
+                            return None;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        let next = (offset + 32 * 1024).min(range.len());
+                        Some((
+                            Ok::<_, Infallible>(Frame::data(Bytes::copy_from_slice(
+                                &range[offset..next],
+                            ))),
+                            next,
+                        ))
+                    }
+                }))
+                .boxed()
+            } else {
+                full_body(range.as_ref().clone())
+            };
+
+            Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header("Accept-Ranges", "bytes")
+                .header(
+                    "Content-Range",
+                    format!("bytes={}-{}/{}", start, end, body.len()),
+                )
+                .header("Content-Length", end - start + 1)
+                .body(response_body)
+                .unwrap()
+        },
+    );
+
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let output_name = "slow-progress-range.bin";
+    let output_path = dir.path().join(output_name);
+    let url = make_url(&server.base_url(), "/slow-progress-range");
+    let options = make_options(Some(4), Some(4), &dir.path().to_string_lossy(), output_name);
+    let started = std::time::Instant::now();
+    let mut command = make_concurrent_command(
+        GroupId::new(407),
+        &url,
+        &options,
+        Some(&dir.path().to_string_lossy()),
+        Some(output_name),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("slow-progress Range should be recovered before its full body finishes")
+        .expect("requeued Range download should succeed");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(6),
+        "the slow Range should be replaced by a fast retry, elapsed={:?}",
+        started.elapsed()
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), data);
+    assert!(
+        first_range_attempts.load(Ordering::Acquire) >= 2,
+        "the slow first Range should be retried"
+    );
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_slow_progressing_range_is_reclaimed_in_multi_mirror_pipeline() {
+    let server = MockHttpServer::start()
+        .await
+        .expect("Failed to start mock server");
+    let file_size = 4 * 1024 * 1024;
+    let data = generate_test_data(file_size, 149);
+    let body = Arc::new(data.clone());
+    let first_range_attempts = Arc::new(AtomicUsize::new(0));
+
+    for path in ["/slow-mirror-a", "/slow-mirror-b"] {
+        let body = Arc::clone(&body);
+        let first_range_attempts = Arc::clone(&first_range_attempts);
+        server.on_get(path, move |req| {
+            range_response_with_slow_first(req, &body, &first_range_attempts)
+        });
+    }
+
+    let dir = tempfile::tempdir().expect("temporary directory should be created");
+    let output_name = "multi-mirror-slow-range.bin";
+    let output_path = dir.path().join(output_name);
+    let base_url = server.base_url();
+    let uris = vec![
+        make_url(&base_url, "/slow-mirror-a"),
+        make_url(&base_url, "/slow-mirror-b"),
+    ];
+    let mut options = make_options(Some(4), Some(4), &dir.path().to_string_lossy(), output_name);
+    options.http_version = HttpVersion::Http11;
+    let started = std::time::Instant::now();
+    let mut command = make_multi_mirror_command(
+        GroupId::new(408),
+        uris,
+        &options,
+        &dir.path().to_string_lossy(),
+        output_name,
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(20), command.execute())
+        .await
+        .expect("multi-mirror slow Range should recover before the full body finishes")
+        .expect("multi-mirror slow Range retry should complete");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(6),
+        "the slow multi-mirror Range should be replaced quickly, elapsed={:?}",
+        started.elapsed()
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), data);
+    assert!(
+        first_range_attempts.load(Ordering::Acquire) >= 2,
+        "the slow multi-mirror Range should be requested again"
     );
     server.shutdown().await;
 }

@@ -6,7 +6,7 @@ use tracing::{debug, info, warn};
 
 use super::RequestGroupMan;
 #[cfg(all(feature = "metalink", feature = "bittorrent"))]
-use crate::engine::metalink_request_graph;
+use crate::engine::metalink::request_graph;
 use crate::error::Result;
 use crate::request::request_group::{DownloadOptions, DownloadStatus, GroupId, RequestGroup};
 use crate::util::rwlock_ext::RwLockRecover;
@@ -139,7 +139,7 @@ impl RequestGroupMan {
     /// Add a Metalink metadata/payload request graph atomically.
     pub fn add_metalink_graph(
         &self,
-        graph: metalink_request_graph::MetalinkRequestGraph,
+        graph: request_graph::MetalinkRequestGraph,
     ) -> Result<(GroupId, GroupId)> {
         let _lifecycle = self.lifecycle_guard();
         let metadata_gid = graph.metadata.recover().gid();

@@ -265,7 +265,7 @@ fn ordinary_follow_child_keeps_plain_session_identity() {
 #[test]
 fn metalink_graph_session_entry_uses_metadata_identity_and_descriptor() {
     let graph =
-        crate::engine::metalink_request_graph::MetalinkRequestGraph::new_memory_with_fallback(
+        crate::engine::metalink::request_graph::MetalinkRequestGraph::new_memory_with_fallback(
             "https://example.test/metadata.torrent",
             "payload.bin",
             &DownloadOptions::default(),

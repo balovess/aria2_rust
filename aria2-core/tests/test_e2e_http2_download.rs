@@ -1,12 +1,14 @@
 //! End-to-end HTTP/2 Range download through the production DownloadCommand.
 
+mod e2e_helpers;
+
 use aria2_core::engine::command::Command;
-use aria2_core::engine::download_command::DownloadCommand;
+use aria2_core::engine::http::download_command::DownloadCommand;
 use aria2_core::http::HttpVersion;
 use aria2_core::request::request_group::{DownloadOptions, GroupId, RequestGroup};
 use bytes::Bytes;
-use http_body_util::Full;
-use hyper::body::Incoming;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
@@ -21,6 +23,8 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
+
+use crate::e2e_helpers::mock_http_server::{Body, full_body};
 
 const HTTP2_TEST_SESSIONS: usize = 16;
 
@@ -56,6 +60,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
     let accepted_connections = Arc::new(AtomicUsize::new(0));
     let payload_requests = Arc::new(AtomicUsize::new(0));
     let h2_payload_requests = Arc::new(AtomicUsize::new(0));
+    let first_range_attempts = Arc::new(AtomicUsize::new(0));
     let active_payload_streams = Arc::new(AtomicUsize::new(0));
     let peak_payload_streams = Arc::new(AtomicUsize::new(0));
     let per_connection_active = Arc::new(
@@ -72,6 +77,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
     let server_accepted_connections = Arc::clone(&accepted_connections);
     let server_payload_requests = Arc::clone(&payload_requests);
     let server_h2_payload_requests = Arc::clone(&h2_payload_requests);
+    let server_first_range_attempts = Arc::clone(&first_range_attempts);
     let server_active_payload_streams = Arc::clone(&active_payload_streams);
     let server_peak_payload_streams = Arc::clone(&peak_payload_streams);
     let server_per_connection_active = Arc::clone(&per_connection_active);
@@ -86,6 +92,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
             let data = Arc::clone(&server_data);
             let payload_requests = Arc::clone(&server_payload_requests);
             let h2_payload_requests = Arc::clone(&server_h2_payload_requests);
+            let first_range_attempts = Arc::clone(&server_first_range_attempts);
             let active_payload_streams = Arc::clone(&server_active_payload_streams);
             let peak_payload_streams = Arc::clone(&server_peak_payload_streams);
             let per_connection_active = Arc::clone(&server_per_connection_active);
@@ -98,6 +105,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
                     let data = Arc::clone(&data);
                     let payload_requests = Arc::clone(&payload_requests);
                     let h2_payload_requests = Arc::clone(&h2_payload_requests);
+                    let first_range_attempts = Arc::clone(&first_range_attempts);
                     let active_payload_streams = Arc::clone(&active_payload_streams);
                     let peak_payload_streams = Arc::clone(&peak_payload_streams);
                     let per_connection_active = Arc::clone(&per_connection_active);
@@ -109,7 +117,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
                                     .status(StatusCode::OK)
                                     .header(ACCEPT_RANGES, "bytes")
                                     .header(CONTENT_LENGTH, data.len())
-                                    .body(Full::new(Bytes::new()))
+                                    .body(full_body(Bytes::new()))
                                     .unwrap(),
                             );
                         }
@@ -128,6 +136,9 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
                         let end = end.parse::<usize>().unwrap();
                         assert!(start <= end && end < data.len());
                         let is_payload = range != "bytes=0-0";
+                        let slow_first_attempt = is_payload
+                            && start == 0
+                            && first_range_attempts.fetch_add(1, Ordering::AcqRel) == 0;
                         if is_payload {
                             payload_requests.fetch_add(1, Ordering::Relaxed);
                             if request.version() == Version::HTTP_2 {
@@ -150,6 +161,29 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
                             }
                         }
 
+                        let response_body: Body = if slow_first_attempt {
+                            let range = Arc::new(data[start..=end].to_vec());
+                            let stream = futures::stream::unfold(0usize, move |offset| {
+                                let range = Arc::clone(&range);
+                                async move {
+                                    if offset >= range.len() {
+                                        return None;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(250)).await;
+                                    let next = (offset + 32 * 1024).min(range.len());
+                                    Some((
+                                        Ok::<_, Infallible>(Frame::data(Bytes::copy_from_slice(
+                                            &range[offset..next],
+                                        ))),
+                                        next,
+                                    ))
+                                }
+                            });
+                            StreamBody::new(stream).boxed()
+                        } else {
+                            full_body(Bytes::copy_from_slice(&data[start..=end]))
+                        };
+
                         Ok::<_, Infallible>(
                             Response::builder()
                                 .status(StatusCode::PARTIAL_CONTENT)
@@ -158,7 +192,7 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
                                     format!("bytes {start}-{end}/{}", data.len()),
                                 )
                                 .header(CONTENT_LENGTH, end - start + 1)
-                                .body(Full::new(Bytes::copy_from_slice(&data[start..=end])))
+                                .body(response_body)
                                 .unwrap(),
                         )
                     }
@@ -204,10 +238,20 @@ async fn download_command_downloads_over_multiplexed_http2_ranges() {
     )
     .unwrap();
 
+    let started = std::time::Instant::now();
     tokio::time::timeout(Duration::from_secs(30), command.execute())
         .await
         .expect("HTTP/2 DownloadCommand should finish within 30 seconds")
         .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(6),
+        "the slow H2 Range should be replaced before its 8-second body completes: {:?}",
+        started.elapsed()
+    );
+    assert!(
+        first_range_attempts.load(Ordering::Acquire) >= 2,
+        "the slow H2 Range must be requested again"
+    );
     let output = std::fs::read(dir.path().join(output_name)).unwrap();
     assert_eq!(output.as_slice(), data.as_slice());
     assert_eq!(
